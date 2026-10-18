@@ -680,7 +680,7 @@ mod tests {
                 }
             }
             drop(storage);
-            let mut restarted = ServerStorage::open(&fixture.0).unwrap();
+            let mut restarted = reopen_after_drop(&fixture.0).unwrap();
             assert_ne!(restarted.generation(), key.generation);
             let mut recovered = restarted.journal().unwrap();
             let expected = if matches!(state, LaunchState::Intent | LaunchState::Spawned) {
@@ -867,7 +867,7 @@ mod tests {
                 assert_eq!(journal.recovered(key).unwrap().state, LaunchState::Unknown);
             }
             drop(storage);
-            let mut reopened = ServerStorage::open(&fixture.0).unwrap();
+            let mut reopened = reopen_after_drop(&fixture.0).unwrap();
             let recovered = reopened.journal().unwrap();
             assert_eq!(
                 recovered.recovered(key).unwrap().state,
@@ -889,7 +889,7 @@ mod tests {
         bytes[8..16].copy_from_slice(&u64::MAX.to_be_bytes());
         fs::write(fixture.0.join("generation"), bytes).unwrap();
         assert_eq!(
-            ServerStorage::open(&fixture.0).unwrap_err().kind(),
+            reopen_after_drop(&fixture.0).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
     }
