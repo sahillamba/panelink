@@ -510,6 +510,29 @@ mod tests {
         }
     }
 
+    /// Reopen a domain whose singleton lock this process just released by drop.
+    ///
+    /// `flock` is released when the holding descriptor closes, but another
+    /// test's concurrent fork+exec inherits every open descriptor, and that
+    /// inherited copy keeps the kernel lock alive until the child execs
+    /// (CLOEXEC) or exits. A bounded retry bridges only that fork-to-exec
+    /// window; a real competing starter keeps the lock and is still reported
+    /// as WouldBlock after the deadline.
+    fn reopen_after_drop(path: &std::path::Path) -> io::Result<ServerStorage> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match ServerStorage::open(path) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                result => return result,
+            }
+        }
+    }
+
     #[test]
     fn generation_is_advanced_before_use_and_lock_excludes_second_server() {
         let fixture = Fixture::new();

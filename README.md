@@ -4,6 +4,8 @@ Panelink is a planned Rust terminal multiplexer and persistent workspace runtime
 
 **Implementation roadmap:** [ROADMAP.md](ROADMAP.md) tracks the current phase, ownership, and verification steps.
 
+For a fresh Mac, see the [clone, setup, build and test guide](docs/SETUP.md).
+
 Current work: Phase 3 integration continues while Phase 2 host acceptance remains pending. The integrated prototype runs one child under a foreground server and exposes authenticated control requests for explicit target reads, bounded reconciliation/watches, status, ownership, and optional input. The server persists monotonically advancing generations within its initialized storage domain; a private client context reuses one lease and records uncertain operations for explicit resync. This does not provide multiple panes/sessions, layout operations, runtime event subscriptions, or OpenCode/provider recovery. Input is opt-in with `--allow-input`; the default server does not advertise the input capability. The corrected pathname CLI acceptance scenario is operator-confirmed passing outside the sandbox; local bind remains restricted by EPERM. Current integrated test totals and ignored cases are recorded in [INTEGRATION.md](docs/progress/INTEGRATION.md), not inferred from component-only checks. The bounded decoder, replacement terminal core, host IO loop, restoration guard, and one-shot probe are described in their linked progress notes below; Apple Terminal acceptance remains incomplete. Selected components retain their [third-party notices](THIRD_PARTY_NOTICES.md). The interface is planned as a terminal UI inside existing terminal applications; the earlier desktop GUI hypothesis has been superseded. Some workflow and integration choices remain open.
 
 - [Research and architecture recommendation](docs/PANELINK-RESEARCH.md)
@@ -28,10 +30,16 @@ subcommands to the built binary. Build once with `cargo build --locked`, then
 link it into the existing user PATH directory:
 
 ```sh
-ln -s /Users/sahillamba/panelink/bin/panelink "$HOME/.local/bin/panelink"
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$PWD/bin/panelink" "$HOME/.local/bin/panelink"
+export PATH="$HOME/.local/bin:$PATH"
 rehash
 panelink
 ```
+
+Add the `PATH` export to your shell startup file if you want it in future
+terminals. The symlink points to this checkout, so recreate it if you move the
+repository. See [SETUP.md](docs/SETUP.md) for a fresh-machine build guide.
 
 The launcher compiles private temporary terminfo and removes it after the probe
 exits. Ctrl-X quits the probe and stops its child; this default is not persistent
