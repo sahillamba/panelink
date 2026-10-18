@@ -6,6 +6,15 @@ Read `README.md`, `docs/SPEC.md`, `docs/PANELINK-DISCOVERY.md`, and `docs/PREBUI
 
 Implementation is in progress. Read `ROADMAP.md` and `docs/progress/` before working; the roadmap is the durable status and resume entrypoint. The user authorized implementation with `gpt-6-luna` at xhigh effort for bounded tasks, supervised by the parent agent. Follow phase order and exclusive file ownership. Unresolved product decisions remain unresolved; use the documented prototype assumptions only within their scope.
 
+User reaffirmed on 2026-10-18: always delegate bounded work to `gpt-6-luna`,
+using xhigh effort for implementation/design that needs it and medium effort
+for smaller tasks. The parent specifies scope, reviews and verifies results.
+
+The user requested continuous work through the five non-UI milestones on
+2026-10-18, with automated tests for new behavior and no manual verification
+handoffs. Build runnable checks and execute those permitted by the environment;
+record blocked acceptance honestly rather than counting skipped tests as passes.
+
 ## Rust guidance
 
 The user requested the community `ms-rust` skill from https://gitlab.com/lx-industries/ms-rust-skill. Installation is pending under this session's network/filesystem restrictions. Do not claim it is installed or that a local skill revision has been pinned.
@@ -29,4 +38,4 @@ User requirements and Panelink's dependency/security policy take precedence over
 
 The private GitHub repository exists; local `main` tracks `origin/main`. Check current status before source-control work and use Git history as the source of truth.
 
-User authorized phase-completion commits on 2026-10-17: after each phase is fully complete and its required checks pass, the parent agent must commit the phase's code and affected documentation/evidence. Do not label incomplete or unverified work as a completed phase, include unrelated pending work, or commit just to checkpoint a partial phase. Worker subagents leave commits to the parent. Pushing requires a separate user request. This supersedes older blanket no-commit instructions in planning/task notes for the parent; workers' exclusive-file and no-commit constraints remain in force.
+User authorized phase-completion commits on 2026-10-17: after each phase is fully complete and its required checks pass, the parent agent must commit the phase's code and affected documentation/evidence. A later explicit user request may also authorize a checkpoint commit of accumulated work; label it as a checkpoint and do not mark unfinished phases complete. Worker subagents leave commits to the parent. Pushing requires a separate user request. This supersedes older blanket no-commit instructions in planning/task notes for the parent; workers' exclusive-file and no-commit constraints remain in force.

@@ -27,7 +27,7 @@ Confirmed requirements come from the user's answers recorded in [discovery](PANE
 | R-13 | Support review by the user's firm security audit team and similar workplaces. | Map the actual review criteria to documented architecture, dependencies, data flows, release evidence, and feature controls. Approval remains the reviewing organization's decision. |
 | R-14 | Avoid clearing and repainting the whole screen for ordinary local changes. | Unchanged frames emit no output; local cell/cursor changes update only the affected cells/cursor. First render, resize and invalidated display state may rebuild the frame. |
 | R-15 | Provide an easy scriptable API for agents to read and control other managed panes, agents and processes. | Stable targets and machine-readable CLI/local API support discovery, bounded sanitized output reads and explicit input/control operations under a documented access/ownership contract. The full API remains unimplemented; a bounded one-child prototype exposes only a subset. Detailed proposed contracts and acceptance scenarios are in [AGENT-CONTROL.md](AGENT-CONTROL.md). |
-| R-16 | Offer Split Left, Right, Up and Down from a pane's right-click menu. | Each action splits relative to the clicked pane with deterministic geometry, stable session identity, minimum-size handling and a matching agent/CLI operation; the detailed proposed behavior is in [PANE-LAYOUT.md](PANE-LAYOUT.md), with implementation/host validation pending. |
+| R-16 | Offer Split Left, Right, Up and Down from a pane's right-click menu. | Each action splits relative to the clicked pane and opens one fresh independent terminal session on the chosen side, preserving the original process/session. Use deterministic geometry, stable identity, minimum-size handling and a matching agent/CLI operation. The [layout design](PANE-LAYOUT.md) and newly prioritized [Phase3A](progress/P3A-RIGHT-CLICK-SPLITS.md) track implementation and host validation, which remain pending. |
 
 Numeric latency, memory, history, and build budgets remain to be established on real hardware. The workload statement is an evaluation target, not a measured result.
 
@@ -114,7 +114,44 @@ The macOS/aarch64 prototype combines the bounded wire and typed response/session
 
 Storage initialization is explicit: `--initialize` applies only to an empty private directory and writes a random nonzero generation seed; normal opens require the existing lock, counter, and journal and advance the counter before use. Missing or corrupt metadata fails closed. This is not a rollback-resistant identity guarantee for copied/restored backups or a collision-free identity guarantee across independent storage domains.
 
-This private-PTY proof is a separately authorized experiment while Phase 2 manual host gates remain pending. The earlier pathname CLI fixture is operator-confirmed passing outside the sandbox; expanded live-watch CLI pathname and host-terminal acceptance remain separate checks. The prototype now negotiates Events when authoritative metadata tracking is available and implements bounded metadata watches plus atomic screen/metadata/cursor reconciliation. Layout changes, multiple sessions, live scrollback and provider identity/recovery remain unimplemented. A same-UID boundary does not isolate one local process or agent from another.
+On the current experimental macOS/aarch64 host, production PTY opening now
+sets close-on-exec during master/slave creation and fails closed on unsupported
+flags. A shared internal gate coordinates managed child spawning with the
+non-atomic socket/bind/accept creation windows; socket waits, authentication,
+normal IO and cleanup run outside it. This protects cooperating Panelink
+paths, not unrelated native callers. Production-path PTY and gate tests pass;
+a full-descriptor child probe now passes its positive and negative controls.
+The actual accepted-socket/exec race fixture exists but its attempted run stopped
+at pathname bind with EPERM. That acceptance remains required before API launch.
+The pure schema-6 launch codec is implemented under its
+[bounded contract](progress/P3-MANAGED-LAUNCH-CODEC-TASK.md), without dispatch or
+authority. The schema-5 session-cursor codec is adopted for isolated library
+work at the proposed offsets; runtime negotiation/migration remains pending.
+No minimum macOS release floor or multi-session capability is adopted.
+
+The isolated trusted launch coordinator now retains at most two non-reused
+session identities, borrows the single global operation ledger, and records
+Intent before spawn. Post-spawn journal uncertainty retains the acquired child
+and blocks new launches; it does not authorize a retry. The launch preparation
+adapter uses only the request's captured cwd/environment plus explicit
+server-owned terminal values, without reading the daemon environment. These
+are tested library components; authenticated launch dispatch remains gated.
+Private reusable grants are now pinned to the complete target selected at
+issuance. Resume cannot broaden that scope, handoff requires the same scope,
+and another target needs a fresh lease. This conservative prototype rule does
+not settle permanent cross-pane permissions. A separate trusted
+[two-session library core](progress/P3-MULTI-OWNER-ASSEMBLY.md) now combines
+launch, connection, control, status/receipt and bounded polling around that one
+global ledger. Its caller holds the storage lock and checks launch authority;
+it exposes no mutable registry or ledger. Automated real-PTY tests exercise
+two children, isolated reads, duplicate launch, public ownership claims and
+nonreplayed input, scoped reconciliation/event pages, and cleanup. The core
+now routes the seven existing session requests and negotiates Events when
+scoped reads are available with healthy metadata; older grants cannot widen
+on resume. Scoped cursors bind generation, session and sequence. The running
+socket/CLI server still owns one target; no multi-session endpoint is enabled.
+
+This private-PTY proof is a separately authorized experiment while Phase 2 manual host gates remain pending. The earlier pathname CLI fixture is operator-confirmed passing outside the sandbox; expanded live-watch CLI pathname and host-terminal acceptance remain separate checks. The prototype now negotiates Events when authoritative metadata tracking is available and implements bounded metadata watches plus atomic screen/metadata/cursor reconciliation. The integrated runtime still lacks layout changes, multiple sessions, live scrollback and provider identity/recovery. A same-UID boundary does not isolate one local process or agent from another.
 
 For this prototype, `Applied` on input means all request bytes were accepted through the PTY write interface; for interrupt it means the signal call succeeded. Neither means the child application accepted the input or completed a task. The input adapter's normal drain window is 100 ms, but a PTY hard-error cleanup can add up to two seconds, so this is not a hard 100 ms whole-call deadline. The bounded journal records only operation key, managed session ID, and lifecycle state; it does not persist launch arguments, environment values, or process identity.
 
@@ -259,6 +296,13 @@ Live reattachment rebuilds the screen from server state and continues existing p
 Do not automatically rerun arbitrary prior commands. Mark normal process relaunch separately from supported agent conversation resume. Store provider session IDs without copying credential stores.
 
 ## Development milestones and exit evidence
+
+Execution priority update2026-10-18: the user inserted Phase3A in
+[ROADMAP.md](../ROADMAP.md) before the previously queued lifecycle/stop and
+history work. Bring forward the bounded two-pane/right-click subset of M2/M3:
+split the clicked pane and start a fresh terminal on the new side. This does
+not select the remaining workspace/tab/sidebar design, close M1, or waive
+runtime launch and host-input gates. Existing milestone IDs remain stable.
 
 | Milestone | Deliverable | Exit evidence |
 | --- | --- | --- |

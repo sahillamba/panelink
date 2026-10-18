@@ -1,5 +1,10 @@
 # P3 Atomic PTY Opener Spike — 2026-10-18
 
+Later checkpoint: the separately reviewed
+[production integration](P3-ATOMIC-PTY-INTEGRATION.md) now adopts this opener
+on experimental macOS/aarch64. The original test-only spike record below is
+retained as evidence; it does not describe the latest runtime adoption status.
+
 **Result: bounded host prototype passes; not adopted by the runtime.** On the
 tested Apple Silicon host, `posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC)` is
 accepted and returns a master with `FD_CLOEXEC` set. Apple Libc's current

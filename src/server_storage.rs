@@ -337,6 +337,39 @@ impl LaunchJournal<'_> {
         })
     }
 
+    /// Check a new launch's metadata capacity without admitting it or writing.
+    ///
+    /// Reserves nothing: the single owner must recheck immediately before its
+    /// Intent write, without interleaving other journal mutations. Three full
+    /// records cover Intent/Spawned/Applied; a failed spawn needs only two.
+    /// This does not promise a later write or durability operation will succeed.
+    pub fn preflight_launch(&self, key: OperationKey, session: u64) -> io::Result<()> {
+        encode_record(LaunchRecord {
+            key,
+            session,
+            state: LaunchState::Intent,
+        })?;
+        if self.poisoned
+            || key.generation != self.storage.generation
+            || self.records.contains_key(&key)
+            || self
+                .records
+                .values()
+                .any(|record| record.key.generation == key.generation && record.session == session)
+        {
+            return Err(invalid());
+        }
+        if self.records.len() >= MAX_JOURNAL_KEYS
+            || self
+                .bytes
+                .checked_add(3 * RECORD_BYTES as u64)
+                .is_none_or(|bytes| bytes > MAX_JOURNAL_BYTES)
+        {
+            return Err(io::Error::other("launch journal is full"));
+        }
+        Ok(())
+    }
+
     /// Persist a new intent before spawn, or advance an existing lifecycle fact.
     ///
     /// Duplicate identical records do not append. A failure poisons this handle;
@@ -353,7 +386,12 @@ impl LaunchJournal<'_> {
             if old.session != record.session || !transition(old.state, record.state) {
                 return Err(invalid());
             }
-        } else if record.state != LaunchState::Intent || self.records.len() >= MAX_JOURNAL_KEYS {
+        } else if record.state != LaunchState::Intent
+            || self.records.len() >= MAX_JOURNAL_KEYS
+            || self.records.values().any(|old| {
+                old.key.generation == record.key.generation && old.session == record.session
+            })
+        {
             return Err(invalid());
         }
         if self.bytes + RECORD_BYTES as u64 > MAX_JOURNAL_BYTES {
@@ -661,6 +699,159 @@ mod tests {
         assert!(journal.poisoned);
         assert!(journal.record(record).is_err());
         assert!(journal.recovered(record.key).is_none());
+    }
+
+    #[test]
+    fn launch_preflight_is_read_only_and_rejects_spent_identity() {
+        let fixture = Fixture::new();
+        let mut storage = ServerStorage::initialize_for_test(&fixture.0).unwrap();
+        let key = OperationKey {
+            generation: storage.generation(),
+            lease: 1,
+            sequence: 1,
+        };
+        let path = fixture.0.join("launch.journal");
+        let mut journal = storage.journal().unwrap();
+        assert!(journal.preflight_launch(key, 1).is_ok());
+        assert!(journal.preflight_launch(key, 1).is_ok());
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+        assert!(journal.records.is_empty());
+        for invalid_key in [
+            OperationKey {
+                generation: 0,
+                ..key
+            },
+            OperationKey {
+                generation: key.generation + 1,
+                ..key
+            },
+            OperationKey { lease: 0, ..key },
+            OperationKey { sequence: 0, ..key },
+        ] {
+            assert!(journal.preflight_launch(invalid_key, 1).is_err());
+        }
+        assert!(journal.preflight_launch(key, 0).is_err());
+        let record = LaunchRecord {
+            key,
+            session: 1,
+            state: LaunchState::Intent,
+        };
+        journal.record(record).unwrap();
+        journal
+            .record(LaunchRecord {
+                state: LaunchState::Failed,
+                ..record
+            })
+            .unwrap();
+        let next_key = OperationKey { sequence: 2, ..key };
+        assert!(journal.preflight_launch(key, 2).is_err());
+        assert!(journal.preflight_launch(next_key, 1).is_err());
+        assert!(journal
+            .record(LaunchRecord {
+                key: next_key,
+                ..record
+            })
+            .is_err());
+        assert!(journal.preflight_launch(next_key, 2).is_ok());
+        assert_eq!(fs::metadata(path).unwrap().len(), 2 * RECORD_BYTES as u64);
+    }
+
+    #[test]
+    fn launch_preflight_checks_entire_success_path_and_global_key_capacity() {
+        let fixture = Fixture::new();
+        let mut storage = ServerStorage::initialize_for_test(&fixture.0).unwrap();
+        let key = OperationKey {
+            generation: storage.generation(),
+            lease: 1,
+            sequence: 1,
+        };
+        let mut journal = storage.journal().unwrap();
+        // Model boundary values without creating thousands of synced records.
+        let headroom = 3 * RECORD_BYTES as u64;
+        journal.bytes = MAX_JOURNAL_BYTES - headroom;
+        assert!(journal.preflight_launch(key, 1).is_ok());
+        journal.bytes += 1;
+        assert!(journal.preflight_launch(key, 1).is_err());
+        journal.bytes = u64::MAX;
+        assert!(journal.preflight_launch(key, 1).is_err());
+        journal.bytes = 0;
+        journal.poisoned = true;
+        assert!(journal.preflight_launch(key, 1).is_err());
+        journal.poisoned = false;
+        for sequence in 1..=MAX_JOURNAL_KEYS as u64 {
+            let historical_key = OperationKey {
+                generation: key.generation + 1,
+                sequence,
+                ..key
+            };
+            journal.records.insert(
+                historical_key,
+                LaunchRecord {
+                    key: historical_key,
+                    session: sequence,
+                    state: LaunchState::Failed,
+                },
+            );
+        }
+        assert!(journal.preflight_launch(key, 1).is_err());
+        assert_eq!(journal.file.metadata().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn post_intent_and_post_spawn_write_faults_recover_as_unknown() {
+        for last_written in [LaunchState::Intent, LaunchState::Spawned] {
+            let fixture = Fixture::new();
+            let mut storage = ServerStorage::initialize_for_test(&fixture.0).unwrap();
+            let key = OperationKey {
+                generation: storage.generation(),
+                lease: 1,
+                sequence: 1,
+            };
+            let record = LaunchRecord {
+                key,
+                session: 1,
+                state: LaunchState::Intent,
+            };
+            {
+                let mut journal = storage.journal().unwrap();
+                journal.preflight_launch(key, 1).unwrap();
+                journal.record(record).unwrap();
+                if last_written == LaunchState::Spawned {
+                    journal
+                        .record(LaunchRecord {
+                            state: last_written,
+                            ..record
+                        })
+                        .unwrap();
+                }
+                // A genuine write error on the production record path.
+                journal.file = File::open(fixture.0.join("launch.journal")).unwrap();
+                let next = if last_written == LaunchState::Intent {
+                    LaunchState::Spawned
+                } else {
+                    LaunchState::Applied
+                };
+                assert!(journal
+                    .record(LaunchRecord {
+                        state: next,
+                        ..record
+                    })
+                    .is_err());
+                assert!(journal.poisoned);
+                assert!(journal
+                    .preflight_launch(OperationKey { sequence: 2, ..key }, 2)
+                    .is_err());
+                assert_eq!(journal.recovered(key).unwrap().state, LaunchState::Unknown);
+            }
+            drop(storage);
+            let mut reopened = ServerStorage::open(&fixture.0).unwrap();
+            let recovered = reopened.journal().unwrap();
+            assert_eq!(
+                recovered.recovered(key).unwrap().state,
+                LaunchState::Unknown
+            );
+            assert_ne!(reopened.generation(), key.generation);
+        }
     }
 
     #[test]

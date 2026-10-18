@@ -472,22 +472,12 @@ impl Ledger {
         payload: &[u8],
         now_secs: u64,
     ) -> Result<Admission, ProtocolError> {
-        if let Some(existing) = self.existing_admission(key, payload, now_secs)? {
+        if let Some(existing) = self.preflight_admission(key, payload, now_secs)? {
             return Ok(existing);
         }
-        let lease = self.leases.get(&key.lease).expect("lease was validated");
-        if lease.operations.len() >= MAX_UNRECEIPTED_OPERATIONS {
-            return Err(ProtocolError::CapacityExceeded);
-        }
-        if self.usage.retained_operations >= MAX_RETAINED_OPERATIONS {
-            return Err(ProtocolError::GlobalOperationCapacityExceeded);
-        }
-        let retained_payload_bytes = self
-            .usage
-            .retained_payload_bytes
-            .checked_add(payload.len())
-            .filter(|bytes| *bytes <= MAX_RETAINED_PAYLOAD_BYTES)
-            .ok_or(ProtocolError::PayloadCapacityExceeded)?;
+        // The read-only preflight checked all arithmetic and capacity while
+        // this exclusive borrow prevents interleaving ledger mutations.
+        let retained_payload_bytes = self.usage.retained_payload_bytes + payload.len();
 
         let lease = self
             .leases
@@ -504,6 +494,37 @@ impl Ledger {
         self.usage.retained_operations += 1;
         self.usage.retained_payload_bytes = retained_payload_bytes;
         Ok(Admission::Execute)
+    }
+
+    /// Observe duplicates or validate new-key capacity without reserving work.
+    ///
+    /// `None` means a new operation fits at this instant, not that it may execute.
+    /// This never returns `Admission::Execute`. Only a later successful `admit`
+    /// can reserve and authorize execution; intervening mutations can invalidate
+    /// this observation. No payload copy or sequence high-water update occurs.
+    pub fn preflight_admission(
+        &self,
+        key: OperationKey,
+        payload: &[u8],
+        now_secs: u64,
+    ) -> Result<Option<Admission>, ProtocolError> {
+        if let Some(existing) = self.existing_admission(key, payload, now_secs)? {
+            return Ok(Some(existing));
+        }
+        let lease = self.leases.get(&key.lease).expect("lease was validated");
+        if lease.operations.len() >= MAX_UNRECEIPTED_OPERATIONS {
+            return Err(ProtocolError::CapacityExceeded);
+        }
+        if self.usage.retained_operations >= MAX_RETAINED_OPERATIONS {
+            return Err(ProtocolError::GlobalOperationCapacityExceeded);
+        }
+        self.usage
+            .retained_payload_bytes
+            .checked_add(payload.len())
+            .filter(|bytes| *bytes <= MAX_RETAINED_PAYLOAD_BYTES)
+            .ok_or(ProtocolError::PayloadCapacityExceeded)?;
+
+        Ok(None)
     }
 
     /// Observe an exact duplicate before checking mutable target preconditions.
@@ -1348,6 +1369,58 @@ mod tests {
         ledger.receipt(11, 1, 101).unwrap();
         assert_eq!(
             ledger.existing_admission(key(1), b"input", 101),
+            Err(ProtocolError::ResultExpired)
+        );
+    }
+
+    #[test]
+    fn capacity_preflight_is_read_only_and_never_authorizes_execution() {
+        let mut ledger = Ledger::new(7).unwrap();
+        ledger.open_lease(11, 100).unwrap();
+        let before = ledger.usage();
+        assert_eq!(ledger.preflight_admission(key(2), b"launch", 101), Ok(None));
+        assert_eq!(ledger.preflight_admission(key(2), b"launch", 101), Ok(None));
+        assert_eq!(ledger.usage(), before);
+        // Peeking at a higher sequence did not advance the watermark.
+        assert_eq!(ledger.admit(key(1), b"first", 101), Ok(Admission::Execute));
+        assert_eq!(
+            ledger.preflight_admission(key(1), b"first", 101),
+            Ok(Some(Admission::InProgress))
+        );
+        assert_eq!(
+            ledger.preflight_admission(key(1), b"changed", 101),
+            Err(ProtocolError::OperationConflict)
+        );
+        ledger.complete(key(1), Outcome::Applied).unwrap();
+        assert_eq!(
+            ledger.preflight_admission(key(1), b"first", 101),
+            Ok(Some(Admission::Completed(Outcome::Applied)))
+        );
+        assert_eq!(
+            ledger.preflight_admission(key(2), b"next", 1900),
+            Err(ProtocolError::LeaseExpired)
+        );
+
+        // Capacity observations reserve nothing, and subsequent mutations can
+        // invalidate them. Use bounded counters to exercise each global limit.
+        let usage = ledger.usage;
+        ledger.usage.retained_operations = MAX_RETAINED_OPERATIONS;
+        assert_eq!(
+            ledger.preflight_admission(key(2), b"next", 101),
+            Err(ProtocolError::GlobalOperationCapacityExceeded)
+        );
+        ledger.usage = usage;
+        ledger.usage.retained_payload_bytes = MAX_RETAINED_PAYLOAD_BYTES;
+        assert_eq!(
+            ledger.preflight_admission(key(2), b"next", 101),
+            Err(ProtocolError::PayloadCapacityExceeded)
+        );
+        ledger.usage = usage;
+        assert_eq!(ledger.status(key(2), 101), Ok(OperationStatus::NotAdmitted));
+        assert_eq!(ledger.admit(key(2), b"next", 101), Ok(Admission::Execute));
+        ledger.receipt(11, 1, 101).unwrap();
+        assert_eq!(
+            ledger.preflight_admission(key(1), b"first", 101),
             Err(ProtocolError::ResultExpired)
         );
     }

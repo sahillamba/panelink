@@ -11,6 +11,15 @@ Current work: Phase 3 integration continues while Phase 2 host acceptance remain
 - [Working implementation specification](docs/SPEC.md)
 - [First prototype preparation and requested Rust skill](docs/PREBUILD.md)
 
+## Automated development checks
+
+Run `python3 scripts/verify_non_ui.py` for the delivered Rust/Python tests,
+including the vendored input decoder suite, formatting, strict Clippy, build,
+component source fingerprints, and documentation checks. It uses offline
+Cargo commands and reports failures automatically. Ignored host/pathname tests
+and live provider acceptance remain separate, uncompleted gates; a successful
+component run does not certify the five non-UI milestones.
+
 ## CLI
 
 For this development checkout, the launcher at `bin/panelink` opens the current

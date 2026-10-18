@@ -16,6 +16,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,6 +25,7 @@ use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
 use rustix::io::Errno;
 use rustix::process::{ioctl_tiocsctty, kill_process_group, setsid, Pid, Signal};
 use rustix::termios::{tcsetwinsize, Winsize};
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 use rustix_openpty::openpty;
 use vt100::{Callbacks, Color, Parser, Screen};
 
@@ -37,7 +39,28 @@ const MAX_QUERY_RESPONSE_BYTES: usize = 256;
 const HUP_WINDOW: Duration = Duration::from_secs(1);
 const KILL_WINDOW: Duration = Duration::from_secs(1);
 const CLEANUP_POLL: Duration = Duration::from_millis(10);
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod pty;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use pty::open_pty;
+
+struct PtyPair {
+    controller: OwnedFd,
+    user: OwnedFd,
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn open_pty(winsize: &Winsize) -> io::Result<PtyPair> {
+    let pair = openpty(None, Some(winsize)).map_err(io::Error::from)?;
+    Ok(PtyPair {
+        controller: pair.controller,
+        user: pair.user,
+    })
+}
 
 /// A checked PTY size. Rows and columns cannot be set directly by callers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -818,10 +841,14 @@ impl TerminalSession {
         let mut snapshot = ScreenSnapshot::new(size);
         snapshot.refresh(parser.screen(), size);
         let input = InputQueue::new();
-        let _spawn_guard = SPAWN_LOCK
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let spawn_guard =
+            crate::spawn_gate::acquire().map_err(|_| TerminalError::SpawnLockPoisoned)?;
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        let spawn_guard = SPAWN_LOCK
             .lock()
             .map_err(|_| TerminalError::SpawnLockPoisoned)?;
-        let pty = openpty(None, Some(&size.winsize())).map_err(|e| io_error("open PTY", e))?;
+        let pty = open_pty(&size.winsize()).map_err(|e| io_error("open PTY", e))?;
         let flags = fcntl_getfl(&pty.controller).map_err(|e| io_error("read PTY flags", e))?;
         fcntl_setfl(&pty.controller, flags | OFlags::NONBLOCK)
             .map_err(|e| io_error("set PTY nonblocking", e))?;
@@ -853,6 +880,9 @@ impl TerminalSession {
             });
         }
         let child = command.spawn().map_err(|e| io_error("spawn child", e))?;
+        // The status-pipe and PTY creation windows are finished. Service and
+        // cleanup of this owned child must not hold the descriptor gate.
+        drop(spawn_guard);
         drop(command);
         drop(pty.user);
         let process_group = Pid::from_child(&child);
@@ -1114,6 +1144,10 @@ impl TerminalSession {
     fn wait_bounded(&mut self, duration: Duration) -> Result<bool, TerminalError> {
         let deadline = Instant::now() + duration;
         loop {
+            // A session-leader child cannot complete its controlling-tty close
+            // while queued output is never drained on macOS. Discard that
+            // output during teardown so the bounded windows can reap it.
+            self.discard_queued_output();
             if self.poll_exit()? {
                 return Ok(true);
             }
@@ -1121,6 +1155,40 @@ impl TerminalSession {
                 return Ok(false);
             }
             thread::sleep(CLEANUP_POLL.min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+
+    /// Best-effort discard of child output queued during teardown.
+    ///
+    /// The session is terminal, so no bytes read here are deliverable; they
+    /// are dropped without touching the parser or the retained snapshot.
+    fn discard_queued_output(&mut self) {
+        const CLEANUP_SCRATCH_BYTES: usize = 4096;
+        let Some(master) = self.master.as_mut() else {
+            return;
+        };
+        let mut scratch = [0_u8; CLEANUP_SCRATCH_BYTES];
+        let mut eof = false;
+        loop {
+            match master.read(&mut scratch) {
+                Ok(0) => {
+                    eof = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if eof {
+            self.pty_eof = true;
         }
     }
 }
@@ -1204,3 +1272,322 @@ fn clone_fd(fd: &OwnedFd) -> Result<OwnedFd, TerminalError> {
 
 #[cfg(test)]
 mod unit_tests;
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+mod atomic_pty_integration_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::time::Instant;
+
+    const IO_DEADLINE: Duration = Duration::from_secs(3);
+    const TEST_CWD: &str = "/private/tmp";
+
+    fn launch() -> ResolvedLaunch {
+        ResolvedLaunch {
+            requested_path: "/bin/sh".into(),
+            executable_path: "/bin/sh".into(),
+            working_directory: TEST_CWD.into(),
+        }
+    }
+
+    fn environment() -> Environment {
+        [(OsString::from("TERM"), OsString::from("panelink-probe"))]
+            .into_iter()
+            .collect()
+    }
+
+    fn snapshot_text(session: &TerminalSession) -> String {
+        let snapshot = session.snapshot();
+        let mut text = String::new();
+        for row in 0..snapshot.rows() {
+            for column in 0..snapshot.columns() {
+                if let Some(cell) = snapshot.cell(row, column) {
+                    text.push_str(cell.text());
+                }
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    fn pump_until(
+        session: &mut TerminalSession,
+        predicate: impl Fn(&TerminalSession) -> bool,
+        detail: &str,
+    ) {
+        let deadline = Instant::now() + IO_DEADLINE;
+        loop {
+            session.pump().expect("bounded PTY pump");
+            if predicate(session) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{detail} exceeded its deadline");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn pump_both_until(
+        first: &mut TerminalSession,
+        second: &mut TerminalSession,
+        predicate: impl Fn(&TerminalSession, &TerminalSession) -> bool,
+        detail: &str,
+    ) {
+        let deadline = Instant::now() + IO_DEADLINE;
+        loop {
+            first.pump().expect("bounded first PTY pump");
+            second.pump().expect("bounded second PTY pump");
+            if predicate(first, second) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{detail} exceeded its deadline");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn has_complete_marker(text: &str, marker: &str, terminator: &str) -> bool {
+        text.split_once(marker)
+            .and_then(|(_, value)| value.split_once(terminator))
+            .is_some_and(|(digits, _)| {
+                !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+            })
+    }
+
+    fn marker_digits(text: &str, marker: &str, terminator: &str) -> u32 {
+        text.split_once(marker)
+            .and_then(|(_, value)| value.split_once(terminator))
+            .and_then(|(digits, _)| {
+                (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+                    .then(|| digits.parse().ok())
+                    .flatten()
+            })
+            .unwrap_or_else(|| panic!("missing numeric marker {marker:?} in PTY output"))
+    }
+
+    fn tty_path(output: &str, label: &str) -> String {
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix(label))
+            .filter(|path| path.starts_with("/dev/"))
+            .unwrap_or_else(|| panic!("missing {label} PTY path in output: {output:?}"))
+            .to_owned()
+    }
+
+    #[test]
+    fn production_child_gets_tty_stdio_and_initial_size() {
+        let size = TerminalSize::new(17, 73).unwrap();
+        let script = concat!(
+            "[ -t 0 ] && [ -t 1 ] && [ -t 2 ] && ",
+            "printf 'TTY-FD0:'; /usr/bin/tty <&0; ",
+            "printf 'TTY-FD1:'; /usr/bin/tty <&1; ",
+            "printf 'TTY-FD2:'; /usr/bin/tty <&2; ",
+            "printf 'PTY-MAP-OK\\n'; /bin/stty size <&0"
+        );
+        let mut session = TerminalSession::spawn(
+            &launch(),
+            &[OsString::from("-c"), OsString::from(script)],
+            &environment(),
+            size,
+        )
+        .expect("spawn child through production PTY opener");
+
+        pump_until(
+            &mut session,
+            |session| session.pty_eof() && session.exit_status().is_some(),
+            "PTY stdio child",
+        );
+        let output = snapshot_text(&session);
+        assert!(
+            session.exit_status().unwrap().success(),
+            "child failed its controlling-PTY checks: {output:?}"
+        );
+        assert!(
+            output.contains("PTY-MAP-OK"),
+            "unexpected child output: {output:?}"
+        );
+        let stdin_tty = tty_path(&output, "TTY-FD0:");
+        let stdout_tty = tty_path(&output, "TTY-FD1:");
+        let stderr_tty = tty_path(&output, "TTY-FD2:");
+        assert_eq!(stdin_tty, stdout_tty);
+        assert_eq!(stdin_tty, stderr_tty);
+        assert!(
+            output.contains("17 73"),
+            "initial size was not visible: {output:?}"
+        );
+        assert_eq!(session.size(), size);
+        session.shutdown().unwrap();
+        assert!(session.master.is_none());
+    }
+
+    const CONTROL_TTY_PROBE_ENV: &str = "PANELINK_CONTROL_TTY_PROBE";
+
+    #[test]
+    fn control_tty_probe_helper() {
+        if std::env::var_os(CONTROL_TTY_PROBE_ENV).is_none() {
+            return;
+        }
+
+        // SAFETY: these libc queries only inspect this process and fd 0; the
+        // parent test installs fd 0 as the PTY slave before this test runs.
+        let (pid, session_id, tty_session_id, process_group, foreground_group, is_tty) = unsafe {
+            (
+                libc::getpid(),
+                libc::getsid(0),
+                libc::tcgetsid(0),
+                libc::getpgrp(),
+                libc::tcgetpgrp(0),
+                libc::isatty(0) == 1,
+            )
+        };
+        let has_controlling_tty = is_tty
+            && pid == session_id
+            && session_id == tty_session_id
+            && process_group == pid
+            && foreground_group == process_group;
+        if has_controlling_tty {
+            println!(
+                "CONTROL-TTY-PROBE-OK:{pid}:{session_id}:{tty_session_id}:{foreground_group}:END"
+            );
+        } else {
+            eprintln!(
+                "CONTROL-TTY-PROBE-FAIL:{pid}:{session_id}:{tty_session_id}:{process_group}:{foreground_group}:{is_tty}"
+            );
+            panic!("child does not own its PTY as the controlling terminal");
+        }
+    }
+
+    #[test]
+    fn production_child_owns_the_controlling_tty() {
+        let executable = std::env::current_exe().expect("locate current test executable");
+        let launch = ResolvedLaunch {
+            requested_path: executable.clone(),
+            executable_path: executable,
+            working_directory: TEST_CWD.into(),
+        };
+        let mut environment = environment();
+        environment.insert(OsString::from(CONTROL_TTY_PROBE_ENV), OsString::from("1"));
+        let helper_test = "terminal::atomic_pty_integration_tests::control_tty_probe_helper";
+        let mut session = TerminalSession::spawn(
+            &launch,
+            &[
+                OsString::from("--exact"),
+                OsString::from(helper_test),
+                OsString::from("--nocapture"),
+            ],
+            &environment,
+            TerminalSize::new(12, 80).unwrap(),
+        )
+        .expect("spawn the test binary through the production PTY opener");
+
+        pump_until(
+            &mut session,
+            |session| session.pty_eof() && session.exit_status().is_some(),
+            "controlling-PTY probe child",
+        );
+        let output = snapshot_text(&session);
+        assert!(
+            session.exit_status().unwrap().success(),
+            "controlling-PTY probe failed: {output:?}"
+        );
+        assert!(
+            output.contains("CONTROL-TTY-PROBE-OK:"),
+            "child did not emit the controlling-PTY proof marker: {output:?}"
+        );
+        session.shutdown().unwrap();
+        assert!(session.master.is_none());
+    }
+
+    #[test]
+    fn concurrent_production_spawns_keep_distinct_ptys_and_clean_up() {
+        let size = TerminalSize::new(12, 80).unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let first_barrier = Arc::clone(&barrier);
+        let second_barrier = Arc::clone(&barrier);
+        let first_launch = launch();
+        let second_launch = launch();
+        let first_environment = environment();
+        let second_environment = environment();
+
+        let first_thread = thread::spawn(move || {
+            first_barrier.wait();
+            TerminalSession::spawn(
+                &first_launch,
+                &[
+                    OsString::from("-c"),
+                    OsString::from(
+                        "printf 'READY-A:%s:END\\n' \"$$\"; IFS= read -r token; printf 'DONE-A:%s:%s\\n' \"$$\" \"$token\"; IFS= read -r ignored",
+                    ),
+                ],
+                &first_environment,
+                size,
+            )
+        });
+        let second_thread = thread::spawn(move || {
+            second_barrier.wait();
+            TerminalSession::spawn(
+                &second_launch,
+                &[
+                    OsString::from("-c"),
+                    OsString::from(
+                        "printf 'READY-B:%s:END\\n' \"$$\"; IFS= read -r token; printf 'DONE-B:%s:%s\\n' \"$$\" \"$token\"; IFS= read -r ignored",
+                    ),
+                ],
+                &second_environment,
+                size,
+            )
+        });
+        barrier.wait();
+        let mut first = first_thread
+            .join()
+            .expect("first spawn worker panicked")
+            .expect("first PTY spawn");
+        let mut second = second_thread
+            .join()
+            .expect("second spawn worker panicked")
+            .expect("second PTY spawn");
+
+        pump_both_until(
+            &mut first,
+            &mut second,
+            |first, second| {
+                has_complete_marker(&snapshot_text(first), "READY-A:", ":END")
+                    && has_complete_marker(&snapshot_text(second), "READY-B:", ":END")
+            },
+            "concurrent PTY readiness",
+        );
+        let first_ready = snapshot_text(&first);
+        let second_ready = snapshot_text(&second);
+        let first_pid = marker_digits(&first_ready, "READY-A:", ":END");
+        let second_pid = marker_digits(&second_ready, "READY-B:", ":END");
+        assert_ne!(
+            first_pid, second_pid,
+            "the children must have distinct identities"
+        );
+        assert!(!first_ready.contains("READY-B:"));
+        assert!(!second_ready.contains("READY-A:"));
+
+        first.text("FIRST-TOKEN", true).unwrap();
+        second.text("SECOND-TOKEN", true).unwrap();
+        pump_both_until(
+            &mut first,
+            &mut second,
+            |first, second| {
+                snapshot_text(first).contains(&format!("DONE-A:{first_pid}:FIRST-TOKEN"))
+                    && snapshot_text(second).contains(&format!("DONE-B:{second_pid}:SECOND-TOKEN"))
+            },
+            "independent PTY output",
+        );
+        let first_output = snapshot_text(&first);
+        let second_output = snapshot_text(&second);
+        assert!(first_output.contains(&format!("DONE-A:{first_pid}:FIRST-TOKEN")));
+        assert!(!first_output.contains("SECOND-TOKEN"));
+        assert!(second_output.contains(&format!("DONE-B:{second_pid}:SECOND-TOKEN")));
+        assert!(!second_output.contains("FIRST-TOKEN"));
+
+        first.shutdown().unwrap();
+        second.shutdown().unwrap();
+        assert!(first.exit_status().is_some());
+        assert!(second.exit_status().is_some());
+        assert!(first.child.is_none() && first.master.is_none());
+        assert!(second.child.is_none() && second.master.is_none());
+    }
+}

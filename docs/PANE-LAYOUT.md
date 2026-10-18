@@ -2,6 +2,13 @@
 
 Status: proposed design for the confirmed right-click-menu requirement and the user's four-direction split request. This document is planning only: it defines no implemented UI, command, wire schema, or runtime behavior. The wider workspace, tab, sidebar, and session-lifetime choices remain open.
 
+Execution priority2026-10-18: the user inserted
+[Phase3A](progress/P3A-RIGHT-CLICK-SPLITS.md) before the next lifecycle/stop
+and history work. A split must create a fresh terminal session on the chosen
+side while preserving the original session. The phase starts with the actual
+two-session core capacity; the larger resource figures below remain proposals,
+and no menu/runtime implementation or host acceptance is inferred.
+
 ## Scope and authority
 
 The user confirmed right-click context menus in requirement R-08, requested four pane-relative split directions, and confirmed the agent-to-pane control feature in R-15. This proposal adds a split operation to the R-15 CLI/API design and uses its full `TargetRef`, operation key, retry, launch, and input-ownership contracts. It does not settle the surrounding workspace/tab hierarchy or the process lifetime after a client exits.

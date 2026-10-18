@@ -1,5 +1,13 @@
 # P3 spawn and descriptor gate — 2026-10-18
 
+**Later integration checkpoint:** the original findings below describe the
+pre-integration source. Production PTY opening and cooperative transport/spawn
+coordination are now implemented; see
+[atomic PTY integration](P3-ATOMIC-PTY-INTEGRATION.md) and
+[shared gate result](P3-SPAWN-GATE-RESULT.md). The broader API-launch verdict
+remains closed pending the descriptor inheritance/race proof. Keep this audit
+as historical evidence rather than reading its old callsites as current code.
+
 **Verdict: NO-GO for API or worker-time launch.** The macOS PTY path opens
 descriptors before setting close-on-exec, and the current mutex coordinates
 only calls through `TerminalSession::spawn`. The audit also found non-atomic

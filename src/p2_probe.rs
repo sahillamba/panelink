@@ -1652,9 +1652,10 @@ mod tests {
         );
 
         assert_eq!(resources.cleanup(), Err(ProbeError::HostRestore));
+        let child_cleanup = resources.session.shutdown();
         assert!(
             resources.session.exit_status().is_some(),
-            "bounded HUP/KILL cleanup must collect the child status"
+            "bounded HUP/KILL cleanup must collect the child status; cached child result: {child_cleanup:?}"
         );
 
         let restored = tcgetattr(&observer).unwrap();

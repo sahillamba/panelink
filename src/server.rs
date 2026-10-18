@@ -33,6 +33,9 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod multi_session;
+
 /// Read result returned by one bounded effect-sink observation.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ReadResult {
@@ -336,6 +339,8 @@ impl From<OwnerError> for ServerError {
 struct LeaseGrant {
     /// Capabilities actually selected for this reusable lease at creation.
     capabilities: u64,
+    /// Immutable full target identity selected when this lease was issued.
+    target: TargetRef,
     expires_secs: u64,
 }
 
@@ -361,17 +366,10 @@ enum OwnerMutation {
     },
 }
 
-/// Pure state for one target, bounded reusable leases, and one effect sink.
-///
-/// A surrounding runtime must authenticate a peer before calling this owner.
-/// This type neither creates server generations nor provides durable recovery.
-pub struct StateOwner<E: EffectSink> {
-    generation: u64,
+/// Private state grouped for one managed target and its effect sink.
+struct TargetState<E: EffectSink> {
     target: TargetRef,
-    allow_input: bool,
-    ledger: Ledger,
     input_owner: InputOwner,
-    grants: HashMap<u64, LeaseGrant>,
     effects: E,
     journal: EventJournal,
     notifications_available: bool,
@@ -380,15 +378,49 @@ pub struct StateOwner<E: EffectSink> {
     last_child_exited: bool,
 }
 
+/// Pure state for one target, bounded reusable leases, and one effect sink.
+///
+/// A surrounding runtime must authenticate a peer before calling this owner.
+/// This type neither creates server generations nor provides durable recovery.
+pub struct StateOwner<E: EffectSink> {
+    global: GlobalAuthority,
+    session: TargetState<E>,
+}
+
+struct GlobalAuthority {
+    generation: u64,
+    allow_input: bool,
+    ledger: Ledger,
+    grants: HashMap<u64, LeaseGrant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestPreflight {
+    /// Authentication and global idempotency checks passed; target checks remain.
+    Continue,
+    /// Return a normal schema rejection without reserving the operation.
+    Rejected(RejectionCode),
+    /// Return an existing global operation status without selecting a target.
+    Known(OperationStatus),
+}
+
+struct SessionHandler<'a, E: EffectSink> {
+    global: &'a mut GlobalAuthority,
+    session: &'a mut TargetState<E>,
+}
+
 impl<E: EffectSink> fmt::Debug for StateOwner<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StateOwner")
             .field("generation", &"<redacted>")
             .field("target", &"<redacted>")
-            .field("allow_input", &self.allow_input)
-            .field("active_leases", &self.grants.len())
-            .field("owner", &self.input_owner.snapshot())
-            .field("notifications_available", &self.notifications_available)
+            .field("allow_input", &self.global.allow_input)
+            .field("active_leases", &self.global.grants.len())
+            .field("owner", &self.session.input_owner.snapshot())
+            .field(
+                "notifications_available",
+                &self.session.notifications_available,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -428,14 +460,10 @@ impl<E: EffectSink> StateOwner<E> {
         let initial_screen_revision = effects.screen_revision().filter(|revision| *revision != 0);
         let last_child_exited = effects.child_exited();
         let journal = EventJournal::new(generation).map_err(|_| ServerError::Internal)?;
-
-        Ok(Self {
-            generation,
+        let grants = HashMap::with_capacity(MAX_ACTIVE_LEASES);
+        let session = TargetState {
             target,
-            allow_input,
-            ledger,
             input_owner,
-            grants: HashMap::with_capacity(MAX_ACTIVE_LEASES),
             effects,
             journal,
             notifications_available: initial_screen_revision.is_some()
@@ -443,7 +471,15 @@ impl<E: EffectSink> StateOwner<E> {
             last_screen_revision: initial_screen_revision,
             last_owner_observation,
             last_child_exited,
-        })
+        };
+        let global = GlobalAuthority {
+            generation,
+            allow_input,
+            ledger,
+            grants,
+        };
+
+        Ok(Self { global, session })
     }
 
     /// Select capabilities, then issue a lease or resume the exact live lease.
@@ -452,14 +488,231 @@ impl<E: EffectSink> StateOwner<E> {
         hello: &SessionHello,
         now_secs: u64,
     ) -> Result<(Connection, Welcome), ServerError> {
+        self.global.connect(&self.session, hello, now_secs)
+    }
+
+    /// Return this owner's immutable target identity.
+    pub const fn target(&self) -> TargetRef {
+        self.session.target
+    }
+
+    /// Return current input-owner state without changing it.
+    pub const fn owner_snapshot(&self) -> OwnerSnapshot {
+        self.session.input_owner.snapshot()
+    }
+
+    /// Borrow the one sink for parent-owned polling and focused tests.
+    pub const fn effects(&self) -> &E {
+        &self.session.effects
+    }
+
+    /// Mutably borrow the one sink for parent-owned testing and adapters.
+    pub fn effects_mut(&mut self) -> &mut E {
+        &mut self.session.effects
+    }
+
+    /// Complete the parent's reserved startup launch after registry/journal work.
+    /// This is not a client route and never authorizes a new effect.
+    pub(crate) fn complete_startup(
+        &mut self,
+        key: OperationKey,
+        outcome: Outcome,
+    ) -> Result<(), ServerError> {
+        self.global.complete_startup(key, outcome)
+    }
+
+    /// Decode, authorize, preflight, admit, and synchronously handle one control request.
+    pub fn handle_control(
+        &mut self,
+        connection: &Connection,
+        payload: &[u8],
+        now_secs: u64,
+    ) -> Result<Vec<u8>, ServerError> {
+        SessionHandler::new(&mut self.global, &mut self.session)
+            .handle_control(connection, payload, now_secs)
+    }
+
+    /// Decode and handle one session request without creating process effects.
+    pub fn handle_session(
+        &mut self,
+        connection: &Connection,
+        payload: &[u8],
+        now_secs: u64,
+    ) -> Result<SessionReply, ServerError> {
+        SessionHandler::new(&mut self.global, &mut self.session)
+            .handle_session(connection, payload, now_secs)
+    }
+
+    /// Read one bounded screen and bind it to current metadata and journal state.
+    pub fn reconcile(
+        &mut self,
+        connection: &Connection,
+        target: TargetRef,
+        max_bytes: u32,
+        max_lines: u16,
+        now_secs: u64,
+    ) -> Result<ReconcileState, ServerError> {
+        SessionHandler::new(&mut self.global, &mut self.session)
+            .reconcile(connection, target, max_bytes, max_lines, now_secs)
+    }
+
+    /// Read a bounded ordered event page for this owner's fixed target.
+    pub fn read_events(
+        &mut self,
+        connection: &Connection,
+        target: TargetRef,
+        cursor: EventCursor,
+        limit: u16,
+        now_secs: u64,
+    ) -> Result<EventPage, ServerError> {
+        SessionHandler::new(&mut self.global, &mut self.session)
+            .read_events(connection, target, cursor, limit, now_secs)
+    }
+
+    /// Expire leases and input ownership, then give the sink one bounded poll.
+    pub fn poll(&mut self, now_secs: u64) -> Result<(), ServerError> {
+        self.global.expire(now_secs);
+        SessionHandler::new(&mut self.global, &mut self.session).poll_session(now_secs)
+    }
+}
+
+impl GlobalAuthority {
+    fn expire(&mut self, now_secs: u64) {
+        self.ledger.expire_leases(now_secs);
+        self.grants.retain(|_, grant| now_secs < grant.expires_secs);
+    }
+
+    fn operation_status(
+        &self,
+        connection: &Connection,
+        key: OperationKey,
+        now_secs: u64,
+    ) -> Result<Vec<u8>, ServerError> {
+        self.require_live_connection(connection, now_secs)?;
+        if connection.selected_capabilities & CAPABILITY_READ == 0 {
+            return Err(ServerError::Unauthorized);
+        }
+        if key.generation != self.generation || key.lease != connection.lease {
+            return preflight_reply(key, RequestPreflight::Rejected(RejectionCode::Unauthorized))?
+                .ok_or(ServerError::Internal);
+        }
+        let status = self.ledger.status(key, now_secs)?;
+        encode_response(Response {
+            key,
+            body: ResponseBody::Status(status),
+        })
+    }
+
+    fn receipt(
+        &mut self,
+        connection: &Connection,
+        generation: u64,
+        lease: u64,
+        through_sequence: u64,
+        now_secs: u64,
+    ) -> Result<Vec<u8>, ServerError> {
+        self.require_live_connection(connection, now_secs)?;
+        if generation != self.generation || lease != connection.lease {
+            return Err(ServerError::Unauthorized);
+        }
+        self.ledger.receipt(lease, through_sequence, now_secs)?;
+        let key = OperationKey {
+            generation,
+            lease,
+            sequence: through_sequence,
+        };
+        encode_response(Response {
+            key,
+            body: ResponseBody::Status(OperationStatus::Completed(Outcome::Applied)),
+        })
+    }
+
+    fn preflight_control(
+        &self,
+        connection: &Connection,
+        request: &ControlRequest<'_>,
+        payload: &[u8],
+        now_secs: u64,
+    ) -> Result<RequestPreflight, ServerError> {
+        self.require_live_connection(connection, now_secs)?;
+        if request.key.lease != connection.lease {
+            return Ok(RequestPreflight::Rejected(RejectionCode::Unauthorized));
+        }
+        let required_capability = match request.command {
+            Command::Read { .. } => CAPABILITY_READ,
+            Command::Text { .. }
+            | Command::Paste { .. }
+            | Command::Submit { .. }
+            | Command::Interrupt { .. } => CAPABILITY_INPUT,
+        };
+        if connection.selected_capabilities & required_capability == 0 {
+            return Ok(RequestPreflight::Rejected(RejectionCode::Unauthorized));
+        }
+
+        match self
+            .ledger
+            .existing_admission(request.key, payload, now_secs)?
+        {
+            None => Ok(RequestPreflight::Continue),
+            Some(Admission::InProgress) => Ok(RequestPreflight::Known(OperationStatus::InProgress)),
+            Some(Admission::Completed(outcome)) => {
+                Ok(RequestPreflight::Known(OperationStatus::Completed(outcome)))
+            }
+            Some(Admission::Execute) => Err(ServerError::Internal),
+        }
+    }
+
+    fn preflight_owner_mutation(
+        &self,
+        connection: &Connection,
+        key: OperationKey,
+        payload: &[u8],
+        now_secs: u64,
+    ) -> Result<RequestPreflight, ServerError> {
+        self.require_live_connection(connection, now_secs)?;
+        if connection.selected_capabilities & CAPABILITY_INPUT == 0
+            || key.lease != connection.lease
+            || key.generation != self.generation
+        {
+            return Ok(RequestPreflight::Rejected(RejectionCode::Unauthorized));
+        }
+
+        match self.ledger.existing_admission(key, payload, now_secs)? {
+            None => Ok(RequestPreflight::Continue),
+            Some(Admission::InProgress) => Ok(RequestPreflight::Known(OperationStatus::InProgress)),
+            Some(Admission::Completed(outcome)) => {
+                Ok(RequestPreflight::Known(OperationStatus::Completed(outcome)))
+            }
+            Some(Admission::Execute) => Err(ServerError::Internal),
+        }
+    }
+
+    fn connect<E: EffectSink>(
+        &mut self,
+        session: &TargetState<E>,
+        hello: &SessionHello,
+        now_secs: u64,
+    ) -> Result<(Connection, Welcome), ServerError> {
+        self.connect_with_capability_mask(
+            session,
+            hello,
+            now_secs,
+            CAPABILITY_READ | CAPABILITY_INPUT | CAPABILITY_EVENTS,
+        )
+    }
+
+    fn connect_with_capability_mask<E: EffectSink>(
+        &mut self,
+        session: &TargetState<E>,
+        hello: &SessionHello,
+        now_secs: u64,
+        capability_mask: u64,
+    ) -> Result<(Connection, Welcome), ServerError> {
         hello.validate()?;
         let expires_secs = now_secs
             .checked_add(LEASE_TTL_SECS)
             .ok_or(ServerError::Protocol(ProtocolError::TimeOverflow))?;
-        let available = self.available_capabilities();
-
-        // Validate all client-required bits before issuing or renewing a lease.
-        negotiate(&hello.hello, available, self.generation, 1)?;
+        let available = self.available_capabilities(session) & capability_mask;
 
         let (lease, capabilities) = match hello.resume {
             Some(resume) => {
@@ -471,7 +724,7 @@ impl<E: EffectSink> StateOwner<E> {
                     .get(&resume.lease)
                     .copied()
                     .ok_or(ServerError::UnknownContext)?;
-                if now_secs >= grant.expires_secs {
+                if now_secs >= grant.expires_secs || grant.target != session.target {
                     return Err(ServerError::UnknownContext);
                 }
                 let welcome = negotiate(
@@ -485,18 +738,22 @@ impl<E: EffectSink> StateOwner<E> {
                     resume.lease,
                     LeaseGrant {
                         capabilities: grant.capabilities,
+                        target: grant.target,
                         expires_secs,
                     },
                 );
                 (resume.lease, welcome.selected_capabilities)
             }
             None => {
+                // Validate required bits before consuming a new lease ID.
+                negotiate(&hello.hello, available, self.generation, 1)?;
                 let lease = self.ledger.issue_lease(now_secs)?;
                 let welcome = negotiate(&hello.hello, available, self.generation, lease)?;
                 self.grants.insert(
                     lease,
                     LeaseGrant {
                         capabilities: welcome.selected_capabilities,
+                        target: session.target,
                         expires_secs,
                     },
                 );
@@ -514,40 +771,86 @@ impl<E: EffectSink> StateOwner<E> {
             welcome,
         ))
     }
-
-    /// Return this owner's immutable target identity.
-    pub const fn target(&self) -> TargetRef {
-        self.target
-    }
-
-    /// Return current input-owner state without changing it.
-    pub const fn owner_snapshot(&self) -> OwnerSnapshot {
-        self.input_owner.snapshot()
-    }
-
-    /// Borrow the one sink for parent-owned polling and focused tests.
-    pub const fn effects(&self) -> &E {
-        &self.effects
-    }
-
-    /// Mutably borrow the one sink for parent-owned testing and adapters.
-    pub fn effects_mut(&mut self) -> &mut E {
-        &mut self.effects
-    }
-
-    /// Complete the parent's reserved startup launch after registry/journal work.
-    /// This is not a client route and never authorizes a new effect.
-    pub(crate) fn complete_startup(
-        &mut self,
-        key: OperationKey,
-        outcome: Outcome,
-    ) -> Result<(), ServerError> {
+    fn complete_startup(&mut self, key: OperationKey, outcome: Outcome) -> Result<(), ServerError> {
         self.ledger.complete(key, outcome)?;
         Ok(())
     }
+    fn available_capabilities<E: EffectSink>(&self, session: &TargetState<E>) -> u64 {
+        CAPABILITY_READ
+            | if self.allow_input {
+                CAPABILITY_INPUT
+            } else {
+                0
+            }
+            | if session.notifications_available {
+                CAPABILITY_EVENTS
+            } else {
+                0
+            }
+    }
+    fn require_live_connection(
+        &self,
+        connection: &Connection,
+        now_secs: u64,
+    ) -> Result<(), ServerError> {
+        if connection.generation != self.generation || connection.lease == 0 {
+            return Err(ServerError::UnknownContext);
+        }
+        let grant = self
+            .grants
+            .get(&connection.lease)
+            .ok_or(ServerError::UnknownContext)?;
+        if now_secs >= grant.expires_secs
+            || connection.selected_capabilities & !grant.capabilities != 0
+        {
+            return Err(ServerError::UnknownContext);
+        }
+        Ok(())
+    }
+    fn require_target_scope(
+        &self,
+        connection: &Connection,
+        target: TargetRef,
+    ) -> Result<(), ServerError> {
+        let grant = self
+            .grants
+            .get(&connection.lease)
+            .ok_or(ServerError::UnknownContext)?;
+        if grant.target == target {
+            Ok(())
+        } else {
+            Err(ServerError::Unauthorized)
+        }
+    }
+    fn active_input_grant(
+        &self,
+        lease: u64,
+        target: TargetRef,
+        now_secs: u64,
+    ) -> Result<(), RejectionCode> {
+        let Some(grant) = self.grants.get(&lease) else {
+            return Err(RejectionCode::UnknownContext);
+        };
+        if now_secs >= grant.expires_secs {
+            return Err(RejectionCode::UnknownContext);
+        }
+        if grant.target != target {
+            return Err(RejectionCode::Unauthorized);
+        }
+        if grant.capabilities & CAPABILITY_INPUT == 0 {
+            return Err(RejectionCode::Unauthorized);
+        }
+        Ok(())
+    }
+}
+
+impl<'a, E: EffectSink> SessionHandler<'a, E> {
+    fn new(global: &'a mut GlobalAuthority, session: &'a mut TargetState<E>) -> Self {
+        Self { global, session }
+    }
 
     /// Decode, authorize, preflight, admit, and synchronously handle one control request.
-    pub fn handle_control(
+    fn handle_control(
         &mut self,
         connection: &Connection,
         payload: &[u8],
@@ -565,39 +868,35 @@ impl<E: EffectSink> StateOwner<E> {
         now_secs: u64,
     ) -> Result<Vec<u8>, ServerError> {
         let request = decode_request_payload(payload)?;
-        self.require_live_connection(connection, now_secs)?;
-
-        if request.key.lease != connection.lease {
-            return self.rejected(request.key, RejectionCode::Unauthorized);
-        }
-        let required_capability = match request.command {
-            Command::Read { .. } => CAPABILITY_READ,
-            Command::Text { .. }
-            | Command::Paste { .. }
-            | Command::Submit { .. }
-            | Command::Interrupt { .. } => CAPABILITY_INPUT,
-        };
-        if connection.selected_capabilities & required_capability == 0 {
-            return self.rejected(request.key, RejectionCode::Unauthorized);
+        let decision = self
+            .global
+            .preflight_control(connection, &request, payload, now_secs)?;
+        if let Some(reply) = preflight_reply(request.key, decision)? {
+            return Ok(reply);
         }
 
-        if let Some(admission) = self
-            .ledger
-            .existing_admission(request.key, payload, now_secs)?
-        {
-            return match admission {
-                Admission::InProgress => {
-                    self.status_response(request.key, OperationStatus::InProgress)
-                }
-                Admission::Completed(outcome) => {
-                    self.status_response(request.key, OperationStatus::Completed(outcome))
-                }
-                Admission::Execute => Err(ServerError::Internal),
-            };
-        }
+        self.handle_control_preflighted(connection, request, payload, now_secs)
+    }
 
-        if request.target != self.target {
+    fn handle_control_preflighted(
+        &mut self,
+        connection: &Connection,
+        request: ControlRequest<'_>,
+        payload: &[u8],
+        now_secs: u64,
+    ) -> Result<Vec<u8>, ServerError> {
+        if request.target != self.session.target {
             return self.rejected(request.key, RejectionCode::StaleTarget);
+        }
+        match self
+            .global
+            .require_target_scope(connection, self.session.target)
+        {
+            Ok(()) => {}
+            Err(ServerError::Unauthorized) => {
+                return self.rejected(request.key, RejectionCode::Unauthorized);
+            }
+            Err(error) => return Err(error),
         }
 
         match request.command {
@@ -611,7 +910,7 @@ impl<E: EffectSink> StateOwner<E> {
     }
 
     /// Decode and handle one session request without creating process effects.
-    pub fn handle_session(
+    fn handle_session(
         &mut self,
         connection: &Connection,
         payload: &[u8],
@@ -629,10 +928,12 @@ impl<E: EffectSink> StateOwner<E> {
         now_secs: u64,
     ) -> Result<SessionReply, ServerError> {
         let request = decode_session_request(payload)?;
-        self.require_live_connection(connection, now_secs)?;
+        self.global.require_live_connection(connection, now_secs)?;
         match request {
             SessionRequest::Describe => {
                 self.require_capability(connection, CAPABILITY_READ)?;
+                self.global
+                    .require_target_scope(connection, self.session.target)?;
                 Ok(SessionReply::Info(self.session_info()?))
             }
             SessionRequest::Claim {
@@ -681,12 +982,12 @@ impl<E: EffectSink> StateOwner<E> {
             ),
             SessionRequest::OperationStatus { key } => {
                 self.require_capability(connection, CAPABILITY_READ)?;
-                if key.generation != self.generation || key.lease != connection.lease {
+                if key.generation != self.global.generation || key.lease != connection.lease {
                     return self
                         .rejected(key, RejectionCode::Unauthorized)
                         .map(SessionReply::Payload);
                 }
-                let status = self.ledger.status(key, now_secs)?;
+                let status = self.global.ledger.status(key, now_secs)?;
                 self.status_response(key, status).map(SessionReply::Payload)
             }
             SessionRequest::Receipt {
@@ -694,10 +995,12 @@ impl<E: EffectSink> StateOwner<E> {
                 lease,
                 through_sequence,
             } => {
-                if generation != self.generation || lease != connection.lease {
+                if generation != self.global.generation || lease != connection.lease {
                     return Err(ServerError::Unauthorized);
                 }
-                self.ledger.receipt(lease, through_sequence, now_secs)?;
+                self.global
+                    .ledger
+                    .receipt(lease, through_sequence, now_secs)?;
                 let key = OperationKey {
                     generation,
                     lease,
@@ -711,7 +1014,7 @@ impl<E: EffectSink> StateOwner<E> {
     }
 
     /// Read one bounded screen and bind it to current metadata and journal state.
-    pub fn reconcile(
+    fn reconcile(
         &mut self,
         connection: &Connection,
         target: TargetRef,
@@ -720,6 +1023,14 @@ impl<E: EffectSink> StateOwner<E> {
         now_secs: u64,
     ) -> Result<ReconcileState, ServerError> {
         self.require_watch_authority(connection, target, now_secs)?;
+        self.reconcile_preflighted(max_bytes, max_lines)
+    }
+
+    fn reconcile_preflighted(
+        &mut self,
+        max_bytes: u32,
+        max_lines: u16,
+    ) -> Result<ReconcileState, ServerError> {
         if !(RECONCILIATION_PREFIX_BYTES as u32..=MAX_RECONCILIATION_BYTES as u32)
             .contains(&max_bytes)
             || !(1..=MAX_RECONCILIATION_LINES).contains(&max_lines)
@@ -728,7 +1039,7 @@ impl<E: EffectSink> StateOwner<E> {
         }
 
         self.synchronize_metadata();
-        if !self.notifications_available {
+        if !self.session.notifications_available {
             return Err(ServerError::NotificationsUnavailable);
         }
 
@@ -736,20 +1047,24 @@ impl<E: EffectSink> StateOwner<E> {
             .ok()
             .and_then(|bytes| bytes.checked_sub(RECONCILIATION_PREFIX_BYTES))
             .ok_or(ServerError::InvalidWatchRequest)?;
-        let read_result = self.effects.read(ReadSource::Screen, max_text, max_lines);
+        let read_result = self
+            .session
+            .effects
+            .read(ReadSource::Screen, max_text, max_lines);
 
         // A sink read may advance its screen. Record that fact before binding a
         // cursor, then reject a result whose revision no longer names that screen.
         self.synchronize_metadata();
-        if !self.notifications_available {
+        if !self.session.notifications_available {
             return Err(ServerError::NotificationsUnavailable);
         }
         let result = read_result.map_err(|_| ServerError::SnapshotReadFailed)?;
         let current_revision = self
+            .session
             .last_screen_revision
             .ok_or(ServerError::NotificationsUnavailable)?;
         if result.revision == 0 {
-            self.notifications_available = false;
+            self.session.notifications_available = false;
             return Err(ServerError::NotificationsUnavailable);
         }
         if result.revision != current_revision {
@@ -765,7 +1080,7 @@ impl<E: EffectSink> StateOwner<E> {
         }
 
         let info = self.session_info()?;
-        let cursor = self.journal.current_cursor();
+        let cursor = self.session.journal.current_cursor();
         let reconciliation = Reconciliation {
             info,
             cursor,
@@ -789,7 +1104,7 @@ impl<E: EffectSink> StateOwner<E> {
     }
 
     /// Read a bounded ordered event page for this owner's fixed target.
-    pub fn read_events(
+    fn read_events(
         &mut self,
         connection: &Connection,
         target: TargetRef,
@@ -798,7 +1113,15 @@ impl<E: EffectSink> StateOwner<E> {
         now_secs: u64,
     ) -> Result<EventPage, ServerError> {
         self.require_watch_authority(connection, target, now_secs)?;
-        if cursor.generation != self.generation {
+        self.read_events_preflighted(cursor, limit)
+    }
+
+    fn read_events_preflighted(
+        &mut self,
+        cursor: EventCursor,
+        limit: u16,
+    ) -> Result<EventPage, ServerError> {
+        if cursor.generation != self.global.generation {
             return Err(ServerError::WrongGeneration);
         }
         if !(1..=MAX_WATCH_EVENTS).contains(&limit) {
@@ -806,12 +1129,12 @@ impl<E: EffectSink> StateOwner<E> {
         }
 
         self.synchronize_metadata();
-        if !self.notifications_available {
+        if !self.session.notifications_available {
             return Err(ServerError::NotificationsUnavailable);
         }
 
-        let latest = self.journal.current_cursor();
-        let events = match self.journal.read_after(cursor, usize::from(limit)) {
+        let latest = self.session.journal.current_cursor();
+        let events = match self.session.journal.read_after(cursor, usize::from(limit)) {
             Ok(events) => events,
             Err(JournalError::CursorExpired) => {
                 return Ok(EventPage {
@@ -825,7 +1148,7 @@ impl<E: EffectSink> StateOwner<E> {
         let cursor = events
             .last()
             .map(|event| EventCursor {
-                generation: self.generation,
+                generation: self.global.generation,
                 sequence: event.cursor,
             })
             .unwrap_or(latest);
@@ -836,18 +1159,16 @@ impl<E: EffectSink> StateOwner<E> {
         })
     }
 
-    /// Expire leases and input ownership, then give the sink one bounded poll.
-    pub fn poll(&mut self, now_secs: u64) -> Result<(), ServerError> {
+    fn poll_session(&mut self, now_secs: u64) -> Result<(), ServerError> {
         let result = (|| {
-            self.ledger.expire_leases(now_secs);
-            self.grants.retain(|_, grant| now_secs < grant.expires_secs);
-            match self.input_owner.expire(now_secs)? {
+            match self.session.input_owner.expire(now_secs)? {
                 ExpireResult::Vacant
                 | ExpireResult::NotDue
                 | ExpireResult::PendingNeedsResolution(_)
                 | ExpireResult::Released(_) => {}
             }
-            self.effects
+            self.session
+                .effects
                 .poll()
                 .map_err(|_| ServerError::EffectPollFailed)
         })();
@@ -864,7 +1185,7 @@ impl<E: EffectSink> StateOwner<E> {
         payload: &[u8],
         now_secs: u64,
     ) -> Result<Vec<u8>, ServerError> {
-        if let Err(code) = self.effects.validate(request.command) {
+        if let Err(code) = self.session.effects.validate(request.command) {
             return self.rejected(request.key, code);
         }
         let Some(text_budget) = usize::try_from(max_bytes)
@@ -874,7 +1195,7 @@ impl<E: EffectSink> StateOwner<E> {
             return self.rejected(request.key, RejectionCode::InvalidRequest);
         };
 
-        match self.ledger.admit(request.key, payload, now_secs) {
+        match self.global.ledger.admit(request.key, payload, now_secs) {
             Ok(Admission::Execute) => {}
             Ok(Admission::InProgress) => {
                 return self.status_response(request.key, OperationStatus::InProgress)
@@ -888,23 +1209,23 @@ impl<E: EffectSink> StateOwner<E> {
             Err(error) => return Err(ServerError::Protocol(error)),
         }
 
-        let result = self.effects.read(source, text_budget, max_lines);
+        let result = self.session.effects.read(source, text_budget, max_lines);
         match result {
             Ok(result)
                 if valid_read_result(
                     &result,
-                    self.target,
+                    self.session.target,
                     request.key,
                     source,
                     max_bytes,
                     max_lines,
                 ) =>
             {
-                self.ledger.complete(request.key, Outcome::Applied)?;
-                self.encode_response(Response {
+                self.global.ledger.complete(request.key, Outcome::Applied)?;
+                encode_response(Response {
                     key: request.key,
                     body: ResponseBody::Read {
-                        target: self.target,
+                        target: self.session.target,
                         source,
                         screen_revision: result.revision,
                         truncated: result.truncated,
@@ -913,12 +1234,12 @@ impl<E: EffectSink> StateOwner<E> {
                 })
             }
             Ok(_) => {
-                self.ledger.complete(request.key, Outcome::Failed)?;
+                self.global.ledger.complete(request.key, Outcome::Failed)?;
                 self.status_response(request.key, OperationStatus::Completed(Outcome::Failed))
             }
             Err(outcome) => {
                 let outcome = terminal_outcome(outcome);
-                self.ledger.complete(request.key, outcome)?;
+                self.global.ledger.complete(request.key, outcome)?;
                 self.status_response(request.key, OperationStatus::Completed(outcome))
             }
         }
@@ -940,17 +1261,17 @@ impl<E: EffectSink> StateOwner<E> {
         };
 
         let caller = Owner::Client(request.key.lease);
-        let mut candidate_owner = self.input_owner.clone();
+        let mut candidate_owner = self.session.input_owner.clone();
         if let Err(error) =
             candidate_owner.begin_input(caller, owner_revision, request.key, now_secs)
         {
             return self.rejected(request.key, owner_rejection(error));
         }
-        if let Err(code) = self.effects.validate(command) {
+        if let Err(code) = self.session.effects.validate(command) {
             return self.rejected(request.key, code);
         }
 
-        match self.ledger.admit(request.key, payload, now_secs) {
+        match self.global.ledger.admit(request.key, payload, now_secs) {
             Ok(Admission::Execute) => {}
             Ok(Admission::InProgress) => {
                 return self.status_response(request.key, OperationStatus::InProgress)
@@ -966,10 +1287,10 @@ impl<E: EffectSink> StateOwner<E> {
 
         // The candidate was validated before admission; commit the input pin
         // only after this call reserved the unique key for execution.
-        self.input_owner = candidate_owner;
-        let outcome = terminal_outcome(self.effects.input(command));
-        self.ledger.complete(request.key, outcome)?;
-        self.input_owner.finish_input(request.key)?;
+        self.session.input_owner = candidate_owner;
+        let outcome = terminal_outcome(self.session.effects.input(command));
+        self.global.ledger.complete(request.key, outcome)?;
+        self.session.input_owner.finish_input(request.key)?;
         self.status_response(request.key, OperationStatus::Completed(outcome))
     }
 
@@ -982,35 +1303,45 @@ impl<E: EffectSink> StateOwner<E> {
         payload: &[u8],
         now_secs: u64,
     ) -> Result<SessionReply, ServerError> {
-        if connection.selected_capabilities & CAPABILITY_INPUT == 0 {
-            return self
-                .rejected(key, RejectionCode::Unauthorized)
-                .map(SessionReply::Payload);
+        let decision = self
+            .global
+            .preflight_owner_mutation(connection, key, payload, now_secs)?;
+        if let Some(reply) = preflight_reply(key, decision)? {
+            return Ok(SessionReply::Payload(reply));
         }
-        if key.lease != connection.lease || key.generation != self.generation {
-            return self
-                .rejected(key, RejectionCode::Unauthorized)
-                .map(SessionReply::Payload);
-        }
-        if let Some(admission) = self.ledger.existing_admission(key, payload, now_secs)? {
-            return match admission {
-                Admission::InProgress => self
-                    .status_response(key, OperationStatus::InProgress)
-                    .map(SessionReply::Payload),
-                Admission::Completed(outcome) => self
-                    .status_response(key, OperationStatus::Completed(outcome))
-                    .map(SessionReply::Payload),
-                Admission::Execute => Err(ServerError::Internal),
-            };
-        }
-        if target != self.target {
+
+        self.handle_owner_mutation_preflighted(connection, key, target, mutation, payload, now_secs)
+    }
+
+    fn handle_owner_mutation_preflighted(
+        &mut self,
+        connection: &Connection,
+        key: OperationKey,
+        target: TargetRef,
+        mutation: OwnerMutation,
+        payload: &[u8],
+        now_secs: u64,
+    ) -> Result<SessionReply, ServerError> {
+        if target != self.session.target {
             return self
                 .rejected(key, RejectionCode::StaleTarget)
                 .map(SessionReply::Payload);
         }
+        match self
+            .global
+            .require_target_scope(connection, self.session.target)
+        {
+            Ok(()) => {}
+            Err(ServerError::Unauthorized) => {
+                return self
+                    .rejected(key, RejectionCode::Unauthorized)
+                    .map(SessionReply::Payload);
+            }
+            Err(error) => return Err(error),
+        }
 
         let caller = Owner::Client(connection.lease);
-        let mut candidate = self.input_owner.clone();
+        let mut candidate = self.session.input_owner.clone();
         let transition = match mutation {
             OwnerMutation::Claim {
                 expected_revision,
@@ -1024,7 +1355,10 @@ impl<E: EffectSink> StateOwner<E> {
                 recipient_lease,
                 ttl_seconds,
             } => {
-                match self.active_input_grant(recipient_lease, now_secs) {
+                match self
+                    .global
+                    .active_input_grant(recipient_lease, self.session.target, now_secs)
+                {
                     Ok(()) => {}
                     Err(code) => return self.rejected(key, code).map(SessionReply::Payload),
                 }
@@ -1043,7 +1377,7 @@ impl<E: EffectSink> StateOwner<E> {
                 .map(SessionReply::Payload);
         }
 
-        match self.ledger.admit(key, payload, now_secs) {
+        match self.global.ledger.admit(key, payload, now_secs) {
             Ok(Admission::Execute) => {}
             Ok(Admission::InProgress) => {
                 return self
@@ -1063,40 +1397,26 @@ impl<E: EffectSink> StateOwner<E> {
             Err(error) => return Err(ServerError::Protocol(error)),
         }
 
-        self.ledger.complete(key, Outcome::Applied)?;
-        self.input_owner = candidate;
+        self.global.ledger.complete(key, Outcome::Applied)?;
+        self.session.input_owner = candidate;
         self.status_response(key, OperationStatus::Completed(Outcome::Applied))
             .map(SessionReply::Payload)
     }
 
     fn session_info(&self) -> Result<SessionInfo, ServerError> {
-        let owner = self.input_owner.snapshot();
+        let owner = self.session.input_owner.snapshot();
         let (owner_lease, owner_expires_secs) = match owner.holder {
             None => (0, 0),
             Some(Owner::Client(lease)) => (lease, owner.expires_secs),
             Some(Owner::Human(_)) => return Err(ServerError::UnsupportedOwner),
         };
         Ok(SessionInfo {
-            target: self.target,
+            target: self.session.target,
             owner_revision: owner.revision,
             owner_lease,
             owner_expires_secs,
-            child_exited: self.effects.child_exited(),
+            child_exited: self.session.effects.child_exited(),
         })
-    }
-
-    fn available_capabilities(&self) -> u64 {
-        CAPABILITY_READ
-            | if self.allow_input {
-                CAPABILITY_INPUT
-            } else {
-                0
-            }
-            | if self.notifications_available {
-                CAPABILITY_EVENTS
-            } else {
-                0
-            }
     }
 
     fn require_watch_authority(
@@ -1105,54 +1425,64 @@ impl<E: EffectSink> StateOwner<E> {
         target: TargetRef,
         now_secs: u64,
     ) -> Result<(), ServerError> {
-        self.require_live_connection(connection, now_secs)?;
+        self.global.require_live_connection(connection, now_secs)?;
         if connection.selected_capabilities & (CAPABILITY_READ | CAPABILITY_EVENTS)
             != (CAPABILITY_READ | CAPABILITY_EVENTS)
         {
             return Err(ServerError::Unauthorized);
         }
-        if target != self.target {
+        self.require_watch_target_scope(connection, target)
+    }
+
+    fn require_watch_target_scope(
+        &self,
+        connection: &Connection,
+        target: TargetRef,
+    ) -> Result<(), ServerError> {
+        if target != self.session.target {
             return Err(ServerError::TargetStale);
         }
-        Ok(())
+        self.global
+            .require_target_scope(connection, self.session.target)
     }
 
     /// Record committed metadata changes without allowing journal failures to
     /// change normal control, input, or polling outcomes.
     fn synchronize_metadata(&mut self) {
-        if !self.notifications_available {
+        if !self.session.notifications_available {
             return;
         }
 
-        let Some(previous_screen_revision) = self.last_screen_revision else {
-            self.notifications_available = false;
+        let Some(previous_screen_revision) = self.session.last_screen_revision else {
+            self.session.notifications_available = false;
             return;
         };
         let Some(screen_revision) = self
+            .session
             .effects
             .screen_revision()
             .filter(|revision| *revision != 0)
         else {
-            self.notifications_available = false;
+            self.session.notifications_available = false;
             return;
         };
-        let Some(owner) = owner_observation(self.input_owner.snapshot()) else {
-            self.notifications_available = false;
+        let Some(owner) = owner_observation(self.session.input_owner.snapshot()) else {
+            self.session.notifications_available = false;
             return;
         };
-        let Some(previous_owner) = self.last_owner_observation else {
-            self.notifications_available = false;
+        let Some(previous_owner) = self.session.last_owner_observation else {
+            self.session.notifications_available = false;
             return;
         };
-        let child_exited = self.effects.child_exited();
+        let child_exited = self.session.effects.child_exited();
 
         if screen_revision < previous_screen_revision
             || owner.revision < previous_owner.revision
             || (owner.revision == previous_owner.revision
                 && owner.owner_lease != previous_owner.owner_lease)
-            || (self.last_child_exited && !child_exited)
+            || (self.session.last_child_exited && !child_exited)
         {
-            self.notifications_available = false;
+            self.session.notifications_available = false;
             return;
         }
 
@@ -1171,42 +1501,30 @@ impl<E: EffectSink> StateOwner<E> {
         {
             return;
         }
-        if !self.last_child_exited && child_exited && !self.record_event(EventBody::ChildExited) {
+        if !self.session.last_child_exited
+            && child_exited
+            && !self.record_event(EventBody::ChildExited)
+        {
             return;
         }
 
-        self.last_screen_revision = Some(screen_revision);
-        self.last_owner_observation = Some(owner);
-        self.last_child_exited = child_exited;
+        self.session.last_screen_revision = Some(screen_revision);
+        self.session.last_owner_observation = Some(owner);
+        self.session.last_child_exited = child_exited;
     }
 
     fn record_event(&mut self, body: EventBody) -> bool {
-        if self.journal.push(self.target, body).is_err() {
-            self.notifications_available = false;
+        if self
+            .session
+            .journal
+            .push(self.session.target, body)
+            .is_err()
+        {
+            self.session.notifications_available = false;
             false
         } else {
             true
         }
-    }
-
-    fn require_live_connection(
-        &self,
-        connection: &Connection,
-        now_secs: u64,
-    ) -> Result<(), ServerError> {
-        if connection.generation != self.generation || connection.lease == 0 {
-            return Err(ServerError::UnknownContext);
-        }
-        let grant = self
-            .grants
-            .get(&connection.lease)
-            .ok_or(ServerError::UnknownContext)?;
-        if now_secs >= grant.expires_secs
-            || connection.selected_capabilities & !grant.capabilities != 0
-        {
-            return Err(ServerError::UnknownContext);
-        }
-        Ok(())
     }
 
     fn require_capability(
@@ -1221,21 +1539,8 @@ impl<E: EffectSink> StateOwner<E> {
         }
     }
 
-    fn active_input_grant(&self, lease: u64, now_secs: u64) -> Result<(), RejectionCode> {
-        let Some(grant) = self.grants.get(&lease) else {
-            return Err(RejectionCode::UnknownContext);
-        };
-        if now_secs >= grant.expires_secs {
-            return Err(RejectionCode::UnknownContext);
-        }
-        if grant.capabilities & CAPABILITY_INPUT == 0 {
-            return Err(RejectionCode::Unauthorized);
-        }
-        Ok(())
-    }
-
     fn rejected(&self, key: OperationKey, code: RejectionCode) -> Result<Vec<u8>, ServerError> {
-        self.encode_response(Response {
+        encode_response(Response {
             key,
             body: ResponseBody::Rejected(code),
         })
@@ -1246,18 +1551,30 @@ impl<E: EffectSink> StateOwner<E> {
         key: OperationKey,
         status: OperationStatus,
     ) -> Result<Vec<u8>, ServerError> {
-        self.encode_response(Response {
+        encode_response(Response {
             key,
             body: ResponseBody::Status(status),
         })
     }
+}
 
-    fn encode_response(&self, response: Response<'_>) -> Result<Vec<u8>, ServerError> {
-        let length = response.encoded_len()?;
-        let mut encoded = Vec::with_capacity(length);
-        encode_response_payload(&response, &mut encoded).map_err(map_response_io_error)?;
-        Ok(encoded)
-    }
+fn preflight_reply(
+    key: OperationKey,
+    decision: RequestPreflight,
+) -> Result<Option<Vec<u8>>, ServerError> {
+    let body = match decision {
+        RequestPreflight::Continue => return Ok(None),
+        RequestPreflight::Rejected(code) => ResponseBody::Rejected(code),
+        RequestPreflight::Known(status) => ResponseBody::Status(status),
+    };
+    Ok(Some(encode_response(Response { key, body })?))
+}
+
+fn encode_response(response: Response<'_>) -> Result<Vec<u8>, ServerError> {
+    let length = response.encoded_len()?;
+    let mut encoded = Vec::with_capacity(length);
+    encode_response_payload(&response, &mut encoded).map_err(map_response_io_error)?;
+    Ok(encoded)
 }
 
 const READ_RESPONSE_METADATA_BYTES: usize = 90;
@@ -1489,6 +1806,37 @@ mod tests {
         StateOwner::new(GENERATION, target(), effects, true).unwrap()
     }
 
+    fn another_target(field: usize) -> TargetRef {
+        let mut target = target();
+        match field {
+            0 => target.generation += 1,
+            1 => target.workspace += 1,
+            2 => target.pane += 1,
+            3 => target.session += 1,
+            4 => target.occupant_revision += 1,
+            _ => unreachable!(),
+        }
+        target
+    }
+
+    fn target_state(target: TargetRef) -> TargetState<FakeSink> {
+        let input_owner = InputOwner::new();
+        let last_owner_observation = owner_observation(input_owner.snapshot());
+        TargetState {
+            target,
+            input_owner,
+            effects: FakeSink {
+                screen_revision: Some(1),
+                ..FakeSink::default()
+            },
+            journal: EventJournal::new(target.generation).unwrap(),
+            notifications_available: true,
+            last_screen_revision: Some(1),
+            last_owner_observation,
+            last_child_exited: false,
+        }
+    }
+
     fn hello(required: u64, optional: u64) -> SessionHello {
         SessionHello {
             hello: Hello {
@@ -1614,7 +1962,7 @@ mod tests {
             connection.selected_capabilities(),
             welcome.selected_capabilities
         );
-        assert_eq!(owner.grants.len(), 1);
+        assert_eq!(owner.global.grants.len(), 1);
     }
 
     #[test]
@@ -1645,9 +1993,9 @@ mod tests {
 
         let mut owner =
             StateOwner::with_ledger(ledger, target(), FakeSink::default(), true).unwrap();
-        assert_eq!(owner.ledger.usage(), usage_before);
+        assert_eq!(owner.global.ledger.usage(), usage_before);
         assert_eq!(
-            owner.ledger.status(launch_key, 3),
+            owner.global.ledger.status(launch_key, 3),
             Ok(OperationStatus::Completed(Outcome::Applied))
         );
         let connection = connect(&mut owner);
@@ -1666,7 +2014,7 @@ mod tests {
         let next_connection = owner.connect(&hello(CAPABILITY_READ, 0), 3).unwrap().0;
         assert_eq!(next_connection.lease(), 3);
         assert_eq!(
-            owner.ledger.usage().lease_records,
+            owner.global.ledger.usage().lease_records,
             usage_before.lease_records + 2
         );
     }
@@ -1720,7 +2068,7 @@ mod tests {
         let mut owner = state();
         let connection = connect(&mut owner);
         let revision = claim(&mut owner, &connection, 1);
-        let ledger_before_requests = owner.ledger.usage();
+        let ledger_before_requests = owner.global.ledger.usage();
         let before_validation = owner.effects().validations.get();
 
         let mut stale_target = target();
@@ -1743,7 +2091,7 @@ mod tests {
             OperationStatus::NotAdmitted
         );
         assert_eq!(owner.effects().validations.get(), before_validation);
-        assert_eq!(owner.ledger.usage(), ledger_before_requests);
+        assert_eq!(owner.global.ledger.usage(), ledger_before_requests);
 
         let stale_owner_key = operation_key(connection.lease(), 3);
         let stale_owner_request = control_payload(
@@ -1763,7 +2111,7 @@ mod tests {
             OperationStatus::NotAdmitted
         );
         assert_eq!(owner.effects().validations.get(), before_validation);
-        assert_eq!(owner.ledger.usage(), ledger_before_requests);
+        assert_eq!(owner.global.ledger.usage(), ledger_before_requests);
 
         let foreign_key = OperationKey {
             lease: connection.lease() + 100,
@@ -1784,7 +2132,7 @@ mod tests {
         assert_eq!(rejection(&rejected), RejectionCode::Unauthorized);
         assert_eq!(owner.effects().validations.get(), before_validation);
         assert_eq!(owner.effects().inputs, 0);
-        assert_eq!(owner.ledger.usage(), ledger_before_requests);
+        assert_eq!(owner.global.ledger.usage(), ledger_before_requests);
 
         let mut read_only_owner = state();
         let read_only = read_only_owner
@@ -1806,7 +2154,7 @@ mod tests {
             read_only_owner.connect(&resumed_with_new_offer, 2).unwrap();
         assert_eq!(resumed_read_only.lease(), read_only.lease());
         assert_eq!(welcome.selected_capabilities, CAPABILITY_READ);
-        let read_only_ledger_before = read_only_owner.ledger.usage();
+        let read_only_ledger_before = read_only_owner.global.ledger.usage();
         let forbidden_key = operation_key(read_only.lease(), 1);
         let forbidden = control_payload(
             forbidden_key,
@@ -1822,7 +2170,10 @@ mod tests {
         assert_eq!(rejection(&denied), RejectionCode::Unauthorized);
         assert_eq!(read_only_owner.effects().validations.get(), 0);
         assert_eq!(read_only_owner.effects().inputs, 0);
-        assert_eq!(read_only_owner.ledger.usage(), read_only_ledger_before);
+        assert_eq!(
+            read_only_owner.global.ledger.usage(),
+            read_only_ledger_before
+        );
     }
 
     #[test]
@@ -1850,7 +2201,7 @@ mod tests {
             .unwrap();
         assert_eq!(owner.owner_snapshot().revision, 3);
 
-        let before = owner.ledger.usage();
+        let before = owner.global.ledger.usage();
         let duplicate = owner
             .handle_session(&connection, &claim_payload, 4)
             .unwrap();
@@ -1862,7 +2213,7 @@ mod tests {
             ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
         );
         assert_eq!(owner.owner_snapshot().holder, None);
-        assert_eq!(owner.ledger.usage(), before);
+        assert_eq!(owner.global.ledger.usage(), before);
     }
 
     #[test]
@@ -1911,7 +2262,7 @@ mod tests {
         );
         owner.handle_control(&connection, &read, 2).unwrap();
         assert_eq!(owner.effects().reads, 1);
-        assert_eq!(owner.ledger.usage().retained_operations, 1);
+        assert_eq!(owner.global.ledger.usage().retained_operations, 1);
 
         let receipt = session_payload(SessionRequest::Receipt {
             generation: GENERATION,
@@ -1926,7 +2277,7 @@ mod tests {
             response(&result).body,
             ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
         );
-        assert_eq!(owner.ledger.usage().retained_operations, 0);
+        assert_eq!(owner.global.ledger.usage().retained_operations, 0);
         assert_eq!(owner.effects().reads, 1);
 
         let repeated = owner.handle_session(&connection, &receipt, 4).unwrap();
@@ -1938,7 +2289,7 @@ mod tests {
     fn preflight_capacity_and_pending_input_reject_before_admission() {
         let mut owner = state();
         let connection = connect(&mut owner);
-        owner.effects.reject_validation = Some(RejectionCode::Capacity);
+        owner.session.effects.reject_validation = Some(RejectionCode::Capacity);
         let read_key = operation_key(connection.lease(), 1);
         let read = control_payload(
             read_key,
@@ -1957,10 +2308,11 @@ mod tests {
         );
         assert_eq!(owner.effects().reads, 0);
 
-        owner.effects.reject_validation = None;
+        owner.session.effects.reject_validation = None;
         let revision = claim(&mut owner, &connection, 2);
         let pending_key = operation_key(connection.lease(), 3);
         owner
+            .session
             .input_owner
             .begin_input(
                 Owner::Client(connection.lease()),
@@ -1994,7 +2346,7 @@ mod tests {
             (Outcome::Accepted, Outcome::Unknown),
         ] {
             let mut owner = state();
-            owner.effects.input_outcomes = VecDeque::from([first_outcome]);
+            owner.session.effects.input_outcomes = VecDeque::from([first_outcome]);
             let connection = connect(&mut owner);
             let revision = claim(&mut owner, &connection, 1);
             let key = operation_key(connection.lease(), 2);
@@ -2025,7 +2377,7 @@ mod tests {
     fn read_budget_includes_metadata_and_invalid_sink_results_are_hidden() {
         let mut owner = state();
         let connection = connect(&mut owner);
-        owner.effects.read_result = Ok(ReadResult {
+        owner.session.effects.read_result = Ok(ReadResult {
             text: String::from("x"),
             revision: 4,
             truncated: false,
@@ -2054,7 +2406,7 @@ mod tests {
 
         let mut too_small_owner = state();
         let too_small_connection = connect(&mut too_small_owner);
-        too_small_owner.effects.read_result = Ok(ReadResult {
+        too_small_owner.session.effects.read_result = Ok(ReadResult {
             text: String::from("x"),
             revision: 4,
             truncated: false,
@@ -2096,7 +2448,7 @@ mod tests {
         ] {
             let mut invalid_owner = state();
             let invalid_connection = connect(&mut invalid_owner);
-            invalid_owner.effects.read_result = Ok(bad_result);
+            invalid_owner.session.effects.read_result = Ok(bad_result);
             let invalid_key = operation_key(invalid_connection.lease(), 1);
             let invalid = control_payload(
                 invalid_key,
@@ -2141,7 +2493,7 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(next.lease(), first.lease() + 1);
-        assert_eq!(owner.grants.len(), 2);
+        assert_eq!(owner.global.grants.len(), 2);
     }
 
     #[test]
@@ -2174,10 +2526,377 @@ mod tests {
     }
 
     #[test]
+    fn grants_are_pinned_to_all_target_identity_fields_before_any_target_access() {
+        for field in 0..5 {
+            let mut owner = watch_state();
+            let connection = connect_with_events(&mut owner);
+            let original_grant = owner.global.grants[&connection.lease()];
+            let mut other = target_state(another_target(field));
+
+            let resume = SessionHello {
+                // Even an otherwise unsupported request must not reveal target
+                // capability availability through a cross-target resume.
+                hello: hello(u64::MAX, 0).hello,
+                resume: Some(LeaseRef {
+                    generation: GENERATION,
+                    lease: connection.lease(),
+                }),
+            };
+            assert!(matches!(
+                owner.global.connect(&other, &resume, 2),
+                Err(ServerError::UnknownContext)
+            ));
+            let unchanged = owner.global.grants[&connection.lease()];
+            assert_eq!(unchanged.target, original_grant.target);
+            assert_eq!(unchanged.expires_secs, original_grant.expires_secs);
+
+            let mut handler = SessionHandler::new(&mut owner.global, &mut other);
+            assert!(matches!(
+                handler.handle_session(&connection, &session_payload(SessionRequest::Describe), 2,),
+                Err(ServerError::Unauthorized)
+            ));
+            assert!(matches!(
+                handler.reconcile(&connection, another_target(field), 256, 1, 2),
+                Err(ServerError::Unauthorized)
+            ));
+            assert!(matches!(
+                handler.read_events(
+                    &connection,
+                    another_target(field),
+                    EventCursor {
+                        generation: GENERATION,
+                        sequence: 0,
+                    },
+                    1,
+                    2,
+                ),
+                Err(ServerError::Unauthorized)
+            ));
+
+            // A protocol request's target generation must match its operation
+            // key generation, so the different-generation session is rejected
+            // as stale before scope; the remaining four fields reach scope.
+            if field != 0 {
+                let control_key = operation_key(connection.lease(), 41);
+                let read = control_payload(
+                    control_key,
+                    another_target(field),
+                    Command::Read {
+                        source: ReadSource::Screen,
+                        max_bytes: 256,
+                        max_lines: 1,
+                    },
+                );
+                assert_eq!(
+                    rejection(&handler.handle_control(&connection, &read, 2).unwrap()),
+                    RejectionCode::Unauthorized
+                );
+                assert_eq!(
+                    handler.global.ledger.status(control_key, 2).unwrap(),
+                    OperationStatus::NotAdmitted
+                );
+
+                // Even valid input ownership in another selected session
+                // cannot replace the lease's immutable target authority.
+                handler
+                    .session
+                    .input_owner
+                    .claim(Owner::Client(connection.lease()), 1, 30, 2)
+                    .unwrap();
+                let input_key = operation_key(connection.lease(), 43);
+                let input_owner_before = handler.session.input_owner.snapshot();
+                let submit = control_payload(
+                    input_key,
+                    another_target(field),
+                    Command::Submit {
+                        owner_revision: input_owner_before.revision,
+                        text: "scope-denied",
+                    },
+                );
+                assert_eq!(
+                    rejection(&handler.handle_control(&connection, &submit, 2).unwrap()),
+                    RejectionCode::Unauthorized
+                );
+                assert_eq!(handler.session.input_owner.snapshot(), input_owner_before);
+                assert_eq!(
+                    handler.global.ledger.status(input_key, 2).unwrap(),
+                    OperationStatus::NotAdmitted
+                );
+            }
+
+            if field != 0 {
+                let owner_key = operation_key(connection.lease(), 42);
+                let claim = session_payload(SessionRequest::Claim {
+                    key: owner_key,
+                    target: another_target(field),
+                    expected_owner_revision: 1,
+                    ttl_seconds: 30,
+                });
+                let before = handler.session.input_owner.snapshot();
+                let SessionReply::Payload(reply) =
+                    handler.handle_session(&connection, &claim, 2).unwrap()
+                else {
+                    panic!("owner mutation must return an operation payload");
+                };
+                assert_eq!(rejection(&reply), RejectionCode::Unauthorized);
+                assert_eq!(handler.session.input_owner.snapshot(), before);
+                assert_eq!(
+                    handler.global.ledger.status(owner_key, 2).unwrap(),
+                    OperationStatus::NotAdmitted
+                );
+            }
+            assert_eq!(handler.session.effects.validations.get(), 0);
+            assert_eq!(handler.session.effects.reads, 0);
+            assert_eq!(handler.session.effects.inputs, 0);
+            assert_eq!(handler.session.effects.polls, 0);
+            let final_grant = handler.global.grants[&connection.lease()];
+            assert_eq!(final_grant.target, original_grant.target);
+            assert_eq!(final_grant.expires_secs, original_grant.expires_secs);
+        }
+    }
+
+    #[test]
+    fn global_exact_results_and_conflicts_precede_selected_target_checks() {
+        let mut owner = state();
+        let connection = connect(&mut owner);
+        let key = operation_key(connection.lease(), 51);
+        let payload = control_payload(
+            key,
+            target(),
+            Command::Read {
+                source: ReadSource::Screen,
+                max_bytes: 256,
+                max_lines: 1,
+            },
+        );
+        let first = owner.handle_control(&connection, &payload, 2).unwrap();
+        assert!(matches!(response(&first).body, ResponseBody::Read { .. }));
+        let mut other = target_state(another_target(4));
+        let mut handler = SessionHandler::new(&mut owner.global, &mut other);
+
+        let exact = handler.handle_control(&connection, &payload, 2).unwrap();
+        assert_eq!(
+            response(&exact).body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        assert_eq!(handler.session.effects.reads, 0);
+
+        let conflict = control_payload(
+            key,
+            handler.session.target,
+            Command::Read {
+                source: ReadSource::Screen,
+                max_bytes: 257,
+                max_lines: 1,
+            },
+        );
+        assert!(matches!(
+            handler.handle_control(&connection, &conflict, 2),
+            Err(ServerError::Protocol(ProtocolError::OperationConflict))
+        ));
+        assert_eq!(handler.session.effects.reads, 0);
+
+        let stale_key = operation_key(connection.lease(), 52);
+        let stale = control_payload(
+            stale_key,
+            target(),
+            Command::Read {
+                source: ReadSource::Screen,
+                max_bytes: 256,
+                max_lines: 1,
+            },
+        );
+        assert_eq!(
+            rejection(&handler.handle_control(&connection, &stale, 2).unwrap()),
+            RejectionCode::StaleTarget
+        );
+        assert_eq!(
+            handler.global.ledger.status(stale_key, 2).unwrap(),
+            OperationStatus::NotAdmitted
+        );
+    }
+
+    #[test]
+    fn global_preflight_is_read_only_and_renders_known_results_without_a_target() {
+        let mut owner = state();
+        let connection = connect(&mut owner);
+        let control_key = operation_key(connection.lease(), 61);
+        let control = control_payload(
+            control_key,
+            target(),
+            Command::Read {
+                source: ReadSource::Screen,
+                max_bytes: 256,
+                max_lines: 1,
+            },
+        );
+        let decoded_control = decode_request_payload(&control).unwrap();
+        let usage_before = owner.global.ledger.usage();
+        assert_eq!(
+            owner
+                .global
+                .preflight_control(&connection, &decoded_control, &control, 2)
+                .unwrap(),
+            RequestPreflight::Continue
+        );
+        assert_eq!(owner.global.ledger.usage(), usage_before);
+        assert_eq!(
+            owner.global.ledger.status(control_key, 2).unwrap(),
+            OperationStatus::NotAdmitted
+        );
+        assert_eq!(
+            preflight_reply(control_key, RequestPreflight::Continue,).unwrap(),
+            None
+        );
+
+        assert_eq!(
+            owner.global.ledger.admit(control_key, &control, 2),
+            Ok(Admission::Execute)
+        );
+        owner
+            .global
+            .ledger
+            .complete(control_key, Outcome::Applied)
+            .unwrap();
+        let usage_after_admission = owner.global.ledger.usage();
+        let known = owner
+            .global
+            .preflight_control(&connection, &decoded_control, &control, 2)
+            .unwrap();
+        assert_eq!(
+            known,
+            RequestPreflight::Known(OperationStatus::Completed(Outcome::Applied))
+        );
+        let Some(reply) = preflight_reply(control_key, known).unwrap() else {
+            panic!("known global operation must render a status reply");
+        };
+        assert_eq!(
+            response(&reply).body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        assert_eq!(owner.global.ledger.usage(), usage_after_admission);
+
+        let conflict = control_payload(
+            control_key,
+            target(),
+            Command::Read {
+                source: ReadSource::Screen,
+                max_bytes: 257,
+                max_lines: 1,
+            },
+        );
+        let decoded_conflict = decode_request_payload(&conflict).unwrap();
+        assert!(matches!(
+            owner
+                .global
+                .preflight_control(&connection, &decoded_conflict, &conflict, 2),
+            Err(ServerError::Protocol(ProtocolError::OperationConflict))
+        ));
+
+        let owner_key = operation_key(connection.lease(), 62);
+        let owner_payload = session_payload(SessionRequest::Claim {
+            key: owner_key,
+            target: target(),
+            expected_owner_revision: 1,
+            ttl_seconds: 30,
+        });
+        let usage_before_owner = owner.global.ledger.usage();
+        assert_eq!(
+            owner
+                .global
+                .preflight_owner_mutation(&connection, owner_key, &owner_payload, 2)
+                .unwrap(),
+            RequestPreflight::Continue
+        );
+        assert_eq!(owner.global.ledger.usage(), usage_before_owner);
+        assert_eq!(
+            owner.global.ledger.status(owner_key, 2).unwrap(),
+            OperationStatus::NotAdmitted
+        );
+        assert_eq!(
+            owner.global.ledger.admit(owner_key, &owner_payload, 2),
+            Ok(Admission::Execute)
+        );
+        owner
+            .global
+            .ledger
+            .complete(owner_key, Outcome::Applied)
+            .unwrap();
+        let known_owner = owner
+            .global
+            .preflight_owner_mutation(&connection, owner_key, &owner_payload, 2)
+            .unwrap();
+        assert_eq!(
+            known_owner,
+            RequestPreflight::Known(OperationStatus::Completed(Outcome::Applied))
+        );
+        assert!(preflight_reply(owner_key, known_owner).unwrap().is_some());
+
+        let missing_authority = Connection {
+            generation: GENERATION,
+            lease: connection.lease() + 100,
+            selected_capabilities: connection.selected_capabilities,
+        };
+        let usage_before_missing = owner.global.ledger.usage();
+        assert!(matches!(
+            owner
+                .global
+                .preflight_control(&missing_authority, &decoded_control, &control, 2,),
+            Err(ServerError::UnknownContext)
+        ));
+        assert!(matches!(
+            owner
+                .global
+                .preflight_owner_mutation(&missing_authority, owner_key, &owner_payload, 2,),
+            Err(ServerError::UnknownContext)
+        ));
+        assert_eq!(owner.global.ledger.usage(), usage_before_missing);
+        assert_eq!(owner.effects().validations.get(), 0);
+        assert_eq!(owner.effects().reads, 0);
+        assert_eq!(owner.effects().inputs, 0);
+    }
+
+    #[test]
+    fn input_handoff_rejects_a_live_recipient_pinned_to_another_target() {
+        let mut owner = state();
+        let caller = connect(&mut owner);
+        let target_b = another_target(3);
+        let recipient = owner
+            .global
+            .connect(
+                &target_state(target_b),
+                &hello(CAPABILITY_READ, CAPABILITY_INPUT),
+                1,
+            )
+            .unwrap()
+            .0;
+        let revision = claim(&mut owner, &caller, 1);
+        let key = operation_key(caller.lease(), 2);
+        let request = session_payload(SessionRequest::Handoff {
+            key,
+            target: target(),
+            expected_owner_revision: revision,
+            recipient_lease: recipient.lease(),
+            ttl_seconds: 30,
+        });
+        let before = owner.owner_snapshot();
+        let SessionReply::Payload(reply) = owner.handle_session(&caller, &request, 3).unwrap()
+        else {
+            panic!("handoff must return an operation payload");
+        };
+        assert_eq!(rejection(&reply), RejectionCode::Unauthorized);
+        assert_eq!(owner.owner_snapshot(), before);
+        assert_eq!(
+            owner.global.ledger.status(key, 3).unwrap(),
+            OperationStatus::NotAdmitted
+        );
+    }
+
+    #[test]
     fn describe_reports_only_client_or_vacant_owner_and_never_casts_human() {
         let mut owner = state();
         let connection = connect(&mut owner);
-        owner.effects.child_exited = true;
+        owner.session.effects.child_exited = true;
         let reply = owner
             .handle_session(&connection, &session_payload(SessionRequest::Describe), 2)
             .unwrap();
@@ -2191,10 +2910,12 @@ mod tests {
         assert!(info.child_exited);
 
         owner
+            .session
             .input_owner
             .claim(Owner::Client(connection.lease()), 1, 20, 2)
             .unwrap();
         owner
+            .session
             .input_owner
             .handoff(
                 Owner::Client(connection.lease()),
@@ -2218,11 +2939,13 @@ mod tests {
             .unwrap()
             .0;
         owner
+            .session
             .input_owner
             .claim(Owner::Client(connection.lease()), 1, 1, 1)
             .unwrap();
         let pending_key = operation_key(connection.lease(), 100);
         owner
+            .session
             .input_owner
             .begin_input(
                 Owner::Client(connection.lease()),
@@ -2239,8 +2962,8 @@ mod tests {
         );
 
         owner.poll(LEASE_TTL_SECS + 1).unwrap();
-        assert!(owner.grants.is_empty());
-        assert_eq!(owner.ledger.usage().active_leases, 0);
+        assert!(owner.global.grants.is_empty());
+        assert_eq!(owner.global.ledger.usage().active_leases, 0);
         assert_eq!(owner.owner_snapshot().pending, Some(pending_key));
         assert!(matches!(
             owner.handle_session(
@@ -2360,7 +3083,7 @@ mod tests {
         for _ in 0..MAX_ACTIVE_LEASES {
             last = Some(owner.connect(&hello(CAPABILITY_READ, 0), 1).unwrap().0);
         }
-        assert_eq!(owner.grants.len(), MAX_ACTIVE_LEASES);
+        assert_eq!(owner.global.grants.len(), MAX_ACTIVE_LEASES);
         assert!(matches!(
             owner.connect(&hello(CAPABILITY_READ, 0), 1),
             Err(ServerError::Protocol(
@@ -2368,7 +3091,7 @@ mod tests {
             ))
         ));
         owner.poll(1 + LEASE_TTL_SECS).unwrap();
-        assert!(owner.grants.is_empty());
+        assert!(owner.global.grants.is_empty());
         let next = owner
             .connect(&hello(CAPABILITY_READ, 0), 1 + LEASE_TTL_SECS)
             .unwrap()
@@ -2679,7 +3402,7 @@ mod tests {
             owner.reconcile(&connection, target(), 1_024, 10, 2),
             Err(ServerError::SnapshotChanged)
         );
-        assert_eq!(owner.journal.current_cursor().sequence, 1);
+        assert_eq!(owner.session.journal.current_cursor().sequence, 1);
 
         owner.effects_mut().read_result = Ok(ReadResult {
             text: String::from("screen"),
@@ -2741,7 +3464,7 @@ mod tests {
         let mut owner = watch_state();
         let connection = connect_with_events(&mut owner);
         let owner_revision = claim(&mut owner, &connection, 1);
-        owner.journal.exhaust_sequence_for_test();
+        owner.session.journal.exhaust_sequence_for_test();
         owner.effects_mut().screen_revision = Some(2);
 
         let payload = control_payload(
@@ -2763,7 +3486,7 @@ mod tests {
             Some(Owner::Client(connection.lease()))
         );
         assert!(!owner.effects().child_exited());
-        assert!(!owner.notifications_available);
+        assert!(!owner.session.notifications_available);
     }
 
     #[test]
@@ -2774,9 +3497,13 @@ mod tests {
             connection.selected_capabilities(),
             CAPABILITY_READ | CAPABILITY_INPUT | CAPABILITY_EVENTS
         );
-        owner.input_owner.claim(Owner::Human(99), 1, 10, 1).unwrap();
+        owner
+            .session
+            .input_owner
+            .claim(Owner::Human(99), 1, 10, 1)
+            .unwrap();
         owner.poll(2).unwrap();
-        assert!(!owner.notifications_available);
-        assert_eq!(owner.journal.current_cursor().sequence, 0);
+        assert!(!owner.session.notifications_available);
+        assert_eq!(owner.session.journal.current_cursor().sequence, 0);
     }
 }

@@ -1,11 +1,11 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: 3 bounded live-watch/reconciliation integrated; managed-launch plan reviewed; Phase 2 host acceptance pending
+current-phase: 3 trusted multi-session library core integrated; runtime launch gated; Phase 2 host acceptance pending
 last-updated: 2026-10-18
-last-verified: 2026-10-18 — 303passed/13ignored; strict all-target Clippy and cargo fmt --check pass; atomic PTY opener spike passes on current macOS host; expanded CLI pathname fixture remains external; see INTEGRATION.md
-next-action: specify production macOS atomic PTY opener integration and owner-path spawn coordination, including remaining socket/pipe windows and supported native-spawn scope; concurrent API launch remains disabled; clipboard/zsh and pathname watch retests pending
-blocked-on: clipboard sentinel failed from empty-reply input injection, fixed with retest pending; full checklist unspecified; short redraw/Unicode/vi/resize/paste/Ctrl-C and Ctrl-X return-to-shell operator-confirmed; OpenCode absent at last check
+last-verified: 2026-10-18 — eight-check verifier passed: root Rust443passed/14ignored plus39decoder, Python31passed, component fingerprints match, strict all-target Clippy, fmt, build,137Markdown/0findings; strict rustdoc and 12 focused pane-layout tests passed
+next-action: P3A pure layout groundwork is implemented and parent-reviewed in P3A-LAYOUT.md. Continue with the right-click menu/input and split transaction contract. The separate requested MiMo menu-analysis task is in P3A-MIMO-MENU-TASK.md; OpenCode ACP startup is blocked here, and no model prompt was sent.
+blocked-on: clipboard sentinel retest and remaining host acceptance; actual pathname listener/accept gate returns EPERM here; OpenCode 2.0.32 private server/ACP bootstrap is blocked by loopback-bind EPERM, so project model availability and live identity remain unproved
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 ```
 
@@ -21,10 +21,17 @@ phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 | Work | Model | Effort |
 | --- | --- | --- |
 | Precise bounded implementation and targeted tests | gpt-6-luna | xhigh |
+| Small documentation, tooling and bounded maintenance tasks | gpt-6-luna | medium |
 | Architecture, ambiguity, security review, integration | Parent orchestrator | inherited |
 | Escalation after two failed attempts at same defect | Parent orchestrator | inherited |
 
 User authorized implementation and cheaper-model delegation on 2026-10-17. No token-cost telemetry is available; report model assignments, not invented savings.
+
+Continuous non-UI work authorization (2026-10-18): finish the five milestones
+in [NON-UI-EXECUTION.md](docs/progress/NON-UI-EXECUTION.md) with automated tests.
+Do not hand the user manual verification tasks or mark environment-blocked
+checks as passed. Continue independent implementation/testing while a specific
+acceptance gate is blocked; do not bypass that gate in enabled behavior.
 
 ## Architecture and constraints
 
@@ -36,10 +43,11 @@ Prototype assumptions, not confirmed product choices: local only, persistent ser
 
 Gotchas: Rust was initially absent, then became available during implementation; Rust/Cargo 1.99.1 now tested and recorded. Cargo registry access now works; restricted home-cache writes require a writable CARGO_HOME (review used /private/tmp/panelink-p2-cargo-home). Sources in /private/tmp are disposable; durable candidate lock/tree/inventory are in docs/progress/p2-review/. Alacritty/vte's selected std path has uncapped combining and OSC storage; small feed chunks do not bound retained state. See docs/progress/P2-SOURCE-GATE.md. Host input is a separate allocation boundary: incomplete paste buffering, UTF-8 conversion, filtered queues and bounded EOF/error return must all be reviewed before enabling a UI. Explicit core shutdown closes the PTY and forbids further IO; natural child exit still drains final output. HUP tests must handshake after trap installation before claiming KILL escalation. The requested ms-rust skill is absent; no guideline compliance stamp. Graph index project: Users-sahillamba-panelink; refresh after source changes. Status observations never authorize dispatch. Path::components normalizes trailing separators; reject slash bytes before basename resolution. Global lease/operation/payload limits and expiry reclamation are now implemented; a real server must schedule maintenance and preserve non-reusable tombstones.
 
-Graph freshness gotcha: application sources are currently untracked relative to
-the initial documentation commit. Git-diff-based detect_changes may report only
-tracked documents and miss application edits. Use a full index refresh plus
-direct source/tests; do not treat an empty source diff as a current graph proof.
+Graph freshness gotcha: before checkpoint b6ee66b, application sources were
+untracked relative to the initial documentation commit, so Git-diff-based
+detect_changes missed application edits. The checkpoint now tracks the sources.
+Refresh after changes and verify the indexed revision; use direct source/tests
+as authority and a full refresh when index freshness is uncertain.
 
 ## Phase 1 — offline foundation
 
@@ -118,9 +126,34 @@ User explicitly authorized parallel GPT-6-Luna xhigh implementation of the trans
 - [ ] Close descriptor/CLOEXEC/process-spawn source gate before enabling API launch; then specify exact launch/cursor/capability contracts and bounded registry implementation.
 - [x] Review initial descriptor/spawn source inventory in P3-SPAWN-DESCRIPTOR-GATE.md: macOS PTY and standard-library socket/pipe flag windows remain; no concurrent-launch approval.
 - [x] Review test-only atomic PTY opener spike and actual macOS evidence in P3-ATOMIC-PTY-SPIKE.md; this does not close socket/pipe/native-spawn gaps or adopt a production replacement.
-- [ ] Specify/review production opener integration, minimum-OS evidence and owner-path spawn coordination before changing launch effects.
+- [x] Integrate/review production atomic PTY opener and cooperative shared spawn gate for current experimental macOS/aarch64; see P3-ATOMIC-PTY-INTEGRATION.md and P3-SPAWN-GATE-RESULT.md. No release minimum-OS or arbitrary native-spawn guarantee.
+- [ ] Implement full-descriptor child probe and deterministic real accepted-socket/managed-exec race fixture; run on a host permitting pathname bind/accept before enabling API launch.
 - [ ] Complete event/watch/launch/layout contracts and implementation; event framing alone does not enable subscriptions, full snapshot queues or multi-session lifecycle.
 - [ ] Complete independent host lifetime/acceptance and remaining bounded runtime capabilities before marking Phase3 complete.
+
+## Phase 3A — right-click splits and new terminal sessions (next priority)
+
+User inserted this phase on2026-10-18 before the previously queued lifecycle/
+stop and history work. Implement a usable two-pane terminal slice, reusing
+the existing [four-way layout design](docs/PANE-LAYOUT.md) and current trusted
+multi-session core. This priority change does not complete Phase3 or waive its
+launch/runtime/host gates. Broader tabs/sidebar/workspace choices stay open.
+Detailed staged work and exit evidence:
+[P3A-RIGHT-CLICK-SPLITS.md](docs/progress/P3A-RIGHT-CLICK-SPLITS.md).
+
+- [x] P3A-L1: bounded two-pane geometry, read-only split preview, guarded commit, validated resize and hit testing; 12 focused tests. This is pure groundwork only; see [P3A-LAYOUT.md](docs/progress/P3A-LAYOUT.md).
+- [ ] Integrate exact clicked-target/layout-revision routing with the menu and split transaction for Split Left, Right, Up and Down.
+- [ ] Add an in-terminal right-click overlay with keyboard fallback, fit/capacity reasons and no menu-input leakage to the child.
+- [ ] Wire each action to one fresh independent terminal session (current shell default zsh), preserving the original process and session; use explicit captured client context and global deduplication.
+- [ ] Integrate two live panes, focus/input routing, layout-owned PTY resize and incremental rendering without ordinary full-screen reloads.
+- [ ] Automate geometry/menu/failure/duplicate tests and real two-child input/resize/isolation/cleanup checks; prove supported host mouse delivery or record the precise blocker.
+- [ ] Parent review, integrated verification and actual usable split acceptance before phase completion and its completion commit. A menu mock or library-only test does not complete this phase.
+
+The current two-session capacity remains authoritative: after one successful
+split, additional splits report capacity until an explicit capacity review
+adopts a larger bound. Launch/stop permission is not inferred from input or
+focus. If a prerequisite is blocked, advance pure layout/menu/tests without
+enabling an unsafe or nonfunctional split action.
 
 ## Phase 4 — early OpenCode identity gate (not started)
 
@@ -142,6 +175,21 @@ User explicitly authorized parallel GPT-6-Luna xhigh implementation of the trans
 ## Resume protocol
 
 Read this file, AGENTS.md, docs/progress/*.md, then git status. Probe rustc/cargo/provider availability without printing secrets. Check source files against phase ownership and claims. Run current phase verification if tools exist. Continue first incomplete task and update STATE, evidence and last-verified before stopping. Do not assume an active subagent survives a session. Never discard uncommitted changes. Source files plus written evidence are the handoff; chat is optional context.
+
+Immediate resume handoff (2026-10-18): read P3A-RIGHT-CLICK-SPLITS.md,
+P3A-LAYOUT-TASK.md, P3A-LAYOUT.md and P3A-MIMO-MENU-TASK.md. The Luna layout
+owner has released its files; src/pane_layout.rs is exported and parent-reviewed.
+Continue menu/input and transaction design, then implement bounded slices with
+Luna xhigh and parent-owned integration. The external MiMo task has not run:
+the installed OpenCode 2.0.32 CLI fails private ACP bootstrap because loopback
+bind returns EPERM. If the user runs the saved controller from normal Terminal,
+review its report before adopting any recommendations. Keep Phase3A incomplete
+until menu-to-two-live-child acceptance and all required checks pass.
+The user also authorized a checkpoint commit of the accumulated staged work,
+but this environment rejected writes to `.git/index` with `Operation not
+permitted`; the explicit commit request remains unfulfilled. Do not ask again
+for authorization. Commit once Git metadata is writable, after checking both
+staged and unstaged diffs.
 
 Latest operator-debug checkpoint: user ran nine ignored scenarios in Terminal (4 passed / 5 failed). Safe-Rustix experiments reproduce retained-slave ENOTTY and blocked exit when the probe owns the controlling session. The corrected harness keeps a supervisor alive across probe exit/assertions and drains the private PTY only during subsequent supervisor teardown. Two new lifecycle regressions pass; the direct application loop detects output stall in1,001ms with bounded cleanup. This supports the correction but does not certify the nine corrected operator scenarios; rerun serially outside the sandbox. See P2-OPERATOR-RUN.md, P2-HOST-DEBUG.md and P2-STALL-DEBUG.md. All ownership released; no production behavior/dependency changes, commits or pushes.
 

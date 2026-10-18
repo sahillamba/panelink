@@ -597,3 +597,371 @@ has a read-only Git metadata boundary and cannot elevate. Commit remains
 pending for an unrestricted Terminal; no push attempted. Intended message:
 "Checkpoint Panelink terminal runtime and agent control foundation".
 This is an explicit work-in-progress checkpoint, not Phase2/3 completion.
+
+Continuation after checkpoint: Git history now shows b6ee66b (Initial Commit)
+and the working tree was clean on entry; this supersedes the earlier pending
+commit note. User reaffirmed ongoing Luna delegation with medium/xhigh effort
+chosen by task. Two xhigh owners are active: production_atomic_pty owns only
+src/terminal/mod.rs, src/terminal/pty.rs and P3-ATOMIC-PTY-INTEGRATION.md;
+spawn_coordination_contract owns only P3-SPAWN-COORDINATION.md. Parent owns
+canonical/shared docs and final verification. Production adoption is scoped
+to current experimental macOS/aarch64 with fail-closed syscall errors; no
+minimum-OS release claim or concurrent-launch authorization follows. Inspect
+ownership status before resuming after interruption.
+
+Parallel UI research assignment: user requested one additional Luna agent to
+study Herdr UI before supplying desired behavior. Luna medium herdr_ui_study
+owns only docs/HERDR-UI-STUDY.md, using official current docs/screenshots and
+labeling documented vs visually observed behavior. No Herdr code/assets are
+copied or installed. This is reference research, not approved Panelink UI
+requirements or new phase priorities; await user preferences before spec and
+phase-list changes. The two runtime/coordination tasks continue unchanged.
+
+Herdr UI study handoff: Luna medium released docs/HERDR-UI-STUDY.md with
+official documentation references and explicit documented/inference/unknown
+labels. Browser attempts failed (iab unavailable; Chrome visibility capability
+unavailable), so no screenshot-based layout claim is made. Parent reviewed
+the study and linked it from research. Await the user's desired UI before
+updating the specification or phase list; no application tests apply.
+
+Coordination contract review: parent adopted the cooperative gate scopes in
+P3-SPAWN-COORDINATION.md for current experimental binary paths. The same Luna
+xhigh owner now owns src/spawn_gate.rs, src/transport.rs and
+P3-SPAWN-GATE-RESULT.md; parent added only the private macOS/aarch64 lib.rs
+module declaration. Terminal gate adoption follows release by the atomic PTY
+owner. No launch API/cursor/capability is enabled by this implementation wave.
+
+## Production atomic PTY and cooperative spawn gate integrated — 2026-10-18
+
+Both xhigh owners released their sources and evidence. Parent reviewed the
+full helper/spawn/transport diffs and replaced macOS/aarch64's private
+SPAWN_LOCK with the shared gate, dropping it immediately after command.spawn
+returns. Other Unix targets retain their prior opener and lock. The atomic
+helper uses existing libc/rustix APIs, fixed128byte slave-name retrieval,
+OwnedFd cleanup and no non-atomic fallback. The gate serializes cooperative
+bind/socket/accept creation and child spawning; waits, authentication, normal
+IO and cleanup remain outside it. No Cargo or dependency change was made,
+no API launch enabled, no release OS floor chosen.
+
+Production-path tests cover CLOEXEC flags, initial dimensions and canonical/
+echo defaults, stdio mapping, child session/foreground-group ownership of
+the controlling PTY, and two concurrent children's independent identity,
+input/output and cleanup. Parent caught a shell-test command-substitution FD
+mistake and the sandbox's /dev/tty restriction; the final proof uses inherited
+descriptors and a self-exec helper. Readiness requires complete numeric marker
+terminators. Gate tests cover exclusion, deadline/no-effect and isolated
+poison; transport tests cover callback lock ownership/error release and
+synthetic accept/auth paths. These are not a complete child descriptor scan
+or an actual pathname accept/exec race proof.
+
+Final parent locked/offline suite:315passed/13ignored (256library,36binary,
+4host preflight,11PTY,1atomic spike,3logical detach,1notification,
+1pathname regression,2socketpair/private-PTY). Strict all-target Clippy,
+cargo fmt --check, build, documentation checker (95Markdown/0findings) and
+git diff --check all passed. The launcher binary was rebuilt. The13ignored
+cases remain9host,3external pathname and1internal context-lock helper;
+no new host acceptance or pathname pass is inferred.
+
+Next: implement the full-descriptor child probe and real accepted-socket/
+managed-exec race fixture, then run where pathname bind is permitted. API
+launch remains gated; managed-launch schemas and the proposed session cursor
+are unadopted. Herdr UI reference is ready; await user preferences before UI
+requirements/phase-list changes. All ownership is released. Phase2/3 remain
+incomplete, so no completion commit or push.
+
+## Continuous five-milestone execution — 2026-10-18
+
+User requested continued Luna work through all five non-UI milestones with
+automated tests and no manual verification handoffs. NON-UI-EXECUTION.md
+records the queue. Initial xhigh owners delivered a reusable actual Darwin
+descriptor inventory and a real pathname accept/managed-exec race fixture.
+Parent reviewed both. Probe tests pass4/4: clean child contains only its
+three shared PTY stdio handles; positive control finds an inheritable handle
+at fd64 or above after the child alone lowers its soft limit to16; negative
+control rejects the known leak. The bounded proc_pidinfo inventory avoids
+assuming RLIMIT_NOFILE covers already-open higher descriptor numbers.
+
+The real accept fixture compiled; its single actual attempt failed at bind
+with EPERM before threads or child exec started. It remains an ignored,
+runnable automated check, not a pass or a manual-verification request. This
+adds one ignored pathname test. The fixture uses the real gate helper and
+actual listener accept syscall; public PrivateListener::accept has no barrier
+seam and is covered separately. The shared helper's markers now start on a
+fresh line to avoid libtest-prefix wrapping in the narrower race PTY.
+
+Parent's first broader run passed257library/4ignored, then stopped on the
+existing stalled-output child-reaping assertion in the binary tests. A focused
+rerun passed, and a subsequent complete binary target passed36/36. No root
+cause is established; no cleanup guarantee/assertion was weakened. Parent
+added the cached child-cleanup result to failure diagnostics for any recurrence.
+Strict Clippy, formatting, docs and diff checks passed after probe corrections;
+the integrated full-suite checkpoint will follow the next codec integration.
+
+The owners were reassigned: one xhigh Luna implements only the pure schema6
+launch/status/result codec under P3-MANAGED-LAUNCH-CODEC-TASK.md; parent added
+its library export. The other xhigh Luna researches pinned OpenCode TUI
+selection evidence and creates a bounded read-only CLI preflight with tests.
+OpenCode is absent on PATH. Parent's bounded artifact acquisition attempt
+failed with curl exit6 (github.com DNS resolution); nothing was downloaded or
+executed. Runtime launch and provider verification remain unclaimed while
+independent work continues. No manual handoff, dependency, commit or push.
+
+## Five-milestone component checkpoint — 2026-10-18
+
+Parent reviewed the released Luna slices and integrated schema6 launch
+validation, a fixed two-identity registry, a trusted launch transaction core,
+schema5 session-scoped watch validation, provider-binding state/record codecs,
+and a bounded read-only screen checkpoint codec. Runtime/CLI launch and
+multi-session dispatch remain disabled. Parent added journal preflight for all
+168 bytes of Intent/Spawned/Applied, non-reused per-generation journal session
+IDs, and an allocation-free ledger capacity preflight that never authorizes
+execution. Existing one-child startup now checks full journal headroom before
+admission/Intent/spawn. No dependency or manifest changed.
+
+Parent review corrected schema6 Accepted/Unknown target presence, tightened
+bridge revision continuity and provider-version tokens, constrained registry
+mutable access to EffectSink, and added the launch coordinator's storage-health
+latch across borrowed journal reopens. Real-child tests require complete PID
+sentinels and signal0/ESRCH cleanup observations. Both Spawned and Applied journal
+faults retain a child that accepts a fresh post-fault token through the same PTY
+and acknowledges with the same PID; no duplicate launch callbacks execute.
+
+The parent full locked/offline suite passed **400 tests, 14 ignored**:
+332 library,36 binary,4 host preflight,11 PTY,1 atomic spike,3 logical detach,
+4 complete-FD probe,2 managed launch,1 notifications,1 pathname regression,
+2 socketpair/private-PTY,2 screen checkpoint and1 ten-child workload. The ignored
+set is four library helpers/fixtures (including actual accept/exec), nine host
+cases and one external pathname case. Ignored results are not passes. The prior
+stalled-output cleanup assertion did not recur in this full run; its root cause
+remains unestablished and the stronger diagnostics/assertion remain intact.
+
+Parent independently reran the provider preflight tests (9/9), provider record
+codec (7/7), binding core (9/9), scoped watch (9/9), registry (12/12), journal
+(11/11), startup (4/4), and the synthetic ten-child fixture. Its measured sample
+was44ms,16,840PTYbytes,5rounds/50pumpcalls, test-process peak RSS2,244,608 to
+7,159,808bytes. This is one synthetic shell sample, not ten OpenCode agents,
+aggregate child RSS, a performance threshold or a ten-session server capability.
+Checkpoint/private-PTY tests preserve styled Unicode normal/alternate cells
+and deny raw OSC/query/input replay; no persistence/recovery behavior is inferred.
+
+The checkpoint owner hit the Luna usage limit after implementation/checks and
+while applying final review. Parent verified the interrupted files, retained
+atomic0700 fixture creation and cell-text control checks, and added a regression
+allowing numeric metadata/color byte27 without treating it as terminal ESC.
+Final formatting/lint/build and documentation checkpoint follows. A medium Luna
+verification-runner task was assigned; inspect status before trusting delivery.
+The next global-owner refactor plan owner failed at the same model limit before
+delivery. No commit/push, manual test handoff or five-milestone completion claim.
+
+Continuation after the user's resume: a fresh Luna medium worker successfully
+completed the verification runner despite the earlier xhigh-owner limit.
+Parent reviewed bounded cleanup, interruption propagation and CLI handling,
+added a relative-CARGO_HOME regression (10 focused tooling tests now pass),
+and reassigned that medium owner to the exact private TargetState data split
+in P3-OWNER-STATE-SPLIT-TASK.md. It owns only src/server.rs and its result note.
+This groups per-target state while keeping one global ledger/grants table and
+all existing behavior/signatures; multi-session routing remains future work.
+Checkpoint final review reran8codec/2private-PTY tests and strict Clippy
+successfully after numeric-byte27 and fixture control-stream corrections.
+
+The parent reviewed the complete TargetState diff: all effect/admission/ownership
+branches and public signatures are preserved; changes are private field grouping
+and existing fixture paths. The integrated verifier then passed all six checks:
+full Rust suite400passed/14ignored, package fmt, strict all-target Clippy, build,
+Python19passed and115Markdown/0findings. Build refreshed the launcher binary.
+The fixed verifier JSON marks component verification only and host/provider
+certification unavailable; it does not convert ignored cases to acceptance.
+Its full output is transient at /private/tmp/panelink-non-ui-verification.log;
+this durable note preserves the actual result. Next: review the separately
+assigned multi-session borrowed-owner contract before source adoption.
+
+## Borrowed authority, pinned leases and launch preparation — 2026-10-18
+
+The private borrowed handler now shares one GlobalAuthority with the unchanged
+single-target facade. Parent review compared the moved branches and confirmed
+global duplicate lookup still precedes target and ownership preconditions.
+Reusable grants pin the full target at issuance, cannot broaden on resume,
+and cannot hand off input to a grant on another target. Parent corrected scope
+guards to propagate non-authorization errors rather than silently continuing,
+and extended denied-Submit checks with valid ownership but mismatched scope;
+all32owner tests passed after these corrections.
+
+The explicit launch adapter captures raw client argv/environment bytes, uses
+the existing resolver and owned terminal values, and consumes its preparation
+once to spawn. Parent reviewed its source and added zero-field target and
+terminfo-boundary assertions. Its8unit tests and2real managed-launch tests pass.
+A non-UTF-8 filesystem fixture creation was blocked by EPERM; passing raw-byte
+argument/environment and missing-path tests do not certify that filesystem case.
+
+The completed integrated verifier log independently aggregates to **411 Rust
+passed,14ignored**, Python19, package formatting, strict all-target Clippy,
+build and121Markdown/0findings. That run preceded the parent's final scope
+guard correction; the32owner rerun covers that correction and another integrated
+run follows the global-preflight slice. An earlier run during launch-adapter
+editing caught formatting and unused-import/helper-argument lint failures;
+the owner corrected them before the passing run. No ignored result is acceptance.
+
+Next assignments use Luna medium: immutable global request preflight and reply
+encoding before target selection (server.rs only), plus a separate exact
+trusted multi-owner assembly proposal (one new task note). Existing endpoint,
+provider and history gates remain unresolved. No phase completion or commit.
+
+The global-before-routing preflight slice is now delivered and parent-reviewed.
+It performs only live-context/capability/key checks and the existing global
+exact-byte lookup. Continue does not reserve a key or authorize dispatch; target,
+scope, owner and actual admission checks remain in the borrowed handler. Pure
+reply encoding no longer needs a selected target. The parent independently
+reran all33owner tests successfully. No runtime/schema/authority was expanded.
+
+The verifier now runs the parser-only vendored decoder's separate locked/offline
+suite automatically after root Cargo tests. Parent reviewed its exact command
+list and injected-runner failure tests. All seven checks then passed: root
+Rust412passed/14ignored, separate decoder39passed, Python20passed, fmt, strict
+all-target Clippy, build and124Markdown/0findings. The combined executed Rust
+count is451; it includes the separate decoder suite. No vendor source/lock or
+dependency changed. A direct root `cargo test -p vt100 --lib` attempt was
+rejected because the non-workspace package requires dev-dependencies; it is
+not included as a passing standalone vendor suite.
+
+The next Luna medium assignment is the amended trusted multi-owner assembly
+contract. Parent adopted a public experimental library core to avoid unused
+private production code/dead-code suppressions, with private target/ledger
+fields and consumed crate-private borrow seams. Its startup ledger remains
+caller-provided; launch authorization/storage-lock responsibility stays with
+the trusted caller. Preparation failure does not spend a session identity;
+Intent/spawn failure after reservation does. No runtime/CLI/socket route,
+generic session mutation routing, watch or stop policy is included.
+
+## Trusted multi-session core integration — 2026-10-18
+
+Parent reviewed the new two-session library owner, pre-spawn target seed,
+exact concrete borrow seams, and one-pass global expiry/per-target polling.
+The existing constructor/order remain intact; the old one-target runtime still
+uses its original capability set. The new core withholds Events while scoped
+read methods are deferred. Parent requested additional router tests proving
+cached results/conflicts precede lookup with an empty fake registry and fresh
+reads/polling remain available after both post-spawn journal failure points;
+all7new owner tests pass.
+
+The separate Luna-owned default real-PTY assembly test passed. It uses actual
+launch preparation/spawn and encoded Read calls, keeps the storage lock alive,
+checks distinct READY/PID-END sentinels and fresh post-readiness isolation,
+denies cross-target reads without admission, rejects the third target with
+exact Capacity classification, and checks both PIDs reaped after owner drop.
+This is in-process core evidence, not pathname/runtime adoption.
+
+Parent then ran all seven verifier checks successfully: **root Rust420passed,
+14ignored; separate decoder39passed; Python20passed; fmt, strict all-target
+Clippy, build and128Markdown/0findings**. Combined executed Rust count459.
+The next bounded Luna medium task routes the seven existing session requests,
+including public Claim before Input on both targets. No schema, endpoint,
+dependency or stop authority is introduced. Scoped-read contract review follows.
+
+The seven-variant session router is released and reviewed. Parent independently
+passed12new-owner unit tests and both real-PTY tests; a final positive same-target
+Handoff regression brings the owner's focused count to13 (worker executed).
+It proves the recipient can submit, the former owner is denied without admission
+using a current owner revision, and the sibling session remains unaffected.
+The real-child case uses public Describe/Claim/Submit, exact same-key retries,
+and subsequent count2/PID ACK barriers to detect replay. Both children are
+reaped after owner drop while storage remains locked. Scoped read implementation
+and its real-PTY assertions are now separately assigned; no runtime endpoint.
+
+The scoped-read contract uses the actual128-byte schema-5 prefix, which embeds
+the session ID in schema-4 reserved bytes. An initial parent premise that it
+added eight bytes was corrected by source inspection before implementation;
+no136-byte header or reduced payload budget is adopted. A separate Luna medium
+tooling task automates the existing two component fingerprint manifests without
+changing them or treating source equality as a security audit.
+
+## Scoped multi-session core and final verifier — 2026-10-18
+
+The scoped read owner released17focused unit tests and the parent reviewed
+the complete target/capability/cursor order, shared preflighted-body extraction,
+unchanged128-byte prefix and final schema-5 encoding bound. Old StateOwner
+wrappers preserve their authorization/error order. New leases may negotiate
+Events with healthy metadata now that both scoped read methods exist; old
+grants cannot widen on resume. Real-PTY assertions exercise both snapshots and
+event pages, reject crossed session cursors and cross-target reconciliation,
+and preserve both read-only and public input/no-replay scenarios.
+
+Parent review of the new source verifier caught blocking FIFO opens before
+fstat and a metadata-only aggregate byte cap vulnerable to file growth. The
+Luna owner corrected both and added bounded FIFO subprocess regressions plus
+growth-after-preflight accounting. Parent independently passed22focused Python
+tests and both live fingerprint sets. This verifies equality with checked-in
+records; it is not upstream authenticity or a security audit. No vendor source,
+manifest, dependency, socket runtime or CLI behavior changed.
+
+Final parent `python3 scripts/verify_non_ui.py` returned0 with all eight checks
+passed: **root Rust431passed/14ignored, separate decoder39passed, Python31passed,
+both component fingerprint sets match, package fmt, strict all-target Clippy,
+build and133Markdown/0findings**. Combined executed Rust count470. Separate
+warnings-denied rustdoc passed. All worker files are released and the launcher
+binary is rebuilt. No phase is marked complete and no commit/push was attempted.
+
+The five-milestone objective is still incomplete. Pathname accept/exec proof
+remains bind-EPERM blocked; multi-session runtime migration, lifecycle authority
+and explicit stop, live OpenCode identity/switch proof, bounded durable history
+and binding stores/recovery, and representative ten-provider workload remain.
+The next independent slices are lifecycle/stop contract review and adopting
+the reviewed history-extraction hooks with complete memory/provenance updates.
+No manual verification handoff, ignored-result acceptance or permission bypass.
+
+## 2026-10-18 layout and commit handoff
+
+Luna xhigh delivered and released the pure fixed-two-pane layout module in
+`src/pane_layout.rs`; parent exported and reviewed it. Its 12 focused tests,
+strict Clippy, formatting, rustdoc and the full eight-check non-UI verifier
+passed. The verifier reported 443 root Rust tests passed/14 ignored, 39
+separate decoder tests, 31 Python tests and 137 Markdown checks with no
+findings. See `P3A-LAYOUT.md` for scope and exact test coverage.
+
+The full context-sensitive menu, event routing, transaction, live second PTY,
+incremental pane rendering and host mouse acceptance remain unfinished. The
+phase checklist marks only the pure geometry groundwork complete; Phase3A is
+still open. Continue from the immediate resume handoff in `ROADMAP.md` and the
+bounded tasks in `P3A-RIGHT-CLICK-SPLITS.md` and `P3A-LAYOUT-TASK.md`.
+
+The user explicitly requested a checkpoint commit of the accumulated staged
+work. This records a checkpoint only; it does not mark Phase3, Phase3A, or any
+other unfinished phase complete. OpenCode 2.0.32 is installed, but its private
+ACP server cannot start under this execution environment: loopback bind returns
+EPERM. No MiMo prompt was sent. A requested checkpoint commit was attempted,
+but Git could not write `.git/index` (`Operation not permitted`); the request
+remains authorized and pending, with some final handoff-note edits unstaged.
+The next model should inspect both staged and unstaged changes, verify them,
+then commit when Git metadata is writable without asking the user again. The
+exact read-only menu-analysis task and
+normal-Terminal controller command are in `P3A-MIMO-MENU-TASK.md`; inspect its
+report before incorporating any external findings.
+
+## Priority insertion: right-click splits — 2026-10-18
+
+User requested a new phase before the next planned work: right-click split
+options that open a fresh terminal session on the other side. Phase3A now
+precedes the lifecycle/stop and history queue. It reuses the reviewed four-way
+PANE-LAYOUT design and current two-session core; it does not start a competing
+layout model or settle tabs/sidebar/workspace choices. Each action preserves
+the original process and starts exactly one new independent terminal on the
+chosen side. Tests must cover the complete menu-to-child interaction, keyboard
+fallback, target identity, deduplication, resize, isolation and cleanup.
+
+This turn changes planning/requirements only; no menu, mouse handling, pane
+renderer or runtime launch is claimed implemented. Current capacity and
+pathname/host gates remain authoritative. A Luna medium owner drafts only
+P3A-RIGHT-CLICK-SPLITS.md; parent owns canonical priority integration and review.
+
+The owner released the plan and parent reviewed it against PANE-LAYOUT,
+clarifying exact-byte deduplication, volatile-ledger limits, and Partial/Unknown
+outcomes after layout commit. The phase scope/acceptance plan is adopted;
+individual source tasks, wire/transaction interfaces and presentation defaults
+still need scoped adoption. Full Markdown check:134files,0findings; whitespace
+check passed. No Rust/application behavior changed or phase marked complete.
+
+User authorized starting Luna implementation. A fresh gpt-6-luna xhigh owner
+`split_layout` owns only src/pane_layout.rs and P3A-LAYOUT.md under the exact
+P3A-LAYOUT-TASK.md contract. Parent owns module export, API review and integrated
+checks. Scope is pure fixed-two-pane geometry, nonmutating preview/guarded
+commit, atomic validated resize, hit testing and boundary tests; no menu/runtime
+or PTY launch yet. Inspect live ownership/results before assuming delivery.

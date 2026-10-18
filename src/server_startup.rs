@@ -69,6 +69,8 @@ impl StartedServer {
             lease,
             sequence: 1,
         };
+        let mut journal = storage.journal()?;
+        journal.preflight_launch(key, 1)?;
         if ledger
             .admit(key, &payload, 0)
             .map_err(|_| failed("startup_admission_failed"))?
@@ -82,7 +84,6 @@ impl StartedServer {
             session: 1,
             state: LaunchState::Intent,
         };
-        let mut journal = storage.journal()?;
         journal.record(record)?;
         let size = TerminalSize::new(24, 80).map_err(|_| failed("startup_size_failed"))?;
         let session = match TerminalSession::spawn(launch, arguments, environment, size) {
@@ -359,35 +360,50 @@ mod tests {
     }
 
     #[test]
-    fn full_valid_journal_prevents_first_spawn() {
-        let fixture = Fixture::new();
-        drop(ServerStorage::initialize_for_test(&fixture.0).unwrap());
-        // Repeated identical metadata records are valid but cannot grow beyond
-        // the bounded append budget. New startup belongs to generation 2.
-        let mut record = [0; 56];
-        record[..8].copy_from_slice(b"PLJNL001");
-        for offset in [8, 16, 24, 32] {
-            record[offset..offset + 8].copy_from_slice(&1_u64.to_be_bytes());
+    fn insufficient_full_transaction_headroom_prevents_first_intent_and_spawn() {
+        // Zero, one or two remaining records are all insufficient, even though
+        // one record would permit the initial Intent alone.
+        for remaining_records in 0..3 {
+            let fixture = Fixture::new();
+            drop(ServerStorage::initialize_for_test(&fixture.0).unwrap());
+            // Repeated identical metadata records are valid on load. New
+            // startup belongs to generation 2, with a distinct operation key.
+            let mut record = [0; 56];
+            record[..8].copy_from_slice(b"PLJNL001");
+            for offset in [8, 16, 24, 32] {
+                record[offset..offset + 8].copy_from_slice(&1_u64.to_be_bytes());
+            }
+            record[40] = 1;
+            record[48..56].copy_from_slice(&(!1_u64).to_be_bytes());
+            let records =
+                crate::server_storage::MAX_JOURNAL_BYTES as usize / 56 - remaining_records;
+            let bytes = record.repeat(records);
+            let original_len = bytes.len() as u64;
+            let path = fixture.0.join("launch.journal");
+            fs::write(&path, bytes).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let mut env = environment();
+            let marker = fixture.0.join("spawned");
+            env.insert("SPAWN_MARKER".into(), marker.as_os_str().to_owned());
+            let storage = ServerStorage::open(&fixture.0).unwrap();
+            let result = StartedServer::start(
+                storage,
+                &fixture.launch(),
+                &["-c".into(), "printf spawned > \"$SPAWN_MARKER\"".into()],
+                &env,
+                true,
+            );
+            assert!(result.is_err());
+            assert!(
+                !marker.exists(),
+                "no spawn before full transaction capacity"
+            );
+            assert_eq!(
+                fs::metadata(&path).unwrap().len(),
+                original_len,
+                "preflight must reject before even the first Intent append"
+            );
         }
-        record[40] = 1;
-        record[48..56].copy_from_slice(&(!1_u64).to_be_bytes());
-        let bytes = record.repeat(crate::server_storage::MAX_JOURNAL_BYTES as usize / 56);
-        let path = fixture.0.join("launch.journal");
-        fs::write(&path, bytes).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        let mut env = environment();
-        let marker = fixture.0.join("spawned");
-        env.insert("SPAWN_MARKER".into(), marker.as_os_str().to_owned());
-        let storage = ServerStorage::open(&fixture.0).unwrap();
-        let result = StartedServer::start(
-            storage,
-            &fixture.launch(),
-            &["-c".into(), "printf spawned > \"$SPAWN_MARKER\"".into()],
-            &env,
-            true,
-        );
-        assert!(result.is_err());
-        assert!(!marker.exists(), "no spawn before successful intent append");
     }
 
     #[test]

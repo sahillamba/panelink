@@ -24,6 +24,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::MutexGuard;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,10 @@ const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
+
+#[cfg(test)]
+#[path = "../tests/support/fd_probe.rs"]
+mod fd_probe;
 
 /// Prepare a protected directory before generation initialization or binding.
 /// Ancestors are validated before creation; chmod acts on the pinned descriptor.
@@ -117,15 +122,19 @@ impl AuthenticatedStream {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "control socket is absent"))?;
         verify_socket_permissions(&directory_fd, socket_identity)?;
         let address = SocketAddrUnix::new(directory.join(SOCKET_BASENAME))?;
-        let fd = net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
-        // macOS does not expose SOCK_NONBLOCK/SOCK_CLOEXEC flags. Set both
-        // before connect or exposing the descriptor; startup forks must be
-        // serialized before client worker creation in this prototype.
+        // macOS does not expose SOCK_CLOEXEC at socket creation. Serialize
+        // creation through the first CLOEXEC flag set so a concurrent
+        // Panelink-managed exec cannot inherit the unmarked descriptor.
+        let fd = with_spawn_gate_until(deadline, || {
+            let fd = net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
+            rustix::io::fcntl_setfd(
+                &fd,
+                rustix::io::fcntl_getfd(&fd)? | rustix::io::FdFlags::CLOEXEC,
+            )?;
+            Ok(fd)
+        })?;
+        check_deadline(deadline)?;
         rustix::fs::fcntl_setfl(&fd, rustix::fs::fcntl_getfl(&fd)? | OFlags::NONBLOCK)?;
-        rustix::io::fcntl_setfd(
-            &fd,
-            rustix::io::fcntl_getfd(&fd)? | rustix::io::FdFlags::CLOEXEC,
-        )?;
         sockopt::set_socket_nosigpipe(&fd, true)?;
         check_deadline(deadline)?;
         match net::connect(&fd, &address) {
@@ -286,7 +295,7 @@ impl PrivateListener {
         }
 
         let socket_path = directory.join(SOCKET_BASENAME);
-        let listener = UnixListener::bind(&socket_path)?;
+        let listener = with_spawn_gate(|| UnixListener::bind(&socket_path))?;
 
         // Capture the inode immediately after bind. If the pathname moved or
         // was replaced, cleanup fails closed and preserves the new path.
@@ -327,8 +336,12 @@ impl PrivateListener {
     pub fn accept(&self, deadline: Instant) -> io::Result<AuthenticatedStream> {
         loop {
             check_deadline(deadline)?;
-            match self.listener.accept() {
-                Ok((stream, _address)) => {
+            // One nonblocking accept syscall is protected. In particular, the
+            // guard is gone before peer authentication and WouldBlock sleep.
+            match with_spawn_gate_until(deadline, || {
+                self.listener.accept().map(|(stream, _address)| stream)
+            }) {
+                Ok(stream) => {
                     check_deadline(deadline)?;
                     return AuthenticatedStream::new(stream);
                 }
@@ -340,6 +353,27 @@ impl PrivateListener {
             }
         }
     }
+}
+
+fn with_spawn_gate<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    let _guard = crate::spawn_gate::acquire()?;
+    operation()
+}
+
+fn with_spawn_gate_until<T>(
+    deadline: Instant,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    with_gate_acquisition(deadline, crate::spawn_gate::acquire_until, operation)
+}
+
+fn with_gate_acquisition<T>(
+    deadline: Instant,
+    acquire: impl FnOnce(Instant) -> io::Result<MutexGuard<'static, ()>>,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let _guard = acquire(deadline)?;
+    operation()
 }
 
 fn validate_path(path: &Path) -> io::Result<PathBuf> {
@@ -694,10 +728,16 @@ fn poisoned_error() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launch::{Environment, ResolvedLaunch};
+    use crate::terminal::{TerminalSession, TerminalSize};
+    use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
     use std::time::SystemTime;
+
+    static TRANSPORT_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn deadline_after(duration: Duration) -> Instant {
         Instant::now() + duration
@@ -708,6 +748,313 @@ mod tests {
         let mut bytes = Vec::new();
         encode_frame(&frame, &mut bytes).expect("encode frame");
         bytes
+    }
+
+    fn assert_test_gate_is_held() {
+        assert!(
+            crate::spawn_gate::test_try_acquire()
+                .expect("isolated test gate remains healthy")
+                .is_none(),
+            "protected callback ran without the spawn gate"
+        );
+    }
+
+    #[test]
+    fn guarded_creation_callback_holds_gate_and_releases_it_on_error() {
+        let _serial = TRANSPORT_GATE_TEST_LOCK
+            .lock()
+            .expect("serialize gate tests");
+        let deadline = deadline_after(Duration::from_secs(1));
+        let result = with_gate_acquisition(deadline, crate::spawn_gate::test_acquire_until, || {
+            assert_test_gate_is_held();
+            Err::<(), _>(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "test creation failure",
+            ))
+        });
+        assert_eq!(
+            result.expect_err("operation error propagates").kind(),
+            io::ErrorKind::ConnectionRefused
+        );
+        let released = crate::spawn_gate::test_acquire_until(deadline)
+            .expect("creation error releases the guard");
+        drop(released);
+    }
+
+    #[test]
+    fn expired_gate_deadline_skips_transport_creation_callback() {
+        let _serial = TRANSPORT_GATE_TEST_LOCK
+            .lock()
+            .expect("serialize gate tests");
+        let held = crate::spawn_gate::test_acquire_until(deadline_after(Duration::from_secs(1)))
+            .expect("hold isolated test gate");
+        let effect = std::sync::atomic::AtomicBool::new(false);
+        let result = with_gate_acquisition(
+            Instant::now(),
+            crate::spawn_gate::test_acquire_until,
+            || {
+                effect.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert_eq!(
+            result.expect_err("expired gate deadline").kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(!effect.load(std::sync::atomic::Ordering::SeqCst));
+        drop(held);
+    }
+
+    #[test]
+    fn accept_guard_drops_before_would_block_wait_and_peer_authentication() {
+        let _serial = TRANSPORT_GATE_TEST_LOCK
+            .lock()
+            .expect("serialize gate tests");
+        let deadline = deadline_after(Duration::from_millis(100));
+        let would_block =
+            with_gate_acquisition(deadline, crate::spawn_gate::test_acquire_until, || {
+                assert_test_gate_is_held();
+                Err::<UnixStream, _>(io::ErrorKind::WouldBlock.into())
+            })
+            .expect_err("synthetic accept has no queued peer");
+        assert_eq!(would_block.kind(), io::ErrorKind::WouldBlock);
+
+        let released = crate::spawn_gate::test_acquire_until(deadline)
+            .expect("WouldBlock returns after the guard is dropped");
+        drop(released);
+        wait_for_readiness(deadline).expect("readiness wait runs outside the gate");
+
+        let (accepted, mut peer) = UnixStream::pair().expect("same-user socket pair");
+        let accepted =
+            with_gate_acquisition(deadline, crate::spawn_gate::test_acquire_until, || {
+                assert_test_gate_is_held();
+                Ok(accepted)
+            })
+            .expect("synthetic accept succeeds");
+        let released = crate::spawn_gate::test_acquire_until(deadline)
+            .expect("accept returns after the guard is dropped");
+        drop(released);
+
+        let mut authenticated = AuthenticatedStream::new(accepted)
+            .expect("peer authentication occurs after accept guard release");
+        peer.write_all(&encoded(MessageKind::Request, 71, b"accept-auth"))
+            .expect("queue authenticated test frame");
+        let frame = authenticated
+            .read_frame(deadline)
+            .expect("read frame after post-accept authentication");
+        assert_eq!(frame.payload(), b"accept-auth");
+    }
+
+    #[test]
+    fn descriptor_probe_child_helper() {
+        let _ = fd_probe::run_if_requested();
+    }
+
+    struct TestTree(PathBuf);
+
+    impl Drop for TestTree {
+        fn drop(&mut self) {
+            remove_test_tree(&self.0);
+        }
+    }
+
+    struct AcceptBarrierRelease(Option<mpsc::Sender<()>>);
+
+    impl AcceptBarrierRelease {
+        fn release(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    impl Drop for AcceptBarrierRelease {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    fn run_descriptor_probe(
+        session: &mut TerminalSession,
+    ) -> Result<(Option<i32>, String), String> {
+        let deadline = deadline_after(Duration::from_secs(5));
+        loop {
+            let outcome = session
+                .pump()
+                .map_err(|error| format!("descriptor probe pump failed: {error:?}"))?;
+            if outcome.pty_eof && outcome.child_exited {
+                let code = session.exit_status().and_then(|status| status.code());
+                let snapshot = session.snapshot();
+                let mut text = String::new();
+                for row in 0..snapshot.rows() {
+                    for column in 0..snapshot.columns() {
+                        if let Some(cell) = snapshot.cell(row, column) {
+                            text.push_str(cell.text());
+                        }
+                    }
+                    text.push('\n');
+                }
+                return Ok((code, text));
+            }
+            if Instant::now() >= deadline {
+                let _ = session.shutdown();
+                return Err("descriptor probe child exceeded its five-second deadline".into());
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    #[ignore = "pathname socket bind is denied with EPERM here; rerun the exact fixture where private pathname bind/accept is permitted"]
+    fn accepted_socket_exec_race_excludes_accepted_descriptor() {
+        const ACCEPT_BARRIER_WAIT: Duration = Duration::from_secs(3);
+        const ACCEPT_DEADLINE: Duration = Duration::from_secs(5);
+        const GATE_PROBE_WAIT: Duration = Duration::from_millis(100);
+        const SPAWN_BLOCK_WINDOW: Duration = Duration::from_millis(500);
+        const FIXTURE_WAIT: Duration = Duration::from_secs(6);
+
+        let tree = TestTree(private_test_directory());
+        let listener =
+            PrivateListener::bind(&tree.0).expect("bind actual private pathname listener");
+        let client =
+            UnixStream::connect(listener.socket_path()).expect("connect real pathname client");
+        let executable = std::env::current_exe().expect("resolve current library test executable");
+        let working_directory = tree
+            .0
+            .canonicalize()
+            .expect("canonicalize private fixture directory");
+        let launch = ResolvedLaunch {
+            requested_path: executable.clone(),
+            executable_path: executable,
+            working_directory,
+        };
+        let environment: Environment = [
+            (OsString::from("TERM"), OsString::from("panelink-probe")),
+            (OsString::from(fd_probe::PROBE_ENV), fd_probe::clean_value()),
+        ]
+        .into_iter()
+        .collect();
+        let arguments = [
+            OsString::from("--exact"),
+            OsString::from("transport::tests::descriptor_probe_child_helper"),
+            OsString::from("--nocapture"),
+            OsString::from("--test-threads=1"),
+        ];
+        let size = TerminalSize::new(5, 80).expect("bounded test PTY size");
+
+        std::thread::scope(|scope| {
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (accepted_tx, accepted_rx) = mpsc::channel();
+            let mut release = AcceptBarrierRelease(Some(release_tx));
+            let listener_for_accept = &listener;
+
+            scope.spawn(move || {
+                let result = with_spawn_gate_until(deadline_after(ACCEPT_DEADLINE), || {
+                    ready_tx.send(()).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "accept readiness receiver closed",
+                        )
+                    })?;
+                    release_rx.recv_timeout(ACCEPT_BARRIER_WAIT).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "test accept barrier release deadline expired",
+                        )
+                    })?;
+                    listener_for_accept
+                        .listener
+                        .accept()
+                        .map(|(stream, _address)| stream)
+                });
+                let _ = accepted_tx.send(result);
+            });
+
+            ready_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("accept thread acquired the production gate before the real accept");
+
+            let (gate_attempt_tx, gate_attempt_rx) = mpsc::sync_channel(0);
+            let (gate_result_tx, gate_result_rx) = mpsc::channel();
+            scope.spawn(move || {
+                let _ = gate_attempt_tx.send(());
+                let result = match crate::spawn_gate::acquire_until(deadline_after(GATE_PROBE_WAIT))
+                {
+                    Ok(guard) => {
+                        drop(guard);
+                        Ok(false)
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::TimedOut => Ok(true),
+                    Err(error) => Err(format!("gate probe failed: {error:?}")),
+                };
+                let _ = gate_result_tx.send(result);
+            });
+            gate_attempt_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("real-gate deadline probe started");
+            assert!(
+                gate_result_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("real-gate deadline probe returned")
+                    .expect("real-gate deadline probe succeeded"),
+                "actual spawn gate must time out while the accept syscall is held"
+            );
+
+            let (spawn_started_tx, spawn_started_rx) = mpsc::sync_channel(0);
+            let (spawn_result_tx, spawn_result_rx) = mpsc::channel();
+            let (child_result_tx, child_result_rx) = mpsc::channel();
+            scope.spawn(move || {
+                let _ = spawn_started_tx.send(());
+                match TerminalSession::spawn(&launch, &arguments, &environment, size) {
+                    Ok(mut session) => {
+                        let _ = spawn_result_tx.send(Ok(()));
+                        let _ = child_result_tx.send(run_descriptor_probe(&mut session));
+                    }
+                    Err(error) => {
+                        let _ = spawn_result_tx
+                            .send(Err(format!("managed child spawn failed: {error:?}")));
+                    }
+                }
+            });
+            spawn_started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("managed PTY spawn contender started while accept held the gate");
+
+            match spawn_result_rx.recv_timeout(SPAWN_BLOCK_WINDOW) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("managed PTY spawn contender exited before reporting its result")
+                }
+                Ok(result) => panic!(
+                    "managed PTY spawn completed before accept released the gate: {result:?}"
+                ),
+            }
+
+            release.release();
+            let accepted = accepted_rx
+                .recv_timeout(FIXTURE_WAIT)
+                .expect("actual accept returned after barrier release")
+                .expect("actual pathname accept succeeded");
+            let spawn_result = spawn_result_rx
+                .recv_timeout(FIXTURE_WAIT)
+                .expect("managed PTY spawn returned after accept released the gate");
+            assert!(spawn_result.is_ok(), "{spawn_result:?}");
+
+            let (exit_code, output) = child_result_rx
+                .recv_timeout(FIXTURE_WAIT)
+                .expect("exec descriptor scanner completed within its deadline")
+                .expect("exec descriptor scanner completed");
+            assert_eq!(exit_code, Some(fd_probe::SUCCESS_EXIT));
+            assert!(
+                output.contains("PANELINK_FD_PROBE_OK_CLEAN_N="),
+                "exec child did not report a clean descriptor scan: {output:?}"
+            );
+
+            assert!(listener.listener.local_addr().is_ok());
+            assert!(client.peer_addr().is_ok());
+            assert!(accepted.peer_addr().is_ok());
+        });
     }
 
     fn metadata_event_payload() -> [u8; EVENT_PAYLOAD_BYTES] {

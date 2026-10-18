@@ -120,6 +120,11 @@ After reboot, restore retained layouts/history and offer OpenCode resume from an
 
 ## Right-click and selection
 
+The [Herdr UI reference study](HERDR-UI-STUDY.md) records the current official
+interaction documentation, distinguishes unknown visual details, and lists
+comparison decisions awaiting the user's UI instructions. It does not adopt
+new Panelink requirements or change phase priorities.
+
 Herdr documents [mouse interaction, right-click menus, and drag selection copying](https://herdr.dev/docs/keyboard/). Panelink can implement its own original menus and copy behavior through host mouse reporting. Crossterm documents [keyboard, mouse, paste, and resize events](https://docs.rs/crossterm/latest/crossterm/event/index.html).
 
 Proposed behavior:
