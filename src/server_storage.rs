@@ -543,7 +543,7 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
         drop(first);
-        let second = ServerStorage::open(&fixture.0).unwrap();
+        let second = reopen_after_drop(&fixture.0).unwrap();
         assert_eq!(second.generation(), 2);
         assert_eq!(
             fs::metadata(fixture.0.join("generation")).unwrap().mode() & 0o7777,
@@ -568,7 +568,7 @@ mod tests {
         );
         drop(first);
         assert_eq!(
-            ServerStorage::open(&fixture.0).unwrap().generation(),
+            reopen_after_drop(&fixture.0).unwrap().generation(),
             generation + 1
         );
     }
@@ -631,13 +631,13 @@ mod tests {
         drop(ServerStorage::initialize_for_test(&fixture.0).unwrap());
         fs::write(fixture.0.join("generation.next"), b"uncertain").unwrap();
         assert_eq!(
-            ServerStorage::open(&fixture.0).unwrap_err().kind(),
+            reopen_after_drop(&fixture.0).unwrap_err().kind(),
             io::ErrorKind::AlreadyExists
         );
         fs::remove_file(fixture.0.join("generation.next")).unwrap();
         fs::write(fixture.0.join("generation"), b"bad").unwrap();
         assert_eq!(
-            ServerStorage::open(&fixture.0).unwrap_err().kind(),
+            reopen_after_drop(&fixture.0).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
     }
