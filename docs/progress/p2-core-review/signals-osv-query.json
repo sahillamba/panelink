@@ -1,0 +1,18 @@
+{
+  "queries": [
+    {
+      "package": {
+        "name": "signal-hook",
+        "ecosystem": "crates.io"
+      },
+      "version": "0.4.5"
+    },
+    {
+      "package": {
+        "name": "signal-hook-registry",
+        "ecosystem": "crates.io"
+      },
+      "version": "1.4.8"
+    }
+  ]
+}

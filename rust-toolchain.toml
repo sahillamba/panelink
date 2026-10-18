@@ -1,0 +1,5 @@
+[toolchain]
+# Tested with rustc 1.99.1. Exact version pin awaits an installed named toolchain.
+channel = "stable"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

@@ -1,0 +1,16 @@
+{
+  "command": [
+    "cargo",
+    "check",
+    "--locked",
+    "--offline",
+    "--manifest-path",
+    "/private/tmp/panelink-p2-core-review/Cargo.toml"
+  ],
+  "exit_code": 0,
+  "elapsed_seconds": 2.136,
+  "target_directory": "/private/tmp/panelink-core-build-gsapi0ed",
+  "stderr": "   Compiling libc v0.2.191\n   Compiling rustix v1.1.5\n    Checking arrayvec v0.7.8\n    Checking bitflags v2.13.2\n    Checking memchr v2.8.3\n    Checking unicode-width v0.2.2\n    Checking itoa v1.0.18\n    Checking vte v0.15.0\n    Checking vt100 v0.16.2-panelink.1 (/Users/sahillamba/panelink/vendor/vt100)\n    Checking errno v0.3.14\n    Checking rustix-openpty v0.2.0\n    Checking panelink-p2-core-review v0.0.0 (/private/tmp/panelink-p2-core-review)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.11s\n",
+  "stdout": "",
+  "scope": "fresh target dependency-only library check; not representative application benchmark"
+}

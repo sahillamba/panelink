@@ -1,0 +1,4 @@
+/target/
+/vendor/*/target/
+__pycache__/
+*.py[cod]

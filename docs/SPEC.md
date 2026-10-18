@@ -1,6 +1,6 @@
 # Panelink: working implementation specification
 
-Revision: 0.3, 2026-10-17. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. This revision resolves five reviewed contract gaps: command retries, agent identity, history semantics, child environments, and terminal clipboard requests.
+Revision: 0.4, 2026-10-18. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoint below records current code without converting prototype assumptions into product requirements. This revision preserves the reviewed contracts for command retries, agent identity, history semantics, child environments, and terminal clipboard requests.
 
 ## Purpose and requirement authority
 
@@ -25,6 +25,9 @@ Confirmed requirements come from the user's answers recorded in [discovery](PANE
 | R-11 | Limit third-party dependencies. | Each direct dependency has a concrete saved-effort justification, license, pinned version policy, and transitive review. |
 | R-12 | Develop privately before public release. | Source history and branches live in the private [sahillamba/panelink](https://github.com/sahillamba/panelink) repository. |
 | R-13 | Support review by the user's firm security audit team and similar workplaces. | Map the actual review criteria to documented architecture, dependencies, data flows, release evidence, and feature controls. Approval remains the reviewing organization's decision. |
+| R-14 | Avoid clearing and repainting the whole screen for ordinary local changes. | Unchanged frames emit no output; local cell/cursor changes update only the affected cells/cursor. First render, resize and invalidated display state may rebuild the frame. |
+| R-15 | Provide an easy scriptable API for agents to read and control other managed panes, agents and processes. | Stable targets and machine-readable CLI/local API support discovery, bounded sanitized output reads and explicit input/control operations under a documented access/ownership contract. The full API remains unimplemented; a bounded one-child prototype exposes only a subset. Detailed proposed contracts and acceptance scenarios are in [AGENT-CONTROL.md](AGENT-CONTROL.md). |
+| R-16 | Offer Split Left, Right, Up and Down from a pane's right-click menu. | Each action splits relative to the clicked pane with deterministic geometry, stable session identity, minimum-size handling and a matching agent/CLI operation; the detailed proposed behavior is in [PANE-LAYOUT.md](PANE-LAYOUT.md), with implementation/host validation pending. |
 
 Numeric latency, memory, history, and build budgets remain to be established on real hardware. The workload statement is an evaluation target, not a measured result.
 
@@ -36,7 +39,7 @@ Tabnine is optional CLI compatibility pending an installed supported version and
 
 ## Proposed runtime and terminal ownership
 
-One executable exposes client, server, and command modes. The server owns PTYs and child lifecycles. Host closure affects the client connection; its intended effect on processes is an open lifetime choice. The recommended behavior is a persistent server with explicit stop operations.
+One executable exposes client, server, and command modes. The server owns PTYs and child lifecycles. Host closure affects the client connection; its intended effect on processes is an open lifetime choice. The recommended behavior is a persistent server with explicit stop operations. A bounded foreground one-child prototype now demonstrates server-owned PTY state during socketpair detach/reconnect; it does not settle the product server/client lifetime contract.
 
 Use one terminal engine per managed PTY, with authoritative state in the server. A pane is a view of a stable managed session, not the identity of its child process. Moving a pane or reconnecting must not relaunch the command.
 
@@ -74,9 +77,11 @@ After server restart/reboot, request a fresh launch context and any required vol
 
 Start with a small Cargo workspace or modules: `core`, `server`, `client`, `terminal`, `protocol`, `storage`, and `integrations/opencode`. Split crates only when ownership or build boundaries justify it.
 
-Recommended dependency candidates are Ratatui, Crossterm, `alacritty_terminal`, Serde, and serde_json. First evaluate the engine's PTY facilities; portable-pty is an alternative if needed. These are research candidates, not installed or fully audited dependencies. Standard library sockets/threads/channels/files are the initial concurrency and storage tools. An async runtime and SQLite remain optional decisions supported by evidence.
+The disposable phase-2 core selects a locally corrected VT100 0.16.2 engine and Rustix/openpty as recorded below. A parser-only local Crossterm extraction is selected separately below. Ratatui, the complete Crossterm host framework, serialization libraries, an async runtime and SQLite remain candidates for later boundaries only when justified. Standard library sockets/threads/channels/files are the initial concurrency and storage tools. No whole UI/provider/storage framework is approved by core selection.
 
-Dependency selection is explicitly unresolved: the user identified firm security audit acceptance as the main concern. Obtain the firm's dependency/execution rules and provide concrete per-dependency review evidence before adopting the list. An installed tmux backend is a separate architecture alternative discussed in research, not an accepted change to this design.
+Phase 2's original [dependency review](progress/P2-DEPENDENCIES.md) and [source-gate evidence](progress/P2-SOURCE-GATE.md) reject Alacritty/portable-pty unchanged because of uncapped storage and launch/cleanup conflicts. The [replacement review](progress/P2-REPLACEMENT.md) approves only a bounded prototype core: VT100 `0.16.2-panelink.1` (local source corrections with MIT notices/provenance), Rustix 1.1.5 and rustix-openpty 0.2.0. Chosen normal history is 1,024 rows within the experiment's 2,000-row ceiling. Its allocation estimate is conditional on the tested Rust 1.99.1 container behavior and adapter limits. No server environment mutation, custom parser or relaxed allocation contract is authorized. The [host component review](progress/P2-INPUT-REVIEW.md) now selects crossterm-input 0.29.0-panelink.1, a fixed-buffer MIT parser/types extraction from Crossterm0.29.0 with original notices, patch and fingerprints. It excludes the unbounded global readers and all upstream host IO. The pure snapshot renderer is implemented, with conservative scalar-width fallback. Ordinary updates use snapshot differences; wide-cell topology changes repaint their row. The host holds two preallocated snapshot caches (last fully written state and pending target), advances the baseline only after all frame bytes are accepted, and invalidates it after resize/discard. First/invalidated frames use a full repaint. This corrects the operator-reported full-screen reload on every change; see [incremental renderer evidence](progress/P2-DELTA-RESULT.md). A binary-private, one-shot macOS/aarch64 host IO/restoration guard and `pty-probe --terminfo <absolute-directory> -- <executable> [arguments...]` are implemented under the [bounded probe contract](progress/P2-PROBE.md); 139 application tests pass, while nine device-dependent outer-PTY scenarios remain ignored because this sandbox denies the independent `/dev/tty` open with EPERM. An initial operator host run reported four passes and five failures; the retained-session lifecycle and producer fixtures are corrected, and the user subsequently confirmed the reported failures are resolved in [operator evidence](progress/P2-OPERATOR-RUN.md), without supplying a fresh raw log. The user confirms the short redraw/Unicode/editor/resize/paste/Ctrl-C retest worked, but Ctrl-Q triggered a host window-close dialog. Ctrl-X is now the documented local probe quit key (Ctrl-Q retained as alias), with live quit/restoration confirmation pending. Separate clipboard/full-checklist results remain unspecified. [Private-PTY tests](progress/P2-RESTORE-ORDER.md) now observe exact saved termios and visual reset before the ready child finishes shutdown, for explicit cleanup and unwind Drop; this establishes scoped cleanup ordering without claiming Apple Terminal acceptance. The incremental renderer has qualitative operator confirmation from the short retest; no measured latency or broad host-compatibility claim is made. The [signal review](progress/P2-SIGNALS-REVIEW.md) adopts signal-hook0.4.5 with defaults disabled for process-lifetime atomic flags only; no unregister is performed during bounded cleanup. The child is stopped on probe exit; this disposable behavior does not change the product server/client lifetime contract. The [core result](progress/P2-CORE-RESULT.md) records core library behavior; current integration evidence records 139 passing application tests, nine ignored host scenarios and 39 separate decoder tests; [host input review](progress/P2-HOST-INPUT.md) records the separate bounded-input gate. Explicit core shutdown closes the PTY and rejects further IO, while natural child exit permits final-output draining. The [phase 2 experiment](progress/P2-EXPERIMENT.md) distinguishes proposed host checks from completed core checks. Apple Terminal compatibility has not been demonstrated.
+
+Broader dependency selection and firm approval remain unresolved: the user identified firm security audit acceptance as the main concern. The personal core experiment has scoped source/API/build/notice/advisory evidence; obtain the firm's actual dependency/execution rules before a corporate pilot. An installed tmux backend is a separate architecture alternative discussed in research, not an accepted change to this design.
 
 ## Proposed security review requirements
 
@@ -97,13 +102,32 @@ Offline/locked dependency resolution is supported by Cargo; offline builds also 
 
 Configuration restrictions should be visible in effective settings and cannot be overridden by project config when an agreed organization policy applies. If the firm needs enforcement against local changes, use its approved managed deployment/policy mechanism; an ordinary user-owned file alone does not supply that guarantee. The exact deployment and enforcement model remains open.
 
-No security evidence bundle exists yet because no application dependency graph or release artifact exists. Produce the first architecture/dependency review packet before a broad implementation, and update release evidence when source or dependencies change.
+A scoped prototype dependency/source/API review packet now exists in `progress/P2-REPLACEMENT.md`, with exact graph, notices, integrity, build-input and dated advisory evidence. It is not a complete application security evidence bundle or a release artifact. Expand the packet before broad implementation/corporate review and update it when source or dependencies change.
 
-The first feasibility gate must prove the engine works independently of its original GUI, can supervise a PTY correctly, and can deliver renderable snapshots to the terminal client. It must also prove exact OpenCode identity capture/persistence and detect in-TUI session changes, establish environment precedence and executable resolution, and exercise lost acknowledgments and clipboard denials. Terminal queries, palette, cursor/keyboard/mouse modes, wide characters, and alternate-screen checkpoints belong in this gate. If authoritative OpenCode identity cannot be established for a supported version, advertise only manual/last-confirmed recovery for that mode; do not defer this limitation to a later status milestone.
+The first feasibility gate must use Apple Terminal as the initial host compatibility baseline; broader terminal support follows after this baseline works. Record the tested terminal and macOS versions before claiming compatibility; the minimum supported macOS version remains undecided. Prove the engine works independently of its original GUI, can supervise a PTY correctly, and can deliver renderable snapshots to the terminal client. Also prove exact OpenCode identity capture/persistence and detect in-TUI session changes, establish environment precedence and executable resolution, and exercise lost acknowledgments and clipboard denials. Terminal queries, palette, cursor/keyboard/mouse modes, wide characters, and alternate-screen checkpoints belong in this gate. If authoritative OpenCode identity cannot be established for a supported version, advertise only manual/last-confirmed recovery for that mode; do not defer this limitation to a later status milestone.
+
+## Current implementation checkpoint — 2026-10-18
+
+This section records the bounded implementation status; it does not settle the broader proposed product contracts below. See [INTEGRATION.md](progress/INTEGRATION.md) for the current verification record and [ROADMAP.md](../ROADMAP.md) for phase status.
+
+The macOS/aarch64 prototype combines the bounded wire and typed response/session codecs, kernel same-UID authentication before handshake, a protected private-directory socket listener with existing-endpoint refusal, bounded connection workers and a single `StateOwner`, durable caller contexts and input ownership, and startup ledger admission plus a durable lifecycle-metadata Intent before child spawn. The operation ledger itself is volatile. An explicitly selected one-child PTY remains owned by the foreground server across logical detach and same-generation reconnect. Focused socketpair tests exercise a lost input acknowledgment and prove no client resend. The full agent-control CLI/API, workspace/layout model, and release runtime remain out of scope.
+
+Storage initialization is explicit: `--initialize` applies only to an empty private directory and writes a random nonzero generation seed; normal opens require the existing lock, counter, and journal and advance the counter before use. Missing or corrupt metadata fails closed. This is not a rollback-resistant identity guarantee for copied/restored backups or a collision-free identity guarantee across independent storage domains.
+
+This private-PTY proof is a separately authorized experiment while Phase 2 manual host gates remain pending. The earlier pathname CLI fixture is operator-confirmed passing outside the sandbox; expanded live-watch CLI pathname and host-terminal acceptance remain separate checks. The prototype now negotiates Events when authoritative metadata tracking is available and implements bounded metadata watches plus atomic screen/metadata/cursor reconciliation. Layout changes, multiple sessions, live scrollback and provider identity/recovery remain unimplemented. A same-UID boundary does not isolate one local process or agent from another.
+
+For this prototype, `Applied` on input means all request bytes were accepted through the PTY write interface; for interrupt it means the signal call succeeded. Neither means the child application accepted the input or completed a task. The input adapter's normal drain window is 100 ms, but a PTY hard-error cleanup can add up to two seconds, so this is not a hard 100 ms whole-call deadline. The bounded journal records only operation key, managed session ID, and lifecycle state; it does not persist launch arguments, environment values, or process identity.
 
 ## Proposed local protocol contract
 
-Use a private per-user Unix socket. Restrict directory access and verify peers where supported. A same-user socket is not isolation against every process running as that user.
+The next bounded notification foundation provides a fixed72byte metadata event
+payload and a volatile64event journal with generation-scoped cursors and explicit
+expiry. A later bounded runtime slice now delivers metadata Events during finite watch
+requests and provides screen/owner/exit/cursor reconciliation in one owner turn.
+Events require explicit negotiation, eight pending watches maximum, at most64
+events per result and a shared250ms batch-write budget. Persistent subscriptions
+and provider/text-condition waits remain unimplemented. See [notification tasks](progress/P3-NOTIFICATIONS-TASKS.md)
+and [runtime integration boundary](progress/P3-NOTIFICATION-RUNTIME.md).
 
 Each message has a protocol version, type, bounded payload, request identity when applicable, and stable domain IDs. The server has a distinct generation identity on each start. State updates are ordered within that generation; clients detect gaps and request a new snapshot.
 
@@ -157,7 +181,7 @@ Default prefix: Ctrl+B, configurable. Ctrl+B twice forwards a literal Ctrl+B. Pr
 
 Mouse hit testing distinguishes sidebar, tab strip, pane border, pane content, menu overlay, scrollbar, and resize handles. Overlay actions must not leak input into the underlying process.
 
-Right-click opens an original context menu with only applicable operations. Initial proposals: new shell, start OpenCode, split right/down, rename, zoom/unzoom, move, copy, paste, close. Closing a live process must use explicit stop semantics and a confirmation appropriate to that action; ordinary detach needs no stop confirmation under the recommended lifetime policy.
+Right-click opens an original context menu with only applicable operations. Confirmed split actions are Split Left, Split Right, Split Up and Split Down, relative to the clicked pane. The proposed detailed contract is in [PANE-LAYOUT.md](PANE-LAYOUT.md), prepared independently of the unresolved workspace/tab hierarchy. Other initial menu proposals are new shell, start OpenCode, rename, zoom/unzoom, move, copy, paste and close. Closing a live process must use explicit stop semantics and a confirmation appropriate to that action; ordinary detach needs no stop confirmation under the recommended lifetime policy.
 
 Selection starts in one pane, stays within its content, supports wrapped lines and Unicode cell widths, and copies after mouse release. Preserve selection across ordinary output where possible; resize or buffer changes must have defined behavior. Recommend a snapshot of selected text at copy time with stable history coordinates, clearing selection on resize or screen-buffer switch in the first release. Keyboard copy mode must work while output continues.
 
@@ -165,13 +189,13 @@ Copy/paste should use macOS clipboard commands from the local attached client wi
 
 ### Clipboard authority and terminal requests
 
-Clipboard actions initiated by the user are separate from requests emitted by a program inside a pane. The proposed [Alacritty event API](https://docs.rs/alacritty_terminal/latest/alacritty_terminal/event/enum.Event.html) exposes both clipboard store and clipboard load events; the latter can return clipboard data to a child PTY. Engine capability is not permission to perform either action.
+Clipboard actions initiated by the user are separate from requests emitted by a program inside a pane. The prototype's selected [VT100 callbacks](../vendor/vt100/src/callbacks.rs) expose clipboard copy/paste requests; the adapter must discard reads, writes and clears without sending clipboard response bytes to child input. Engine capability is not permission to access the host clipboard.
 
 | Source | First-release behavior |
 | --- | --- |
 | User finishes a drag selection or invokes Copy | Copy selected text under the effective copy-on-selection/clipboard policy. Only the attached local client accesses the system clipboard. |
 | User invokes Paste | Read the local clipboard for the explicitly focused/input-owned session and send one user-authorized paste. Deny if no valid attachment/ownership or policy disables it; never queue for a future attachment. |
-| Child emits OSC 52 or equivalent programmatic clipboard read | Deny by default and throughout the first release. Do not invoke a host read, pbpaste, or a load callback with real clipboard data. For a supported query return a protocol-valid empty response, bounded/rate-limited; ignore unsupported requests. Do not forward the query to the host terminal. |
+| Child emits OSC 52 or equivalent programmatic clipboard read | Deny by default and throughout the first release. Do not invoke a host read, pbpaste, or a load callback with real clipboard data. Ignore clipboard queries without a response; even an empty OSC reply can become unintended shell input. Do not forward the query to the host terminal. |
 | Child emits a programmatic clipboard write/clear | Deny throughout the first release. Do not change the clipboard, emit an OSC clipboard write to the host, or show a consent prompt triggered by arbitrary output. |
 | Programmatic request while detached, during reconnect, in saved history, or received from a non-owning client | Same denial. Drop the side-effect request without deferred execution or prompts; do not replay it on attach. |
 
@@ -181,7 +205,7 @@ Mouse-reporting inner applications need a defined pass-through gesture or per-pa
 
 ## Proposed OpenCode integration
 
-Phase one launches the installed executable with the explicit child environment and preserves provider-owned authentication. Missing executable or invalid directory produces a local actionable error, without silently installing tools or replacing the shell.
+The first supported provider implementation launches the installed executable with the explicit child environment and preserves provider-owned authentication. Missing executable or invalid directory produces a local actionable error, without silently installing tools or replacing the shell. Provider integration is not part of the completed foundation or current terminal-core task.
 
 Reliable identity capture is an M1 requirement for the supported managed OpenCode mode. Rich status/attention reporting can arrive later. A bridge failure must not kill the user's agent, but it must revoke verified identity/readiness and degrade recovery promises explicitly. Users who disable the bridge or use an unsupported version can still use a generic terminal pane, with reduced recovery capabilities displayed.
 
@@ -246,7 +270,7 @@ Do not automatically rerun arbitrary prior commands. Mark normal process relaunc
 | M5 | OpenCode status/notifications layered on the identity contract proved in M1. | Real versioned activity/permission events map truthfully; missing bridge and provider failures revoke readiness without losing the user's running terminal. |
 | M6 | Personal alpha and release preparation. | Representative 10-agent workload, resource/build measurements, installation, notices, and upgrade behavior documented. |
 
-The validation plan should include process cleanup, terminal restoration after client failure, protocol ordering/resync, history rotation/recovery, wide-character selection, and clipboard behavior across the supported hosts. These are proposed checks for later implementation. No tests or benchmarks have been run for an app that does not yet exist.
+The validation plan should include process cleanup, terminal restoration after client failure, protocol ordering/resync, history rotation/recovery, wide-character selection, and clipboard behavior across the supported hosts. Foundation tests and disposable engine/PTY source/API probes have run as recorded in `progress/`; these broader integrated acceptance checks and representative benchmarks remain pending. No prototype check establishes the complete M1 milestone.
 
 ### Acceptance scenarios added by contract review
 
@@ -261,10 +285,10 @@ The validation plan should include process cleanup, terminal restoration after c
 
 These are acceptance requirements for future implementation, not completed executable tests or evidence that the provider identity capability exists.
 
-## Open decisions before implementation
+## Open decisions beyond the bounded prototype
 
-User choices: primary host terminals; OpenCode control versus delegation; lifetime/stop behavior; workspace/sidebar/tab hierarchy; remote/tmux scope; firm review criteria, OpenCode approval, allowed dependencies, and history/clipboard policy. The private repository destination is confirmed as [sahillamba/panelink](https://github.com/sahillamba/panelink).
+User choices still pending: exact agent-control access scope/defaults and autonomous scheduling; lifetime/stop behavior; workspace/sidebar/tab hierarchy; remote/tmux scope; firm review criteria, OpenCode approval, allowed dependencies, and history/clipboard policy. Apple Terminal is the first host baseline. The private repository destination is confirmed as [sahillamba/panelink](https://github.com/sahillamba/panelink).
 
-Engineering choices after prototype: pinned dependency versions/features, PTY API, viewport/delta schema, terminal capability baseline, minimum macOS, data format/retention limits, input ownership, mouse pass-through gesture, OpenCode adapter/version matrix, and numeric quality budgets.
+Core dependency pins and the PTY API are selected only for the bounded prototype. Release-level dependency/capability choices, host input, viewport/delta schema, minimum macOS, data format/retention limits, input ownership, mouse pass-through gesture, OpenCode adapter/version matrix, and representative numeric quality budgets remain open.
 
-Every future task must identify owned modules, required protocol changes, observable behavior, failure handling, and documentation updates. Do not turn pending options or prototype assumptions into confirmed user requirements. Do not begin full application implementation from this draft without resolving its required choices.
+Every future task must identify owned modules, required protocol changes, observable behavior, failure handling, and documentation updates. Do not turn pending options or prototype assumptions into confirmed user requirements. On 2026-10-17 the user authorized implementation and model delegation with durable progress tracking. `../ROADMAP.md` records the first bounded foundation tasks and explicit prototype assumptions; resolve further choices before implementing the affected features.

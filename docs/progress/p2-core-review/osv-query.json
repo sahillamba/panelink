@@ -1,0 +1,102 @@
+{
+  "queries": [
+    {
+      "package": {
+        "name": "arrayvec",
+        "ecosystem": "crates.io"
+      },
+      "version": "0.7.8"
+    },
+    {
+      "package": {
+        "name": "bitflags",
+        "ecosystem": "crates.io"
+      },
+      "version": "2.13.2"
+    },
+    {
+      "package": {
+        "name": "errno",
+        "ecosystem": "crates.io"
+      },
+      "version": "0.3.14"
+    },
+    {
+      "package": {
+        "name": "itoa",
+        "ecosystem": "crates.io"
+      },
+      "version": "1.0.18"
+    },
+    {
+      "package": {
+        "name": "libc",
+        "ecosystem": "crates.io"
+      },
+      "version": "0.2.191"
+    },
+    {
+      "package": {
+        "name": "linux-raw-sys",
+        "ecosystem": "crates.io"
+      },
+      "version": "0.12.1"
+    },
+    {
+      "package": {
+        "name": "memchr",
+        "ecosystem": "crates.io"
+      },
+      "version": "2.8.3"
+    },
+    {
+      "package": {
+        "name": "rustix",
+        "ecosystem": "crates.io"
+      },
+      "version": "1.1.5"
+    },
+    {
+      "package": {
+        "name": "rustix-openpty",
+        "ecosystem": "crates.io"
+      },
+      "version": "0.2.0"
+    },
+    {
+      "package": {
+        "name": "unicode-width",
+        "ecosystem": "crates.io"
+      },
+      "version": "0.2.2"
+    },
+    {
+      "package": {
+        "name": "vt100",
+        "ecosystem": "crates.io"
+      },
+      "version": "0.16.2"
+    },
+    {
+      "package": {
+        "name": "vte",
+        "ecosystem": "crates.io"
+      },
+      "version": "0.15.0"
+    },
+    {
+      "package": {
+        "name": "windows-link",
+        "ecosystem": "crates.io"
+      },
+      "version": "0.2.1"
+    },
+    {
+      "package": {
+        "name": "windows-sys",
+        "ecosystem": "crates.io"
+      },
+      "version": "0.61.2"
+    }
+  ]
+}

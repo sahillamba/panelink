@@ -1,0 +1,44 @@
+panelink v0.1.0 (/Users/sahillamba/panelink)
+├── crossterm-input feature "default"
+│   └── crossterm-input v0.29.0-panelink.1 (/Users/sahillamba/panelink/vendor/crossterm-input)
+│       └── bitflags feature "default"
+│           └── bitflags v2.13.2
+├── rustix feature "fs"
+│   └── rustix v1.1.5
+│       ├── bitflags v2.13.2
+│       ├── errno v0.3.14
+│       │   └── libc v0.2.191
+│       └── libc v0.2.191
+├── rustix feature "process"
+│   └── rustix v1.1.5 (*)
+├── rustix feature "std"
+│   ├── rustix v1.1.5 (*)
+│   ├── bitflags feature "std"
+│   │   └── bitflags v2.13.2
+│   ├── rustix feature "alloc"
+│   │   └── rustix v1.1.5 (*)
+│   ├── errno feature "std"
+│   │   ├── errno v0.3.14 (*)
+│   │   └── libc feature "std"
+│   │       └── libc v0.2.191
+│   └── libc feature "std" (*)
+├── rustix feature "termios"
+│   └── rustix v1.1.5 (*)
+├── rustix-openpty feature "default"
+│   └── rustix-openpty v0.2.0
+│       ├── errno v0.3.14 (*)
+│       ├── libc v0.2.191
+│       ├── rustix feature "fs" (*)
+│       └── rustix feature "termios" (*)
+├── unicode-width feature "default"
+│   ├── unicode-width v0.2.2
+│   └── unicode-width feature "cjk"
+│       └── unicode-width v0.2.2
+└── vt100 feature "default"
+    └── vt100 v0.16.2-panelink.1 (/Users/sahillamba/panelink/vendor/vt100)
+        ├── vte v0.15.0
+        │   ├── arrayvec v0.7.8
+        │   └── memchr v2.8.3
+        ├── unicode-width feature "default" (*)
+        └── itoa feature "default"
+            └── itoa v1.0.18

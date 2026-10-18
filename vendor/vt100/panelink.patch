@@ -1,0 +1,85 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -13,7 +13,7 @@
+ edition = "2021"
+ rust-version = "1.70"
+ name = "vt100"
+-version = "0.16.2"
++version = "0.16.2-panelink.1"
+ authors = ["Jesse Luehrs <doy@tozt.net>"]
+ build = false
+ include = [
+@@ -53,6 +53,7 @@
+ 
+ [dependencies.vte]
+ version = "0.15.0"
++default-features = false
+ 
+ [dev-dependencies.nix]
+ version = "0.30.1"
+--- a/src/cell.rs
++++ b/src/cell.rs
+@@ -2,6 +2,7 @@
+ 
+ // chosen to make the size of the cell struct 32 bytes
+ const CONTENT_BYTES: usize = 22;
++const MAX_EXTRA_SCALARS: usize = 8;
+ 
+ const IS_WIDE: u8 = 0b1000_0000;
+ const IS_WIDE_CONTINUATION: u8 = 0b0100_0000;
+@@ -55,6 +56,11 @@
+     pub(crate) fn append(&mut self, c: char) {
+         let len = self.len();
+         if len >= CONTENT_BYTES - 4 {
++            return;
++        }
++        // The first scalar is the cell's base character (or the virtual
++        // blank inserted below when a combining character arrives first).
++        if self.contents().chars().count() >= MAX_EXTRA_SCALARS + 1 {
+             return;
+         }
+         if len == 0 {
+--- a/src/grid.rs
++++ b/src/grid.rs
+@@ -501,6 +501,7 @@
+     pub fn insert_cells(&mut self, count: u16) {
+         let size = self.size;
+         let pos = self.pos;
++        let count = count.min(size.cols.saturating_sub(pos.col));
+         let wide = pos.col < size.cols
+             && self
+                 .drawing_cell(pos)
+@@ -542,7 +543,7 @@
+     }
+ 
+     pub fn insert_lines(&mut self, count: u16) {
+-        for _ in 0..count {
++        for _ in 0..count.min(self.size.rows - self.pos.row) {
+             self.rows.remove(usize::from(self.scroll_bottom));
+             self.rows.insert(usize::from(self.pos.row), self.new_row());
+             // self.scroll_bottom is maintained to always be a valid row
+@@ -577,7 +578,7 @@
+     }
+ 
+     pub fn scroll_down(&mut self, count: u16) {
+-        for _ in 0..count {
++        for _ in 0..count.min(self.scroll_bottom - self.scroll_top + 1) {
+             self.rows.remove(usize::from(self.scroll_bottom));
+             self.rows
+                 .insert(usize::from(self.scroll_top), self.new_row());
+--- a/src/perform.rs
++++ b/src/perform.rs
+@@ -88,9 +88,12 @@
+         &mut self,
+         params: &vte::Params,
+         intermediates: &[u8],
+-        _ignore: bool,
++        ignore: bool,
+         c: char,
+     ) {
++        if ignore {
++            return;
++        }
+         let unhandled = |screen: &mut crate::screen::Screen| {
+             self.callbacks.unhandled_csi(
+                 screen,

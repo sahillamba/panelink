@@ -1,0 +1,30 @@
+{
+  "upstream_crate": "vt100",
+  "upstream_version": "0.16.2",
+  "local_version": "0.16.2-panelink.1",
+  "registry_archive_sha256": "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9",
+  "upstream_vcs": {
+    "git": {
+      "sha1": "eb66ffaf7d771c13303ef73b29f6f2a56fdacecf"
+    },
+    "path_in_vcs": ""
+  },
+  "files": {
+    "CHANGELOG.md": "c0a75dec3b5cf7d9c119d357acb7258278f00476314738960f441d03c991ec1e",
+    "Cargo.toml": "6ae8fc1fc0552591dc9694036473e32a808115fa5669c9853fee4d0c12220d26",
+    "Cargo.toml.orig": "066bfd0fa6bda2ac9a633c95b80d0f3e06884a9926580ac5825075434bac5ca6",
+    "LICENSE": "53a04b0a11073f3d0183c31a4b7bdf9a3f68d453adeec136e59e5a9d9a554370",
+    "README.md": "01d073eaeefbd6a5ded71874cf9fe4738ee0e99a6f47772eb51254cc76c30dba",
+    "panelink.patch": "c55d1318afc3c49595761e8d7157f22e5f2d67582d65a5bf974b92d16d166610",
+    "src/attrs.rs": "40a44d333d27b44e5cfe9f286b557ce1d02e5ad26d64e4770c01e1c4f8c417d2",
+    "src/callbacks.rs": "45b2a1b3f8a35953fc1ed987a84c1f06a3680f77b58a7014230f5b6a5e804e01",
+    "src/cell.rs": "e3aefe7a5dfa7f9ae001f6fa4f3c16e748f6bb328b519239cbc5bf923666641f",
+    "src/grid.rs": "d8e91fb905b9df62c6ceb489113536b53bb8e1e2acb3515c512833d8c257bae0",
+    "src/lib.rs": "62c7a444a5f4b27747790e8856060c3a729a14dd72ab4b745cf9236847236e2b",
+    "src/parser.rs": "c5ea946a8f0a0d3206872dca2d57b8f8bfbcb3791638a33d869a4fd6c177260d",
+    "src/perform.rs": "7266144272db741d16489cc98ead02d50fe93746f1f8bf58488e969041682995",
+    "src/row.rs": "133e1f6e110e072a1f872191d05fc16a664787e7558dd0aca3d772b2e3a6dabf",
+    "src/screen.rs": "67c3fb92cedda3a80d37e6436349b093a4786be6589c209ad59728e83221cbf0",
+    "src/term.rs": "7dfcfba0f56b280467d5804425d3e04bb704c81fc4ef31d350fd3269162c5f75"
+  }
+}

@@ -1,0 +1,15 @@
+# Disposable Crossterm input decoder extraction
+
+Source: crates.io `crossterm` 0.29.0, MIT, upstream VCS revision `36d95b26a26e64b0f8c12edfe11f410a6d56a812` from `upstream/.cargo_vcs_info.json`. The downloaded crate archive SHA-256 is `d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b`; the local sparse-index record reports the same checksum. The copied upstream `src/event.rs` and `src/event/sys/unix/parse.rs` compare byte-for-byte with the source-registry files. `LICENSE` is preserved unchanged.
+
+The crate `crossterm-input` is `0.29.0-panelink.1`, edition 2021, MIT, private, and has only the exact dependency `bitflags = 2.13.2`. `Cargo.lock` locks only that dependency. Doctests are disabled because extracted upstream docs link to the complete Crossterm facade. The crate compiles only on Unix; it includes no input readers, signal handlers, terminal commands, global state, or host IO.
+
+## Extraction recipe
+
+1. Copy the upstream MIT `LICENSE`, `src/event.rs`, and `src/event/sys/unix/parse.rs` into `LICENSE` and `upstream/` unchanged. Preserve the upstream VCS metadata.
+2. Form `src/event.rs` from upstream `src/event.rs` lines 284–315 and 545–1487. This retains `KeyboardEnhancementFlags`, `Event`, mouse/key types, and `InternalEvent`; it omits upstream event IO and command implementations. Remove feature-only `serde`, `derive-more`, `events`, and `bracketed-paste` cfg attributes, making `Paste` unconditional. Use the already reviewed `bitflags` dependency. `Event`, `KeyCode`, `KeyEvent`, and `MouseEvent` have redacted manual Debug implementations.
+3. Copy the entire Unix `parse.rs`, including its applicable upstream parser tests. Rewrite only `InternalEvent`'s module path. Replace both raw-mode lookups with the documented `INPUT_IS_RAW = true` constant. Replace lossy paste conversion with a 65,536-byte check, checked UTF-8 validation, then owned conversion. Change parser error kind from `Other` to `InvalidData` for current Clippy and malformed-input semantics. Replace unchecked one-based cursor/mouse coordinate subtraction with checked conversion so malformed zero coordinates return parser errors instead of panicking.
+4. Add `src/decoder.rs`: one boxed `[u8; 65_548]`, a 16,384-byte ordinary sequence cap, the 65,548-byte bracketed paste frame cap, pre-store cap checks, no event queue, redacted permanent failure, and `finish_escape` handling for only a single ESC. The wrapper does not implement escape-sequence grammar; all completion and event semantics remain in the upstream parser.
+5. Generate the lockfile with `cargo generate-lockfile --offline`. `PATCH.diff` records the full extraction delta from the selected upstream source ranges and all added crate files. `FINGERPRINTS.json` records SHA-256 values for originals, extracted files, metadata, and patch.
+
+Do not use this parser without a separately owned raw-mode guard, bounded host IO loop, error cleanup, and terminal restoration. Parser tests and these source checks do not establish host IO progress, scheduling deadlines, Apple Terminal behavior, or app adoption.

@@ -14,13 +14,14 @@ Status: first user answers and security review objective recorded; focused follo
 - Dependencies are exceptions: established components must save substantial time and have a documented reason for inclusion. Original Panelink logic remains independently implemented.
 - The main reason for dependency caution is obtaining the firm's security audit approval and making Panelink suitable for others in similarly controlled workplaces. The firm's actual review policy and OpenCode approval status are not yet known.
 - OpenCode is the required agent. Tabnine is an optional feasibility item. Preserve the agent's own terminal interface with status and notifications.
+- Provide an easy scriptable/agent command API to discover, read and control other managed agents/processes across panes (requested2026-10-17). Exact access scope/defaults and command contracts are proposed in [AGENT-CONTROL.md](AGENT-CONTROL.md); this does not request autonomous scheduling.
 - Keyboard navigation in the style of tmux, with Herdr-like workspace and mouse interactions.
-- Right-click context menus and automatic clipboard copy after text selection.
+- Right-click context menus and automatic clipboard copy after text selection. The user explicitly requested Split Left, Right, Up and Down options (2026-10-17); the pane-layout contract is proposed in [PANE-LAYOUT.md](PANE-LAYOUT.md) independently of the unresolved workspace/tab hierarchy.
 - Reboot recovery restores layouts and offers supported agent conversation resume.
 - Local layouts, settings, and saved terminal history.
 - Personal use first, public MIT release later, with private Git source hosting for commits and branches.
 
-The earlier desktop UI recommendation is superseded. Ratatui/Crossterm with a terminal engine and independent session server is an engineering candidate, not a selected or installed dependency set. The user's dependency concern is security audit acceptance. Do not treat any named library as accepted or claim the architecture will pass a firm's audit. Application implementation has not begun.
+The earlier desktop UI recommendation is superseded. Ratatui/Crossterm with a terminal engine and independent session server is an engineering candidate, not a selected or installed dependency set. The user's dependency concern is security audit acceptance. Do not treat any named library as accepted or claim the architecture will pass a firm's audit. The dependency-free foundation has been implemented and verified; [ROADMAP.md](../ROADMAP.md) tracks remaining implementation.
 
 ## Current interpretation and recommendations
 
@@ -32,14 +33,14 @@ Recommend Herdr-style lifetime: detach or quit the host terminal while processes
 
 ## Focused follow-ups presented as options
 
-1. Primary host terminal: Ghostty / iTerm2 / Apple Terminal / several equally; custom combinations allowed.
-2. OpenCode scope: launch-monitor-interrupt-resume (recommended) / allow agents to create panes and send work / autonomous scheduling.
+1. Primary host terminal: Apple Terminal selected for the first prototype. Expand terminal compatibility after that baseline works.
+2. Agent scope update: agent-to-pane/process read and control API is now requested. Exact launch/create capabilities and access defaults are under design; autonomous scheduling is not implied.
 3. Lifetime: persistent server with explicit stop (recommended) / prompt on explicit detach / stop with client.
 4. Hierarchy: workspace sidebar with tabs/splits (recommended) / picker with hidden sidebar / workspaces with splits and no tabs.
 5. Remote scope: local Mac with ordinary ssh commands (recommended) / persistent remote sessions / existing tmux attachment.
 6. Private hosting destination: confirmed as [sahillamba/panelink](https://github.com/sahillamba/panelink) on GitHub; the user requested a private repository and an initial commit of the current files.
 
-Answers 1–5 are still pending. No preselected option is an accepted user decision.
+Answer 1 is confirmed. Agent read/control in answer2 is now requested; its detailed scope/defaults and answers3–5 remain pending. No preselected option is an accepted user decision. Implementation was authorized on 2026-10-17 using cheaper models where appropriate, with durable roadmap/progress files; prototype assumptions are recorded in `ROADMAP.md`.
 
 ## Security review follow-ups presented as options
 
@@ -60,7 +61,7 @@ These are engineering contracts for the draft, not evidence of completed impleme
 
 - Current shell reports macOS 26.5.2; this is not yet the minimum supported version.
 - Neither OpenCode nor Tabnine was found on the active shell PATH. Do not infer global absence or install either without the relevant setup task.
-- The earlier Git initialization restriction was resolved through an approved operation; the local repository now uses `main`.
+- The earlier Git initialization restriction was resolved through an approved operation; the local repository now uses `main` and tracks `origin/main`.
 - GitHub CLI authentication was verified as `sahillamba` after the user completed `gh auth login`. The earlier sandbox-only authentication check was misleading because network access was restricted.
 - The private [sahillamba/panelink](https://github.com/sahillamba/panelink) repository was created on 2026-10-17 for the current specifications and future implementation. Git history is the source of truth for commits and pushes.
 

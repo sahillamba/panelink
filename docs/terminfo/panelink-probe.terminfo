@@ -1,0 +1,17 @@
+# Internal phase-2 profile. This is not an installed or compatibility-approved
+# terminal entry. The future probe must compile it into a private directory and
+# supply TERMINFO explicitly before running terminfo-driven full-screen apps.
+# No alternate character set, printer, clipboard or color capabilities claimed.
+panelink-probe|Panelink bounded terminal feasibility profile,
+	am, xenl,
+	cols#80, it#8, lines#24,
+	cr=\r, ind=\n, ht=\t,
+	clear=\E[H\E[2J, home=\E[H, ed=\E[J, el=\E[K,
+	cup=\E[%i%p1%d;%p2%dH, csr=\E[%i%p1%d;%p2%dr,
+	cub1=\b, cud1=\E[B, cuf1=\E[C, cuu1=\E[A,
+	cub=\E[%p1%dD, cud=\E[%p1%dB,
+	cuf=\E[%p1%dC, cuu=\E[%p1%dA,
+	kbs=\177, kcub1=\E[D, kcud1=\E[B, kcuf1=\E[C, kcuu1=\E[A,
+	bold=\E[1m, rev=\E[7m, smul=\E[4m, rmul=\E[24m, sgr0=\E[0m,
+	civis=\E[?25l, cnorm=\E[?25h,
+	smcup=\E[?1049h, rmcup=\E[?1049l,

@@ -1,0 +1,16 @@
+{
+  "crate": {
+    "num": "0.29.0",
+    "created_at": "2025-04-05T15:21:48.500601Z",
+    "license": "MIT",
+    "checksum": "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b",
+    "rust_version": "1.63.0"
+  },
+  "repository": {
+    "html_url": "https://github.com/crossterm-rs/crossterm",
+    "archived": false,
+    "pushed_at": "2026-10-16T09:48:28Z",
+    "updated_at": "2026-10-16T20:23:10Z",
+    "default_branch": "master"
+  }
+}

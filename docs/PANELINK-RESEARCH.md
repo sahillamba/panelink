@@ -4,7 +4,7 @@ Updated: 2026-10-17, including the user's security audit objective.
 
 Panelink runs **inside existing terminal applications**, like tmux or Herdr. It provides workspaces for OpenCode and ordinary processes. The initial desktop GUI hypothesis is superseded; it is preserved only as [historical research](archive/2026-10-16-DESKTOP-OPTIONS.md).
 
-This document contains engineering recommendations. Confirmed user decisions are recorded in [discovery](PANELINK-DISCOVERY.md); [SPEC.md](SPEC.md) is the working implementation specification. No application implementation or performance/compatibility benchmark exists yet.
+This document contains engineering recommendations. Confirmed user decisions are recorded in [discovery](PANELINK-DISCOVERY.md); [SPEC.md](SPEC.md) is the working implementation specification. The dependency-free foundation is now implemented and verified; see [ROADMAP.md](../ROADMAP.md). No PTY/terminal compatibility or representative performance benchmark exists yet.
 
 ## Recommended architecture
 
@@ -42,10 +42,11 @@ The user wants high performance, manageable build sessions, and dependencies onl
 | PTY fallback | [`portable-pty`](https://docs.rs/portable-pty/latest/portable_pty/), MIT | Add only if the selected engine's PTY integration materially complicates independent server ownership. Use one owner, never two overlapping PTY loops. |
 | Typed persistence/protocol | Serde + serde_json, subject to dependency review | Save effort and correctness risk in serialization. Do not handwrite a JSON parser merely to reduce the direct crate count. |
 | Sockets, threads, files | Rust standard library initially | Unix sockets, bounded channels, threads, filesystem operations, and process launching may suffice at the target concurrency. Add an async runtime only when demonstrated needs justify it. |
+| Memory allocator | Rust's default system allocator initially; benchmark mimalloc later | The ms-rust skill recommends mimalloc based on allocation-heavy hot-path benchmarks. Panelink has no profile yet, and agent child processes may dominate resource use. The allocator is mature, but a global swap adds native build code and has no established Panelink-specific benefit. |
 
 Ratatui and Crossterm expose [MIT notices](https://raw.githubusercontent.com/ratatui/ratatui/main/LICENSE), [MIT notices](https://raw.githubusercontent.com/crossterm-rs/crossterm/master/LICENSE); Alacritty's [manifest](https://raw.githubusercontent.com/alacritty/alacritty/master/alacritty_terminal/Cargo.toml) specifies Apache-2.0. Review the exact pinned versions and full transitive dependency graph before adopting them. Maintenance evidence and project use are selection signals, not a guarantee that any dependency is fully trustworthy.
 
-Avoid a separate async runtime, HTTP client, database binding, configuration format library, plugin framework, or general-purpose clipboard crate until the feature needs them. Do not bundle OpenCode or Tabnine in the initial release: use the user's installed executables and existing authentication.
+Avoid a separate async runtime, HTTP client, database binding, configuration format library, plugin framework, or general-purpose clipboard crate until the feature needs them. Do not bundle OpenCode or Tabnine in the initial release: use the user's installed executables and existing authentication. The skill's mimalloc recommendation is deferred until representative profiling shows a useful gain over the system allocator.
 
 One proposed storage approach is atomically replaced versioned JSON metadata plus bounded history segments, with one server writer. Evaluate SQLite only if cross-record recovery or history querying becomes materially simpler with it. Atomic rename alone is not a complete durability protocol: the spec must cover sync ordering, partial history records, metadata/history generations, rotation, and recovery.
 

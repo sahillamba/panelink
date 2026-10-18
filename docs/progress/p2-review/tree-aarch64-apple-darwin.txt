@@ -1,0 +1,320 @@
+panelink-p2-review v0.0.0 (/private/tmp/panelink-p2-review)
+├── alacritty_terminal v0.26.0
+│   ├── base64 feature "default"
+│   │   ├── base64 v0.22.1
+│   │   └── base64 feature "std"
+│   │       ├── base64 v0.22.1
+│   │       └── base64 feature "alloc"
+│   │           └── base64 v0.22.1
+│   ├── bitflags feature "default"
+│   │   └── bitflags v2.13.2
+│   ├── home feature "default"
+│   │   └── home v0.5.12
+│   ├── libc feature "default"
+│   │   ├── libc v0.2.191
+│   │   └── libc feature "std"
+│   │       └── libc v0.2.191
+│   ├── log feature "default"
+│   │   └── log v0.4.34
+│   ├── parking_lot feature "default"
+│   │   └── parking_lot v0.12.5
+│   │       ├── lock_api feature "default"
+│   │       │   ├── lock_api v0.4.14
+│   │       │   │   └── scopeguard v1.2.0
+│   │       │   └── lock_api feature "atomic_usize"
+│   │       │       └── lock_api v0.4.14 (*)
+│   │       └── parking_lot_core feature "default"
+│   │           └── parking_lot_core v0.9.12
+│   │               ├── libc feature "default" (*)
+│   │               ├── cfg-if feature "default"
+│   │               │   └── cfg-if v1.0.5
+│   │               └── smallvec feature "default"
+│   │                   └── smallvec v1.16.3
+│   ├── polling feature "default"
+│   │   └── polling v3.11.0
+│   │       ├── cfg-if feature "default" (*)
+│   │       ├── rustix feature "event"
+│   │       │   └── rustix v1.1.5
+│   │       │       ├── bitflags v2.13.2
+│   │       │       ├── errno v0.3.14
+│   │       │       │   └── libc v0.2.191
+│   │       │       └── libc v0.2.191
+│   │       ├── rustix feature "fs"
+│   │       │   └── rustix v1.1.5 (*)
+│   │       ├── rustix feature "pipe"
+│   │       │   └── rustix v1.1.5 (*)
+│   │       ├── rustix feature "process"
+│   │       │   └── rustix v1.1.5 (*)
+│   │       ├── rustix feature "std"
+│   │       │   ├── rustix v1.1.5 (*)
+│   │       │   ├── bitflags feature "std"
+│   │       │   │   └── bitflags v2.13.2
+│   │       │   ├── libc feature "std" (*)
+│   │       │   ├── rustix feature "alloc"
+│   │       │   │   └── rustix v1.1.5 (*)
+│   │       │   └── errno feature "std"
+│   │       │       ├── errno v0.3.14 (*)
+│   │       │       └── libc feature "std" (*)
+│   │       └── rustix feature "time"
+│   │           └── rustix v1.1.5 (*)
+│   ├── rustix feature "std" (*)
+│   ├── regex-automata feature "default"
+│   │   ├── regex-automata v0.4.18
+│   │   │   ├── aho-corasick v1.1.5
+│   │   │   │   └── memchr v2.8.3
+│   │   │   ├── memchr v2.8.3
+│   │   │   └── regex-syntax v0.8.11
+│   │   ├── regex-automata feature "dfa"
+│   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   ├── regex-automata feature "dfa-build"
+│   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   ├── regex-automata feature "dfa-search"
+│   │   │   │   │   └── regex-automata v0.4.18 (*)
+│   │   │   │   └── regex-automata feature "nfa-thompson"
+│   │   │   │       ├── regex-automata v0.4.18 (*)
+│   │   │   │       └── regex-automata feature "alloc"
+│   │   │   │           └── regex-automata v0.4.18 (*)
+│   │   │   ├── regex-automata feature "dfa-onepass"
+│   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   └── regex-automata feature "nfa-thompson" (*)
+│   │   │   └── regex-automata feature "dfa-search" (*)
+│   │   ├── regex-automata feature "hybrid"
+│   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   ├── regex-automata feature "alloc" (*)
+│   │   │   └── regex-automata feature "nfa-thompson" (*)
+│   │   ├── regex-automata feature "meta"
+│   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   ├── regex-automata feature "nfa-pikevm"
+│   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   └── regex-automata feature "nfa-thompson" (*)
+│   │   │   └── regex-automata feature "syntax"
+│   │   │       ├── regex-automata v0.4.18 (*)
+│   │   │       └── regex-automata feature "alloc" (*)
+│   │   ├── regex-automata feature "nfa"
+│   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   ├── regex-automata feature "nfa-backtrack"
+│   │   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   │   └── regex-automata feature "nfa-thompson" (*)
+│   │   │   ├── regex-automata feature "nfa-pikevm" (*)
+│   │   │   └── regex-automata feature "nfa-thompson" (*)
+│   │   ├── regex-automata feature "perf"
+│   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   ├── regex-automata feature "perf-inline"
+│   │   │   │   └── regex-automata v0.4.18 (*)
+│   │   │   └── regex-automata feature "perf-literal"
+│   │   │       ├── regex-automata v0.4.18 (*)
+│   │   │       ├── regex-automata feature "perf-literal-multisubstring"
+│   │   │       │   └── regex-automata v0.4.18 (*)
+│   │   │       └── regex-automata feature "perf-literal-substring"
+│   │   │           ├── regex-automata v0.4.18 (*)
+│   │   │           └── aho-corasick feature "perf-literal"
+│   │   │               └── aho-corasick v1.1.5 (*)
+│   │   ├── regex-automata feature "std"
+│   │   │   ├── regex-automata v0.4.18 (*)
+│   │   │   ├── regex-automata feature "alloc" (*)
+│   │   │   ├── aho-corasick feature "std"
+│   │   │   │   ├── aho-corasick v1.1.5 (*)
+│   │   │   │   └── memchr feature "std"
+│   │   │   │       ├── memchr v2.8.3
+│   │   │   │       └── memchr feature "alloc"
+│   │   │   │           └── memchr v2.8.3
+│   │   │   ├── memchr feature "std" (*)
+│   │   │   └── regex-syntax feature "std"
+│   │   │       └── regex-syntax v0.8.11
+│   │   ├── regex-automata feature "syntax" (*)
+│   │   └── regex-automata feature "unicode"
+│   │       ├── regex-automata v0.4.18 (*)
+│   │       ├── regex-automata feature "unicode-age"
+│   │       │   ├── regex-automata v0.4.18 (*)
+│   │       │   └── regex-syntax feature "unicode-age"
+│   │       │       └── regex-syntax v0.8.11
+│   │       ├── regex-automata feature "unicode-bool"
+│   │       │   ├── regex-automata v0.4.18 (*)
+│   │       │   └── regex-syntax feature "unicode-bool"
+│   │       │       └── regex-syntax v0.8.11
+│   │       ├── regex-automata feature "unicode-case"
+│   │       │   ├── regex-automata v0.4.18 (*)
+│   │       │   └── regex-syntax feature "unicode-case"
+│   │       │       └── regex-syntax v0.8.11
+│   │       ├── regex-automata feature "unicode-gencat"
+│   │       │   ├── regex-automata v0.4.18 (*)
+│   │       │   └── regex-syntax feature "unicode-gencat"
+│   │       │       └── regex-syntax v0.8.11
+│   │       ├── regex-automata feature "unicode-perl"
+│   │       │   ├── regex-automata v0.4.18 (*)
+│   │       │   └── regex-syntax feature "unicode-perl"
+│   │       │       └── regex-syntax v0.8.11
+│   │       ├── regex-automata feature "unicode-script"
+│   │       │   ├── regex-automata v0.4.18 (*)
+│   │       │   └── regex-syntax feature "unicode-script"
+│   │       │       └── regex-syntax v0.8.11
+│   │       ├── regex-automata feature "unicode-segment"
+│   │       │   ├── regex-automata v0.4.18 (*)
+│   │       │   └── regex-syntax feature "unicode-segment"
+│   │       │       └── regex-syntax v0.8.11
+│   │       ├── regex-automata feature "unicode-word-boundary"
+│   │       │   └── regex-automata v0.4.18 (*)
+│   │       └── regex-syntax feature "unicode"
+│   │           ├── regex-syntax v0.8.11
+│   │           ├── regex-syntax feature "unicode-age" (*)
+│   │           ├── regex-syntax feature "unicode-bool" (*)
+│   │           ├── regex-syntax feature "unicode-case" (*)
+│   │           ├── regex-syntax feature "unicode-gencat" (*)
+│   │           ├── regex-syntax feature "unicode-perl" (*)
+│   │           ├── regex-syntax feature "unicode-script" (*)
+│   │           └── regex-syntax feature "unicode-segment" (*)
+│   ├── rustix-openpty feature "default"
+│   │   └── rustix-openpty v0.2.0
+│   │       ├── errno v0.3.14 (*)
+│   │       ├── libc v0.2.191
+│   │       ├── rustix feature "fs" (*)
+│   │       └── rustix feature "termios"
+│   │           └── rustix v1.1.5 (*)
+│   ├── signal-hook feature "default"
+│   │   ├── signal-hook v0.4.5
+│   │   │   ├── libc feature "default" (*)
+│   │   │   └── signal-hook-registry feature "default"
+│   │   │       └── signal-hook-registry v1.4.8
+│   │   │           ├── libc feature "default" (*)
+│   │   │           └── errno feature "default"
+│   │   │               ├── errno v0.3.14 (*)
+│   │   │               └── errno feature "std" (*)
+│   │   ├── signal-hook feature "channel"
+│   │   │   └── signal-hook v0.4.5 (*)
+│   │   └── signal-hook feature "iterator"
+│   │       ├── signal-hook v0.4.5 (*)
+│   │       └── signal-hook feature "channel" (*)
+│   ├── unicode-width feature "default"
+│   │   ├── unicode-width v0.2.2
+│   │   └── unicode-width feature "cjk"
+│   │       └── unicode-width v0.2.2
+│   ├── vte feature "ansi"
+│   │   ├── vte v0.15.0
+│   │   │   ├── arrayvec v0.7.8
+│   │   │   ├── bitflags v2.13.2
+│   │   │   ├── cursor-icon v1.2.0
+│   │   │   ├── memchr v2.8.3
+│   │   │   └── log feature "default" (*)
+│   │   ├── vte feature "bitflags"
+│   │   │   └── vte v0.15.0 (*)
+│   │   ├── vte feature "cursor-icon"
+│   │   │   └── vte v0.15.0 (*)
+│   │   └── vte feature "log"
+│   │       └── vte v0.15.0 (*)
+│   └── vte feature "std"
+│       ├── vte v0.15.0 (*)
+│       └── memchr feature "std" (*)
+├── portable-pty v0.9.0
+│   ├── libc feature "default" (*)
+│   ├── log feature "default" (*)
+│   ├── anyhow feature "default"
+│   │   ├── anyhow v1.0.104
+│   │   └── anyhow feature "std"
+│   │       └── anyhow v1.0.104
+│   ├── downcast-rs feature "default"
+│   │   ├── downcast-rs v1.2.1
+│   │   └── downcast-rs feature "std"
+│   │       └── downcast-rs v1.2.1
+│   ├── filedescriptor feature "default"
+│   │   └── filedescriptor v0.8.3
+│   │       ├── libc feature "default" (*)
+│   │       └── thiserror feature "default"
+│   │           └── thiserror v1.0.69
+│   │               └── thiserror-impl feature "default"
+│   │                   └── thiserror-impl v1.0.69 (proc-macro)
+│   │                       ├── proc-macro2 feature "default"
+│   │                       │   ├── proc-macro2 v1.0.107
+│   │                       │   │   └── unicode-ident feature "default"
+│   │                       │   │       └── unicode-ident v1.0.27
+│   │                       │   └── proc-macro2 feature "proc-macro"
+│   │                       │       └── proc-macro2 v1.0.107 (*)
+│   │                       ├── quote feature "default"
+│   │                       │   ├── quote v1.0.47
+│   │                       │   │   └── proc-macro2 v1.0.107 (*)
+│   │                       │   └── quote feature "proc-macro"
+│   │                       │       ├── quote v1.0.47 (*)
+│   │                       │       └── proc-macro2 feature "proc-macro" (*)
+│   │                       └── syn feature "default"
+│   │                           ├── syn v2.0.119
+│   │                           │   ├── proc-macro2 v1.0.107 (*)
+│   │                           │   ├── quote v1.0.47 (*)
+│   │                           │   └── unicode-ident feature "default" (*)
+│   │                           ├── syn feature "clone-impls"
+│   │                           │   └── syn v2.0.119 (*)
+│   │                           ├── syn feature "derive"
+│   │                           │   └── syn v2.0.119 (*)
+│   │                           ├── syn feature "parsing"
+│   │                           │   └── syn v2.0.119 (*)
+│   │                           ├── syn feature "printing"
+│   │                           │   └── syn v2.0.119 (*)
+│   │                           └── syn feature "proc-macro"
+│   │                               ├── syn v2.0.119 (*)
+│   │                               ├── proc-macro2 feature "proc-macro" (*)
+│   │                               └── quote feature "proc-macro" (*)
+│   ├── nix feature "default"
+│   │   └── nix v0.28.0
+│   │       ├── bitflags feature "default" (*)
+│   │       ├── libc feature "default" (*)
+│   │       ├── libc feature "extra_traits"
+│   │       │   └── libc v0.2.191
+│   │       └── cfg-if feature "default" (*)
+│   │       [build-dependencies]
+│   │       └── cfg_aliases feature "default"
+│   │           └── cfg_aliases v0.1.1
+│   ├── nix feature "fs"
+│   │   └── nix v0.28.0 (*)
+│   ├── nix feature "term"
+│   │   └── nix v0.28.0 (*)
+│   ├── serial2 feature "default"
+│   │   └── serial2 v0.2.38
+│   │       ├── libc feature "default" (*)
+│   │       └── cfg-if feature "default" (*)
+│   └── shell-words feature "default"
+│       ├── shell-words v1.1.1
+│       └── shell-words feature "std"
+│           └── shell-words v1.1.1
+├── crossterm feature "bracketed-paste"
+│   └── crossterm v0.29.0
+│       ├── bitflags feature "default" (*)
+│       ├── parking_lot feature "default" (*)
+│       ├── rustix feature "std" (*)
+│       ├── rustix feature "stdio"
+│       │   └── rustix v1.1.5 (*)
+│       ├── rustix feature "termios" (*)
+│       ├── document-features feature "default"
+│       │   └── document-features v0.2.12 (proc-macro)
+│       │       └── litrs feature "default"
+│       │           └── litrs v1.0.1
+│       ├── mio feature "default"
+│       │   ├── mio v1.2.4
+│       │   │   ├── libc feature "default" (*)
+│       │   │   └── log feature "default" (*)
+│       │   └── mio feature "log"
+│       │       └── mio v1.2.4 (*)
+│       ├── mio feature "os-poll"
+│       │   └── mio v1.2.4 (*)
+│       ├── signal-hook feature "default"
+│       │   ├── signal-hook v0.3.18
+│       │   │   ├── libc feature "default" (*)
+│       │   │   └── signal-hook-registry feature "default" (*)
+│       │   ├── signal-hook feature "channel"
+│       │   │   └── signal-hook v0.3.18 (*)
+│       │   └── signal-hook feature "iterator"
+│       │       ├── signal-hook v0.3.18 (*)
+│       │       └── signal-hook feature "channel" (*)
+│       ├── signal-hook-mio feature "default"
+│       │   └── signal-hook-mio v0.2.5
+│       │       ├── libc feature "default" (*)
+│       │       ├── mio feature "default" (*)
+│       │       ├── mio feature "net"
+│       │       │   └── mio v1.2.4 (*)
+│       │       ├── mio feature "os-ext"
+│       │       │   ├── mio v1.2.4 (*)
+│       │       │   └── mio feature "os-poll" (*)
+│       │       └── signal-hook feature "default" (*)
+│       └── signal-hook-mio feature "support-v1_0"
+│           ├── signal-hook-mio v0.2.5 (*)
+│           └── signal-hook-mio feature "mio-1_0"
+│               └── signal-hook-mio v0.2.5 (*)
+└── crossterm feature "events"
+    └── crossterm v0.29.0 (*)

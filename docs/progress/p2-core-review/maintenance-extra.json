@@ -1,0 +1,47 @@
+{
+  "vt100_repo": {
+    "html_url": "https://github.com/doy/vt100-rust",
+    "archived": false,
+    "disabled": false,
+    "pushed_at": "2025-07-12T20:55:18Z",
+    "updated_at": "2026-09-12T10:28:26Z"
+  },
+  "rustix_repo": {
+    "html_url": "https://github.com/bytecodealliance/rustix",
+    "archived": false,
+    "disabled": false,
+    "pushed_at": "2026-10-15T20:20:06Z",
+    "updated_at": "2026-10-16T14:57:21Z"
+  },
+  "openpty_repo": {
+    "html_url": "https://github.com/sunfishcode/rustix-openpty",
+    "archived": false,
+    "disabled": false,
+    "pushed_at": "2025-03-06T23:06:42Z",
+    "updated_at": "2025-09-29T12:15:18Z"
+  },
+  "linux-raw-sys": {
+    "name": "linux-raw-sys",
+    "repository": "https://github.com/sunfishcode/linux-raw-sys",
+    "updated_at": "2025-12-23T00:00:07.059646Z",
+    "max_stable_version": "0.12.1"
+  },
+  "memchr": {
+    "name": "memchr",
+    "repository": "https://github.com/BurntSushi/memchr",
+    "updated_at": "2026-07-08T00:49:54.408285Z",
+    "max_stable_version": "2.8.3"
+  },
+  "windows-link": {
+    "name": "windows-link",
+    "repository": "https://github.com/microsoft/windows-rs",
+    "updated_at": "2026-09-03T16:39:03.349369Z",
+    "max_stable_version": "0.100.0"
+  },
+  "windows-sys": {
+    "name": "windows-sys",
+    "repository": "https://github.com/microsoft/windows-rs",
+    "updated_at": "2025-10-06T19:18:30.163595Z",
+    "max_stable_version": "0.61.2"
+  }
+}

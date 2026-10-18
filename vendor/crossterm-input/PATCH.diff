@@ -1,0 +1,782 @@
+--- a/upstream/selected-event-ranges.rs
++++ b/src/event.rs
+@@ -1,10 +1,14 @@
++use std::fmt::{self, Display};
++use std::hash::{Hash, Hasher};
++
++use bitflags::bitflags;
++
+ bitflags! {
+     /// Represents special flags that tell compatible terminals to add extra information to keyboard events.
+     ///
+     /// See <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement> for more information.
+     ///
+     /// Alternate keys and Unicode codepoints are not yet supported by crossterm.
+-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(transparent))]
+     #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+     pub struct KeyboardEnhancementFlags: u8 {
+         /// Represent Escape and modified keys using CSI-u sequences, so they can be unambiguously
+@@ -27,15 +31,8 @@
+     }
+ }
+ 
+-/// A command that enables mouse event capturing.
+-///
+-/// Mouse events can be captured with [read](./fn.read.html)/[poll](./fn.poll.html).
+-
+ /// Represents an event.
+-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+-#[cfg_attr(feature = "derive-more", derive(IsVariant))]
+-#[cfg_attr(not(feature = "bracketed-paste"), derive(Copy))]
+-#[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Hash)]
++#[derive(PartialOrd, PartialEq, Eq, Clone, Hash)]
+ pub enum Event {
+     /// The terminal gained focus
+     FocusGained,
+@@ -47,7 +44,6 @@
+     Mouse(MouseEvent),
+     /// A string that was pasted into the terminal. Only emitted if bracketed paste has been
+     /// enabled.
+-    #[cfg(feature = "bracketed-paste")]
+     Paste(String),
+     /// An resize event with new dimensions after resize (columns, rows).
+     /// **Note** that resize events can occur in batches.
+@@ -214,7 +210,6 @@
+     /// }
+     /// # std::io::Result::Ok(())
+     /// ```
+-    #[cfg(feature = "bracketed-paste")]
+     #[inline]
+     pub fn as_paste_event(&self) -> Option<&str> {
+         match self {
+@@ -261,8 +256,7 @@
+ /// Some platforms/terminals does not report all key modifiers
+ /// combinations for all mouse event types. For example - macOS reports
+ /// `Ctrl` + left mouse button click as a right mouse button click.
+-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+-#[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
++#[derive(PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+ pub struct MouseEvent {
+     /// The kind of mouse event that was caused.
+     pub kind: MouseEventKind,
+@@ -283,8 +277,6 @@
+ /// Some platforms/terminals do not report mouse button for the
+ /// `MouseEventKind::Up` and `MouseEventKind::Drag` events. `MouseButton::Left`
+ /// is returned if we don't know which button was used.
+-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+-#[cfg_attr(feature = "derive-more", derive(IsVariant))]
+ #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+ pub enum MouseEventKind {
+     /// Pressed mouse button. Contains the button that was pressed.
+@@ -306,8 +298,6 @@
+ }
+ 
+ /// Represents a mouse button.
+-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+-#[cfg_attr(feature = "derive-more", derive(IsVariant))]
+ #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+ pub enum MouseButton {
+     /// Left mouse button.
+@@ -324,7 +314,6 @@
+     /// **Note:** `SUPER`, `HYPER`, and `META` can only be read if
+     /// [`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES`] has been enabled with
+     /// [`PushKeyboardEnhancementFlags`].
+-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(transparent))]
+     #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+     pub struct KeyModifiers: u8 {
+         const SHIFT = 0b0000_0001;
+@@ -388,8 +377,6 @@
+ }
+ 
+ /// Represents a keyboard event kind.
+-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+-#[cfg_attr(feature = "derive-more", derive(IsVariant))]
+ #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+ pub enum KeyEventKind {
+     Press,
+@@ -404,7 +391,6 @@
+     /// [`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES`] has been enabled with
+     /// [`PushKeyboardEnhancementFlags`].
+     #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(transparent))]
+     pub struct KeyEventState: u8 {
+         /// The key event origins from the keypad.
+         const KEYPAD = 0b0000_0001;
+@@ -421,8 +407,7 @@
+ }
+ 
+ /// Represents a key event.
+-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+-#[derive(Debug, PartialOrd, Clone, Copy)]
++#[derive(PartialOrd, Clone, Copy)]
+ pub struct KeyEvent {
+     /// The key itself.
+     pub code: KeyCode,
+@@ -562,7 +547,6 @@
+ 
+ /// Represents a media key (as part of [`KeyCode::Media`]).
+ #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+ pub enum MediaKeyCode {
+     /// Play media key.
+     Play,
+@@ -614,7 +598,6 @@
+ 
+ /// Represents a modifier key (as part of [`KeyCode::Modifier`]).
+ #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+ pub enum ModifierKeyCode {
+     /// Left Shift key.
+     LeftShift,
+@@ -709,9 +692,7 @@
+ }
+ 
+ /// Represents a key.
+-#[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+-#[cfg_attr(feature = "derive-more", derive(IsVariant))]
+-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
++#[derive(PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+ pub enum KeyCode {
+     /// Backspace key (Delete on macOS, Backspace on other platforms).
+     Backspace,
+@@ -744,12 +725,10 @@
+     /// F key.
+     ///
+     /// `KeyCode::F(1)` represents F1 key, etc.
+-    #[cfg_attr(feature = "derive-more", is_variant(ignore))]
+     F(u8),
+     /// A character.
+     ///
+     /// `KeyCode::Char('c')` represents `c` character, etc.
+-    #[cfg_attr(feature = "derive-more", is_variant(ignore))]
+     Char(char),
+     /// Null.
+     Null,
+@@ -802,7 +781,6 @@
+     /// **Note:** these keys can only be read if
+     /// [`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES`] has been enabled with
+     /// [`PushKeyboardEnhancementFlags`].
+-    #[cfg_attr(feature = "derive-more", is_variant(ignore))]
+     Media(MediaKeyCode),
+     /// A modifier key.
+     ///
+@@ -810,7 +788,6 @@
+     /// [`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES`] and
+     /// [`KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES`] have been enabled with
+     /// [`PushKeyboardEnhancementFlags`].
+-    #[cfg_attr(feature = "derive-more", is_variant(ignore))]
+     Modifier(ModifierKeyCode),
+ }
+ 
+@@ -974,3 +951,38 @@
+     #[cfg(unix)]
+     PrimaryDeviceAttributes,
+ }
++
++impl fmt::Debug for Event {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Event::FocusGained => formatter.write_str("FocusGained"),
++            Event::FocusLost => formatter.write_str("FocusLost"),
++            Event::Key(_) => formatter.write_str("Key(<redacted>)"),
++            Event::Mouse(_) => formatter.write_str("Mouse(<redacted>)"),
++            Event::Paste(_) => formatter.write_str("Paste(<redacted>)"),
++            Event::Resize(columns, rows) => formatter
++                .debug_tuple("Resize")
++                .field(columns)
++                .field(rows)
++                .finish(),
++        }
++    }
++}
++
++impl fmt::Debug for KeyEvent {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("KeyEvent(<redacted>)")
++    }
++}
++
++impl fmt::Debug for KeyCode {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("KeyCode(<redacted>)")
++    }
++}
++
++impl fmt::Debug for MouseEvent {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("MouseEvent(<redacted>)")
++    }
++}
+--- a/upstream/parse.rs
++++ b/src/parse.rs
+@@ -1,11 +1,15 @@
+ use std::io;
++
++/// The decoder accepts input only while the caller has raw mode enabled.
++const INPUT_IS_RAW: bool = true;
++const MAX_PASTE_PAYLOAD_BYTES: usize = 65_536;
+ 
+ use crate::event::{
+     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, KeyboardEnhancementFlags,
+     MediaKeyCode, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
+ };
+ 
+-use super::super::super::InternalEvent;
++use crate::event::InternalEvent;
+ 
+ // Event parsing
+ //
+@@ -20,7 +24,7 @@
+ //
+ 
+ fn could_not_parse_event_error() -> io::Error {
+-    io::Error::new(io::ErrorKind::Other, "Could not parse an event.")
++    io::Error::new(io::ErrorKind::InvalidData, "Could not parse an event.")
+ }
+ 
+ pub(crate) fn parse_event(
+@@ -96,9 +100,9 @@
+         // newlines as input is because the terminal converts \r into \n for us. When we
+         // enter raw mode, we disable that, so \n no longer has any meaning - it's better to
+         // use Ctrl+J. Waiting to handle it here means it gets picked up later
+-        b'\n' if !crate::terminal::sys::is_raw_mode_enabled() => Ok(Some(InternalEvent::Event(
+-            Event::Key(KeyCode::Enter.into()),
+-        ))),
++        b'\n' if !INPUT_IS_RAW => Ok(Some(InternalEvent::Event(Event::Key(
++            KeyCode::Enter.into(),
++        )))),
+         b'\t' => Ok(Some(InternalEvent::Event(Event::Key(KeyCode::Tab.into())))),
+         b'\x7F' => Ok(Some(InternalEvent::Event(Event::Key(
+             KeyCode::Backspace.into(),
+@@ -193,7 +197,6 @@
+                 if !(64..=126).contains(&last_byte) {
+                     None
+                 } else {
+-                    #[cfg(feature = "bracketed-paste")]
+                     if buffer.starts_with(b"\x1B[200~") {
+                         return parse_csi_bracketed_paste(buffer);
+                     }
+@@ -250,8 +253,8 @@
+ 
+     let mut split = s.split(';');
+ 
+-    let y = next_parsed::<u16>(&mut split)? - 1;
+-    let x = next_parsed::<u16>(&mut split)? - 1;
++    let y = coordinate_from_one_based(next_parsed::<u16>(&mut split)?)?;
++    let x = coordinate_from_one_based(next_parsed::<u16>(&mut split)?)?;
+ 
+     Ok(Some(InternalEvent::CursorPosition(x, y)))
+ }
+@@ -298,6 +301,10 @@
+     // See <https://vt100.net/docs/vt510-rm/DA1.html>
+ 
+     Ok(Some(InternalEvent::PrimaryDeviceAttributes))
++}
++
++fn coordinate_from_one_based(value: u16) -> io::Result<u16> {
++    value.checked_sub(1).ok_or_else(could_not_parse_event_error)
+ }
+ 
+ fn parse_modifiers(mask: u8) -> KeyModifiers {
+@@ -549,7 +556,7 @@
+                     // newlines as input is because the terminal converts \r into \n for us. When we
+                     // enter raw mode, we disable that, so \n no longer has any meaning - it's better to
+                     // use Ctrl+J. Waiting to handle it here means it gets picked up later
+-                    '\n' if !crate::terminal::sys::is_raw_mode_enabled() => KeyCode::Enter,
++                    '\n' if !INPUT_IS_RAW => KeyCode::Enter,
+                     '\t' => {
+                         if modifiers.contains(KeyModifiers::SHIFT) {
+                             KeyCode::BackTab
+@@ -676,8 +683,8 @@
+         .ok_or_else(could_not_parse_event_error)?;
+     let (kind, modifiers) = parse_cb(cb)?;
+ 
+-    let cx = next_parsed::<u16>(&mut split)? - 1;
+-    let cy = next_parsed::<u16>(&mut split)? - 1;
++    let cx = coordinate_from_one_based(next_parsed::<u16>(&mut split)?)?;
++    let cy = coordinate_from_one_based(next_parsed::<u16>(&mut split)?)?;
+ 
+     Ok(Some(InternalEvent::Event(Event::Mouse(MouseEvent {
+         kind,
+@@ -704,8 +711,8 @@
+     // See http://www.xfree86.org/current/ctlseqs.html#Mouse%20Tracking
+     // The upper left character position on the terminal is denoted as 1,1.
+     // Subtract 1 to keep it synced with cursor
+-    let cx = u16::from(buffer[4].saturating_sub(32)) - 1;
+-    let cy = u16::from(buffer[5].saturating_sub(32)) - 1;
++    let cx = coordinate_from_one_based(u16::from(buffer[4].saturating_sub(32)))?;
++    let cy = coordinate_from_one_based(u16::from(buffer[5].saturating_sub(32)))?;
+ 
+     Ok(Some(InternalEvent::Event(Event::Mouse(MouseEvent {
+         kind,
+@@ -734,8 +741,8 @@
+     // See http://www.xfree86.org/current/ctlseqs.html#Mouse%20Tracking
+     // The upper left character position on the terminal is denoted as 1,1.
+     // Subtract 1 to keep it synced with cursor
+-    let cx = next_parsed::<u16>(&mut split)? - 1;
+-    let cy = next_parsed::<u16>(&mut split)? - 1;
++    let cx = coordinate_from_one_based(next_parsed::<u16>(&mut split)?)?;
++    let cy = coordinate_from_one_based(next_parsed::<u16>(&mut split)?)?;
+ 
+     // When button 3 in Cb is used to represent mouse release, you can't tell which button was
+     // released. SGR mode solves this by having the sequence end with a lowercase m if it's a
+@@ -809,7 +816,6 @@
+     Ok((kind, modifiers))
+ }
+ 
+-#[cfg(feature = "bracketed-paste")]
+ pub(crate) fn parse_csi_bracketed_paste(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
+     // ESC [ 2 0 0 ~ pasted text ESC 2 0 1 ~
+     assert!(buffer.starts_with(b"\x1B[200~"));
+@@ -817,7 +823,16 @@
+     if !buffer.ends_with(b"\x1b[201~") {
+         Ok(None)
+     } else {
+-        let paste = String::from_utf8_lossy(&buffer[6..buffer.len() - 6]).to_string();
++        let paste_bytes = &buffer[6..buffer.len() - 6];
++        if paste_bytes.len() > MAX_PASTE_PAYLOAD_BYTES {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "paste exceeds input limit",
++            ));
++        }
++        let paste = std::str::from_utf8(paste_bytes)
++            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 paste"))?
++            .to_owned();
+         Ok(Some(InternalEvent::Event(Event::Paste(paste))))
+     }
+ }
+@@ -946,7 +961,6 @@
+         );
+ 
+         // parse_csi_bracketed_paste
+-        #[cfg(feature = "bracketed-paste")]
+         assert_eq!(
+             parse_event(b"\x1B[200~on and on and on\x1B[201~", false).unwrap(),
+             Some(InternalEvent::Event(Event::Paste(
+@@ -1051,7 +1065,6 @@
+         );
+     }
+ 
+-    #[cfg(feature = "bracketed-paste")]
+     #[test]
+     fn test_parse_csi_bracketed_paste() {
+         //
+--- a//dev/null
++++ b/Cargo.toml
+@@ -0,0 +1,12 @@
++[package]
++name = "crossterm-input"
++version = "0.29.0-panelink.1"
++edition = "2021"
++publish = false
++license = "MIT"
++
++[lib]
++doctest = false
++
++[dependencies]
++bitflags = "=2.13.2"
+--- a//dev/null
++++ b/Cargo.lock
+@@ -0,0 +1,16 @@
++# This file is automatically @generated by Cargo.
++# It is not intended for manual editing.
++version = 4
++
++[[package]]
++name = "bitflags"
++version = "2.13.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
++
++[[package]]
++name = "crossterm-input"
++version = "0.29.0-panelink.1"
++dependencies = [
++ "bitflags",
++]
+--- a//dev/null
++++ b/src/lib.rs
+@@ -0,0 +1,16 @@
++//! A bounded, parser-only extraction of Crossterm's Unix input decoder.
++//!
++//! Callers must own raw terminal mode, input IO, error cleanup, and restoration.
++
++#[cfg(not(unix))]
++compile_error!("this parser extraction supports Unix targets only");
++
++mod decoder;
++mod event;
++mod parse;
++
++pub use decoder::{DecodeError, Decoder};
++pub use event::{
++    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, KeyboardEnhancementFlags,
++    MediaKeyCode, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
++};
+--- a//dev/null
++++ b/src/decoder.rs
+@@ -0,0 +1,362 @@
++use std::fmt;
++
++use crate::event::{Event, InternalEvent};
++use crate::parse;
++
++const ORDINARY_SEQUENCE_LIMIT: usize = 16_384;
++const PASTE_SEQUENCE_LIMIT: usize = 65_548;
++const PASTE_OPENER: &[u8] = b"\x1b[200~";
++
++/// A fixed-storage stream decoder around Crossterm's Unix input parser.
++///
++/// The caller must enable raw mode before feeding bytes and must stop input and
++/// restore the terminal after any error. This type performs no host IO.
++pub struct Decoder {
++    buffer: Box<[u8; PASTE_SEQUENCE_LIMIT]>,
++    pending: usize,
++    failed: bool,
++}
++
++/// A malformed or over-limit input sequence. The error carries no input bytes.
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub struct DecodeError;
++
++impl fmt::Debug for DecodeError {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("DecodeError")
++    }
++}
++
++impl fmt::Display for DecodeError {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("input decoding failed")
++    }
++}
++
++impl std::error::Error for DecodeError {}
++
++impl fmt::Debug for Decoder {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter
++            .debug_struct("Decoder")
++            .field("pending_bytes", &self.pending)
++            .field("failed", &self.failed)
++            .finish()
++    }
++}
++
++impl Decoder {
++    /// Allocate the decoder's fixed maximum input buffer.
++    pub fn new() -> Self {
++        Self {
++            buffer: Box::new([0; PASTE_SEQUENCE_LIMIT]),
++            pending: 0,
++            failed: false,
++        }
++    }
++
++    /// Feed one raw input byte. At most one user-facing event is returned.
++    ///
++    /// A parser error permanently poisons this decoder. The caller must stop
++    /// the probe and restore the terminal rather than feeding any suffix.
++    pub fn advance(
++        &mut self,
++        byte: u8,
++        input_available: bool,
++    ) -> Result<Option<Event>, DecodeError> {
++        if self.failed {
++            return Err(DecodeError);
++        }
++
++        let limit = self.sequence_limit();
++        if self.pending == limit {
++            return Err(self.poison());
++        }
++
++        self.buffer[self.pending] = byte;
++        self.pending += 1;
++
++        match parse::parse_event(&self.buffer[..self.pending], input_available) {
++            Ok(Some(InternalEvent::Event(event))) => {
++                self.clear_pending();
++                Ok(Some(event))
++            }
++            Ok(Some(_)) => {
++                self.clear_pending();
++                Ok(None)
++            }
++            Ok(None) => Ok(None),
++            Err(_) => Err(self.poison()),
++        }
++    }
++
++    /// Resolve a pending single ESC after the caller's escape timeout.
++    ///
++    /// Incomplete CSI and paste sequences remain pending and are not flushed.
++    pub fn finish_escape(&mut self) -> Result<Option<Event>, DecodeError> {
++        if self.failed {
++            return Err(DecodeError);
++        }
++        if self.pending != 1 || self.buffer[0] != b'\x1b' {
++            return Ok(None);
++        }
++
++        match parse::parse_event(&self.buffer[..self.pending], false) {
++            Ok(Some(InternalEvent::Event(event))) => {
++                self.clear_pending();
++                Ok(Some(event))
++            }
++            Ok(Some(_)) | Ok(None) => {
++                self.clear_pending();
++                Ok(None)
++            }
++            Err(_) => Err(self.poison()),
++        }
++    }
++
++    /// Number of buffered, incomplete input bytes, without exposing their contents.
++    pub fn pending_bytes(&self) -> usize {
++        self.pending
++    }
++
++    /// Whether malformed or over-limit input has permanently poisoned this decoder.
++    pub fn is_failed(&self) -> bool {
++        self.failed
++    }
++
++    fn sequence_limit(&self) -> usize {
++        if self.buffer[..self.pending].starts_with(PASTE_OPENER) {
++            PASTE_SEQUENCE_LIMIT
++        } else {
++            ORDINARY_SEQUENCE_LIMIT
++        }
++    }
++
++    fn poison(&mut self) -> DecodeError {
++        self.clear_pending();
++        self.failed = true;
++        DecodeError
++    }
++
++    fn clear_pending(&mut self) {
++        self.buffer[..self.pending].fill(0);
++        self.pending = 0;
++    }
++}
++
++impl Default for Decoder {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
++
++    fn feed(decoder: &mut Decoder, bytes: &[u8]) -> Result<Vec<Event>, DecodeError> {
++        let mut events = Vec::new();
++        for &byte in bytes {
++            if let Some(event) = decoder.advance(byte, true)? {
++                events.push(event);
++            }
++        }
++        Ok(events)
++    }
++
++    #[test]
++    fn decodes_utf8_and_arrow_across_byte_boundaries_once() {
++        let mut decoder = Decoder::new();
++        assert!(
++            feed(&mut decoder, "Ž".as_bytes()).unwrap().as_slice()
++                == [Event::Key(KeyEvent::new(
++                    KeyCode::Char('Ž'),
++                    KeyModifiers::SHIFT,
++                ))]
++        );
++        assert_eq!(feed(&mut decoder, b"\x1b[").unwrap(), Vec::<Event>::new());
++        assert_eq!(
++            feed(&mut decoder, b"A").unwrap(),
++            [Event::Key(KeyCode::Up.into())]
++        );
++        assert_eq!(decoder.pending_bytes(), 0);
++    }
++
++    #[test]
++    fn finish_escape_resolves_only_single_escape() {
++        let mut decoder = Decoder::new();
++        assert_eq!(decoder.advance(b'\x1b', true), Ok(None));
++        assert_eq!(
++            decoder.finish_escape(),
++            Ok(Some(Event::Key(KeyCode::Esc.into())))
++        );
++        assert_eq!(decoder.pending_bytes(), 0);
++
++        assert_eq!(decoder.advance(b'\x1b', true), Ok(None));
++        assert_eq!(decoder.advance(b'[', true), Ok(None));
++        assert_eq!(decoder.advance(b'1', true), Ok(None));
++        let pending = decoder.pending_bytes();
++        assert_eq!(decoder.finish_escape(), Ok(None));
++        assert_eq!(decoder.pending_bytes(), pending);
++        assert!(!decoder.is_failed());
++    }
++
++    #[test]
++    fn paste_delimiters_may_be_split_at_every_boundary() {
++        let opener = b"\x1b[200~";
++        let closer = b"\x1b[201~";
++        for opener_split in 0..=opener.len() {
++            for closer_split in 0..=closer.len() {
++                let mut decoder = Decoder::new();
++                let mut events = Vec::new();
++                for chunk in [
++                    &opener[..opener_split],
++                    &opener[opener_split..],
++                    b"hello",
++                    &closer[..closer_split],
++                    &closer[closer_split..],
++                ] {
++                    events.extend(feed(&mut decoder, chunk).unwrap());
++                }
++                assert_eq!(events, [Event::Paste("hello".to_owned())]);
++                assert_eq!(decoder.pending_bytes(), 0);
++                assert_eq!(
++                    decoder.advance(b'x', true),
++                    Ok(Some(Event::Key(KeyCode::Char('x').into())))
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn accepts_maximum_paste_payload_and_rejects_first_excess_byte() {
++        let mut decoder = Decoder::new();
++        assert!(feed(&mut decoder, b"\x1b[200~").unwrap().is_empty());
++        assert!(feed(&mut decoder, &vec![b'x'; 65_536]).unwrap().is_empty());
++        let events = feed(&mut decoder, b"\x1b[201~").unwrap();
++        assert_eq!(events.len(), 1);
++        let Event::Paste(paste) = &events[0] else {
++            panic!("expected one paste event");
++        };
++        assert_eq!(paste.len(), 65_536);
++        assert!(paste.bytes().all(|byte| byte == b'x'));
++        assert_eq!(decoder.pending_bytes(), 0);
++
++        let mut decoder = Decoder::new();
++        assert!(feed(&mut decoder, b"\x1b[200~").unwrap().is_empty());
++        assert!(feed(&mut decoder, &vec![b'x'; 65_537]).unwrap().is_empty());
++        assert!(feed(&mut decoder, b"\x1b[201~"[..5].as_ref())
++            .unwrap()
++            .is_empty());
++        assert_eq!(decoder.pending_bytes(), 65_548);
++        assert_eq!(decoder.advance(b'~', true), Err(DecodeError));
++        assert_eq!(decoder.pending_bytes(), 0);
++        assert!(decoder.is_failed());
++        for byte in b"\x1b[A" {
++            assert_eq!(decoder.advance(*byte, true), Err(DecodeError));
++        }
++    }
++
++    #[test]
++    fn ordinary_sequence_ceiling_is_checked_before_store() {
++        let mut decoder = Decoder::new();
++        assert!(feed(&mut decoder, b"\x1b[").unwrap().is_empty());
++        assert!(feed(&mut decoder, &vec![b'1'; 16_382]).unwrap().is_empty());
++        assert_eq!(decoder.pending_bytes(), 16_384);
++        assert_eq!(decoder.advance(b'1', true), Err(DecodeError));
++        assert_eq!(decoder.pending_bytes(), 0);
++        assert!(decoder.is_failed());
++    }
++
++    #[test]
++    fn invalid_utf8_and_malformed_control_poison_without_suffix_events() {
++        let mut decoder = Decoder::new();
++        assert!(feed(&mut decoder, b"\x1b[200~").unwrap().is_empty());
++        assert!(feed(&mut decoder, &[0xff]).unwrap().is_empty());
++        assert_eq!(decoder.advance(b'\x1b', true), Ok(None));
++        assert_eq!(decoder.advance(b'[', true), Ok(None));
++        assert_eq!(decoder.advance(b'2', true), Ok(None));
++        assert_eq!(decoder.advance(b'0', true), Ok(None));
++        assert_eq!(decoder.advance(b'1', true), Ok(None));
++        assert_eq!(decoder.advance(b'~', true), Err(DecodeError));
++        assert_eq!(decoder.advance(b'\x1b', true), Err(DecodeError));
++
++        let mut malformed = Decoder::new();
++        assert_eq!(malformed.advance(b'\x1b', true), Ok(None));
++        assert_eq!(malformed.advance(b'[', true), Ok(None));
++        assert_eq!(malformed.advance(b'!', true), Err(DecodeError));
++        assert_eq!(malformed.advance(b'a', true), Err(DecodeError));
++    }
++
++    #[test]
++    fn zero_terminal_coordinates_poison_without_panicking() {
++        for malformed in [
++            b"\x1b[0;1R".as_slice(),
++            b"\x1b[32;0;1;M",
++            b"\x1b[M  !",
++            b"\x1b[<0;0;1M",
++        ] {
++            let mut decoder = Decoder::new();
++            for &byte in &malformed[..malformed.len() - 1] {
++                assert_eq!(decoder.advance(byte, true), Ok(None));
++            }
++            assert_eq!(
++                decoder.advance(*malformed.last().unwrap(), true),
++                Err(DecodeError)
++            );
++            assert!(decoder.is_failed());
++            assert_eq!(decoder.advance(b'a', true), Err(DecodeError));
++        }
++    }
++
++    #[test]
++    fn internal_query_responses_are_dropped_without_queueing() {
++        let mut decoder = Decoder::new();
++        for response in [b"\x1b[20;10R".as_slice(), b"\x1b[?1u", b"\x1b[?1c"] {
++            assert!(feed(&mut decoder, response).unwrap().is_empty());
++            assert_eq!(decoder.pending_bytes(), 0);
++        }
++        assert_eq!(
++            decoder.advance(b'a', true),
++            Ok(Some(Event::Key(KeyCode::Char('a').into())))
++        );
++        assert_eq!(
++            decoder.advance(b'b', true),
++            Ok(Some(Event::Key(KeyCode::Char('b').into())))
++        );
++    }
++
++    #[test]
++    fn debug_output_redacts_event_payloads_and_pending_bytes() {
++        let secret = "distinctive-user-secret";
++        let key = Event::Key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE));
++        let paste = Event::Paste(secret.to_owned());
++        let mouse = MouseEvent {
++            kind: MouseEventKind::Down(MouseButton::Left),
++            column: 123,
++            row: 456,
++            modifiers: KeyModifiers::NONE,
++        };
++        let mouse_event = Event::Mouse(mouse);
++        assert!(!format!("{key:?}").contains('Q'));
++        assert!(!format!("{:?}", key.as_key_event().unwrap().code).contains('Q'));
++        assert!(!format!("{:?}", key.as_key_event().unwrap()).contains('Q'));
++        assert!(!format!("{paste:?}").contains(secret));
++        assert!(!format!("{mouse_event:?}").contains("123"));
++        assert!(!format!("{mouse_event:?}").contains("456"));
++        assert!(!format!("{mouse:?}").contains("123"));
++        assert!(!format!("{mouse:?}").contains("456"));
++
++        let mut decoder = Decoder::new();
++        feed(&mut decoder, b"\x1b[200~distinctive-user-secret").unwrap();
++        assert!(!format!("{decoder:?}").contains(secret));
++        let mut failed = Decoder::new();
++        assert_eq!(failed.advance(b'\x1b', true), Ok(None));
++        assert_eq!(failed.advance(b'[', true), Ok(None));
++        assert_eq!(failed.advance(b'!', true), Err(DecodeError));
++        assert!(!format!("{failed:?}").contains(secret));
++        let error = DecodeError;
++        assert!(!format!("{error:?} {error}").contains(secret));
++    }
++}

@@ -1,0 +1,14 @@
+[
+  {
+    "installed_doc_source": "/Users/sahillamba/.rustup/toolchains/stable-aarch64-apple-darwin/share/doc/rust/html/src/alloc/raw_vec/mod.rs.html",
+    "sha256": "e755b693f5da4ff04fb9a7932ffabf317f1f59d431f245bee58df2d4a8a356a8",
+    "rustc": "1.99.1",
+    "compiler_commit": "58cf8f9c35b355199727627d07ae34a4e2846d67"
+  },
+  {
+    "installed_doc_source": "/Users/sahillamba/.rustup/toolchains/stable-aarch64-apple-darwin/share/doc/rust/html/src/alloc/collections/vec_deque/mod.rs.html",
+    "sha256": "4e06a48fba7cacfc4b0df85b222bd9b7188c30bde7bd35ab717f058d7fc67b07",
+    "rustc": "1.99.1",
+    "compiler_commit": "58cf8f9c35b355199727627d07ae34a4e2846d67"
+  }
+]

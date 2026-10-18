@@ -1,0 +1,15 @@
+{
+  "Cargo.lock": "d2d7cc79075dae24989eafc870eed9c9515d92e6a1ef2dad885511c26a7092ba",
+  "Cargo.toml": "fb3ae0ef14b00a43cd2f71589f2a349076d3d33fcd87ee3c47dcd1686e823208",
+  "LICENSE": "aca4760f2a5eba9ce9d4448fe7cd3fcf98245a8315ede59ebd0c6085dd542e61",
+  "PATCH.diff": "5955fcfc4b85a567f286484e707f97b1f43325d0ab76e8ccfa499115c41a6fbf",
+  "PROVENANCE.md": "658a52455ca084ab03853e39ceaf8ec2e42c0467ac9d1c05dbcf6cbf41f00be3",
+  "src/decoder.rs": "9136ca0fa627d2102040f230b8137a87ced2d46c026d76dc89ca0c4104b5be3d",
+  "src/event.rs": "308da047db3d4c25e0e80e1a6b75ee0bd057a2d340cf132c5f2c2d4371f653d8",
+  "src/lib.rs": "51abaa791b5c3cbf8db343ee36fd8e4387f00fdc65f420ef4cbac702aa58e49c",
+  "src/parse.rs": "89a7720127d63b55e1825e13dfd72bd72da47ed62fe330968afc55560e63a9d5",
+  "upstream/.cargo_vcs_info.json": "c36e7cbcffc6c12772c1e6f9205c9eeb139af7d9dd702f9dcdb266e8f03d43ad",
+  "upstream/event.rs": "0d7c9506d5dc0033bf357c255e6d44bfe765cb7db5f503cbe62cd66094aaf34f",
+  "upstream/parse.rs": "689b765d67be62703f7935abfa1475d98994987461e413836b54c7936966ce2b",
+  "upstream/selected-event-ranges.rs": "cbc0eb6083420364f530011ac675f7a6a9bd2fe4d18203529814f7f9dbed5f8e"
+}

@@ -1,0 +1,9 @@
+# Deliberately selected third-party terminal engine
+
+This directory contains VT100 0.16.2, MIT copyright Jesse Luehrs, with narrow local corrections. It is a third-party library, not independently authored Panelink application logic. Preserve `LICENSE` when redistributing it. No competitor application implementation or assets were imported.
+
+`PROVENANCE.json` records the published registry archive SHA-256, upstream VCS commit from its archive metadata, and every imported/patched file hash. `panelink.patch` is the complete change against the published normalized package for modified files. Local package version: `0.16.2-panelink.1`. Root Cargo.lock controls application resolution. The upstream standalone lockfile and Cargo cache bookkeeping were intentionally omitted; Cargo.toml.orig is retained as upstream source metadata, not the active local manifest.
+
+Corrections: disable VTE default features so OSC storage uses its fixed 1,024-byte buffer; cap extra scalars at eight per cell; clamp cell insertion before allocation; bound repeated line insertion/scroll-down work; drop ignored CSI sequences before dispatch. The upstream fixed cell storage can truncate combining sequences before eight scalars when its byte capacity is exhausted. Oversized OSC is truncated by VTE and may dispatch a prefix; callbacks must not mistake that for validated complete content or forward it to the host.
+
+These changes have not been submitted upstream and are not upstream-approved releases. Do not refresh sources or regenerate guidelines/code automatically. A dependency/toolchain change must repeat feature activation, allocation-bound, query/clipboard and compatibility review. See ../../docs/progress/P2-REPLACEMENT.md for the scoped adoption decision, limitations, source review and actual checks.

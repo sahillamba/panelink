@@ -1,0 +1,26 @@
+#!/bin/sh
+# Development launcher: keep normal subcommands and open the shell probe by default.
+set -eu
+
+project=/Users/sahillamba/panelink
+binary="$project/target/debug/panelink"
+
+if [ ! -x "$binary" ]; then
+    printf '%s\n' 'Build Panelink first: cd /Users/sahillamba/panelink && cargo build --locked' >&2
+    exit 1
+fi
+
+if [ "$#" -gt 0 ]; then
+    exec "$binary" "$@"
+fi
+
+terminfo_dir="$(mktemp -d "${TMPDIR:-/private/tmp}/panelink-terminfo.XXXXXX")"
+trap 'rm -rf "$terminfo_dir"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+/usr/bin/tic -x -o "$terminfo_dir" "$project/docs/terminfo/panelink-probe.terminfo"
+# Keep the launcher alive to remove its private terminfo directory after exit.
+status=0
+"$binary" pty-probe --terminfo "$terminfo_dir" -- /bin/zsh || status=$?
+exit "$status"

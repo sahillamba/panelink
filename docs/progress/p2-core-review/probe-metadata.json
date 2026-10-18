@@ -1,0 +1,3084 @@
+{
+  "packages": [
+    {
+      "name": "arrayvec",
+      "version": "0.7.8",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#arrayvec@0.7.8",
+      "license": "MIT OR Apache-2.0",
+      "license_file": null,
+      "description": "A vector with fixed capacity, backed by an array (it can be stored on the stack too). Implements fixed capacity ArrayVec and ArrayString.",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "borsh",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.2.0",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "zeroize",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.4",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "bencher",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.1.4",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "matches",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.1",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde_test",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "arrayvec",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/arrayvec-0.7.8/src/lib.rs",
+          "edition": "2018",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "borsh",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/arrayvec-0.7.8/tests/borsh.rs",
+          "edition": "2018",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "serde",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/arrayvec-0.7.8/tests/serde.rs",
+          "edition": "2018",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "tests",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/arrayvec-0.7.8/tests/tests.rs",
+          "edition": "2018",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        },
+        {
+          "kind": [
+            "bench"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "arraystring",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/arrayvec-0.7.8/benches/arraystring.rs",
+          "edition": "2018",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        {
+          "kind": [
+            "bench"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "extend",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/arrayvec-0.7.8/benches/extend.rs",
+          "edition": "2018",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        }
+      ],
+      "features": {
+        "borsh": [
+          "dep:borsh"
+        ],
+        "default": [
+          "std"
+        ],
+        "serde": [
+          "dep:serde"
+        ],
+        "std": [],
+        "zeroize": [
+          "dep:zeroize"
+        ]
+      },
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/arrayvec-0.7.8/Cargo.toml",
+      "metadata": {
+        "docs": {
+          "rs": {
+            "features": [
+              "borsh",
+              "serde",
+              "zeroize"
+            ]
+          }
+        },
+        "release": {
+          "no-dev-version": true,
+          "tag-name": "{{version}}"
+        }
+      },
+      "publish": null,
+      "authors": [
+        "bluss"
+      ],
+      "categories": [
+        "data-structures",
+        "no-std"
+      ],
+      "keywords": [
+        "stack",
+        "vector",
+        "array",
+        "data-structure",
+        "no_std"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/bluss/arrayvec",
+      "homepage": null,
+      "documentation": "https://docs.rs/arrayvec/",
+      "edition": "2018",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.51"
+    },
+    {
+      "name": "bitflags",
+      "version": "2.13.2",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#bitflags@2.13.2",
+      "license": "MIT OR Apache-2.0",
+      "license_file": null,
+      "description": "A macro to generate structures which behave like bitflags.\n",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "arbitrary",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "bytemuck",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.12",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde_core",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.228",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "arbitrary",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "derive"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "bytemuck",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.12.2",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "derive"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rustversion",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde_json",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.103",
+          "kind": "dev",
+          "rename": "serde_lib",
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "derive"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde_test",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.19",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "trybuild",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.18",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "zerocopy",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.8",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "derive"
+          ],
+          "target": null,
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "bitflags",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.13.2/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "custom_bits_type",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.13.2/examples/custom_bits_type.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "custom_derive",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.13.2/examples/custom_derive.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "fmt",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.13.2/examples/fmt.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "macro_free",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.13.2/examples/macro_free.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "serde",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.13.2/examples/serde.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        {
+          "kind": [
+            "bench"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "parse",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.13.2/benches/parse.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        }
+      ],
+      "features": {
+        "arbitrary": [
+          "dep:arbitrary"
+        ],
+        "bytemuck": [
+          "dep:bytemuck"
+        ],
+        "example_generated": [],
+        "serde": [
+          "serde_core"
+        ],
+        "serde_core": [
+          "dep:serde_core"
+        ],
+        "std": []
+      },
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.13.2/Cargo.toml",
+      "metadata": {
+        "docs": {
+          "rs": {
+            "features": [
+              "example_generated"
+            ]
+          }
+        }
+      },
+      "publish": null,
+      "authors": [
+        "The Rust Project Developers"
+      ],
+      "categories": [
+        "no-std"
+      ],
+      "keywords": [
+        "bit",
+        "bitmask",
+        "bitflags",
+        "flags"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/bitflags/bitflags",
+      "homepage": "https://github.com/bitflags/bitflags",
+      "documentation": "https://docs.rs/bitflags",
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.56.0"
+    },
+    {
+      "name": "crossterm-input",
+      "version": "0.29.0-panelink.1",
+      "id": "path+file:///Users/sahillamba/panelink/vendor/crossterm-input#0.29.0-panelink.1",
+      "license": "MIT",
+      "license_file": null,
+      "description": null,
+      "source": null,
+      "dependencies": [
+        {
+          "name": "bitflags",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "=2.13.2",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "crossterm_input",
+          "src_path": "/Users/sahillamba/panelink/vendor/crossterm-input/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": false,
+          "test": true
+        }
+      ],
+      "features": {},
+      "manifest_path": "/Users/sahillamba/panelink/vendor/crossterm-input/Cargo.toml",
+      "metadata": null,
+      "publish": [],
+      "authors": [],
+      "categories": [],
+      "keywords": [],
+      "readme": null,
+      "repository": null,
+      "homepage": null,
+      "documentation": null,
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": null
+    },
+    {
+      "name": "errno",
+      "version": "0.3.14",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#errno@0.3.14",
+      "license": "MIT OR Apache-2.0",
+      "license_file": null,
+      "description": "Cross-platform interface to the `errno` variable.",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "libc",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.2",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(target_os = \"hermit\")",
+          "registry": null
+        },
+        {
+          "name": "libc",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.2",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(target_os = \"wasi\")",
+          "registry": null
+        },
+        {
+          "name": "libc",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.2",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(unix)",
+          "registry": null
+        },
+        {
+          "name": "windows-sys",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": ">=0.52, <0.62",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "Win32_Foundation",
+            "Win32_System_Diagnostics_Debug"
+          ],
+          "target": "cfg(windows)",
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "errno",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/errno-0.3.14/src/lib.rs",
+          "edition": "2018",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        }
+      ],
+      "features": {
+        "default": [
+          "std"
+        ],
+        "std": [
+          "libc/std"
+        ]
+      },
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/errno-0.3.14/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [
+        "Chris Wong <lambda.fairy@gmail.com>",
+        "Dan Gohman <dev@sunfishcode.online>"
+      ],
+      "categories": [
+        "no-std",
+        "os"
+      ],
+      "keywords": [],
+      "readme": "README.md",
+      "repository": "https://github.com/lambda-fairy/rust-errno",
+      "homepage": null,
+      "documentation": "https://docs.rs/errno",
+      "edition": "2018",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.56"
+    },
+    {
+      "name": "itoa",
+      "version": "1.0.18",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#itoa@1.0.18",
+      "license": "MIT OR Apache-2.0",
+      "license_file": null,
+      "description": "Fast integer primitive to string conversion",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "no-panic",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.1",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "criterion",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.8",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(not(miri))",
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "itoa",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/itoa-1.0.18/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "test",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/itoa-1.0.18/tests/test.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        },
+        {
+          "kind": [
+            "bench"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "bench",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/itoa-1.0.18/benches/bench.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        }
+      ],
+      "features": {
+        "no-panic": [
+          "dep:no-panic"
+        ]
+      },
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/itoa-1.0.18/Cargo.toml",
+      "metadata": {
+        "docs": {
+          "rs": {
+            "targets": [
+              "x86_64-unknown-linux-gnu"
+            ],
+            "rustdoc-args": [
+              "--generate-link-to-definition",
+              "--generate-macro-expansion",
+              "--extern-html-root-url=core=https://doc.rust-lang.org",
+              "--extern-html-root-url=alloc=https://doc.rust-lang.org",
+              "--extern-html-root-url=std=https://doc.rust-lang.org"
+            ]
+          }
+        }
+      },
+      "publish": null,
+      "authors": [
+        "David Tolnay <dtolnay@gmail.com>"
+      ],
+      "categories": [
+        "value-formatting",
+        "no-std",
+        "no-std::no-alloc"
+      ],
+      "keywords": [
+        "integer"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/dtolnay/itoa",
+      "homepage": null,
+      "documentation": "https://docs.rs/itoa",
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.68"
+    },
+    {
+      "name": "libc",
+      "version": "0.2.191",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191",
+      "license": "MIT OR Apache-2.0",
+      "license_file": null,
+      "description": "Raw FFI bindings to platform libraries like libc.",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "rustc-std-workspace-core",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.1",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "libc",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.191/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "const_fn",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.191/tests/const_fn.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        },
+        {
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "build-script-build",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.191/build.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        }
+      ],
+      "features": {
+        "align": [],
+        "const-extern-fn": [],
+        "default": [
+          "std"
+        ],
+        "extra_traits": [],
+        "rustc-dep-of-std": [
+          "align",
+          "rustc-std-workspace-core"
+        ],
+        "rustc-std-workspace-core": [
+          "dep:rustc-std-workspace-core"
+        ],
+        "std": [],
+        "use_std": [
+          "std"
+        ]
+      },
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.191/Cargo.toml",
+      "metadata": {
+        "docs": {
+          "rs": {
+            "features": [
+              "extra_traits"
+            ],
+            "default-target": "x86_64-unknown-linux-gnu",
+            "targets": [
+              "aarch64-apple-darwin",
+              "aarch64-pc-windows-msvc",
+              "aarch64-unknown-linux-gnu",
+              "i686-unknown-linux-gnu",
+              "x86_64-pc-windows-gnu",
+              "x86_64-pc-windows-msvc",
+              "x86_64-unknown-linux-gnu",
+              "i686-pc-windows-msvc",
+              "aarch64-pc-windows-gnullvm",
+              "aarch64-unknown-linux-musl",
+              "aarch64-unknown-linux-ohos",
+              "arm-unknown-linux-gnueabi",
+              "arm-unknown-linux-gnueabihf",
+              "armv7-unknown-linux-gnueabihf",
+              "armv7-unknown-linux-ohos",
+              "loongarch64-unknown-linux-gnu",
+              "loongarch64-unknown-linux-musl",
+              "powerpc-unknown-linux-gnu",
+              "powerpc64-unknown-linux-gnu",
+              "powerpc64-unknown-linux-musl",
+              "powerpc64le-unknown-linux-gnu",
+              "powerpc64le-unknown-linux-musl",
+              "riscv64gc-unknown-linux-gnu",
+              "riscv64gc-unknown-linux-musl",
+              "s390x-unknown-linux-gnu",
+              "sparcv9-sun-solaris",
+              "x86_64-apple-darwin",
+              "x86_64-pc-solaris",
+              "x86_64-pc-windows-gnullvm",
+              "x86_64-unknown-freebsd",
+              "x86_64-unknown-illumos",
+              "x86_64-unknown-linux-musl",
+              "x86_64-unknown-linux-ohos",
+              "x86_64-unknown-netbsd",
+              "aarch64-apple-ios",
+              "aarch64-apple-tvos",
+              "aarch64-apple-visionos",
+              "aarch64-apple-watchos",
+              "aarch64-linux-android",
+              "aarch64-unknown-fuchsia",
+              "arm-linux-androideabi",
+              "arm-unknown-linux-musleabi",
+              "arm-unknown-linux-musleabihf",
+              "arm64ec-pc-windows-msvc",
+              "armv5te-unknown-linux-gnueabi",
+              "armv5te-unknown-linux-musleabi",
+              "armv7-linux-androideabi",
+              "armv7-unknown-linux-musleabihf",
+              "i586-unknown-linux-gnu",
+              "i586-unknown-linux-musl",
+              "i686-linux-android",
+              "i686-pc-windows-gnu",
+              "i686-unknown-freebsd",
+              "i686-unknown-linux-musl",
+              "nvptx64-nvidia-cuda",
+              "sparc64-unknown-linux-gnu",
+              "thumbv7neon-linux-androideabi",
+              "thumbv7neon-unknown-linux-gnueabihf",
+              "wasm32-unknown-emscripten",
+              "wasm32-unknown-unknown",
+              "wasm32-wasip1",
+              "wasm32-wasip2",
+              "x86_64-fortanix-unknown-sgx",
+              "x86_64-linux-android",
+              "x86_64-unknown-fuchsia",
+              "x86_64-unknown-linux-gnux32",
+              "x86_64-unknown-redox",
+              "aarch64-unknown-freebsd",
+              "aarch64-unknown-helenos",
+              "aarch64-unknown-hermit",
+              "aarch64-unknown-illumos",
+              "aarch64-unknown-netbsd",
+              "aarch64-unknown-qnx",
+              "aarch64-unknown-openbsd",
+              "aarch64-unknown-redox",
+              "aarch64-wrs-vxworks",
+              "aarch64_be-unknown-linux-gnu",
+              "aarch64_be-unknown-linux-musl",
+              "armebv7r-none-eabi",
+              "armebv7r-none-eabihf",
+              "armv7-linux-androideabi",
+              "armv7-wrs-vxworks-eabihf",
+              "armv7r-none-eabi",
+              "armv7r-none-eabihf",
+              "hexagon-unknown-linux-musl",
+              "i686-unknown-haiku",
+              "i686-unknown-helenos",
+              "i686-unknown-netbsd",
+              "i686-unknown-openbsd",
+              "i686-wrs-vxworks",
+              "mips-unknown-linux-gnu",
+              "mips-unknown-linux-musl",
+              "mips64-unknown-linux-gnuabi64",
+              "mips64-unknown-linux-muslabi64",
+              "mips64el-unknown-linux-gnuabi64",
+              "mips64el-unknown-linux-muslabi64",
+              "mipsel-sony-psp",
+              "mipsel-unknown-linux-gnu",
+              "mipsel-unknown-linux-musl",
+              "powerpc-unknown-helenos",
+              "powerpc-unknown-linux-gnuspe",
+              "powerpc-unknown-netbsd",
+              "powerpc-wrs-vxworks",
+              "powerpc-wrs-vxworks-spe",
+              "powerpc64-ibm-aix",
+              "powerpc64-unknown-freebsd",
+              "powerpc64-unknown-linux-gnu",
+              "powerpc64-unknown-linux-gnuelfv2",
+              "powerpc64-wrs-vxworks",
+              "riscv32-wrs-vxworks",
+              "riscv32gc-unknown-linux-musl",
+              "riscv32i-unknown-none-elf",
+              "riscv32imac-unknown-none-elf",
+              "riscv32imc-unknown-none-elf",
+              "riscv64-wrs-vxworks",
+              "riscv64gc-unknown-freebsd",
+              "riscv64gc-unknown-hermit",
+              "riscv64gc-unknown-none-elf",
+              "riscv64imac-unknown-none-elf",
+              "s390x-unknown-linux-musl",
+              "sparc-unknown-linux-gnu",
+              "sparc64-unknown-helenos",
+              "sparc64-unknown-netbsd",
+              "thumbv6m-none-eabi",
+              "thumbv7em-none-eabi",
+              "thumbv7em-none-eabihf",
+              "thumbv7m-none-eabi",
+              "wasm32-wasip3",
+              "x86_64-apple-ios",
+              "x86_64-pc-cygwin",
+              "x86_64-unknown-dragonfly",
+              "x86_64-unknown-haiku",
+              "x86_64-unknown-helenos",
+              "x86_64-unknown-hermit",
+              "x86_64-unknown-hurd-gnu",
+              "x86_64-unknown-l4re-uclibc",
+              "x86_64-unknown-openbsd",
+              "x86_64-wrs-vxworks"
+            ],
+            "cargo-args": [
+              "-Zbuild-std=core"
+            ]
+          }
+        },
+        "cargo-semver-checks": {
+          "lints": {
+            "repr_align_removed": "warn",
+            "global_value_marked_deprecated": "warn"
+          }
+        }
+      },
+      "publish": null,
+      "authors": [],
+      "categories": [
+        "external-ffi-bindings",
+        "no-std",
+        "os"
+      ],
+      "keywords": [
+        "libc",
+        "ffi",
+        "bindings",
+        "operating",
+        "system"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/rust-lang/libc",
+      "homepage": null,
+      "documentation": null,
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.65"
+    },
+    {
+      "name": "memchr",
+      "version": "2.8.3",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#memchr@2.8.3",
+      "license": "Unlicense OR MIT",
+      "license_file": null,
+      "description": "Provides extremely fast (uses SIMD on x86_64, aarch64 and wasm32) routines for\n1, 2 or 3 byte search and single substring search.\n",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "rustc-std-workspace-core",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.0",
+          "kind": null,
+          "rename": "core",
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "log",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.4.20",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "quickcheck",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.3",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "memchr",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/memchr-2.8.3/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        }
+      ],
+      "features": {
+        "alloc": [],
+        "core": [
+          "dep:core"
+        ],
+        "default": [
+          "std"
+        ],
+        "libc": [],
+        "logging": [
+          "dep:log"
+        ],
+        "rustc-dep-of-std": [
+          "core"
+        ],
+        "std": [
+          "alloc"
+        ],
+        "use_std": [
+          "std"
+        ]
+      },
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/memchr-2.8.3/Cargo.toml",
+      "metadata": {
+        "docs": {
+          "rs": {
+            "rustdoc-args": [
+              "--generate-link-to-definition"
+            ]
+          }
+        }
+      },
+      "publish": null,
+      "authors": [
+        "Andrew Gallant <jamslam@gmail.com>",
+        "bluss"
+      ],
+      "categories": [],
+      "keywords": [
+        "memchr",
+        "memmem",
+        "substring",
+        "find",
+        "search"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/BurntSushi/memchr",
+      "homepage": "https://github.com/BurntSushi/memchr",
+      "documentation": "https://docs.rs/memchr/",
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.61"
+    },
+    {
+      "name": "panelink",
+      "version": "0.1.0",
+      "id": "path+file:///Users/sahillamba/panelink#0.1.0",
+      "license": "MIT",
+      "license_file": null,
+      "description": null,
+      "source": null,
+      "dependencies": [
+        {
+          "name": "signal-hook",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "=0.4.5",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(all(target_os = \"macos\", target_arch = \"aarch64\"))",
+          "registry": null
+        },
+        {
+          "name": "crossterm-input",
+          "source": null,
+          "req": "=0.29.0-panelink.1",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": "cfg(unix)",
+          "registry": null,
+          "path": "/Users/sahillamba/panelink/vendor/crossterm-input"
+        },
+        {
+          "name": "rustix",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "=1.1.5",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [
+            "std",
+            "fs",
+            "process",
+            "termios"
+          ],
+          "target": "cfg(unix)",
+          "registry": null
+        },
+        {
+          "name": "rustix-openpty",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "=0.2.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": "cfg(unix)",
+          "registry": null
+        },
+        {
+          "name": "unicode-width",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "=0.2.2",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": "cfg(unix)",
+          "registry": null
+        },
+        {
+          "name": "vt100",
+          "source": null,
+          "req": "=0.16.2-panelink.1",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": "cfg(unix)",
+          "registry": null,
+          "path": "/Users/sahillamba/panelink/vendor/vt100"
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "panelink",
+          "src_path": "/Users/sahillamba/panelink/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        {
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "panelink",
+          "src_path": "/Users/sahillamba/panelink/src/main.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": false,
+          "test": true
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "p2_pty",
+          "src_path": "/Users/sahillamba/panelink/tests/p2_pty.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        }
+      ],
+      "features": {},
+      "manifest_path": "/Users/sahillamba/panelink/Cargo.toml",
+      "metadata": null,
+      "publish": [],
+      "authors": [],
+      "categories": [],
+      "keywords": [],
+      "readme": "README.md",
+      "repository": null,
+      "homepage": null,
+      "documentation": null,
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": null
+    },
+    {
+      "name": "rustix",
+      "version": "1.1.5",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#rustix@1.1.5",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "license_file": null,
+      "description": "Safe Rust bindings to POSIX/Unix/Linux/Winsock-like syscalls",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "bitflags",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^2.4.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rustc-std-workspace-core",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.0",
+          "kind": null,
+          "rename": "core",
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rustc-std-workspace-alloc",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.0",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "flate2",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "libc",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.2.171",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "errno",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.3.10",
+          "kind": "dev",
+          "rename": "libc_errno",
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "memoffset",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.9.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serial_test",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^2.0.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "static_assertions",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.1.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "tempfile",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^3.5.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "linux-raw-sys",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.12",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [
+            "general",
+            "ioctl",
+            "no_std"
+          ],
+          "target": "cfg(all(any(target_os = \"linux\", target_os = \"android\"), any(rustix_use_libc, miri, not(all(target_os = \"linux\", any(target_endian = \"little\", any(target_arch = \"s390x\", target_arch = \"powerpc\")), any(target_arch = \"arm\", all(target_arch = \"aarch64\", target_pointer_width = \"64\"), target_arch = \"riscv64\", all(rustix_use_experimental_asm, target_arch = \"powerpc\"), all(rustix_use_experimental_asm, target_arch = \"powerpc64\"), all(rustix_use_experimental_asm, target_arch = \"s390x\"), all(rustix_use_experimental_asm, target_arch = \"mips\"), all(rustix_use_experimental_asm, target_arch = \"mips32r6\"), all(rustix_use_experimental_asm, target_arch = \"mips64\"), all(rustix_use_experimental_asm, target_arch = \"mips64r6\"), target_arch = \"x86\", all(target_arch = \"x86_64\", target_pointer_width = \"64\")))))))",
+          "registry": null
+        },
+        {
+          "name": "criterion",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.4",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": "cfg(all(criterion, not(any(target_os = \"emscripten\", target_os = \"wasi\"))))",
+          "registry": null
+        },
+        {
+          "name": "libc",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.2.182",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(all(not(rustix_use_libc), not(miri), target_os = \"linux\", any(target_endian = \"little\", any(target_arch = \"s390x\", target_arch = \"powerpc\")), any(target_arch = \"arm\", all(target_arch = \"aarch64\", target_pointer_width = \"64\"), target_arch = \"riscv64\", all(rustix_use_experimental_asm, target_arch = \"powerpc\"), all(rustix_use_experimental_asm, target_arch = \"powerpc64\"), all(rustix_use_experimental_asm, target_arch = \"s390x\"), all(rustix_use_experimental_asm, target_arch = \"mips\"), all(rustix_use_experimental_asm, target_arch = \"mips32r6\"), all(rustix_use_experimental_asm, target_arch = \"mips64\"), all(rustix_use_experimental_asm, target_arch = \"mips64r6\"), target_arch = \"x86\", all(target_arch = \"x86_64\", target_pointer_width = \"64\"))))",
+          "registry": null
+        },
+        {
+          "name": "errno",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.3.10",
+          "kind": null,
+          "rename": "libc_errno",
+          "optional": true,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(all(not(rustix_use_libc), not(miri), target_os = \"linux\", any(target_endian = \"little\", any(target_arch = \"s390x\", target_arch = \"powerpc\")), any(target_arch = \"arm\", all(target_arch = \"aarch64\", target_pointer_width = \"64\"), target_arch = \"riscv64\", all(rustix_use_experimental_asm, target_arch = \"powerpc\"), all(rustix_use_experimental_asm, target_arch = \"powerpc64\"), all(rustix_use_experimental_asm, target_arch = \"s390x\"), all(rustix_use_experimental_asm, target_arch = \"mips\"), all(rustix_use_experimental_asm, target_arch = \"mips32r6\"), all(rustix_use_experimental_asm, target_arch = \"mips64\"), all(rustix_use_experimental_asm, target_arch = \"mips64r6\"), target_arch = \"x86\", all(target_arch = \"x86_64\", target_pointer_width = \"64\"))))",
+          "registry": null
+        },
+        {
+          "name": "linux-raw-sys",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.12",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [
+            "auxvec",
+            "general",
+            "errno",
+            "ioctl",
+            "no_std",
+            "elf"
+          ],
+          "target": "cfg(all(not(rustix_use_libc), not(miri), target_os = \"linux\", any(target_endian = \"little\", any(target_arch = \"s390x\", target_arch = \"powerpc\")), any(target_arch = \"arm\", all(target_arch = \"aarch64\", target_pointer_width = \"64\"), target_arch = \"riscv64\", all(rustix_use_experimental_asm, target_arch = \"powerpc\"), all(rustix_use_experimental_asm, target_arch = \"powerpc64\"), all(rustix_use_experimental_asm, target_arch = \"s390x\"), all(rustix_use_experimental_asm, target_arch = \"mips\"), all(rustix_use_experimental_asm, target_arch = \"mips32r6\"), all(rustix_use_experimental_asm, target_arch = \"mips64\"), all(rustix_use_experimental_asm, target_arch = \"mips64r6\"), target_arch = \"x86\", all(target_arch = \"x86_64\", target_pointer_width = \"64\"))))",
+          "registry": null
+        },
+        {
+          "name": "libc",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.2.182",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(all(not(windows), any(rustix_use_libc, miri, not(all(target_os = \"linux\", any(target_endian = \"little\", any(target_arch = \"s390x\", target_arch = \"powerpc\")), any(target_arch = \"arm\", all(target_arch = \"aarch64\", target_pointer_width = \"64\"), target_arch = \"riscv64\", all(rustix_use_experimental_asm, target_arch = \"powerpc\"), all(rustix_use_experimental_asm, target_arch = \"powerpc64\"), all(rustix_use_experimental_asm, target_arch = \"s390x\"), all(rustix_use_experimental_asm, target_arch = \"mips\"), all(rustix_use_experimental_asm, target_arch = \"mips32r6\"), all(rustix_use_experimental_asm, target_arch = \"mips64\"), all(rustix_use_experimental_asm, target_arch = \"mips64r6\"), target_arch = \"x86\", all(target_arch = \"x86_64\", target_pointer_width = \"64\")))))))",
+          "registry": null
+        },
+        {
+          "name": "errno",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.3.10",
+          "kind": null,
+          "rename": "libc_errno",
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(all(not(windows), any(rustix_use_libc, miri, not(all(target_os = \"linux\", any(target_endian = \"little\", any(target_arch = \"s390x\", target_arch = \"powerpc\")), any(target_arch = \"arm\", all(target_arch = \"aarch64\", target_pointer_width = \"64\"), target_arch = \"riscv64\", all(rustix_use_experimental_asm, target_arch = \"powerpc\"), all(rustix_use_experimental_asm, target_arch = \"powerpc64\"), all(rustix_use_experimental_asm, target_arch = \"s390x\"), all(rustix_use_experimental_asm, target_arch = \"mips\"), all(rustix_use_experimental_asm, target_arch = \"mips32r6\"), all(rustix_use_experimental_asm, target_arch = \"mips64\"), all(rustix_use_experimental_asm, target_arch = \"mips64r6\"), target_arch = \"x86\", all(target_arch = \"x86_64\", target_pointer_width = \"64\")))))))",
+          "registry": null
+        },
+        {
+          "name": "errno",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.3.10",
+          "kind": null,
+          "rename": "libc_errno",
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(windows)",
+          "registry": null
+        },
+        {
+          "name": "windows-sys",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": ">=0.52, <0.62",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "Win32_Foundation",
+            "Win32_Networking_WinSock"
+          ],
+          "target": "cfg(windows)",
+          "registry": null
+        },
+        {
+          "name": "once_cell",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.20.3",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": "cfg(windows)",
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "rustix",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/rustix-1.1.5/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        {
+          "kind": [
+            "bench"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "mod",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/rustix-1.1.5/benches/mod.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        {
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "build-script-build",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/rustix-1.1.5/build.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        }
+      ],
+      "features": {
+        "all-apis": [
+          "event",
+          "fs",
+          "io_uring",
+          "mm",
+          "mount",
+          "net",
+          "param",
+          "pipe",
+          "process",
+          "pty",
+          "rand",
+          "runtime",
+          "shm",
+          "stdio",
+          "system",
+          "termios",
+          "thread",
+          "time"
+        ],
+        "alloc": [],
+        "core": [
+          "dep:core"
+        ],
+        "default": [
+          "std"
+        ],
+        "event": [],
+        "fs": [],
+        "io_uring": [
+          "event",
+          "fs",
+          "net",
+          "thread",
+          "linux-raw-sys/io_uring"
+        ],
+        "libc": [
+          "dep:libc"
+        ],
+        "libc_errno": [
+          "dep:libc_errno"
+        ],
+        "linux_4_11": [],
+        "linux_5_1": [
+          "linux_4_11"
+        ],
+        "linux_5_11": [
+          "linux_5_1"
+        ],
+        "linux_latest": [
+          "linux_5_11"
+        ],
+        "mm": [],
+        "mount": [],
+        "net": [
+          "linux-raw-sys/net",
+          "linux-raw-sys/netlink",
+          "linux-raw-sys/if_ether",
+          "linux-raw-sys/xdp"
+        ],
+        "param": [],
+        "pipe": [],
+        "process": [
+          "linux-raw-sys/prctl"
+        ],
+        "pty": [
+          "fs"
+        ],
+        "rand": [],
+        "runtime": [
+          "linux-raw-sys/prctl"
+        ],
+        "rustc-dep-of-std": [
+          "core",
+          "rustc-std-workspace-alloc",
+          "linux-raw-sys/rustc-dep-of-std",
+          "bitflags/rustc-dep-of-std"
+        ],
+        "rustc-std-workspace-alloc": [
+          "dep:rustc-std-workspace-alloc"
+        ],
+        "shm": [
+          "fs"
+        ],
+        "std": [
+          "bitflags/std",
+          "alloc",
+          "libc?/std",
+          "libc_errno?/std"
+        ],
+        "stdio": [],
+        "system": [
+          "linux-raw-sys/system"
+        ],
+        "termios": [],
+        "thread": [
+          "linux-raw-sys/prctl"
+        ],
+        "time": [],
+        "try_close": [],
+        "use-explicitly-provided-auxv": [],
+        "use-libc": [
+          "libc_errno",
+          "libc"
+        ],
+        "use-libc-auxv": []
+      },
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/rustix-1.1.5/Cargo.toml",
+      "metadata": {
+        "docs": {
+          "rs": {
+            "features": [
+              "all-apis"
+            ],
+            "targets": [
+              "x86_64-unknown-linux-gnu",
+              "i686-unknown-linux-gnu",
+              "x86_64-apple-darwin",
+              "x86_64-pc-windows-msvc",
+              "x86_64-unknown-freebsd",
+              "x86_64-unknown-openbsd",
+              "x86_64-unknown-netbsd",
+              "x86_64-unknown-dragonfly",
+              "x86_64-unknown-illumos",
+              "x86_64-unknown-redox",
+              "x86_64-unknown-haiku",
+              "wasm32-unknown-emscripten",
+              "wasm32-wasip1"
+            ]
+          }
+        }
+      },
+      "publish": null,
+      "authors": [
+        "Dan Gohman <dev@sunfishcode.online>",
+        "Jakub Konka <kubkon@jakubkonka.com>"
+      ],
+      "categories": [
+        "os::unix-apis",
+        "date-and-time",
+        "filesystem",
+        "network-programming"
+      ],
+      "keywords": [
+        "api",
+        "file",
+        "network",
+        "safe",
+        "syscall"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/bytecodealliance/rustix",
+      "homepage": null,
+      "documentation": "https://docs.rs/rustix",
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.65",
+      "hints": {
+        "mostly-unused": true
+      }
+    },
+    {
+      "name": "rustix-openpty",
+      "version": "0.2.0",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#rustix-openpty@0.2.0",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "license_file": null,
+      "description": "Safe Rust bindings to `openpty` and related functions",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "rustix",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "termios"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rustix",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [
+            "alloc",
+            "fs",
+            "process",
+            "pty",
+            "stdio",
+            "termios"
+          ],
+          "target": "cfg(any(target_os = \"android\", target_os = \"linux\"))",
+          "registry": null
+        },
+        {
+          "name": "errno",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.3.1",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(not(any(target_os = \"android\", target_os = \"linux\")))",
+          "registry": null
+        },
+        {
+          "name": "libc",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.2.114",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": "cfg(not(any(target_os = \"android\", target_os = \"linux\")))",
+          "registry": null
+        },
+        {
+          "name": "rustix",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [
+            "fs",
+            "termios"
+          ],
+          "target": "cfg(not(any(target_os = \"android\", target_os = \"linux\")))",
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "rustix_openpty",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/rustix-openpty-0.2.0/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        }
+      ],
+      "features": {},
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/rustix-openpty-0.2.0/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [
+        "Dan Gohman <dev@sunfishcode.online>"
+      ],
+      "categories": [
+        "os::unix-apis"
+      ],
+      "keywords": [
+        "terminal",
+        "safe"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/sunfishcode/rustix-openpty",
+      "homepage": null,
+      "documentation": "https://docs.rs/rustix-openpty",
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.63"
+    },
+    {
+      "name": "signal-hook",
+      "version": "0.4.5",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#signal-hook@0.4.5",
+      "license": "MIT OR Apache-2.0",
+      "license_file": null,
+      "description": "Unix signal handling",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "libc",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.2",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "signal-hook-registry",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.4",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "cc",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1",
+          "kind": "build",
+          "rename": null,
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "signal_hook",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-0.4.5/src/lib.rs",
+          "edition": "2018",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "print",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-0.4.5/examples/print.rs",
+          "edition": "2018",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "default",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-0.4.5/tests/default.rs",
+          "edition": "2018",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "iterator",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-0.4.5/tests/iterator.rs",
+          "edition": "2018",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "shutdown",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-0.4.5/tests/shutdown.rs",
+          "edition": "2018",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        },
+        {
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "build-script-build",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-0.4.5/build.rs",
+          "edition": "2018",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        }
+      ],
+      "features": {
+        "cc": [
+          "dep:cc"
+        ],
+        "channel": [],
+        "default": [
+          "channel",
+          "iterator"
+        ],
+        "extended-siginfo": [
+          "channel",
+          "iterator",
+          "extended-siginfo-raw"
+        ],
+        "extended-siginfo-raw": [
+          "cc"
+        ],
+        "iterator": [
+          "channel"
+        ]
+      },
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-0.4.5/Cargo.toml",
+      "metadata": {
+        "docs": {
+          "rs": {
+            "all-features": true,
+            "rustdoc-args": [
+              "--cfg",
+              "docsrs"
+            ]
+          }
+        }
+      },
+      "publish": null,
+      "authors": [
+        "Michal 'vorner' Vaner <vorner@vorner.cz>",
+        "Thomas Himmelstoss <thimm@posteo.de>"
+      ],
+      "categories": [],
+      "keywords": [
+        "signal",
+        "unix",
+        "daemon"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/vorner/signal-hook",
+      "homepage": null,
+      "documentation": "https://docs.rs/signal-hook",
+      "edition": "2018",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.66"
+    },
+    {
+      "name": "signal-hook-registry",
+      "version": "1.4.8",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#signal-hook-registry@1.4.8",
+      "license": "MIT OR Apache-2.0",
+      "license_file": null,
+      "description": "Backend crate for signal-hook",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "errno",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": ">=0.2, <0.4",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "libc",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.2",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "signal-hook",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "~0.3",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "signal_hook_registry",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs",
+          "edition": "2015",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "unregister_signal",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/tests/unregister_signal.rs",
+          "edition": "2015",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        }
+      ],
+      "features": {},
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [
+        "Michal 'vorner' Vaner <vorner@vorner.cz>",
+        "Masaki Hara <ackie.h.gmai@gmail.com>"
+      ],
+      "categories": [],
+      "keywords": [
+        "signal",
+        "unix",
+        "daemon"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/vorner/signal-hook",
+      "homepage": null,
+      "documentation": "https://docs.rs/signal-hook-registry",
+      "edition": "2015",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.26"
+    },
+    {
+      "name": "unicode-width",
+      "version": "0.2.2",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#unicode-width@0.2.2",
+      "license": "MIT OR Apache-2.0",
+      "license_file": null,
+      "description": "Determine displayed width of `char` and `str` types\naccording to Unicode Standard Annex #11 rules.\n",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "rustc-std-workspace-core",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": null,
+          "rename": "core",
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rustc-std-workspace-std",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": null,
+          "rename": "std",
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "unicode_width",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.2/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "tests",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.2/tests/tests.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        },
+        {
+          "kind": [
+            "bench"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "benches",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.2/benches/benches.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        }
+      ],
+      "features": {
+        "cjk": [],
+        "core": [
+          "dep:core"
+        ],
+        "default": [
+          "cjk"
+        ],
+        "no_std": [],
+        "rustc-dep-of-std": [
+          "std",
+          "core"
+        ],
+        "std": [
+          "dep:std"
+        ]
+      },
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.2/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [
+        "kwantam <kwantam@gmail.com>",
+        "Manish Goregaokar <manishsmail@gmail.com>"
+      ],
+      "categories": [
+        "command-line-interface",
+        "internationalization",
+        "no-std::no-alloc",
+        "text-processing"
+      ],
+      "keywords": [
+        "text",
+        "width",
+        "unicode"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/unicode-rs/unicode-width",
+      "homepage": "https://github.com/unicode-rs/unicode-width",
+      "documentation": null,
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.66"
+    },
+    {
+      "name": "vt100",
+      "version": "0.16.2-panelink.1",
+      "id": "path+file:///Users/sahillamba/panelink/vendor/vt100#0.16.2-panelink.1",
+      "license": "MIT",
+      "license_file": null,
+      "description": "Library for parsing terminal data",
+      "source": null,
+      "dependencies": [
+        {
+          "name": "itoa",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.15",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "unicode-width",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.2.1",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "vte",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.15.0",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "nix",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.30.1",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "term"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "quickcheck",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "rand",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.9",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.219",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [
+            "derive"
+          ],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde_json",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.140",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "terminal_size",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.4.2",
+          "kind": "dev",
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "vt100",
+          "src_path": "/Users/sahillamba/panelink/vendor/vt100/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        }
+      ],
+      "features": {},
+      "manifest_path": "/Users/sahillamba/panelink/vendor/vt100/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [
+        "Jesse Luehrs <doy@tozt.net>"
+      ],
+      "categories": [
+        "command-line-interface",
+        "encoding"
+      ],
+      "keywords": [
+        "terminal",
+        "vt100"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/doy/vt100-rust",
+      "homepage": "https://github.com/doy/vt100-rust",
+      "documentation": null,
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.70"
+    },
+    {
+      "name": "vte",
+      "version": "0.15.0",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#vte@0.15.0",
+      "license": "Apache-2.0 OR MIT",
+      "license_file": null,
+      "description": "Parser for implementing terminal emulators",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [
+        {
+          "name": "arrayvec",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.7.2",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "bitflags",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^2.3.3",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "cursor-icon",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.0",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "log",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^0.4.17",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "memchr",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^2.7.4",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": false,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "serde",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1.0.160",
+          "kind": null,
+          "rename": null,
+          "optional": true,
+          "uses_default_features": true,
+          "features": [
+            "derive"
+          ],
+          "target": null,
+          "registry": null
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "vte",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/vte-0.15.0/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "parselog",
+          "src_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/vte-0.15.0/examples/parselog.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        }
+      ],
+      "features": {
+        "ansi": [
+          "log",
+          "cursor-icon",
+          "bitflags"
+        ],
+        "bitflags": [
+          "dep:bitflags"
+        ],
+        "cursor-icon": [
+          "dep:cursor-icon"
+        ],
+        "default": [
+          "std"
+        ],
+        "log": [
+          "dep:log"
+        ],
+        "serde": [
+          "dep:serde"
+        ],
+        "std": [
+          "memchr/std"
+        ]
+      },
+      "manifest_path": "/private/tmp/panelink-p2-cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/vte-0.15.0/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [
+        "Joe Wilm <joe@jwilm.com>",
+        "Christian Duerr <contact@christianduerr.com>"
+      ],
+      "categories": [
+        "parsing",
+        "no-std"
+      ],
+      "keywords": [
+        "ansi",
+        "vte",
+        "parser",
+        "terminal"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/alacritty/vte",
+      "homepage": null,
+      "documentation": "https://docs.rs/vte/",
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": "1.62.1"
+    }
+  ],
+  "workspace_members": [
+    "path+file:///Users/sahillamba/panelink#0.1.0"
+  ],
+  "workspace_default_members": [
+    "path+file:///Users/sahillamba/panelink#0.1.0"
+  ],
+  "resolve": {
+    "nodes": [
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#arrayvec@0.7.8",
+        "dependencies": [],
+        "deps": [],
+        "features": []
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#bitflags@2.13.2",
+        "dependencies": [],
+        "deps": [],
+        "features": [
+          "std"
+        ]
+      },
+      {
+        "id": "path+file:///Users/sahillamba/panelink/vendor/crossterm-input#0.29.0-panelink.1",
+        "dependencies": [
+          "registry+https://github.com/rust-lang/crates.io-index#bitflags@2.13.2"
+        ],
+        "deps": [
+          {
+            "name": "bitflags",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#bitflags@2.13.2",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          }
+        ],
+        "features": []
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#errno@0.3.14",
+        "dependencies": [
+          "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191"
+        ],
+        "deps": [
+          {
+            "name": "libc",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(unix)"
+              },
+              {
+                "kind": null,
+                "target": "cfg(target_os = \"hermit\")"
+              },
+              {
+                "kind": null,
+                "target": "cfg(target_os = \"wasi\")"
+              }
+            ]
+          }
+        ],
+        "features": [
+          "default",
+          "std"
+        ]
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#itoa@1.0.18",
+        "dependencies": [],
+        "deps": [],
+        "features": []
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191",
+        "dependencies": [],
+        "deps": [],
+        "features": [
+          "default",
+          "std"
+        ]
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#memchr@2.8.3",
+        "dependencies": [],
+        "deps": [],
+        "features": []
+      },
+      {
+        "id": "path+file:///Users/sahillamba/panelink#0.1.0",
+        "dependencies": [
+          "path+file:///Users/sahillamba/panelink/vendor/crossterm-input#0.29.0-panelink.1",
+          "registry+https://github.com/rust-lang/crates.io-index#rustix@1.1.5",
+          "registry+https://github.com/rust-lang/crates.io-index#rustix-openpty@0.2.0",
+          "registry+https://github.com/rust-lang/crates.io-index#signal-hook@0.4.5",
+          "registry+https://github.com/rust-lang/crates.io-index#unicode-width@0.2.2",
+          "path+file:///Users/sahillamba/panelink/vendor/vt100#0.16.2-panelink.1"
+        ],
+        "deps": [
+          {
+            "name": "crossterm_input",
+            "pkg": "path+file:///Users/sahillamba/panelink/vendor/crossterm-input#0.29.0-panelink.1",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(unix)"
+              }
+            ]
+          },
+          {
+            "name": "rustix",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#rustix@1.1.5",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(unix)"
+              }
+            ]
+          },
+          {
+            "name": "rustix_openpty",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#rustix-openpty@0.2.0",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(unix)"
+              }
+            ]
+          },
+          {
+            "name": "signal_hook",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#signal-hook@0.4.5",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(all(target_os = \"macos\", target_arch = \"aarch64\"))"
+              }
+            ]
+          },
+          {
+            "name": "unicode_width",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#unicode-width@0.2.2",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(unix)"
+              }
+            ]
+          },
+          {
+            "name": "vt100",
+            "pkg": "path+file:///Users/sahillamba/panelink/vendor/vt100#0.16.2-panelink.1",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(unix)"
+              }
+            ]
+          }
+        ],
+        "features": []
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#rustix@1.1.5",
+        "dependencies": [
+          "registry+https://github.com/rust-lang/crates.io-index#bitflags@2.13.2",
+          "registry+https://github.com/rust-lang/crates.io-index#errno@0.3.14",
+          "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191"
+        ],
+        "deps": [
+          {
+            "name": "bitflags",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#bitflags@2.13.2",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          },
+          {
+            "name": "libc_errno",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#errno@0.3.14",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(all(not(rustix_use_libc), not(miri), target_os = \"linux\", any(target_endian = \"little\", any(target_arch = \"s390x\", target_arch = \"powerpc\")), any(target_arch = \"arm\", all(target_arch = \"aarch64\", target_pointer_width = \"64\"), target_arch = \"riscv64\", all(rustix_use_experimental_asm, target_arch = \"powerpc\"), all(rustix_use_experimental_asm, target_arch = \"powerpc64\"), all(rustix_use_experimental_asm, target_arch = \"s390x\"), all(rustix_use_experimental_asm, target_arch = \"mips\"), all(rustix_use_experimental_asm, target_arch = \"mips32r6\"), all(rustix_use_experimental_asm, target_arch = \"mips64\"), all(rustix_use_experimental_asm, target_arch = \"mips64r6\"), target_arch = \"x86\", all(target_arch = \"x86_64\", target_pointer_width = \"64\"))))"
+              },
+              {
+                "kind": null,
+                "target": "cfg(all(not(windows), any(rustix_use_libc, miri, not(all(target_os = \"linux\", any(target_endian = \"little\", any(target_arch = \"s390x\", target_arch = \"powerpc\")), any(target_arch = \"arm\", all(target_arch = \"aarch64\", target_pointer_width = \"64\"), target_arch = \"riscv64\", all(rustix_use_experimental_asm, target_arch = \"powerpc\"), all(rustix_use_experimental_asm, target_arch = \"powerpc64\"), all(rustix_use_experimental_asm, target_arch = \"s390x\"), all(rustix_use_experimental_asm, target_arch = \"mips\"), all(rustix_use_experimental_asm, target_arch = \"mips32r6\"), all(rustix_use_experimental_asm, target_arch = \"mips64\"), all(rustix_use_experimental_asm, target_arch = \"mips64r6\"), target_arch = \"x86\", all(target_arch = \"x86_64\", target_pointer_width = \"64\")))))))"
+              },
+              {
+                "kind": null,
+                "target": "cfg(windows)"
+              }
+            ]
+          },
+          {
+            "name": "libc",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(all(not(rustix_use_libc), not(miri), target_os = \"linux\", any(target_endian = \"little\", any(target_arch = \"s390x\", target_arch = \"powerpc\")), any(target_arch = \"arm\", all(target_arch = \"aarch64\", target_pointer_width = \"64\"), target_arch = \"riscv64\", all(rustix_use_experimental_asm, target_arch = \"powerpc\"), all(rustix_use_experimental_asm, target_arch = \"powerpc64\"), all(rustix_use_experimental_asm, target_arch = \"s390x\"), all(rustix_use_experimental_asm, target_arch = \"mips\"), all(rustix_use_experimental_asm, target_arch = \"mips32r6\"), all(rustix_use_experimental_asm, target_arch = \"mips64\"), all(rustix_use_experimental_asm, target_arch = \"mips64r6\"), target_arch = \"x86\", all(target_arch = \"x86_64\", target_pointer_width = \"64\"))))"
+              },
+              {
+                "kind": null,
+                "target": "cfg(all(not(windows), any(rustix_use_libc, miri, not(all(target_os = \"linux\", any(target_endian = \"little\", any(target_arch = \"s390x\", target_arch = \"powerpc\")), any(target_arch = \"arm\", all(target_arch = \"aarch64\", target_pointer_width = \"64\"), target_arch = \"riscv64\", all(rustix_use_experimental_asm, target_arch = \"powerpc\"), all(rustix_use_experimental_asm, target_arch = \"powerpc64\"), all(rustix_use_experimental_asm, target_arch = \"s390x\"), all(rustix_use_experimental_asm, target_arch = \"mips\"), all(rustix_use_experimental_asm, target_arch = \"mips32r6\"), all(rustix_use_experimental_asm, target_arch = \"mips64\"), all(rustix_use_experimental_asm, target_arch = \"mips64r6\"), target_arch = \"x86\", all(target_arch = \"x86_64\", target_pointer_width = \"64\")))))))"
+              }
+            ]
+          }
+        ],
+        "features": [
+          "alloc",
+          "fs",
+          "process",
+          "pty",
+          "std",
+          "stdio",
+          "termios"
+        ]
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#rustix-openpty@0.2.0",
+        "dependencies": [
+          "registry+https://github.com/rust-lang/crates.io-index#errno@0.3.14",
+          "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191",
+          "registry+https://github.com/rust-lang/crates.io-index#rustix@1.1.5"
+        ],
+        "deps": [
+          {
+            "name": "errno",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#errno@0.3.14",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(not(any(target_os = \"android\", target_os = \"linux\")))"
+              }
+            ]
+          },
+          {
+            "name": "libc",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(not(any(target_os = \"android\", target_os = \"linux\")))"
+              }
+            ]
+          },
+          {
+            "name": "rustix",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#rustix@1.1.5",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": "cfg(not(any(target_os = \"android\", target_os = \"linux\")))"
+              },
+              {
+                "kind": null,
+                "target": "cfg(any(target_os = \"android\", target_os = \"linux\"))"
+              }
+            ]
+          }
+        ],
+        "features": []
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#signal-hook@0.4.5",
+        "dependencies": [
+          "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191",
+          "registry+https://github.com/rust-lang/crates.io-index#signal-hook-registry@1.4.8"
+        ],
+        "deps": [
+          {
+            "name": "libc",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          },
+          {
+            "name": "signal_hook_registry",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#signal-hook-registry@1.4.8",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          }
+        ],
+        "features": []
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#signal-hook-registry@1.4.8",
+        "dependencies": [
+          "registry+https://github.com/rust-lang/crates.io-index#errno@0.3.14",
+          "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191"
+        ],
+        "deps": [
+          {
+            "name": "errno",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#errno@0.3.14",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          },
+          {
+            "name": "libc",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          }
+        ],
+        "features": []
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#unicode-width@0.2.2",
+        "dependencies": [],
+        "deps": [],
+        "features": [
+          "cjk",
+          "default"
+        ]
+      },
+      {
+        "id": "path+file:///Users/sahillamba/panelink/vendor/vt100#0.16.2-panelink.1",
+        "dependencies": [
+          "registry+https://github.com/rust-lang/crates.io-index#itoa@1.0.18",
+          "registry+https://github.com/rust-lang/crates.io-index#unicode-width@0.2.2",
+          "registry+https://github.com/rust-lang/crates.io-index#vte@0.15.0"
+        ],
+        "deps": [
+          {
+            "name": "itoa",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#itoa@1.0.18",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          },
+          {
+            "name": "unicode_width",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#unicode-width@0.2.2",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          },
+          {
+            "name": "vte",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#vte@0.15.0",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          }
+        ],
+        "features": []
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#vte@0.15.0",
+        "dependencies": [
+          "registry+https://github.com/rust-lang/crates.io-index#arrayvec@0.7.8",
+          "registry+https://github.com/rust-lang/crates.io-index#memchr@2.8.3"
+        ],
+        "deps": [
+          {
+            "name": "arrayvec",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#arrayvec@0.7.8",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          },
+          {
+            "name": "memchr",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#memchr@2.8.3",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          }
+        ],
+        "features": []
+      }
+    ],
+    "root": "path+file:///Users/sahillamba/panelink#0.1.0"
+  },
+  "target_directory": "/Users/sahillamba/panelink/target",
+  "build_directory": "/Users/sahillamba/panelink/target",
+  "version": 1,
+  "workspace_root": "/Users/sahillamba/panelink",
+  "metadata": null
+}

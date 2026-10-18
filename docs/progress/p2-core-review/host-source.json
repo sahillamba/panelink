@@ -1,0 +1,13 @@
+{
+  "crate": "crossterm",
+  "version": "0.29.0",
+  "disposition": "not adopted; source findings only",
+  "files": {
+    "src/event/source/unix/mio.rs": "57f4a90b828444fcc6dd7199a73907bbbccf2df4b7808f9e8a0a4b0771e12e39",
+    "src/event/source/unix/tty.rs": "453e854ca82cd2d37e57494d9766a9eea728883a8a1c5fec186f7c6b83dbd64e",
+    "src/event/read.rs": "704eb054bff7408e7591e7b5869cf4606794a43b69dc7a1edef67fa7e26ccb8a",
+    "src/event/sys/unix/parse.rs": "689b765d67be62703f7935abfa1475d98994987461e413836b54c7936966ce2b",
+    "src/terminal/sys/unix.rs": "db066f11aa75d6c06515fd600ee38336f230d0f8f9d307663debb6ba835b334b",
+    "src/terminal/sys/file_descriptor.rs": "d215ff60394ec2150c2df6340343d84a3922570c1feba813663742d0eb85d13f"
+  }
+}
