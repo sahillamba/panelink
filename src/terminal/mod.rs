@@ -3,6 +3,8 @@
 //! This module owns one child, one PTY, and one bounded VT100 screen. It does
 //! not provide host input IO, persistence, or server lifetime.
 
+mod checkpoint_load;
+pub mod compose;
 pub mod render;
 
 /// Bounded parser-only host decoder; callers own raw input IO and restoration.

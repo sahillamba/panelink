@@ -9,10 +9,16 @@ use std::io::IsTerminal;
 use panelink::launch::{resolve_launch, Environment, LaunchContext, LaunchError, ResolvedLaunch};
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod default_open;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod p2_probe;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod p3_cli;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod ui_client;
 
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 const MAX_ENVIRONMENT_VARIABLES: usize = 4_096;
@@ -89,10 +95,33 @@ where
 {
     let mut arguments = arguments.into_iter().peekable();
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    if arguments
-        .peek()
-        .is_some_and(|argument| argument == "server-probe" || argument == "control")
     {
+        // `panelink` alone opens (or reattaches to) the user's workspace.
+        if arguments.peek().is_none() {
+            return default_open::open();
+        }
+        if arguments.peek().is_some_and(|argument| argument == "stop") {
+            arguments.next();
+            if arguments.next().is_some() {
+                return report_cli_error(CliError::InvalidArguments);
+            }
+            return default_open::stop();
+        }
+        if arguments.peek().is_some_and(|argument| argument == "probe") {
+            arguments.next();
+            if arguments.next().is_some() {
+                return report_cli_error(CliError::InvalidArguments);
+            }
+            return run_default_probe();
+        }
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if arguments.peek().is_some_and(|argument| {
+        argument == "server-probe"
+            || argument == "serve"
+            || argument == "control"
+            || argument == "attach"
+    }) {
         let mut captured = Vec::new();
         let mut bytes = 0_usize;
         for argument in arguments {
@@ -128,9 +157,11 @@ where
                 std::env::consts::OS,
                 std::env::consts::ARCH
             );
-            println!("Experimental PTY probe: one-shot child launch on macOS/aarch64.");
-            println!("Experimental local server/control probe: available on macOS/aarch64.");
-            println!("Persistent multiplexer: unsupported; host and pathname acceptance pending.");
+            println!("Workspace: `panelink` opens a persistent two-pane workspace (experimental).");
+            println!(
+                "Experimental PTY probe and server/control commands: available on macOS/aarch64."
+            );
+            println!("Not yet supported: more than two panes, tabs, provider session recovery.");
             1
         }
         Command::PtyProbe(request) => execute_probe(request),
@@ -297,6 +328,45 @@ fn execute_probe(request: ProbeRequest) -> i32 {
     }
 }
 
+/// `panelink probe`: the disposable single-shell probe with the bundled
+/// terminfo compiled into a private temporary directory.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn run_default_probe() -> i32 {
+    let base = std::env::temp_dir();
+    let directory = base.join(format!("panelink-terminfo-{}", std::process::id()));
+    let source = directory.join("panelink-probe.src");
+    let prepared = std::fs::create_dir(&directory)
+        .and_then(|()| {
+            std::fs::write(
+                &source,
+                include_str!("../docs/terminfo/panelink-probe.terminfo"),
+            )
+        })
+        .and_then(|()| {
+            std::process::Command::new("/usr/bin/tic")
+                .arg("-x")
+                .arg("-o")
+                .arg(&directory)
+                .arg(&source)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+        });
+    let code = match prepared {
+        Ok(status) if status.success() => match std::fs::canonicalize(&directory) {
+            Ok(terminfo_directory) => execute_probe(ProbeRequest {
+                terminfo_directory,
+                executable: OsString::from("/bin/zsh"),
+                arguments: Vec::new(),
+            }),
+            Err(_) => report_cli_error(CliError::InvalidTerminfoDirectory),
+        },
+        _ => report_cli_error(CliError::InvalidTerminfoDirectory),
+    };
+    let _ = std::fs::remove_dir_all(&directory);
+    code
+}
+
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 fn execute_probe(request: ProbeRequest) -> i32 {
     let ProbeRequest {
@@ -328,6 +398,21 @@ fn prepare_probe(request: ProbeRequest) -> Result<PreparedProbe, CliError> {
         arguments: request.arguments,
         environment,
     })
+}
+
+/// Validate the terminfo directory and resolve `executable` against an
+/// already-captured (and already filtered) client context, without reading
+/// the process environment again. Used by `serve`, whose context excludes
+/// inherited `PANELINK_*` names.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn preflight_serve_launch(
+    terminfo_directory: &Path,
+    executable: &OsStr,
+    context: &LaunchContext,
+) -> Result<PathBuf, CliError> {
+    let terminfo_directory = canonical_terminfo_directory(terminfo_directory)?;
+    resolve_probe_launch(&terminfo_directory, executable, context)?;
+    Ok(terminfo_directory)
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -451,22 +536,36 @@ fn child_exit_code(status: std::process::ExitStatus) -> i32 {
 
 fn print_help() {
     println!(
-        "Panelink {} - experimental terminal probe",
+        "Panelink {} - experimental terminal workspace",
         env!("CARGO_PKG_VERSION")
     );
     println!("Usage:");
-    println!("  panelink");
+    println!("  panelink              open your workspace (starts it if needed, else reattaches)");
+    println!("  panelink stop         stop the workspace and all of its shells");
+    println!();
+    println!("In the workspace: right-click a pane to split it; click a pane to focus it.");
+    println!("Control-B (not Command-B) enters NAV mode: r/l/u/d split, arrows/Tab switch");
+    println!("pane, s opens the menu, Esc leaves. Ctrl-X detaches (shells keep running).");
+    println!();
+    println!("Advanced:");
+    println!("  panelink probe        disposable single-shell terminal probe");
     println!("  panelink --help");
     println!("  panelink -h");
     println!("  panelink --version");
     println!("  panelink doctor");
     println!("  panelink pty-probe --terminfo <absolute-dir> -- <executable> [arguments...]");
     println!("  panelink server-probe --directory <private-dir> --terminfo <absolute-dir> [--initialize] [--allow-input] -- <executable> [arguments...]");
+    println!("  panelink serve --directory <private-dir> --terminfo <absolute-dir> [--initialize] [--allow-input] -- <executable> [arguments...]");
     println!("  panelink control --directory <private-dir> --context <absolute-file> <command> [arguments...]");
+    println!("  panelink attach --directory <private-dir> --context-dir <private-dir>");
     println!();
     println!("pty-probe runs one disposable child on macOS/aarch64.");
     println!("server-probe runs a foreground one-child server; control exchanges typed commands.");
-    println!("A persistent multiplexer UI and provider recovery are not implemented.");
+    println!("serve runs an experimental foreground two-pane server (one split, zsh splits).");
+    println!("attach is an experimental full-screen client for serve; Ctrl-X detaches.");
+    println!(
+        "Experimental prototype: two panes per workspace; provider recovery is not implemented."
+    );
 }
 
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
@@ -499,8 +598,11 @@ mod tests {
 
     #[test]
     fn help_version_doctor_and_unknown_commands_keep_their_exit_contract() {
-        assert_eq!(run(Vec::new()), 0);
+        // No arguments now opens the user's workspace (covered by the
+        // tests/p3a_default_open.rs host test), so it is not run here.
         assert_eq!(run(arguments(&["--help"])), 0);
+        assert_eq!(run(arguments(&["stop", "extra"])), 2);
+        assert_eq!(run(arguments(&["probe", "extra"])), 2);
         assert_eq!(run(arguments(&["--version"])), 0);
         assert_eq!(run(arguments(&["doctor"])), 1);
         assert_eq!(run(arguments(&["--unknown-option"])), 2);

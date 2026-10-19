@@ -105,6 +105,8 @@ pub struct AuthenticatedStream {
     stream: UnixStream,
     poisoned: bool,
     metadata_events_enabled: bool,
+    snapshot_reads_enabled: bool,
+    snapshot_writes_enabled: bool,
 }
 
 impl AuthenticatedStream {
@@ -165,6 +167,8 @@ impl AuthenticatedStream {
             stream,
             poisoned: false,
             metadata_events_enabled: false,
+            snapshot_reads_enabled: false,
+            snapshot_writes_enabled: false,
         })
     }
 
@@ -184,6 +188,32 @@ impl AuthenticatedStream {
             return Err(poisoned_error());
         }
         self.metadata_events_enabled = true;
+        Ok(())
+    }
+
+    /// Allow this connection to read bounded `Snapshot` frames.
+    ///
+    /// Each frame is capped at the wire limit
+    /// [`MAX_SNAPSHOT_PAYLOAD_BYTES`](crate::protocol_wire::MAX_SNAPSHOT_PAYLOAD_BYTES);
+    /// the receive buffer is reserved fallibly from the validated header
+    /// length before any payload byte is read. Only a client that requested
+    /// snapshots should opt in; a server that only sends them must not.
+    pub fn enable_snapshot_reads(&mut self) -> io::Result<()> {
+        if self.poisoned {
+            return Err(poisoned_error());
+        }
+        self.snapshot_reads_enabled = true;
+        Ok(())
+    }
+
+    /// Allow this connection to write bounded `Snapshot` frames.
+    ///
+    /// Every other kind keeps its existing limit and enablement.
+    pub fn enable_snapshot_writes(&mut self) -> io::Result<()> {
+        if self.poisoned {
+            return Err(poisoned_error());
+        }
+        self.snapshot_writes_enabled = true;
         Ok(())
     }
 
@@ -212,7 +242,8 @@ impl AuthenticatedStream {
         let header = decode_header(&encoded_header).map_err(wire_error)?;
         let kind = header.kind();
         let event_enabled = kind == MessageKind::Event && self.metadata_events_enabled;
-        if !initial_kind(kind) && !event_enabled {
+        let snapshot_enabled = kind == MessageKind::Snapshot && self.snapshot_reads_enabled;
+        if !initial_kind(kind) && !event_enabled && !snapshot_enabled {
             return Err(invalid_data(
                 "message kind is not enabled on this connection",
             ));
@@ -223,7 +254,7 @@ impl AuthenticatedStream {
                 "metadata event payload must be exactly 72 bytes",
             ));
         }
-        if payload_len > MAX_CONTROL_PAYLOAD_BYTES {
+        if payload_len > MAX_CONTROL_PAYLOAD_BYTES && !snapshot_enabled {
             return Err(invalid_data("control payload exceeds the transport limit"));
         }
 
@@ -251,7 +282,11 @@ impl AuthenticatedStream {
         if self.poisoned {
             return Err(poisoned_error());
         }
-        validate_outbound(frame, self.metadata_events_enabled)?;
+        validate_outbound(
+            frame,
+            self.metadata_events_enabled,
+            self.snapshot_writes_enabled,
+        )?;
 
         let result = {
             let mut writer = DeadlineWriter {
@@ -579,17 +614,25 @@ impl Identity {
     }
 }
 
-fn validate_outbound(frame: &Frame<'_>, metadata_events_enabled: bool) -> io::Result<()> {
+fn validate_outbound(
+    frame: &Frame<'_>,
+    metadata_events_enabled: bool,
+    snapshot_frames_enabled: bool,
+) -> io::Result<()> {
     let kind = frame.header().kind();
     let event_enabled = kind == MessageKind::Event && metadata_events_enabled;
-    if !initial_kind(kind) && !event_enabled {
+    let snapshot_enabled = kind == MessageKind::Snapshot && snapshot_frames_enabled;
+    if !initial_kind(kind) && !event_enabled && !snapshot_enabled {
         return Err(invalid_input(
             "message kind is not enabled on this connection",
         ));
     }
-    if frame.header().payload_len() != frame.payload().len()
-        || frame.payload().len() > MAX_CONTROL_PAYLOAD_BYTES
-    {
+    let limit = if snapshot_enabled {
+        MessageKind::Snapshot.max_payload_bytes()
+    } else {
+        MAX_CONTROL_PAYLOAD_BYTES
+    };
+    if frame.header().payload_len() != frame.payload().len() || frame.payload().len() > limit {
         return Err(invalid_input("control frame has an invalid payload length"));
     }
     if event_enabled {
@@ -1244,6 +1287,88 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         assert!(!server.is_poisoned());
+    }
+
+    #[test]
+    fn opted_in_snapshot_frames_round_trip_within_the_snapshot_limit() {
+        let (server_socket, client_socket) = UnixStream::pair().expect("socket pair");
+        let mut server = AuthenticatedStream::new(server_socket).expect("server stream");
+        let mut client = AuthenticatedStream::new(client_socket).expect("client stream");
+        let payload = vec![0x5a_u8; MAX_CONTROL_PAYLOAD_BYTES + 1];
+        let snapshot = Frame::new(MessageKind::Snapshot, 3, &payload).expect("snapshot frame");
+        // Not enabled: rejected before any I/O, stream still usable.
+        assert_eq!(
+            server
+                .write_frame(&snapshot, deadline_after(Duration::from_secs(1)))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(!server.is_poisoned());
+        server
+            .enable_snapshot_writes()
+            .expect("enable server snapshot writes");
+        client
+            .enable_snapshot_reads()
+            .expect("enable client snapshot reads");
+        // Read-only opt-in does not permit outbound snapshots.
+        assert_eq!(
+            client
+                .write_frame(&snapshot, deadline_after(Duration::from_secs(1)))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let writer = thread::spawn(move || {
+            server
+                .write_frame(
+                    &snapshot_payload_frame(),
+                    deadline_after(Duration::from_secs(2)),
+                )
+                .map(|()| server)
+        });
+        let received = client
+            .read_frame(deadline_after(Duration::from_secs(2)))
+            .expect("read opted-in snapshot");
+        let mut server = writer.join().unwrap().expect("write opted-in snapshot");
+        assert_eq!(received.kind(), MessageKind::Snapshot);
+        assert_eq!(received.request_id(), 3);
+        assert_eq!(received.payload().len(), MAX_CONTROL_PAYLOAD_BYTES + 1);
+        // A large Response is still capped at the control limit.
+        let big_response =
+            Frame::new(MessageKind::Response, 4, &payload).expect_err("response limit");
+        let _ = big_response;
+        let events = Frame::new(MessageKind::Event, 0, b"no").unwrap();
+        assert_eq!(
+            server
+                .write_frame(&events, deadline_after(Duration::from_secs(1)))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    fn snapshot_payload_frame() -> Frame<'static> {
+        static PAYLOAD: [u8; MAX_CONTROL_PAYLOAD_BYTES + 1] = [0x5a; MAX_CONTROL_PAYLOAD_BYTES + 1];
+        Frame::new(MessageKind::Snapshot, 3, &PAYLOAD).expect("snapshot frame")
+    }
+
+    #[test]
+    fn oversized_snapshot_header_is_rejected_before_allocation_even_when_enabled() {
+        let (receiver, mut sender) = UnixStream::pair().expect("socket pair");
+        let mut authenticated = AuthenticatedStream::new(receiver).expect("same-user socket pair");
+        authenticated.enable_snapshot_reads().unwrap();
+        let mut header = encoded(MessageKind::Snapshot, 1, b"")
+            .into_iter()
+            .take(HEADER_BYTES)
+            .collect::<Vec<_>>();
+        let too_large = (20 + crate::protocol_wire::MAX_SNAPSHOT_PAYLOAD_BYTES + 1) as u32;
+        header[..4].copy_from_slice(&too_large.to_be_bytes());
+        sender.write_all(&header).unwrap();
+        let error = authenticated
+            .read_frame(deadline_after(Duration::from_secs(1)))
+            .expect_err("snapshot over the wire limit");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

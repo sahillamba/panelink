@@ -109,3 +109,11 @@ detach/reconnect, singleton refusal and endpoint cleanup. No raw rerun output,
 new timing, version record or measured count was provided. Earlier sandbox
 EPERM and the initial parser failure remain historical evidence. This does not
 complete Phase2 host checks or the remaining Phase3 capabilities.
+
+## Agent-captured pass on new machine — 2026-10-18
+
+On the new development Mac (see latest INTEGRATION.md), the parent ran
+`cargo test --locked --offline --test p3_pathname -- --ignored` directly:
+`pathname_server_cli_context_reuse ... ok`, 1 passed in 0.68 s. Pathname bind
+and accept are permitted in this environment, so EPERM no longer blocks this
+fixture here. Remaining Phase 3 runtime capabilities are unaffected.

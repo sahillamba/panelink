@@ -246,3 +246,27 @@ This audit owns only this report. No source, Cargo, roadmap, integration, or
 shared planning file was changed, and no commit or push was made. Report
 ownership is released to the parent for review; the API-launch gate remains
 closed pending the bounded descriptor work above.
+
+## Gate closure — 2026-10-18
+
+Parent closes the descriptor/CLOEXEC/process-spawn gate for API launch on the
+current experimental target (macOS/aarch64, Rust 1.99.1), with the scope below.
+Each step-4 requirement now has passing host evidence:
+
+| Requirement | Evidence (this host, macOS 26.6.1 arm64) |
+| --- | --- |
+| Atomic close-on-exec PTY opener | P3-ATOMIC-PTY-INTEGRATION.md; `p3_atomic_pty` and `terminal::atomic_pty_integration_tests` pass |
+| Two concurrent managed PTY spawns get distinct PTYs | `concurrent_production_spawns_keep_distinct_ptys_and_clean_up` passes |
+| Child has only intended PTY on fds 0/1/2 | `tests/p3_fd_inheritance.rs` 4/4 pass (clean, positive control, leak rejected) |
+| Socket bind/accept/connect creation windows | cooperative `spawn_gate` covers bind, accept and client socket (transport.rs:128, 298, 341); `accepted_socket_exec_race_excludes_accepted_descriptor` passes 6/6 |
+
+Scope decision for the open question in step 3: foreign/native concurrent
+spawn is **out of scope**. Panelink loads no native library that spawns
+processes; every Panelink child exec and descriptor-creation window that could
+overlap a launch goes through the shared spawn gate. Server launches must stay
+on the single owner path, and worker threads forward requests only.
+
+Not established: behavior on any macOS release other than the tested hosts
+(26.5.2 and 26.6.1); a minimum supported macOS version is still unset. If the
+Rust toolchain changes, recheck the standard-library pipe/socket behavior. A
+new dependency that spawns processes or creates descriptors reopens this gate.

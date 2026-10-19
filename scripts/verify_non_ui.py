@@ -48,6 +48,12 @@ def _cargo_home(environment: Mapping[str, str]) -> str | None:
             raise ValueError("invalid_cargo_home")
         return str(path)
 
+    # Prefer the standard rustup/Cargo home when it holds a populated registry;
+    # the temporary cache was only needed in a restricted environment and can
+    # be recreated empty, which would break offline builds.
+    standard = Path.home() / ".cargo"
+    if (standard / "registry").is_dir() and os.access(standard, os.W_OK | os.X_OK):
+        return str(standard)
     fallback = Path("/private/tmp/panelink-p2-cargo-home")
     if fallback.is_dir() and os.access(fallback, os.W_OK | os.X_OK):
         return str(fallback)

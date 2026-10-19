@@ -94,27 +94,24 @@ optional and controls where temporary terminfo/runtime directories are made.
 Do not put provider keys or other credentials into shell startup files for
 Panelink. The current build and tests do not need provider credentials.
 
-## Run the current disposable probe
+## Run Panelink
 
-From the repository root, compile the checked-in terminfo entry into a private
-temporary directory, then launch a child in an interactive terminal:
+After building, link the launcher once and open your workspace:
 
 ```sh
-probe_terminfo_dir="$(mktemp -d "${TMPDIR:-/tmp}/panelink-terminfo.XXXXXX")"
-/usr/bin/tic -x -o "$probe_terminfo_dir" docs/terminfo/panelink-probe.terminfo
-./target/debug/panelink pty-probe --terminfo "$probe_terminfo_dir" -- /bin/zsh
-status=$?
-rm -rf "$probe_terminfo_dir"
-exit "$status"
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$PWD/bin/panelink" "$HOME/.local/bin/panelink"
+panelink
 ```
 
-The launcher script is also available as `bin/panelink`. Once the binary is
-built, running `./bin/panelink` with no arguments opens the disposable zsh
-probe; arguments are passed to the Panelink CLI. The launcher finds its
-checkout from its own location, so it works after cloning into a different
-directory. Ctrl-X stops the probe and its child, returning to the outer shell.
-It does not detach or preserve the child. The probe requires access to the
-host terminal device and is not supported in every restricted environment.
+Make sure `$HOME/.local/bin` is on your `PATH`. The launcher finds its
+checkout from its own location, so recreate the link if you move the
+repository. `panelink` compiles its terminfo entry once into
+`~/Library/Application Support/Panelink`. It starts the background workspace
+server if needed and attaches. Ctrl-X detaches, and `panelink stop` ends the
+workspace. `panelink probe` runs the older disposable single-shell probe.
+These need access to the host terminal device, which some restricted
+environments deny.
 
 ## Continue implementation
 

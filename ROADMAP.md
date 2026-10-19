@@ -1,12 +1,14 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: 3 trusted multi-session library core integrated; runtime launch gated; Phase 2 host acceptance pending
+current-phase: 3A DONE (2026-10-19, usable two-pane `panelink`); Phase 3 runtime gates and Phase 2 manual host checks remain open
 last-updated: 2026-10-18
-last-verified: 2026-10-18 — eight-check verifier passed: root Rust443passed/14ignored plus39decoder, Python31passed, component fingerprints match, strict all-target Clippy, fmt, build,137Markdown/0findings; strict rustdoc and 12 focused pane-layout tests passed
-next-action: P3A pure layout groundwork is implemented and parent-reviewed in P3A-LAYOUT.md. Continue with the right-click menu/input and split transaction contract. The separate requested MiMo menu-analysis task is in P3A-MIMO-MENU-TASK.md; OpenCode ACP startup is blocked here, and no model prompt was sent.
-blocked-on: clipboard sentinel retest and remaining host acceptance; actual pathname listener/accept gate returns EPERM here; OpenCode 2.0.32 private server/ACP bootstrap is blocked by loopback-bind EPERM, so project model availability and live identity remain unproved
+last-verified: 2026-10-19 — verifier 8/8; full Rust 588 passed/0 failed/15 ignored; rustdoc clean; p3a_default_open 6/6 x4; Ctrl-B NAV mode added
+next-action: Phase 3A complete and committed. Choose next: lifecycle/stop and history work queued before 3A, raising the 2-pane capacity, wider key support (function/Alt/Ctrl keys over schema 8), or Phase 4 OpenCode identity (OpenCode 1.19.0 installed; loopback bind now permitted).
+blocked-on: clipboard sentinel retest and remaining manual Apple Terminal acceptance; live OpenCode identity unproved. New machine (2026-10-18): p2_host 9/9 and p3_pathname ignored fixtures pass with captured output; /dev/tty, pathname and loopback bind permitted; OpenCode here is 1.19.0 and the MiMo task has not run
+setup: new Mac 2026-10-18, rustup stable 1.99.1, verifier 8/8, 443 passed/14 ignored; launcher symlink fix uncommitted — see INTEGRATION.md "New-machine setup"
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
+phase-3a: DONE — 2026-10-19 — see docs/progress/P3A-DEFAULT-OPEN.md and INTEGRATION.md
 ```
 
 ## Control commands
@@ -123,15 +125,15 @@ User explicitly authorized parallel GPT-6-Luna xhigh implementation of the trans
 - [x] N3 explicit CLI receipt command and context-preservation checks; reviewed under P3-NOTIFICATIONS-TASKS.md, see P3-RECEIPT.md.
 - [x] W1/W2/W3 bounded live-watch protocol, authoritative reconciliation and delivery; parent CLI/private-PTY integration passes. See P3-WATCH-INTEGRATION.md; expanded pathname CLI watch acceptance remains external.
 - [x] Review managed launch/multi-session next-task plan under P3-MANAGED-LAUNCH-TASK.md. Plan is a proposal in P3-MANAGED-LAUNCH-PLAN.md, not adopted runtime/schema; ownership released.
-- [ ] Close descriptor/CLOEXEC/process-spawn source gate before enabling API launch; then specify exact launch/cursor/capability contracts and bounded registry implementation.
+- [x] Close descriptor/CLOEXEC/process-spawn source gate before enabling API launch (closed 2026-10-18 for macOS/aarch64 + Rust 1.99.1, foreign/native spawn out of scope; see P3-SPAWN-DESCRIPTOR-GATE.md 'Gate closure').
 - [x] Review initial descriptor/spawn source inventory in P3-SPAWN-DESCRIPTOR-GATE.md: macOS PTY and standard-library socket/pipe flag windows remain; no concurrent-launch approval.
 - [x] Review test-only atomic PTY opener spike and actual macOS evidence in P3-ATOMIC-PTY-SPIKE.md; this does not close socket/pipe/native-spawn gaps or adopt a production replacement.
 - [x] Integrate/review production atomic PTY opener and cooperative shared spawn gate for current experimental macOS/aarch64; see P3-ATOMIC-PTY-INTEGRATION.md and P3-SPAWN-GATE-RESULT.md. No release minimum-OS or arbitrary native-spawn guarantee.
-- [ ] Implement full-descriptor child probe and deterministic real accepted-socket/managed-exec race fixture; run on a host permitting pathname bind/accept before enabling API launch.
+- [x] Implement full-descriptor child probe and deterministic real accepted-socket/managed-exec race fixture; run on a host permitting pathname bind/accept before enabling API launch (passed 6/6 on new Mac; see P3-ACCEPT-EXEC-RACE.md).
 - [ ] Complete event/watch/launch/layout contracts and implementation; event framing alone does not enable subscriptions, full snapshot queues or multi-session lifecycle.
 - [ ] Complete independent host lifetime/acceptance and remaining bounded runtime capabilities before marking Phase3 complete.
 
-## Phase 3A — right-click splits and new terminal sessions (next priority)
+## Phase 3A — right-click splits and new terminal sessions (DONE 2026-10-19)
 
 User inserted this phase on2026-10-18 before the previously queued lifecycle/
 stop and history work. Implement a usable two-pane terminal slice, reusing
@@ -142,12 +144,15 @@ Detailed staged work and exit evidence:
 [P3A-RIGHT-CLICK-SPLITS.md](docs/progress/P3A-RIGHT-CLICK-SPLITS.md).
 
 - [x] P3A-L1: bounded two-pane geometry, read-only split preview, guarded commit, validated resize and hit testing; 12 focused tests. This is pure groundwork only; see [P3A-LAYOUT.md](docs/progress/P3A-LAYOUT.md).
-- [ ] Integrate exact clicked-target/layout-revision routing with the menu and split transaction for Split Left, Right, Up and Down.
-- [ ] Add an in-terminal right-click overlay with keyboard fallback, fit/capacity reasons and no menu-input leakage to the child.
-- [ ] Wire each action to one fresh independent terminal session (current shell default zsh), preserving the original process and session; use explicit captured client context and global deduplication.
-- [ ] Integrate two live panes, focus/input routing, layout-owned PTY resize and incremental rendering without ordinary full-screen reloads.
-- [ ] Automate geometry/menu/failure/duplicate tests and real two-child input/resize/isolation/cleanup checks; prove supported host mouse delivery or record the precise blocker.
-- [ ] Parent review, integrated verification and actual usable split acceptance before phase completion and its completion commit. A menu mock or library-only test does not complete this phase.
+- [x] P3A-W1: pure split menu model, schema-7 split codec and offset-aware two-pane compositor; see P3A-MENU.md, P3A-SPLIT-CODEC.md, P3A-COMPOSE.md.
+- [x] P3A-W2: trusted in-process split transaction with exact-payload dedup, layout-owned absolute resize and real two-PTY proof; see P3A-SPLIT-TRANSACTION.md. No runtime route yet.
+- [x] Integrate exact clicked-target/layout-revision routing from the client menu through the runtime (`panelink serve`, schema 7/8) to the split transaction; see P3A-RUNTIME.md.
+- [x] Add an in-terminal right-click overlay with keyboard fallback (Ctrl-B s), fit/capacity reasons and no menu-input leakage to the child; see P3A-CLIENT.md.
+- [x] Wire each action to one fresh independent zsh session, preserving the original; explicit client context and global deduplication.
+- [x] Integrate two live panes, focus/input routing, layout-owned PTY resize and incremental rendering (`panelink attach`).
+- [x] Zero-configuration `panelink` (no args) opens/reattaches the workspace; `panelink stop`; last-shell exit closes it; see P3A-DEFAULT-OPEN.md.
+- [x] Automate geometry/menu/failure/duplicate tests and real two-child input/resize/isolation/cleanup checks; outer-PTY fixture proves SGR right-click through the decoder. Apple Terminal delivery still needs the manual check below.
+- [x] Parent review, integrated verification and actual usable split acceptance: user confirmed in Apple Terminal (2026-10-19) that `panelink`, right-click split, typing in both panes and Control-B NAV mode work.
 
 The current two-session capacity remains authoritative: after one successful
 split, additional splits report capacity until an explicit capacity review
@@ -189,7 +194,8 @@ The user also authorized a checkpoint commit of the accumulated staged work,
 but this environment rejected writes to `.git/index` with `Operation not
 permitted`; the explicit commit request remains unfulfilled. Do not ask again
 for authorization. Commit once Git metadata is writable, after checking both
-staged and unstaged diffs.
+staged and unstaged diffs. Update 2026-10-18 (new machine): Git is writable,
+but the user said "no need to commit yet"; hold commits until asked again.
 
 Latest operator-debug checkpoint: user ran nine ignored scenarios in Terminal (4 passed / 5 failed). Safe-Rustix experiments reproduce retained-slave ENOTTY and blocked exit when the probe owns the controlling session. The corrected harness keeps a supervisor alive across probe exit/assertions and drains the private PTY only during subsequent supervisor teardown. Two new lifecycle regressions pass; the direct application loop detects output stall in1,001ms with bounded cleanup. This supports the correction but does not certify the nine corrected operator scenarios; rerun serially outside the sandbox. See P2-OPERATOR-RUN.md, P2-HOST-DEBUG.md and P2-STALL-DEBUG.md. All ownership released; no production behavior/dependency changes, commits or pushes.
 

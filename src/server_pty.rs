@@ -10,7 +10,7 @@ use crate::control_protocol::{
 use crate::protocol::Outcome;
 use crate::response_protocol::RejectionCode;
 use crate::server::{EffectSink, ReadResult};
-use crate::terminal::{PumpOutcome, ScreenSnapshot, TerminalSession};
+use crate::terminal::{Key, PumpOutcome, ScreenSnapshot, TerminalSession, TerminalSize};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -146,6 +146,12 @@ impl PtyEffects {
             .session
             .pending_input_bytes()
             .saturating_sub(pending_before);
+        self.drain_request(request_bytes)
+    }
+
+    /// Write exactly one already-queued request within the bounded window.
+    /// Any unwritten suffix is discarded and never replayed.
+    fn drain_request(&mut self, request_bytes: usize) -> Outcome {
         if request_bytes == 0 {
             self.session.discard_pending_input();
             return Outcome::Applied;
@@ -282,6 +288,82 @@ impl EffectSink for PtyEffects {
 }
 
 impl PtyEffects {
+    /// Apply one absolute PTY and screen-engine size with one bounded pump.
+    ///
+    /// Sizes outside the terminal-core bounds fail before any effect. The
+    /// applying pump makes ordinary output progress and never enqueues caller
+    /// input. `Err(Outcome::Unknown)` means the PTY may or may not have
+    /// accepted the size; a pump error fails this adapter closed, as `poll`
+    /// does. A successful size change advances the screen revision.
+    pub fn resize(&mut self, rows: u16, columns: u16) -> Result<(), Outcome> {
+        if self.failed {
+            return Err(Outcome::Unknown);
+        }
+        let size = TerminalSize::new(rows, columns).map_err(|_| Outcome::Failed)?;
+        if self.session.size() == size {
+            return Ok(());
+        }
+        self.session
+            .request_resize(size)
+            .map_err(|_| Outcome::Failed)?;
+        match self.session.pump() {
+            Ok(progress) => {
+                if !self.observe_progress(progress) {
+                    return Err(Outcome::Unknown);
+                }
+            }
+            Err(_) => {
+                self.fail_closed();
+                return Err(Outcome::Unknown);
+            }
+        }
+        if self.session.size() != size {
+            return Err(Outcome::Unknown);
+        }
+        match self.revision.checked_add(1) {
+            Some(next) => {
+                self.revision = next;
+                Ok(())
+            }
+            None => {
+                self.fail_closed();
+                Err(Outcome::Unknown)
+            }
+        }
+    }
+
+    /// Borrow the current sanitized, styled visible screen.
+    ///
+    /// The snapshot corresponds to [`Self::revision`] at the time of the call.
+    pub fn screen(&self) -> &ScreenSnapshot {
+        self.session.snapshot()
+    }
+
+    /// Check that typed keys could be queued now, without any effect.
+    pub fn validate_keys(&self) -> Result<(), RejectionCode> {
+        self.validate_input_capacity()
+    }
+
+    /// Queue and synchronously deliver one bounded sequence of typed keys.
+    ///
+    /// Keys go through the core's typed encoder only, never as raw host
+    /// escape bytes. Like text input, the queue must be empty first; any
+    /// suffix not written within the bounded drain window is discarded and
+    /// reported as `Partial`/`Failed`, never retried.
+    pub fn keys(&mut self, keys: impl IntoIterator<Item = Key>) -> Outcome {
+        if self.validate_input_capacity().is_err() {
+            return Outcome::Failed;
+        }
+        for key in keys {
+            if self.session.key(key).is_err() {
+                self.session.discard_pending_input();
+                return Outcome::Failed;
+            }
+        }
+        let request_bytes = self.session.pending_input_bytes();
+        self.drain_request(request_bytes)
+    }
+
     fn validate_input_capacity(&self) -> Result<(), RejectionCode> {
         if !self.is_live() {
             return Err(RejectionCode::Unsupported);

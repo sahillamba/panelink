@@ -4,7 +4,9 @@
 //! context, session, response, and server-owner APIs. It does not persist
 //! request bodies, infer pane selection, retry operations, or own a host TTY.
 
-use super::{capture_child_arguments, os_str_byte_len, prepare_probe, ProbeRequest};
+use super::{
+    capture_child_arguments, os_str_byte_len, preflight_serve_launch, prepare_probe, ProbeRequest,
+};
 use panelink::client_context::{ContextError, ContextFile, ReconcileResult};
 use panelink::control_protocol::{
     encode_request_payload, Command as ControlCommand, ControlRequest, ReadSource, TargetRef,
@@ -15,6 +17,10 @@ use panelink::event_protocol::{decode_event, Event, EventBody};
 use panelink::handshake_protocol::{
     validate_welcome, Hello, Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT, CAPABILITY_READ,
 };
+use panelink::launch::{Environment, LaunchContext};
+use panelink::managed_launch_protocol::LaunchRequest;
+use panelink::multi_startup::{StartedMultiServer, StartupLaunch};
+use panelink::pane_layout::SplitDirection;
 use panelink::protocol::{OperationKey, OperationStatus, Outcome};
 use panelink::protocol_wire::{Frame, MessageKind};
 use panelink::response_protocol::{decode_response_payload, RejectionCode, ResponseBody};
@@ -24,7 +30,10 @@ use panelink::session_protocol::{
     decode_session_info, encode_session_hello, encode_session_request, LeaseRef, SessionHello,
     SessionInfo, SessionRequest,
 };
+use panelink::split_protocol::{decode_split_result, encode_split_request, SplitRequest};
+use panelink::terminal::Key;
 use panelink::transport::{AuthenticatedStream, PrivateListener};
+use panelink::ui_protocol::KeyInput;
 use panelink::watch_protocol::{
     decode_reconciliation, decode_watch_end, encode_watch_request, Reconciliation, WatchEnd,
     WatchRequest, WatchStatus, MAX_WATCH_EVENTS, MAX_WATCH_WAIT_MS,
@@ -33,6 +42,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{self, Write as IoWrite};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -51,7 +61,15 @@ static NONCE_SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 enum CliCommand {
     Help,
     ServerProbe(ServerProbe),
+    Serve(ServerProbe),
     Control(Control),
+    Attach(Attach),
+}
+
+/// `attach --directory SERVER_DIR --context-dir DIR`.
+struct Attach {
+    directory: PathBuf,
+    context_dir: PathBuf,
 }
 
 struct ServerProbe {
@@ -70,7 +88,19 @@ struct Control {
 }
 
 enum Action {
-    Init,
+    Init(Option<TargetRef>),
+    Layout,
+    Split {
+        target: TargetRef,
+        layout_revision: u64,
+        direction: SplitDirection,
+        cwd: Option<PathBuf>,
+    },
+    Keys {
+        target: TargetRef,
+        owner_revision: u64,
+        text: String,
+    },
     Show,
     Describe,
     Resync,
@@ -136,7 +166,11 @@ pub(super) fn run(args: Vec<OsString>) -> i32 {
             0
         }
         CliCommand::ServerProbe(request) => run_server_probe(request),
+        CliCommand::Serve(request) => run_serve(request),
         CliCommand::Control(request) => run_control(request),
+        CliCommand::Attach(request) => {
+            crate::ui_client::run(request.directory, request.context_dir)
+        }
     }
 }
 
@@ -146,7 +180,7 @@ fn parse(args: Vec<OsString>) -> Result<CliCommand, ()> {
     }
     if (args.len() == 1 && matches_os(&args[0], &["--help", "-h"]))
         || (args.len() == 2
-            && matches_os(&args[0], &["server-probe", "control"])
+            && matches_os(&args[0], &["server-probe", "serve", "control", "attach"])
             && matches_os(&args[1], &["--help", "-h"]))
     {
         return Ok(CliCommand::Help);
@@ -156,11 +190,30 @@ fn parse(args: Vec<OsString>) -> Result<CliCommand, ()> {
     };
     if first == OsStr::new("server-probe") {
         parse_server_probe(&args[1..]).map(CliCommand::ServerProbe)
+    } else if first == OsStr::new("serve") {
+        parse_server_probe(&args[1..]).map(CliCommand::Serve)
     } else if first == OsStr::new("control") {
         parse_control(&args[1..]).map(CliCommand::Control)
+    } else if first == OsStr::new("attach") {
+        parse_attach(&args[1..]).map(CliCommand::Attach)
     } else {
         Err(())
     }
+}
+
+fn parse_attach(args: &[OsString]) -> Result<Attach, ()> {
+    let mut index = 0;
+    expect_arg(args, &mut index, "--directory")?;
+    let directory = next_path(args, &mut index)?;
+    expect_arg(args, &mut index, "--context-dir")?;
+    let context_dir = next_path(args, &mut index)?;
+    if index != args.len() {
+        return Err(());
+    }
+    Ok(Attach {
+        directory,
+        context_dir,
+    })
 }
 
 fn parse_server_probe(args: &[OsString]) -> Result<ServerProbe, ()> {
@@ -201,7 +254,7 @@ fn parse_server_probe(args: &[OsString]) -> Result<ServerProbe, ()> {
 }
 
 fn parse_control(args: &[OsString]) -> Result<Control, ()> {
-    if args.len() > 9 || !arguments_within_limit(args, MAX_CONTROL_ARGUMENT_BYTES) {
+    if args.len() > 10 || !arguments_within_limit(args, MAX_CONTROL_ARGUMENT_BYTES) {
         return Err(());
     }
     let mut index = 0;
@@ -211,7 +264,50 @@ fn parse_control(args: &[OsString]) -> Result<Control, ()> {
     let context_path = next_path(args, &mut index)?;
     let action_name = next_utf8(args, &mut index)?;
     let action = match action_name {
-        "init" => Action::Init,
+        "init" => Action::Init(match args.get(index) {
+            Some(_) => Some(parse_target(next_utf8(args, &mut index)?)?),
+            None => None,
+        }),
+        "layout" => Action::Layout,
+        "split" => {
+            let target = parse_target(next_utf8(args, &mut index)?)?;
+            let layout_revision = parse_nonzero_decimal(next_utf8(args, &mut index)?)?;
+            let direction = match next_utf8(args, &mut index)? {
+                "left" => SplitDirection::Left,
+                "right" => SplitDirection::Right,
+                "up" => SplitDirection::Up,
+                "down" => SplitDirection::Down,
+                _ => return Err(()),
+            };
+            let cwd = if args.get(index).is_some() {
+                expect_arg(args, &mut index, "--cwd")?;
+                Some(next_path(args, &mut index)?)
+            } else {
+                None
+            };
+            Action::Split {
+                target,
+                layout_revision,
+                direction,
+                cwd,
+            }
+        }
+        "keys" => {
+            let target = parse_target(next_utf8(args, &mut index)?)?;
+            let owner_revision = parse_nonzero_decimal(next_utf8(args, &mut index)?)?;
+            let text = next_utf8(args, &mut index)?.to_owned();
+            // One Char key per scalar plus Enter, within the schema-8 cap.
+            if text.chars().count() + 1 > panelink::ui_protocol::MAX_KEYS
+                || text.chars().any(char::is_control)
+            {
+                return Err(());
+            }
+            Action::Keys {
+                target,
+                owner_revision,
+                text,
+            }
+        }
         "show" => Action::Show,
         "describe" => Action::Describe,
         "resync" => Action::Resync,
@@ -378,7 +474,7 @@ fn arguments_within_limit(args: &[OsString], maximum: usize) -> bool {
 
 fn run_control(control: Control) -> i32 {
     match control.action {
-        Action::Init => run_init(&control.directory, &control.context_path),
+        Action::Init(target) => run_init(&control.directory, &control.context_path, target),
         Action::Show => run_show(&control.context_path),
         action => run_existing_control(control.directory, control.context_path, action),
     }
@@ -392,7 +488,7 @@ fn run_show(path: &Path) -> i32 {
     emit_context(&context, "show")
 }
 
-fn run_init(directory: &Path, context_path: &Path) -> i32 {
+fn run_init(directory: &Path, context_path: &Path, target: Option<TargetRef>) -> i32 {
     match fs::symlink_metadata(context_path) {
         Ok(_) => return emit_failure("context_exists"),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -402,7 +498,7 @@ fn run_init(directory: &Path, context_path: &Path) -> i32 {
         Ok(stream) => stream,
         Err(error) => return emit_failure(error),
     };
-    let welcome = match handshake(&mut stream, None) {
+    let welcome = match handshake_attach(&mut stream, None, target) {
         Ok(welcome) => welcome,
         Err(error) => return emit_failure(error),
     };
@@ -542,6 +638,25 @@ fn run_existing_control(directory: PathBuf, path: PathBuf, action: Action) -> i3
     }
 
     match action {
+        Action::Layout => ui_layout(&mut stream),
+        Action::Split {
+            target,
+            layout_revision,
+            direction,
+            cwd,
+        } => ui_split(
+            &mut context,
+            &mut stream,
+            target,
+            layout_revision,
+            direction,
+            cwd,
+        ),
+        Action::Keys {
+            target,
+            owner_revision,
+            text,
+        } => ui_keys(&mut context, &mut stream, target, owner_revision, &text),
         Action::Describe => describe(&mut stream),
         Action::Detach => detach(&mut stream),
         Action::Read(target) => control_read(&mut context, &mut stream, target),
@@ -622,7 +737,7 @@ fn run_existing_control(directory: PathBuf, path: PathBuf, action: Action) -> i3
             target,
             owner_revision,
         } => control_interrupt(&mut context, &mut stream, target, owner_revision),
-        Action::Init
+        Action::Init(_)
         | Action::Show
         | Action::Resync
         | Action::Status(_)
@@ -710,6 +825,27 @@ fn handshake_mode(
     resume: Option<panelink::client_context::ClientContext>,
     require_events: bool,
 ) -> Result<Welcome, &'static str> {
+    handshake_full(stream, resume, require_events, None)
+}
+
+/// Fresh or resumed Hello with an optional schema-8 AttachTarget trailer.
+///
+/// Only the multi-session `serve` runtime understands the trailer; it pins a
+/// new lease to that exact pane.
+fn handshake_attach(
+    stream: &mut AuthenticatedStream,
+    resume: Option<panelink::client_context::ClientContext>,
+    target: Option<TargetRef>,
+) -> Result<Welcome, &'static str> {
+    handshake_full(stream, resume, false, target)
+}
+
+fn handshake_full(
+    stream: &mut AuthenticatedStream,
+    resume: Option<panelink::client_context::ClientContext>,
+    require_events: bool,
+    target: Option<TargetRef>,
+) -> Result<Welcome, &'static str> {
     let hello = Hello {
         nonce: fresh_nonce(),
         required_capabilities: CAPABILITY_READ | if require_events { CAPABILITY_EVENTS } else { 0 },
@@ -723,7 +859,12 @@ fn handshake_mode(
             lease: context.lease(),
         }),
     };
-    let payload = encode_session_hello(&session_hello).map_err(|_| "handshake_invalid")?;
+    let mut payload = encode_session_hello(&session_hello).map_err(|_| "handshake_invalid")?;
+    if let Some(target) = target {
+        let trailer =
+            panelink::ui_protocol::encode_attach_target(target).map_err(|_| "request_invalid")?;
+        payload.extend_from_slice(&trailer);
+    }
     write_frame(stream, MessageKind::Hello, 0, &payload)?;
     let frame = read_frame(stream)?;
     if frame.kind() == MessageKind::Error && frame.request_id() == 0 {
@@ -749,9 +890,18 @@ fn handshake_mode(
 }
 
 fn exchange(stream: &mut AuthenticatedStream, payload: &[u8]) -> Result<Vec<u8>, &'static str> {
-    write_frame(stream, MessageKind::Request, 1, payload)?;
+    exchange_with_id(stream, 1, payload)
+}
+
+/// One request/response with an explicit, strictly increasing request ID.
+fn exchange_with_id(
+    stream: &mut AuthenticatedStream,
+    request_id: u64,
+    payload: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    write_frame(stream, MessageKind::Request, request_id, payload)?;
     let frame = read_frame(stream)?;
-    if frame.request_id() != 1 {
+    if frame.request_id() != request_id {
         return Err("response_invalid");
     }
     match frame.kind() {
@@ -1170,6 +1320,378 @@ fn run_server_probe(request: ServerProbe) -> i32 {
     }
 }
 
+/// Foreground multi-session server: same storage/endpoint semantics as
+/// `server-probe`, but the first child is a managed schema-6 launch and the
+/// runtime routes schemas 1, 2, 5, 6 (status), 7 (split) and 8 (pane UI).
+fn run_serve(request: ServerProbe) -> i32 {
+    // Capture the filtered context once (inherited PANELINK_* removed, so a
+    // serve started inside a Panelink pane works), then validate terminfo and
+    // resolve the executable against that same context before storage.
+    let context = match capture_launch_context(None) {
+        Ok(context) => context,
+        Err(error) => return emit_failure(error),
+    };
+    if preflight_serve_launch(&request.terminfo, &request.executable, &context).is_err() {
+        return emit_failure("launch_context_invalid");
+    }
+    if ensure_server_directory(&request.directory).is_err() {
+        return emit_failure("server_directory_invalid");
+    }
+    let storage = match if request.initialize {
+        ServerStorage::initialize(&request.directory)
+    } else {
+        ServerStorage::open(&request.directory)
+    } {
+        Ok(storage) => storage,
+        Err(_) => return emit_failure("server_storage_unavailable"),
+    };
+    let listener = match PrivateListener::bind(&request.directory) {
+        Ok(listener) => listener,
+        // EPERM/EACCES is reported distinctly so callers can tell an
+        // environment-denied pathname bind from any other bind failure.
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            return emit_failure("listener_permission_denied")
+        }
+        Err(_) => return emit_failure("listener_unavailable"),
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let _signal_ids = match register_stop_signals(Arc::clone(&stop)) {
+        Ok(ids) => ids,
+        Err(_) => return emit_failure("signal_registration_failed"),
+    };
+    let (rows, columns) = host_size();
+    let started = StartedMultiServer::start(
+        storage,
+        &request.terminfo,
+        &StartupLaunch {
+            executable: &request.executable,
+            arguments: &request.arguments,
+            context: &context,
+            rows,
+            columns,
+        },
+        request.allow_input,
+    );
+    drop(context);
+    let started = match started {
+        Ok(started) => started,
+        Err(_) => return emit_failure("server_start_failed"),
+    };
+    let startup = started.startup();
+    let mut driver = started.into_driver();
+    let generation = driver.generation();
+    let mut line =
+        String::from("{\"ok\":true,\"action\":\"serve\",\"state\":\"running\",\"generation\":");
+    let _ = write!(line, "{generation},\"target\":");
+    match startup.target {
+        Some(target) => push_target(&mut line, target),
+        None => line.push_str("null"),
+    }
+    let _ = write!(
+        line,
+        ",\"startup_outcome\":\"{}\",\"rows\":{rows},\"columns\":{columns},\"allow_input\":{}}}",
+        outcome_name(startup.outcome),
+        request.allow_input
+    );
+    let clock = monotonic_clock(Instant::now());
+    if !write_json(&line) {
+        driver.stop_connections(&clock);
+        drop(driver);
+        drop(listener);
+        return 1;
+    }
+    let mut failed = false;
+    while !stop.load(Ordering::Relaxed) {
+        if driver.verify_storage().is_err() {
+            failed = true;
+            break;
+        }
+        // A per-session poll error (for example one exited child) does not
+        // stop the server or its sibling session.
+        let _ = driver.tick(&clock);
+        // When every shell has exited there is nothing left to serve: stop
+        // so the next `panelink` starts a fresh workspace.
+        if driver.owner().all_sessions_ended() {
+            break;
+        }
+        match listener.accept(deadline_after(SERVER_ACCEPT_SLICE)) {
+            Ok(stream) => {
+                // Capacity/spawn failures reject only this attachment.
+                let _ = driver.attach(stream);
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                ) => {}
+            Err(_) => {
+                failed = true;
+                break;
+            }
+        }
+    }
+    driver.stop_connections(&clock);
+    drop(driver);
+    drop(listener);
+    if failed {
+        emit_failure("server_runtime_failed")
+    } else {
+        emit_json(
+            &format!(
+                "{{\"ok\":true,\"action\":\"serve\",\"state\":\"stopped\",\"generation\":{generation}}}"
+            ),
+            if startup.outcome == Outcome::Applied { 0 } else { 1 },
+        )
+    }
+}
+
+/// Initial root size: the terminal size when stdout is a TTY, clamped to pane
+/// bounds; otherwise 24x80.
+fn host_size() -> (u16, u16) {
+    use panelink::pane_layout::{MAX_PANE_COLUMNS, MAX_PANE_ROWS, MIN_PANE_COLUMNS, MIN_PANE_ROWS};
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ writes one winsize into the valid pointer supplied.
+    let result = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) };
+    if result != 0 || size.ws_row == 0 || size.ws_col == 0 {
+        return (24, 80);
+    }
+    (
+        size.ws_row.clamp(MIN_PANE_ROWS, MAX_PANE_ROWS),
+        size.ws_col.clamp(MIN_PANE_COLUMNS, MAX_PANE_COLUMNS),
+    )
+}
+
+/// Capture this CLI process's own cwd (or an explicit override) and
+/// environment as one bounded launch context, minus reserved names.
+fn capture_launch_context(cwd: Option<PathBuf>) -> Result<LaunchContext, &'static str> {
+    let working_directory = match cwd {
+        Some(path) => path,
+        None => std::env::current_dir().map_err(|_| "launch_context_invalid")?,
+    };
+    if !working_directory.is_absolute() {
+        return Err("launch_context_invalid");
+    }
+    filtered_launch_context(working_directory, std::env::vars_os())
+}
+
+/// Bound and filter one captured environment. Inherited `PANELINK_*` names
+/// (for example when started from inside a Panelink pane) are dropped; the
+/// server sets its own owned values for each child.
+fn filtered_launch_context(
+    working_directory: PathBuf,
+    variables: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<LaunchContext, &'static str> {
+    let mut environment = Environment::new();
+    let mut total = 0_usize;
+    for (name, value) in variables {
+        // Panelink-owned names are set by the server, never forwarded.
+        if name.as_bytes().starts_with(b"PANELINK_") {
+            continue;
+        }
+        total = total
+            .checked_add(name.len() + value.len() + 6)
+            .filter(|total| *total <= 48 * 1024)
+            .ok_or("launch_context_too_large")?;
+        if environment.len() >= 1_024 {
+            return Err("launch_context_too_large");
+        }
+        environment.insert(name, value);
+    }
+    Ok(LaunchContext {
+        working_directory,
+        environment,
+    })
+}
+
+fn ui_layout_reply(
+    stream: &mut AuthenticatedStream,
+) -> Result<panelink::ui_protocol::LayoutReply, &'static str> {
+    let bytes = exchange(stream, &panelink::ui_protocol::encode_layout_query())?;
+    panelink::ui_protocol::decode_layout_reply(&bytes).map_err(|_| "response_invalid")
+}
+
+fn ui_layout(stream: &mut AuthenticatedStream) -> i32 {
+    match ui_layout_reply(stream) {
+        Ok(layout) => emit_json(&layout_json(&layout), 0),
+        Err(error) => emit_failure(error),
+    }
+}
+
+fn layout_json(layout: &panelink::ui_protocol::LayoutReply) -> String {
+    let mut json = String::from("{\"ok\":true,\"action\":\"layout\"");
+    let _ = write!(
+        json,
+        ",\"revision\":{},\"rows\":{},\"columns\":{},\"pane_count\":{},\"panes\":[",
+        layout.revision,
+        layout.rows,
+        layout.columns,
+        layout.panes.iter().flatten().count()
+    );
+    for (index, pane) in layout.panes.iter().flatten().enumerate() {
+        if index != 0 {
+            json.push(',');
+        }
+        json.push_str("{\"target\":");
+        push_target(&mut json, pane.target);
+        let _ = write!(
+            json,
+            ",\"x\":{},\"y\":{},\"rows\":{},\"columns\":{},\"resize_pending\":{}}}",
+            pane.rect.x,
+            pane.rect.y,
+            pane.rect.rows,
+            pane.rect.columns,
+            pane.pending_confirmed.is_some()
+        );
+    }
+    json.push(']');
+    match layout.divider {
+        Some(divider) => {
+            let _ = write!(
+                json,
+                ",\"divider\":{{\"x\":{},\"y\":{},\"rows\":{},\"columns\":{}}}}}",
+                divider.x, divider.y, divider.rows, divider.columns
+            );
+        }
+        None => json.push_str(",\"divider\":null}"),
+    }
+    json
+}
+
+/// Split from the caller-captured target/revision. The new zsh child's
+/// launch context is this CLI process's own cwd (or `--cwd`) and environment,
+/// never the server's; its size is the locally previewed planned rectangle.
+fn ui_split(
+    context: &mut ContextFile,
+    stream: &mut AuthenticatedStream,
+    target: TargetRef,
+    layout_revision: u64,
+    direction: SplitDirection,
+    cwd: Option<PathBuf>,
+) -> i32 {
+    let layout = match ui_layout_reply(stream) {
+        Ok(layout) => layout,
+        Err(error) => return emit_failure(error),
+    };
+    // The server independently checks target, revision and size first.
+    let (rows, columns) =
+        match panelink::ui_protocol::planned_split_size(&layout, target, direction) {
+            Ok(size) => size,
+            Err(_) => return emit_failure("split_unavailable"),
+        };
+    let launch_context = match capture_launch_context(cwd) {
+        Ok(context) => context,
+        Err(error) => return emit_failure(error),
+    };
+    let key = candidate_key(context.context());
+    let mut payload = Vec::new();
+    {
+        let cwd = launch_context.working_directory.as_os_str().as_bytes();
+        let environment = panelink::multi_startup::environment_entries(&launch_context.environment);
+        let launch = LaunchRequest {
+            key,
+            rows,
+            columns,
+            requested_executable: b"/bin/zsh",
+            requested_working_directory: cwd,
+            client_working_directory: cwd,
+            arguments: &[],
+            environment: &environment,
+        };
+        if encode_split_request(
+            &SplitRequest {
+                key,
+                target,
+                expected_layout_revision: layout_revision,
+                direction,
+                launch: &launch,
+            },
+            &mut payload,
+        )
+        .is_err()
+        {
+            return emit_failure("request_invalid");
+        }
+    }
+    drop(launch_context);
+    let reserved = match context.reserve() {
+        Ok(reserved) if reserved == key => reserved,
+        Ok(_) => return emit_failure("context_key_mismatch"),
+        Err(error) => return emit_failure(context_error_label(&error)),
+    };
+    // Request ID 1 was the layout query on this connection.
+    let bytes = exchange_with_id(stream, 2, &payload);
+    // The payload held environment values; release it before any output.
+    drop(payload);
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(error) => return emit_failure(error),
+    };
+    let result = match decode_split_result(&bytes) {
+        Ok(result) if result.key == reserved => result,
+        _ => return emit_failure("response_invalid"),
+    };
+    if let Err(error) = context.ack(reserved) {
+        return emit_failure(context_error_label(&error));
+    }
+    let applied = result.outcome == Outcome::Applied;
+    let mut json = String::from("{\"ok\":");
+    json.push_str(if applied { "true" } else { "false" });
+    let _ = write!(
+        json,
+        ",\"action\":\"split\",\"sequence\":{},\"outcome\":\"{}\",\"layout_revision\":{},\"existing_target\":",
+        reserved.sequence,
+        outcome_name(result.outcome),
+        result.committed_layout_revision
+    );
+    push_target(&mut json, result.existing_target);
+    json.push_str(",\"new_target\":");
+    match result.new_target {
+        Some(target) => push_target(&mut json, target),
+        None => json.push_str("null"),
+    }
+    json.push('}');
+    emit_json(&json, if applied { 0 } else { 1 })
+}
+
+/// Type printable text plus Enter as typed keys (never replayed).
+fn ui_keys(
+    context: &mut ContextFile,
+    stream: &mut AuthenticatedStream,
+    target: TargetRef,
+    owner_revision: u64,
+    text: &str,
+) -> i32 {
+    let key = candidate_key(context.context());
+    let mut keys: Vec<Key> = text.chars().map(Key::Char).collect();
+    keys.push(Key::Enter);
+    let payload = match panelink::ui_protocol::encode_key_input(&KeyInput {
+        key,
+        target,
+        expected_owner_revision: owner_revision,
+        keys: &keys,
+    }) {
+        Ok(payload) => payload,
+        Err(_) => return emit_failure("request_invalid"),
+    };
+    let reserved = match context.reserve() {
+        Ok(reserved) if reserved == key => reserved,
+        Ok(_) => return emit_failure("context_key_mismatch"),
+        Err(error) => return emit_failure(context_error_label(&error)),
+    };
+    let response = match exchange(stream, &payload) {
+        Ok(bytes) => bytes,
+        Err(error) => return emit_failure(error),
+    };
+    handle_reserved_response(context, reserved, &response, "keys", None)
+}
+
 fn ensure_server_directory(path: &Path) -> io::Result<()> {
     panelink::transport::prepare_directory(path)
 }
@@ -1492,7 +2014,7 @@ fn fresh_nonce() -> u64 {
 fn print_help() {
     let _ = writeln!(
         io::stdout().lock(),
-        "Usage:\n  panelink server-probe --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink control --directory DIR --context FILE init|show|describe|resync|detach\n  panelink control --directory DIR --context FILE read TARGET\n  panelink control --directory DIR --context FILE reconcile TARGET\n  panelink control --directory DIR --context FILE watch TARGET GEN:SEQ LIMIT WAIT_MS\n  panelink control --directory DIR --context FILE claim|release TARGET OWNER_REV\n  panelink control --directory DIR --context FILE handoff TARGET OWNER_REV RECIPIENT_LEASE\n  panelink control --directory DIR --context FILE text|paste|submit TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE interrupt TARGET OWNER_REV\n  panelink control --directory DIR --context FILE status SEQUENCE\n  panelink control --directory DIR --context FILE receipt THROUGH_SEQUENCE\nTARGET is generation:workspace:pane:session:occupant_revision. Use --initialize only for a new empty server directory."
+        "Usage:\n  panelink server-probe --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink serve --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink control --directory DIR --context FILE init [TARGET]\n  panelink control --directory DIR --context FILE show|describe|resync|detach\n  panelink control --directory DIR --context FILE layout\n  panelink control --directory DIR --context FILE split TARGET LAYOUT_REV left|right|up|down [--cwd DIR]\n  panelink control --directory DIR --context FILE keys TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE read TARGET\n  panelink control --directory DIR --context FILE reconcile TARGET\n  panelink control --directory DIR --context FILE watch TARGET GEN:SEQ LIMIT WAIT_MS\n  panelink control --directory DIR --context FILE claim|release TARGET OWNER_REV\n  panelink control --directory DIR --context FILE handoff TARGET OWNER_REV RECIPIENT_LEASE\n  panelink control --directory DIR --context FILE text|paste|submit TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE interrupt TARGET OWNER_REV\n  panelink control --directory DIR --context FILE status SEQUENCE\n  panelink control --directory DIR --context FILE receipt THROUGH_SEQUENCE\nTARGET is generation:workspace:pane:session:occupant_revision. Use --initialize only for a new empty server directory.\nserve is an experimental two-pane server (at most one split). split launches /bin/zsh with this CLI process's own cwd (or --cwd) and environment and needs a serve started with --allow-input. init TARGET pins a new context to one serve pane; layout, split and keys work only against serve.\n  panelink attach --directory DIR --context-dir CONTEXT_DIR\nattach is an experimental full-screen client for serve (run it inside a terminal): one connection and one private context file per pane under CONTEXT_DIR (created 0700 if missing). Keys go to the focused pane; left-click focuses; right-click or Ctrl-B then s opens the split menu; Ctrl-X detaches (server-owned shells keep running)."
     );
 }
 
@@ -1850,6 +2372,170 @@ mod tests {
                 "receipt",
                 "1",
                 "extra",
+            ],
+        ] {
+            assert!(parse(args(&malformed)).is_err(), "accepted {malformed:?}");
+        }
+    }
+
+    #[test]
+    fn parser_accepts_serve_and_pane_ui_control_forms() {
+        let parsed = parse(args(&[
+            "serve",
+            "--directory",
+            "/private/tmp/pl-serve",
+            "--terminfo",
+            "/private/tmp/terminfo",
+            "--allow-input",
+            "--",
+            "/bin/zsh",
+            "-f",
+        ]))
+        .unwrap();
+        let CliCommand::Serve(serve) = parsed else {
+            panic!("expected serve");
+        };
+        assert!(serve.allow_input && !serve.initialize);
+        assert_eq!(serve.arguments, args(&["-f"]));
+        assert!(matches!(
+            parse(args(&["serve", "--help"])),
+            Ok(CliCommand::Help)
+        ));
+        let control = |extra: &[&str]| {
+            let mut values = vec![
+                "control",
+                "--directory",
+                "/private/tmp/pl-serve",
+                "--context",
+                "/private/tmp/c.ctx",
+            ];
+            values.extend_from_slice(extra);
+            parse(args(&values))
+        };
+        let Ok(CliCommand::Control(parsed)) = control(&["init", "7:2:3:4:5"]) else {
+            panic!("init TARGET");
+        };
+        assert!(matches!(parsed.action, Action::Init(Some(target)) if target == test_target()));
+        let Ok(CliCommand::Control(parsed)) = control(&["init"]) else {
+            panic!("init");
+        };
+        assert!(matches!(parsed.action, Action::Init(None)));
+        let Ok(CliCommand::Control(parsed)) = control(&["layout"]) else {
+            panic!("layout");
+        };
+        assert!(matches!(parsed.action, Action::Layout));
+        for (word, direction) in [
+            ("left", SplitDirection::Left),
+            ("right", SplitDirection::Right),
+            ("up", SplitDirection::Up),
+            ("down", SplitDirection::Down),
+        ] {
+            let Ok(CliCommand::Control(parsed)) = control(&["split", "7:2:3:4:5", "3", word])
+            else {
+                panic!("split {word}");
+            };
+            assert!(matches!(
+                parsed.action,
+                Action::Split { layout_revision: 3, direction: d, cwd: None, .. } if d == direction
+            ));
+        }
+        let Ok(CliCommand::Control(parsed)) =
+            control(&["split", "7:2:3:4:5", "1", "down", "--cwd", "/private/tmp"])
+        else {
+            panic!("split --cwd");
+        };
+        assert!(matches!(parsed.action, Action::Split { cwd: Some(_), .. }));
+        let Ok(CliCommand::Control(parsed)) = control(&["keys", "7:2:3:4:5", "2", "echo hi"])
+        else {
+            panic!("keys");
+        };
+        assert!(matches!(
+            parsed.action,
+            Action::Keys {
+                owner_revision: 2,
+                ..
+            }
+        ));
+        let long = "x".repeat(panelink::ui_protocol::MAX_KEYS);
+        for malformed in [
+            vec!["init", "7:2:3:4:5", "extra"],
+            vec!["layout", "extra"],
+            vec!["split", "7:2:3:4:5", "0", "left"],
+            vec!["split", "7:2:3:4:5", "1", "sideways"],
+            vec!["split", "7:2:3:4:5", "1", "left", "--cwd", "relative"],
+            vec!["split", "7:2:3:4:5", "1", "left", "--other", "/tmp"],
+            vec!["keys", "7:2:3:4:5", "1", "tab\there"],
+            vec!["keys", "7:2:3:4:5", "1", long.as_str()],
+        ] {
+            assert!(control(&malformed).is_err(), "accepted {malformed:?}");
+        }
+    }
+
+    #[test]
+    fn launch_context_drops_inherited_panelink_names_and_stays_bounded() {
+        let context = filtered_launch_context(
+            PathBuf::from("/private/tmp"),
+            [
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("PANELINK_SESSION".into(), "INHERITED".into()),
+                ("PANELINK_GENERATION".into(), "INHERITED".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(context.environment.len(), 1);
+        assert!(context
+            .environment
+            .keys()
+            .all(|name| !name.as_bytes().starts_with(b"PANELINK_")));
+        let huge = (0..2_000).map(|index| (OsString::from(format!("V{index}")), OsString::new()));
+        assert_eq!(
+            filtered_launch_context(PathBuf::from("/"), huge).unwrap_err(),
+            "launch_context_too_large"
+        );
+    }
+
+    #[test]
+    fn attach_parser_accepts_exact_form_only() {
+        let Ok(CliCommand::Attach(attach)) = parse(args(&[
+            "attach",
+            "--directory",
+            "/private/tmp/pl-serve",
+            "--context-dir",
+            "/private/tmp/pl-ctx",
+        ])) else {
+            panic!("attach");
+        };
+        assert_eq!(attach.directory, PathBuf::from("/private/tmp/pl-serve"));
+        assert_eq!(attach.context_dir, PathBuf::from("/private/tmp/pl-ctx"));
+        assert!(matches!(
+            parse(args(&["attach", "--help"])),
+            Ok(CliCommand::Help)
+        ));
+        for malformed in [
+            vec!["attach"],
+            vec!["attach", "--directory", "/private/tmp/s"],
+            vec![
+                "attach",
+                "--directory",
+                "relative",
+                "--context-dir",
+                "/tmp/c",
+            ],
+            vec![
+                "attach",
+                "--directory",
+                "/tmp/s",
+                "--context-dir",
+                "relative",
+            ],
+            vec!["attach", "--context-dir", "/tmp/c", "--directory", "/tmp/s"],
+            vec![
+                "attach",
+                "--directory",
+                "/tmp/s",
+                "--context-dir",
+                "/tmp/c",
+                "x",
             ],
         ] {
             assert!(parse(args(&malformed)).is_err(), "accepted {malformed:?}");

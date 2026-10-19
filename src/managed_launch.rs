@@ -307,6 +307,85 @@ impl<E> ManagedLaunchCoordinator<E> {
             }
         }
 
+        self.run_reserved(key, target, prepared, Some(ledger), journal, spawn)
+    }
+
+    /// Run the journaled launch path for a key the trusted caller has already
+    /// admitted in the one global ledger under its own (larger) payload.
+    ///
+    /// This performs no ledger admission, duplicate lookup, or completion:
+    /// the caller owns that key's ledger record and terminal outcome. The
+    /// key must be new to this coordinator. `expected_target` must equal the
+    /// next registry identity, which lets the caller plan with that identity
+    /// before effects. Preparation and journal-preflight failures return an
+    /// error without reserving the identity. After reservation the result
+    /// follows [`Self::execute`]: Intent before spawn, an acquired handle
+    /// retained through `Unknown`, and the emergency slot on an attach fault.
+    pub(crate) fn execute_admitted<P, PE, SE, J, Prepare, Spawn>(
+        &mut self,
+        request: LaunchRequestView<'_>,
+        expected_target: TargetRef,
+        journal: &mut J,
+        prepare: Prepare,
+        spawn: Spawn,
+    ) -> Result<LaunchResult, ManagedLaunchError>
+    where
+        J: LaunchJournalPort,
+        Prepare: FnOnce(LaunchRequestView<'_>, TargetRef) -> Result<P, PE>,
+        Spawn: FnOnce(P) -> Result<E, SE>,
+    {
+        let key = request.key();
+        if key.generation != self.generation {
+            return Err(ManagedLaunchError::GenerationMismatch);
+        }
+        if self.entry(key).is_some() {
+            return Err(ManagedLaunchError::InternalInvariant);
+        }
+        if self.unhealthy || self.emergency_effect.is_some() {
+            self.unhealthy = true;
+            return Err(ManagedLaunchError::Unhealthy);
+        }
+        let target = self
+            .registry
+            .next_target()
+            .map_err(ManagedLaunchError::Registry)?;
+        if target != expected_target {
+            return Err(ManagedLaunchError::InternalInvariant);
+        }
+        let prepared =
+            prepare(request, target).map_err(|_| ManagedLaunchError::PreparationFailed)?;
+        journal
+            .preflight_launch(key, target.session)
+            .map_err(|_| ManagedLaunchError::JournalPreflightFailed)?;
+        self.run_reserved(key, target, prepared, None, journal, spawn)
+    }
+
+    /// Observe this coordinator's retained launch result for one key.
+    pub(crate) fn retained_result(&self, key: OperationKey) -> Option<LaunchResult> {
+        self.entry(key).map(|entry| entry.result)
+    }
+
+    /// Pure preflight of the identity the next reservation would receive.
+    pub(crate) fn next_target(&self) -> Result<TargetRef, RegistryError> {
+        self.registry.next_target()
+    }
+
+    /// Reserve, journal, spawn and attach after admission and preflight.
+    ///
+    /// `ledger` is `None` when the caller owns the key's completion.
+    fn run_reserved<P, SE, J, Spawn>(
+        &mut self,
+        key: OperationKey,
+        target: TargetRef,
+        prepared: P,
+        mut ledger: Option<&mut Ledger>,
+        journal: &mut J,
+        spawn: Spawn,
+    ) -> Result<LaunchResult, ManagedLaunchError>
+    where
+        J: LaunchJournalPort,
+        Spawn: FnOnce(P) -> Result<E, SE>,
+    {
         let reserved = match self.registry.reserve() {
             Ok(reserved) if reserved == target => reserved,
             _ => {
@@ -317,7 +396,7 @@ impl<E> ManagedLaunchCoordinator<E> {
                     target: None,
                 };
                 let _ = self.store_entry(key, result);
-                if ledger.complete(key, Outcome::Failed).is_err() {
+                if complete_owned(&mut ledger, key, Outcome::Failed).is_err() {
                     return Err(ManagedLaunchError::InternalInvariant);
                 }
                 return Err(ManagedLaunchError::InternalInvariant);
@@ -339,7 +418,7 @@ impl<E> ManagedLaunchCoordinator<E> {
                 target: Some(reserved),
             };
             self.store_existing_result(key, failed);
-            let _ = ledger.complete(key, Outcome::Failed);
+            let _ = complete_owned(&mut ledger, key, Outcome::Failed);
             return Err(ManagedLaunchError::InternalInvariant);
         }
 
@@ -351,7 +430,7 @@ impl<E> ManagedLaunchCoordinator<E> {
         if journal.record(intent).is_err() {
             self.unhealthy = true;
             let _ = self.registry.transition(reserved, SessionState::Failed);
-            return self.finish_pre_spawn(ledger, key, reserved, Outcome::Failed);
+            return self.finish_pre_spawn(ledger.as_deref_mut(), key, reserved, Outcome::Failed);
         }
         if self
             .registry
@@ -365,7 +444,7 @@ impl<E> ManagedLaunchCoordinator<E> {
                 target: Some(reserved),
             };
             self.store_existing_result(key, failed);
-            let _ = ledger.complete(key, Outcome::Failed);
+            let _ = complete_owned(&mut ledger, key, Outcome::Failed);
             return Err(ManagedLaunchError::InternalInvariant);
         }
 
@@ -389,19 +468,24 @@ impl<E> ManagedLaunchCoordinator<E> {
                     self.unhealthy = true;
                     return Err(ManagedLaunchError::InternalInvariant);
                 }
-                return self.finish_pre_spawn(ledger, key, reserved, Outcome::Failed);
+                return self.finish_pre_spawn(
+                    ledger.as_deref_mut(),
+                    key,
+                    reserved,
+                    Outcome::Failed,
+                );
             }
         };
 
         // Move E into coordinator ownership before invoking any further
         // journal, result, or ledger operation.
         if let Err(attach_error) = self.registry.attach_spawned(reserved, effects) {
-            return self.retain_emergency_after_attach_error(
+            return self.retain_emergency_inner(
                 key,
                 reserved,
                 intent,
                 attach_error,
-                ledger,
+                ledger.as_deref_mut(),
                 journal,
             );
         }
@@ -412,7 +496,7 @@ impl<E> ManagedLaunchCoordinator<E> {
         };
         if journal.record(spawned).is_err() {
             self.unhealthy = true;
-            return self.finish_post_spawn_unknown(ledger, key, reserved);
+            return self.finish_post_spawn_unknown(ledger.as_deref_mut(), key, reserved);
         }
         if journal
             .record(LaunchRecord {
@@ -422,7 +506,7 @@ impl<E> ManagedLaunchCoordinator<E> {
             .is_err()
         {
             self.unhealthy = true;
-            return self.finish_post_spawn_unknown(ledger, key, reserved);
+            return self.finish_post_spawn_unknown(ledger.as_deref_mut(), key, reserved);
         }
         if self
             .registry
@@ -435,7 +519,7 @@ impl<E> ManagedLaunchCoordinator<E> {
                 state: LaunchState::Unknown,
                 ..intent
             });
-            return self.finish_post_spawn_unknown(ledger, key, reserved);
+            return self.finish_post_spawn_unknown(ledger.as_deref_mut(), key, reserved);
         }
 
         let applied = LaunchResult {
@@ -444,7 +528,7 @@ impl<E> ManagedLaunchCoordinator<E> {
             target: Some(reserved),
         };
         self.store_existing_result(key, applied);
-        if ledger.complete(key, Outcome::Applied).is_err() {
+        if complete_owned(&mut ledger, key, Outcome::Applied).is_err() {
             self.unhealthy = true;
             let _ = self.registry.transition(reserved, SessionState::Unknown);
             let _ = journal.record(LaunchRecord {
@@ -512,7 +596,7 @@ impl<E> ManagedLaunchCoordinator<E> {
 
     fn finish_pre_spawn(
         &mut self,
-        ledger: &mut Ledger,
+        mut ledger: Option<&mut Ledger>,
         key: OperationKey,
         target: TargetRef,
         outcome: Outcome,
@@ -523,7 +607,7 @@ impl<E> ManagedLaunchCoordinator<E> {
             target: Some(target),
         };
         self.store_existing_result(key, result);
-        if ledger.complete(key, outcome).is_err() {
+        if complete_owned(&mut ledger, key, outcome).is_err() {
             // A known no-child failure is still truthful locally. The bad
             // ledger invariant blocks all future new operations.
             self.unhealthy = true;
@@ -533,7 +617,7 @@ impl<E> ManagedLaunchCoordinator<E> {
 
     fn finish_post_spawn_unknown(
         &mut self,
-        ledger: &mut Ledger,
+        mut ledger: Option<&mut Ledger>,
         key: OperationKey,
         target: TargetRef,
     ) -> Result<LaunchResult, ManagedLaunchError> {
@@ -547,12 +631,13 @@ impl<E> ManagedLaunchCoordinator<E> {
             target: Some(target),
         };
         self.store_existing_result(key, unknown);
-        if ledger.complete(key, Outcome::Unknown).is_err() {
+        if complete_owned(&mut ledger, key, Outcome::Unknown).is_err() {
             self.unhealthy = true;
         }
         Ok(unknown)
     }
 
+    #[cfg(test)]
     fn retain_emergency_after_attach_error<J: LaunchJournalPort>(
         &mut self,
         key: OperationKey,
@@ -560,6 +645,18 @@ impl<E> ManagedLaunchCoordinator<E> {
         intent: LaunchRecord,
         attach_error: AttachError<E>,
         ledger: &mut Ledger,
+        journal: &mut J,
+    ) -> Result<LaunchResult, ManagedLaunchError> {
+        self.retain_emergency_inner(key, target, intent, attach_error, Some(ledger), journal)
+    }
+
+    fn retain_emergency_inner<J: LaunchJournalPort>(
+        &mut self,
+        key: OperationKey,
+        target: TargetRef,
+        intent: LaunchRecord,
+        attach_error: AttachError<E>,
+        mut ledger: Option<&mut Ledger>,
         journal: &mut J,
     ) -> Result<LaunchResult, ManagedLaunchError> {
         let (_registry_error, effects) = attach_error.into_parts();
@@ -580,8 +677,21 @@ impl<E> ManagedLaunchCoordinator<E> {
             target: Some(target),
         };
         self.store_existing_result(key, unknown);
-        let _ = ledger.complete(key, Outcome::Unknown);
+        let _ = complete_owned(&mut ledger, key, Outcome::Unknown);
         Err(ManagedLaunchError::InternalInvariant)
+    }
+}
+
+/// Complete a key in the borrowed ledger, or succeed without effect when the
+/// trusted caller retains ownership of that key's terminal ledger outcome.
+fn complete_owned(
+    ledger: &mut Option<&mut Ledger>,
+    key: OperationKey,
+    outcome: Outcome,
+) -> Result<(), ProtocolError> {
+    match ledger.as_deref_mut() {
+        Some(ledger) => ledger.complete(key, outcome),
+        None => Ok(()),
     }
 }
 
@@ -1385,6 +1495,110 @@ mod tests {
         assert_eq!(duplicate.outcome, Outcome::Unknown);
         drop(owner);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn execute_admitted_runs_journaled_spawn_without_touching_the_callers_ledger_key() {
+        let (mut owner, mut ledger, events, drops) = setup();
+        let request = payload(key(1), b"/bin/sh", &[]);
+        // The caller admitted this key under its own larger payload.
+        let outer = [request.as_slice(), b"outer-envelope"].concat();
+        assert_eq!(ledger.admit(key(1), &outer, NOW), Ok(Admission::Execute));
+        let view = crate::managed_launch_protocol::decode_launch_request(&request).unwrap();
+        let expected = owner.next_target().unwrap();
+        let mut journal = FakeJournal::new(&events);
+        let result = owner
+            .execute_admitted(
+                view,
+                expected,
+                &mut journal,
+                |_, target| {
+                    assert_eq!(target, expected);
+                    events.lock().unwrap().push(Event::Prepare);
+                    Ok::<_, ()>(())
+                },
+                |_| {
+                    events.lock().unwrap().push(Event::Spawn);
+                    Ok::<_, ()>(TrackedHandle::new(&drops, false))
+                },
+            )
+            .unwrap();
+        assert_eq!(result.outcome, Outcome::Applied);
+        assert_eq!(result.target, Some(expected));
+        assert_eq!(owner.retained_result(key(1)), Some(result));
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                Event::Prepare,
+                Event::JournalPreflight,
+                Event::Intent,
+                Event::Spawn,
+                Event::Spawned,
+                Event::Applied,
+            ]
+        );
+        // The caller still owns completion of its admitted key.
+        assert_eq!(ledger.status(key(1), NOW), Ok(OperationStatus::InProgress));
+        // A second inner run for the same key is refused before callbacks.
+        assert!(matches!(
+            owner.execute_admitted(
+                view,
+                owner.next_target().unwrap(),
+                &mut journal,
+                |_, _| -> Result<(), ()> { panic!("known key must not prepare") },
+                |_| -> Result<TrackedHandle, ()> { panic!("known key must not spawn") },
+            ),
+            Err(ManagedLaunchError::InternalInvariant)
+        ));
+    }
+
+    #[test]
+    fn execute_admitted_rejects_unplanned_identity_and_unreserved_failures_spend_nothing() {
+        let (mut owner, _ledger, events, _drops) = setup();
+        let request = payload(key(1), b"/bin/sh", &[]);
+        let view = crate::managed_launch_protocol::decode_launch_request(&request).unwrap();
+        let planned = owner.next_target().unwrap();
+        let wrong = TargetRef {
+            session: planned.session + 1,
+            pane: planned.pane + 1,
+            ..planned
+        };
+        let mut journal = FakeJournal::new(&events);
+        assert!(matches!(
+            owner.execute_admitted(
+                view,
+                wrong,
+                &mut journal,
+                |_, _| -> Result<(), ()> { panic!("unplanned identity must not prepare") },
+                |_| -> Result<TrackedHandle, ()> { panic!("unplanned identity must not spawn") },
+            ),
+            Err(ManagedLaunchError::InternalInvariant)
+        ));
+        assert!(matches!(
+            owner.execute_admitted(
+                view,
+                planned,
+                &mut journal,
+                |_, _| Err::<(), _>("secret"),
+                |_| -> Result<TrackedHandle, ()> { panic!("failed preparation must not spawn") },
+            ),
+            Err(ManagedLaunchError::PreparationFailed)
+        ));
+        journal.preflight_failure = true;
+        assert!(matches!(
+            owner.execute_admitted(
+                view,
+                planned,
+                &mut journal,
+                |_, _| Ok::<_, ()>(()),
+                |_| -> Result<TrackedHandle, ()> { panic!("failed preflight must not spawn") },
+            ),
+            Err(ManagedLaunchError::JournalPreflightFailed)
+        ));
+        assert_eq!(owner.records().len(), 0);
+        assert_eq!(owner.retained_result(key(1)), None);
+        assert_eq!(owner.next_target(), Ok(planned));
+        assert!(owner.is_healthy());
     }
 
     #[test]

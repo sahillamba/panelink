@@ -7,22 +7,26 @@
 //! launch, control result, status, and receipt in this generation.
 
 use super::{
-    decode_request_payload, preflight_reply, Connection, EffectSink, EventPage, GlobalAuthority,
-    OwnerMutation, OwnerObservation, RequestPreflight, ServerError, SessionHandler, SessionReply,
-    TargetState,
+    decode_request_payload, encode_response, is_capacity_error, owner_rejection, preflight_reply,
+    terminal_outcome, Connection, EffectSink, EventPage, GlobalAuthority, OwnerMutation,
+    OwnerObservation, RequestPreflight, ServerError, SessionHandler, SessionReply, TargetState,
 };
 use crate::control_protocol::{Command, TargetRef};
 use crate::event_journal::{EventCursor, EventJournal};
 use crate::event_protocol::Event;
 use crate::handshake_protocol::{Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT, CAPABILITY_READ};
-use crate::input_owner::InputOwner;
+use crate::input_owner::{InputOwner, Owner};
 use crate::managed_launch::{LaunchJournalPort, ManagedLaunchCoordinator, ManagedLaunchError};
-use crate::managed_launch_protocol::{LaunchRequestView, LaunchResult};
-use crate::protocol::{Ledger, OperationKey, Outcome, MAX_ACTIVE_LEASES};
-use crate::response_protocol::RejectionCode;
+use crate::managed_launch_protocol::{decode_launch_request, LaunchRequestView, LaunchResult};
+use crate::pane_layout::{LayoutError, LayoutSnapshot, PaneLayout};
+use crate::protocol::{
+    Admission, Ledger, OperationKey, OperationStatus, Outcome, ProtocolError, MAX_ACTIVE_LEASES,
+};
+use crate::response_protocol::{RejectionCode, Response, ResponseBody};
 use crate::scoped_watch_protocol::SessionCursor;
 use crate::session_protocol::{decode_session_request, SessionHello, SessionRequest};
 use crate::session_registry::{RegistryError, SessionState, SESSION_CAPACITY};
+use crate::split_protocol::{decode_split_request, SplitCodecError, SplitResult};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -118,6 +122,45 @@ impl TargetStateSeed {
 pub struct MultiSessionOwner<E: EffectSink> {
     global: GlobalAuthority,
     launches: ManagedLaunchCoordinator<TargetState<E>>,
+    /// Volatile layout established by the first Applied `execute_launch`.
+    layout: Option<PaneLayout>,
+    /// The one committed split this two-pane prototype can retain.
+    committed_split: Option<SplitResult>,
+    /// Bounded per-pane size state keyed by full target: last confirmed
+    /// absolute PTY size and, while a resize is pending, the desired size.
+    pane_sizes: [Option<PaneSizeState>; 2],
+}
+
+#[derive(Clone, Copy)]
+struct PaneSizeState {
+    target: TargetRef,
+    confirmed: (u16, u16),
+    desired: Option<(u16, u16)>,
+}
+
+/// Read-only view of one pane whose absolute PTY resize has not succeeded.
+///
+/// The layout rectangle is the desired size; the confirmed size is the last
+/// size this owner launched or successfully resized the session to. A UI must
+/// treat the pane as resize-pending until a later absolute resize succeeds.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct PendingResize {
+    /// Complete identity of the pane occupant.
+    pub target: TargetRef,
+    /// Desired `(rows, columns)` from the committed layout.
+    pub desired: (u16, u16),
+    /// Last confirmed `(rows, columns)` applied to the session.
+    pub confirmed: (u16, u16),
+}
+
+impl fmt::Debug for PendingResize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingResize")
+            .field("target", &"<redacted>")
+            .field("desired", &self.desired)
+            .field("confirmed", &self.confirmed)
+            .finish()
+    }
 }
 
 impl<E: EffectSink> fmt::Debug for MultiSessionOwner<E> {
@@ -126,9 +169,177 @@ impl<E: EffectSink> fmt::Debug for MultiSessionOwner<E> {
             .field("generation", &"<redacted>")
             .field("active_leases", &self.global.grants.len())
             .field("launches", &self.launches)
+            .field("layout_established", &self.layout.is_some())
+            .field("split_committed", &self.committed_split.is_some())
+            .field(
+                "pending_resizes",
+                &self
+                    .pane_sizes
+                    .iter()
+                    .flatten()
+                    .filter(|state| state.desired.is_some())
+                    .count(),
+            )
             .finish_non_exhaustive()
     }
 }
+
+/// Fixed reason a new split operation was recorded as `Failed`.
+///
+/// Every reason means no layout commit, no resize, and no child process. Only
+/// [`SplitFailure::LaunchFailed`] spends a registry identity (a known Intent or
+/// spawn failure after reservation); every other reason consumes none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SplitFailure {
+    /// No layout exists yet; no first launch reached Applied.
+    NoLayout,
+    /// The target is not a retained pane occupant in the current layout.
+    StaleTarget,
+    /// The expected layout revision is not the current revision.
+    StaleLayout,
+    /// The two-session or two-pane prototype capacity is exhausted.
+    Capacity,
+    /// The launch coordinator latched unhealthy and accepts no new launches.
+    Unhealthy,
+    /// The registry could not allocate a checked identity.
+    Registry(RegistryError),
+    /// The layout rejected the split geometry or state.
+    Layout(LayoutError),
+    /// The embedded launch rows/columns differ from the planned new pane.
+    LaunchSizeMismatch,
+    /// Pure launch preparation failed before reservation.
+    PreparationFailed,
+    /// Launch journal preflight failed before reservation.
+    JournalPreflightFailed,
+    /// A known Intent or spawn failure after reservation; no child exists.
+    LaunchFailed,
+    /// An exact duplicate of a key already recorded `Failed`. The original
+    /// reason is not retained; the recorded result is identical.
+    PreviouslyFailed,
+}
+
+/// Fixed, redacted failures of the trusted split transaction.
+pub enum SplitError {
+    /// The schema-7 payload is malformed; nothing was admitted.
+    InvalidPayload(SplitCodecError),
+    /// The key generation is not this owner's generation.
+    GenerationMismatch,
+    /// Ledger validation, conflict, or capacity rejected the key before effects.
+    Ledger(ProtocolError),
+    /// The key is admitted but has no terminal retained result yet.
+    InProgress,
+    /// The new operation was admitted and recorded `Failed`; `result` is the
+    /// exact value an identical retry returns.
+    Failed {
+        /// Why this first execution failed.
+        reason: SplitFailure,
+        /// Recorded result: no committed revision and no new target.
+        result: Box<SplitResult>,
+    },
+    /// An internal invariant failed; the ledger records `Unknown` when admitted.
+    InternalInvariant,
+}
+
+impl SplitError {
+    /// Return the protocol classification without formatting payload data.
+    pub fn ledger_error(&self) -> Option<&ProtocolError> {
+        match self {
+            Self::Ledger(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    /// Return the recorded `Failed` result and its reason, when admitted.
+    pub fn failure(&self) -> Option<(SplitFailure, SplitResult)> {
+        match self {
+            Self::Failed { reason, result } => Some((*reason, **result)),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Debug for SplitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPayload(error) => f.debug_tuple("InvalidPayload").field(error).finish(),
+            Self::GenerationMismatch => f.write_str("GenerationMismatch"),
+            Self::Ledger(_) => f.write_str("Ledger(<redacted>)"),
+            Self::InProgress => f.write_str("InProgress"),
+            Self::Failed { reason, .. } => f
+                .debug_struct("Failed")
+                .field("reason", reason)
+                .field("result", &"<redacted>")
+                .finish(),
+            Self::InternalInvariant => f.write_str("InternalInvariant"),
+        }
+    }
+}
+
+impl fmt::Display for SplitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InvalidPayload(_) => "pane split payload is invalid",
+            Self::GenerationMismatch => "pane split generation is invalid",
+            Self::Ledger(ProtocolError::OperationConflict) => {
+                "operation key was reused with a different pane split"
+            }
+            Self::Ledger(_) => "pane split ledger validation failed",
+            Self::InProgress => "pane split result is not yet available",
+            Self::Failed { reason, .. } => match reason {
+                SplitFailure::NoLayout => "no pane layout exists",
+                SplitFailure::StaleTarget => "pane split target is stale",
+                SplitFailure::StaleLayout => "pane layout revision is stale",
+                SplitFailure::Capacity => "pane or session capacity is exhausted",
+                SplitFailure::Unhealthy => "managed launch coordinator is unhealthy",
+                SplitFailure::Registry(_) => "managed session identity is unavailable",
+                SplitFailure::Layout(_) => "pane layout rejected the split",
+                SplitFailure::LaunchSizeMismatch => "launch size does not match the new pane",
+                SplitFailure::PreparationFailed => "managed launch preparation failed",
+                SplitFailure::JournalPreflightFailed => "launch journal preflight failed",
+                SplitFailure::LaunchFailed => "managed process launch failed",
+                SplitFailure::PreviouslyFailed => "pane split previously failed",
+            },
+            Self::InternalInvariant => "pane split invariant failed",
+        })
+    }
+}
+
+impl std::error::Error for SplitError {}
+
+/// Failures of a layout-owned root resize.
+#[derive(Debug)]
+pub enum LayoutResizeError {
+    /// No layout exists yet.
+    NoLayout,
+    /// The layout rejected the request; nothing changed and no PTY was resized.
+    Layout(LayoutError),
+    /// The new layout is committed but some sessions were not resized.
+    ///
+    /// `failed[i]` corresponds to `snapshot.panes[i]`. Reconcile with another
+    /// absolute resize; never a relative delta.
+    ResizePending {
+        /// Committed layout whose rectangles are the desired sizes.
+        snapshot: Box<LayoutSnapshot>,
+        /// Which pane sessions did not accept their absolute size.
+        failed: [bool; 2],
+    },
+}
+
+impl fmt::Display for LayoutResizeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NoLayout => "no pane layout exists",
+            Self::Layout(LayoutError::StaleRevision) => "pane layout revision is stale",
+            Self::Layout(LayoutError::LayoutTooSmall | LayoutError::InvalidDimensions) => {
+                "pane layout is too small or too large"
+            }
+            Self::Layout(_) => "pane layout rejected the resize",
+            Self::ResizePending { .. } => "pane layout committed; session resize is pending",
+        })
+    }
+}
+
+impl std::error::Error for LayoutResizeError {}
 
 impl<E: EffectSink> MultiSessionOwner<E> {
     /// Adopt a pre-opened ledger and trusted internal launch lease.
@@ -153,6 +364,44 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 grants,
             },
             launches,
+            layout: None,
+            committed_split: None,
+            pane_sizes: [None; 2],
+        })
+    }
+
+    /// Return whether at least one session exists and every retained session
+    /// has exited or failed, so no live child remains.
+    pub fn all_sessions_ended(&self) -> bool {
+        let mut any = false;
+        for record in self.launches.records() {
+            any = true;
+            if !matches!(record.state, SessionState::Exited | SessionState::Failed) {
+                return false;
+            }
+        }
+        any
+    }
+
+    /// Return a copy of the current pane layout, if one is established.
+    pub fn layout_snapshot(&self) -> Option<LayoutSnapshot> {
+        self.layout.as_ref().map(PaneLayout::snapshot)
+    }
+
+    /// Return every layout pane whose absolute PTY resize is still pending.
+    ///
+    /// Entries are bounded by the two-pane prototype; unused entries are
+    /// `None`. A pending pane is retried by [`Self::resize_layout`], including
+    /// at the current root size, without changing the layout revision.
+    pub fn pending_resizes(&self) -> [Option<PendingResize>; 2] {
+        self.pane_sizes.map(|state| {
+            state.and_then(|state| {
+                state.desired.map(|desired| PendingResize {
+                    target: state.target,
+                    desired,
+                    confirmed: state.confirmed,
+                })
+            })
         })
     }
 
@@ -162,6 +411,13 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     /// `prepare` must remain pure; `spawn` must return an error only when no
     /// child handle was acquired. The returned result contains only the fixed
     /// existing operation outcome and target identity.
+    ///
+    /// The first launch that reaches `Applied` while no layout exists also
+    /// establishes the owner's volatile layout: revision 1, its target as the
+    /// single pane, and the launch rows/columns as the root. The launch result
+    /// is never changed by layout establishment; if the root were invalid the
+    /// layout would stay absent and splits would fail with `NoLayout`. Later
+    /// launches through this method are retained sessions outside the layout.
     pub fn execute_launch<P, PE, SE, J, Prepare, Spawn>(
         &mut self,
         payload: &[u8],
@@ -176,7 +432,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         Spawn: FnOnce(P) -> Result<E, SE>,
     {
         let generation = self.global.generation;
-        self.launches.execute(
+        let result = self.launches.execute(
             payload,
             now_secs,
             &mut self.global.ledger,
@@ -191,7 +447,405 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                     .map(|effects| seed.attach(effects))
                     .map_err(|_| ())
             },
-        )
+        )?;
+        if self.layout.is_none() && result.outcome == Outcome::Applied {
+            if let (Some(target), Ok(request)) = (result.target, decode_launch_request(payload)) {
+                let (rows, columns) = request.dimensions();
+                self.layout = PaneLayout::new(target, rows, columns).ok();
+                if self.layout.is_some() {
+                    self.pane_sizes = [
+                        Some(PaneSizeState {
+                            target,
+                            confirmed: (rows, columns),
+                            desired: None,
+                        }),
+                        None,
+                    ];
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Execute or observe one trusted schema-7 pane split.
+    ///
+    /// The caller must validate split/launch authority first. Ordering:
+    /// decode; exact-payload duplicate lookup in the one global ledger
+    /// (returning the retained result before any layout, target or capacity
+    /// check; changed bytes conflict); admission of the complete split bytes;
+    /// then, for a new key only, target/revision/capacity/geometry and exact
+    /// launch-size validation. A rejection there records `Failed` and spends
+    /// no identity. Otherwise exactly one child is launched through the
+    /// coordinator's journaled path under the split's own key (not admitted a
+    /// second time). The layout commits only after that child is acquired;
+    /// a known pre-acquisition failure records `Failed` with no commit. After
+    /// commit, the existing session receives one absolute resize to its new
+    /// rectangle through `resize`. Outcomes: `Applied`; `Partial` when that
+    /// resize fails; `Unknown` when the child's journal/result boundary is
+    /// uncertain (the child stays retained). No input is ever sent, no child
+    /// is respawned or killed as rollback, and the split claims no input
+    /// ownership.
+    pub fn execute_split<P, PE, SE, RE, J, Prepare, Spawn, Resize>(
+        &mut self,
+        payload: &[u8],
+        now_secs: u64,
+        journal: &mut J,
+        prepare: Prepare,
+        spawn: Spawn,
+        mut resize: Resize,
+    ) -> Result<SplitResult, SplitError>
+    where
+        J: LaunchJournalPort,
+        Prepare: FnOnce(LaunchRequestView<'_>, TargetRef) -> Result<P, PE>,
+        Spawn: FnOnce(P) -> Result<E, SE>,
+        Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
+    {
+        let request = decode_split_request(payload).map_err(SplitError::InvalidPayload)?;
+        let key = request.key();
+        let generation = self.global.generation;
+        if key.generation != generation {
+            return Err(SplitError::GenerationMismatch);
+        }
+        if let Some(admission) = self
+            .global
+            .ledger
+            .existing_admission(key, payload, now_secs)
+            .map_err(SplitError::Ledger)?
+        {
+            return self.split_duplicate(key, request.target(), admission);
+        }
+        match self
+            .global
+            .ledger
+            .admit(key, payload, now_secs)
+            .map_err(SplitError::Ledger)?
+        {
+            Admission::Execute => {}
+            Admission::InProgress | Admission::Completed(_) => {
+                return Err(SplitError::InternalInvariant)
+            }
+        }
+
+        let failed = SplitResult {
+            key,
+            outcome: Outcome::Failed,
+            committed_layout_revision: 0,
+            existing_target: request.target(),
+            new_target: None,
+        };
+        if self.launches.retained_result(key).is_some() {
+            // Unreachable while the ledger owns key uniqueness; nothing ran.
+            let _ = self.global.ledger.complete(key, Outcome::Failed);
+            return Err(SplitError::InternalInvariant);
+        }
+        let (preview, new_target) = match self.plan_split(&request) {
+            Ok(plan) => plan,
+            Err(reason) => return self.finish_split_failed(failed, reason),
+        };
+
+        let launch = self.launches.execute_admitted(
+            request.launch(),
+            new_target,
+            journal,
+            |launch, target| {
+                let seed = TargetStateSeed::prepare(generation, target).map_err(|_| ())?;
+                let prepared = prepare(launch, target).map_err(|_| ())?;
+                Ok::<_, ()>((prepared, seed))
+            },
+            |(prepared, seed)| {
+                spawn(prepared)
+                    .map(|effects| seed.attach(effects))
+                    .map_err(|_| ())
+            },
+        );
+        // The coordinator's retained result, not the call's return value, is
+        // authoritative about whether a child may have been acquired.
+        let launch_outcome = match self.launches.retained_result(key) {
+            None
+            | Some(LaunchResult {
+                outcome: Outcome::Failed,
+                ..
+            }) => {
+                let reason = match launch {
+                    Err(ManagedLaunchError::PreparationFailed) => SplitFailure::PreparationFailed,
+                    Err(ManagedLaunchError::JournalPreflightFailed) => {
+                        SplitFailure::JournalPreflightFailed
+                    }
+                    Err(ManagedLaunchError::Unhealthy) => SplitFailure::Unhealthy,
+                    Err(ManagedLaunchError::Registry(RegistryError::Capacity)) => {
+                        SplitFailure::Capacity
+                    }
+                    Err(ManagedLaunchError::Registry(error)) => SplitFailure::Registry(error),
+                    _ => SplitFailure::LaunchFailed,
+                };
+                return self.finish_split_failed(failed, reason);
+            }
+            Some(LaunchResult {
+                outcome: Outcome::Applied,
+                target: Some(target),
+                ..
+            }) if target == new_target => Outcome::Applied,
+            // Unknown (or any non-terminal value) may own a child: keep it.
+            Some(LaunchResult {
+                target: Some(target),
+                ..
+            }) if target == new_target => Outcome::Unknown,
+            Some(_) => {
+                let _ = self.global.ledger.complete(key, Outcome::Unknown);
+                return Err(SplitError::InternalInvariant);
+            }
+        };
+
+        let committed = match self
+            .layout
+            .as_mut()
+            .map(|layout| layout.commit_split(preview))
+        {
+            Some(Ok(snapshot)) => snapshot,
+            _ => {
+                let _ = self.global.ledger.complete(key, Outcome::Unknown);
+                return Err(SplitError::InternalInvariant);
+            }
+        };
+        let existing_rect = committed
+            .panes
+            .into_iter()
+            .flatten()
+            .find(|pane| pane.target == request.target())
+            .map(|pane| pane.rect);
+        // The acquired child was spawned at exactly its planned rectangle.
+        self.record_pane_size(new_target, request.launch().dimensions(), None);
+        let resized = existing_rect
+            .is_some_and(|rect| self.apply_pane_size(request.target(), rect, &mut resize));
+        let outcome = match (launch_outcome, resized) {
+            (Outcome::Applied, true) => Outcome::Applied,
+            (Outcome::Applied, false) => Outcome::Partial,
+            _ => Outcome::Unknown,
+        };
+        let result = SplitResult {
+            key,
+            outcome,
+            committed_layout_revision: committed.revision,
+            existing_target: request.target(),
+            new_target: Some(new_target),
+        };
+        self.committed_split = Some(result);
+        if self.global.ledger.complete(key, outcome).is_err() {
+            let unknown = SplitResult {
+                outcome: Outcome::Unknown,
+                ..result
+            };
+            self.committed_split = Some(unknown);
+            return Ok(unknown);
+        }
+        Ok(result)
+    }
+
+    /// Resize the layout root and apply each pane's absolute rectangle.
+    ///
+    /// An invalid, stale, or too-small request changes nothing and resizes no
+    /// PTY. At the current size the revision is unchanged and only panes in
+    /// [`Self::pending_resizes`] are retried, once each, to their current
+    /// rectangle; with nothing pending this has no PTY effect. Otherwise the
+    /// new revision is committed first and every pane session receives one
+    /// absolute resize. Any failure returns
+    /// [`LayoutResizeError::ResizePending`] with the committed snapshot,
+    /// keeps that pane pending, and never reverts the layout.
+    pub fn resize_layout<RE, Resize>(
+        &mut self,
+        expected_revision: u64,
+        rows: u16,
+        columns: u16,
+        mut resize: Resize,
+    ) -> Result<LayoutSnapshot, LayoutResizeError>
+    where
+        Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
+    {
+        let layout = self.layout.as_mut().ok_or(LayoutResizeError::NoLayout)?;
+        let before = layout.snapshot().revision;
+        let snapshot = layout
+            .resize(expected_revision, rows, columns)
+            .map_err(LayoutResizeError::Layout)?;
+        let retry_pending_only = snapshot.revision == before;
+        let mut failed = [false; 2];
+        for (index, pane) in snapshot.panes.into_iter().enumerate() {
+            let Some(pane) = pane else {
+                continue;
+            };
+            if retry_pending_only && !self.is_resize_pending(pane.target) {
+                continue;
+            }
+            failed[index] = !self.apply_pane_size(pane.target, pane.rect, &mut resize);
+        }
+        if failed.contains(&true) {
+            Err(LayoutResizeError::ResizePending {
+                snapshot: Box::new(snapshot),
+                failed,
+            })
+        } else {
+            Ok(snapshot)
+        }
+    }
+
+    fn split_duplicate(
+        &self,
+        key: OperationKey,
+        target: TargetRef,
+        admission: Admission,
+    ) -> Result<SplitResult, SplitError> {
+        if let Some(result) = self.committed_split.filter(|result| result.key == key) {
+            return Ok(result);
+        }
+        match admission {
+            // Exact bytes match a split this owner recorded as Failed, so the
+            // result is fully determined by the request: no commit, no IDs.
+            Admission::Completed(Outcome::Failed) => Err(SplitError::Failed {
+                reason: SplitFailure::PreviouslyFailed,
+                result: Box::new(SplitResult {
+                    key,
+                    outcome: Outcome::Failed,
+                    committed_layout_revision: 0,
+                    existing_target: target,
+                    new_target: None,
+                }),
+            }),
+            Admission::InProgress => Err(SplitError::InProgress),
+            Admission::Execute | Admission::Completed(_) => Err(SplitError::InternalInvariant),
+        }
+    }
+
+    fn plan_split(
+        &self,
+        request: &crate::split_protocol::SplitRequestView<'_>,
+    ) -> Result<(crate::pane_layout::SplitPreview, TargetRef), SplitFailure> {
+        let layout = self.layout.as_ref().ok_or(SplitFailure::NoLayout)?;
+        let current = layout.snapshot();
+        let target = request.target();
+        if self.launches.effects(target).is_err()
+            || !current
+                .panes
+                .into_iter()
+                .flatten()
+                .any(|pane| pane.target == target)
+        {
+            return Err(SplitFailure::StaleTarget);
+        }
+        if request.expected_layout_revision() != current.revision {
+            return Err(SplitFailure::StaleLayout);
+        }
+        if !self.launches.is_healthy() {
+            return Err(SplitFailure::Unhealthy);
+        }
+        let new_target = self.launches.next_target().map_err(|error| match error {
+            RegistryError::Capacity => SplitFailure::Capacity,
+            other => SplitFailure::Registry(other),
+        })?;
+        let preview = layout
+            .preview_split(
+                target,
+                request.expected_layout_revision(),
+                request.direction(),
+                new_target,
+            )
+            .map_err(|error| match error {
+                LayoutError::StaleTarget => SplitFailure::StaleTarget,
+                LayoutError::StaleRevision => SplitFailure::StaleLayout,
+                LayoutError::PaneLimitExceeded => SplitFailure::Capacity,
+                other => SplitFailure::Layout(other),
+            })?;
+        let planned = preview
+            .planned_snapshot()
+            .panes
+            .into_iter()
+            .flatten()
+            .find(|pane| pane.target == new_target)
+            .ok_or(SplitFailure::Layout(LayoutError::InvalidLayoutState))?;
+        if request.launch().dimensions() != (planned.rect.rows, planned.rect.columns) {
+            return Err(SplitFailure::LaunchSizeMismatch);
+        }
+        Ok((preview, new_target))
+    }
+
+    fn finish_split_failed(
+        &mut self,
+        result: SplitResult,
+        reason: SplitFailure,
+    ) -> Result<SplitResult, SplitError> {
+        if self
+            .global
+            .ledger
+            .complete(result.key, Outcome::Failed)
+            .is_err()
+        {
+            return Err(SplitError::InternalInvariant);
+        }
+        Err(SplitError::Failed {
+            reason,
+            result: Box::new(result),
+        })
+    }
+
+    /// Apply one absolute size and record it as confirmed or pending.
+    fn apply_pane_size<RE, Resize>(
+        &mut self,
+        target: TargetRef,
+        rect: crate::pane_layout::Rect,
+        resize: &mut Resize,
+    ) -> bool
+    where
+        Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
+    {
+        let desired = (rect.rows, rect.columns);
+        let applied = match self.launches.session_mut(target) {
+            Ok(session) => resize(&mut session.effects, rect.rows, rect.columns).is_ok(),
+            Err(_) => false,
+        };
+        if applied {
+            self.record_pane_size(target, desired, None);
+        } else {
+            let confirmed = self
+                .pane_state(target)
+                .map_or(desired, |state| state.confirmed);
+            self.record_pane_size(target, confirmed, Some(desired));
+        }
+        applied
+    }
+
+    fn pane_state(&self, target: TargetRef) -> Option<PaneSizeState> {
+        self.pane_sizes
+            .into_iter()
+            .flatten()
+            .find(|state| state.target == target)
+    }
+
+    fn is_resize_pending(&self, target: TargetRef) -> bool {
+        self.pane_state(target)
+            .is_some_and(|state| state.desired.is_some())
+    }
+
+    /// Update or insert one bounded pane-size entry keyed by full target.
+    fn record_pane_size(
+        &mut self,
+        target: TargetRef,
+        confirmed: (u16, u16),
+        desired: Option<(u16, u16)>,
+    ) {
+        let entry = PaneSizeState {
+            target,
+            confirmed,
+            desired,
+        };
+        if let Some(slot) = self
+            .pane_sizes
+            .iter_mut()
+            .find(|slot| slot.is_some_and(|state| state.target == target))
+        {
+            *slot = Some(entry);
+        } else if let Some(slot) = self.pane_sizes.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(entry);
+        }
+        // Both prototype panes are tracked from layout establishment and split
+        // commit, so a third distinct target cannot reach this point.
     }
 
     /// Attach to an exact retained target and issue a fresh global lease or
@@ -546,6 +1200,346 @@ impl<E: EffectSink> MultiSessionOwner<E> {
 
         first_error.map_or(Ok(()), Err)
     }
+}
+
+/// One layout snapshot with its per-pane resize-pending state.
+pub type LayoutView = (LayoutSnapshot, [Option<PendingResize>; 2]);
+
+/// Result of an authorized layout-owned root resize request.
+pub enum RootResizeReply {
+    /// Encoded schema-1 rejection or known status for a duplicate key; no
+    /// new effect ran.
+    Response(Vec<u8>),
+    /// The resize executed; `snapshot` is the committed layout and `pending`
+    /// marks layout panes whose absolute PTY resize is still pending.
+    Resized {
+        /// Committed layout after this request.
+        snapshot: Box<LayoutSnapshot>,
+        /// Per-pane resize-pending flags, aligned with `snapshot.panes`.
+        pending: [bool; 2],
+    },
+    /// The layout rejected the request; the key is recorded `Failed` and no
+    /// PTY was resized.
+    LayoutRejected(LayoutResizeError),
+}
+
+impl fmt::Debug for RootResizeReply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Response(bytes) => f
+                .debug_struct("Response")
+                .field("bytes_len", &bytes.len())
+                .finish(),
+            Self::Resized { pending, .. } => f
+                .debug_struct("Resized")
+                .field("pending", pending)
+                .finish_non_exhaustive(),
+            Self::LayoutRejected(error) => f.debug_tuple("LayoutRejected").field(error).finish(),
+        }
+    }
+}
+
+impl<E: EffectSink> MultiSessionOwner<E> {
+    /// Return the full target identity pinned to a live lease grant, if any.
+    ///
+    /// Runtime adapters use this only to select the attach target for a
+    /// resume Hello; `connect` still validates the grant against the target.
+    pub fn lease_target(&self, lease: u64) -> Option<TargetRef> {
+        self.global.grants.get(&lease).map(|grant| grant.target)
+    }
+
+    /// Return the first layout pane, the default attach target for a fresh
+    /// Hello that names no target.
+    pub fn first_pane_target(&self) -> Option<TargetRef> {
+        self.layout_snapshot()
+            .and_then(|layout| layout.panes[0])
+            .map(|pane| pane.target)
+    }
+
+    /// Observe the layout for a live Read-capable connection.
+    ///
+    /// The layout is shared geometry, not pane content, so it is visible to
+    /// any connection regardless of its pinned target. `Ok(None)` means no
+    /// layout has been established.
+    pub fn layout_view(
+        &self,
+        connection: &Connection,
+        now_secs: u64,
+    ) -> Result<Option<LayoutView>, ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        if connection.selected_capabilities & CAPABILITY_READ == 0 {
+            return Err(ServerError::Unauthorized);
+        }
+        Ok(self
+            .layout_snapshot()
+            .map(|layout| (layout, self.pending_resizes())))
+    }
+
+    /// Run one bounded read-only observation of the exact target pinned to a
+    /// live Read-capable connection.
+    ///
+    /// Scope is checked before target lookup: another target is
+    /// `Unauthorized`; a pinned target without effects is `TargetStale`.
+    /// Metadata is synchronized once before `observe` runs.
+    pub fn observe_target<R>(
+        &mut self,
+        connection: &Connection,
+        target: TargetRef,
+        now_secs: u64,
+        observe: impl FnOnce(&E) -> R,
+    ) -> Result<R, ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        if connection.selected_capabilities & CAPABILITY_READ == 0 {
+            return Err(ServerError::Unauthorized);
+        }
+        self.global.require_target_scope(connection, target)?;
+        let session = self
+            .launches
+            .session_mut(target)
+            .map_err(map_watch_registry_error)?;
+        let mut handler = SessionHandler::new(&mut self.global, session);
+        handler.synchronize_metadata();
+        Ok(observe(&handler.session.effects))
+    }
+
+    /// Admit and synchronously deliver one non-replayable typed-key input.
+    ///
+    /// Ordering matches a schema-1 Text request: live connection, own lease
+    /// and Input capability, then global exact-key lookup (duplicates return
+    /// their status and never re-deliver), then stale-target and pinned-scope
+    /// checks, then the input-owner pin for `expected_owner_revision`, then
+    /// `validate`, admission, `apply`, and completion. Returns an encoded
+    /// schema-1 status or rejection.
+    pub fn handle_key_input<V, A>(
+        &mut self,
+        connection: &Connection,
+        request: &crate::ui_protocol::KeyInputView<'_>,
+        payload: &[u8],
+        now_secs: u64,
+        validate: V,
+        apply: A,
+    ) -> Result<Vec<u8>, ServerError>
+    where
+        V: FnOnce(&E) -> Result<(), RejectionCode>,
+        A: FnOnce(&mut E) -> Outcome,
+    {
+        let key = request.key();
+        self.global.require_live_connection(connection, now_secs)?;
+        if key.lease != connection.lease
+            || key.generation != self.global.generation
+            || connection.selected_capabilities & CAPABILITY_INPUT == 0
+        {
+            return rejected_reply(key, RejectionCode::Unauthorized);
+        }
+        if let Some(reply) = known_reply(&self.global, key, payload, now_secs)? {
+            return Ok(reply);
+        }
+        let target = request.target();
+        if self
+            .global
+            .require_target_scope(connection, target)
+            .is_err()
+        {
+            return rejected_reply(key, RejectionCode::Unauthorized);
+        }
+        let session = match self.launches.session_mut(target) {
+            Ok(session) => session,
+            Err(RegistryError::InvalidTarget | RegistryError::EffectsUnavailable) => {
+                return rejected_reply(key, RejectionCode::StaleTarget);
+            }
+            Err(_) => return Err(ServerError::Internal),
+        };
+        let mut handler = SessionHandler::new(&mut self.global, session);
+        let result = (|| {
+            let mut candidate = handler.session.input_owner.clone();
+            if let Err(error) = candidate.begin_input(
+                Owner::Client(key.lease),
+                request.expected_owner_revision(),
+                key,
+                now_secs,
+            ) {
+                return rejected_reply(key, owner_rejection(error));
+            }
+            if let Err(code) = validate(&handler.session.effects) {
+                return rejected_reply(key, code);
+            }
+            match handler.global.ledger.admit(key, payload, now_secs) {
+                Ok(Admission::Execute) => {}
+                Ok(Admission::InProgress) => return status_reply(key, OperationStatus::InProgress),
+                Ok(Admission::Completed(outcome)) => {
+                    return status_reply(key, OperationStatus::Completed(outcome))
+                }
+                Err(error) if is_capacity_error(&error) => {
+                    return rejected_reply(key, RejectionCode::Capacity)
+                }
+                Err(error) => return Err(ServerError::Protocol(error)),
+            }
+            // Commit the pin only after this call reserved the unique key.
+            handler.session.input_owner = candidate;
+            let outcome = terminal_outcome(apply(&mut handler.session.effects));
+            handler.global.ledger.complete(key, outcome)?;
+            handler.session.input_owner.finish_input(key)?;
+            status_reply(key, OperationStatus::Completed(outcome))
+        })();
+        handler.synchronize_metadata();
+        result
+    }
+
+    /// Admit and execute one absolute layout-root resize.
+    ///
+    /// Requires a live connection with the Input capability and its own
+    /// lease; input ownership is not required and not changed. A duplicate
+    /// key returns its recorded status without a second resize. Same-size
+    /// requests retry only resize-pending panes, as [`Self::resize_layout`].
+    /// The ledger records `Applied`, `Partial` (some pane pending) or
+    /// `Failed` (layout rejection, no PTY effect).
+    pub fn handle_root_resize<RE, Resize>(
+        &mut self,
+        connection: &Connection,
+        request: crate::ui_protocol::RootResize,
+        payload: &[u8],
+        now_secs: u64,
+        resize: Resize,
+    ) -> Result<RootResizeReply, ServerError>
+    where
+        Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
+    {
+        let key = request.key;
+        self.global.require_live_connection(connection, now_secs)?;
+        if key.lease != connection.lease
+            || key.generation != self.global.generation
+            || connection.selected_capabilities & CAPABILITY_INPUT == 0
+        {
+            return rejected_reply(key, RejectionCode::Unauthorized).map(RootResizeReply::Response);
+        }
+        if let Some(reply) = known_reply(&self.global, key, payload, now_secs)? {
+            return Ok(RootResizeReply::Response(reply));
+        }
+        match self.global.ledger.admit(key, payload, now_secs) {
+            Ok(Admission::Execute) => {}
+            Ok(Admission::InProgress) => {
+                return status_reply(key, OperationStatus::InProgress)
+                    .map(RootResizeReply::Response)
+            }
+            Ok(Admission::Completed(outcome)) => {
+                return status_reply(key, OperationStatus::Completed(outcome))
+                    .map(RootResizeReply::Response)
+            }
+            Err(error) if is_capacity_error(&error) => {
+                return rejected_reply(key, RejectionCode::Capacity).map(RootResizeReply::Response)
+            }
+            Err(error) => return Err(ServerError::Protocol(error)),
+        }
+        let result = self.resize_layout(
+            request.expected_layout_revision,
+            request.rows,
+            request.columns,
+            resize,
+        );
+        let (outcome, reply) = match result {
+            Ok(snapshot) => (
+                Outcome::Applied,
+                RootResizeReply::Resized {
+                    pending: self.pending_flags(&snapshot),
+                    snapshot: Box::new(snapshot),
+                },
+            ),
+            Err(LayoutResizeError::ResizePending { snapshot, .. }) => (
+                Outcome::Partial,
+                RootResizeReply::Resized {
+                    pending: self.pending_flags(&snapshot),
+                    snapshot,
+                },
+            ),
+            Err(error) => (Outcome::Failed, RootResizeReply::LayoutRejected(error)),
+        };
+        self.global.ledger.complete(key, outcome)?;
+        Ok(reply)
+    }
+
+    /// Authorize one schema-7 split from a live connection before
+    /// [`Self::execute_split`].
+    ///
+    /// The prototype rule: the connection must hold the Input capability
+    /// (server started with input enabled), use its own lease in the split
+    /// key, and be pinned to the exact split target. A split never claims or
+    /// requires input ownership.
+    pub fn authorize_split(
+        &self,
+        connection: &Connection,
+        request: &crate::split_protocol::SplitRequestView<'_>,
+        now_secs: u64,
+    ) -> Result<(), ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        if connection.selected_capabilities & CAPABILITY_INPUT == 0
+            || request.key().lease != connection.lease
+        {
+            return Err(ServerError::Unauthorized);
+        }
+        self.global
+            .require_target_scope(connection, request.target())
+    }
+
+    /// Observe a retained launch result for one of the caller's own keys.
+    pub fn launch_status(
+        &self,
+        connection: &Connection,
+        key: OperationKey,
+        now_secs: u64,
+    ) -> Result<LaunchResult, ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        if connection.selected_capabilities & CAPABILITY_READ == 0
+            || key.lease != connection.lease
+            || key.generation != self.global.generation
+        {
+            return Err(ServerError::Unauthorized);
+        }
+        self.launches
+            .status(key, now_secs, &self.global.ledger)
+            .map_err(|error| match error {
+                ManagedLaunchError::Ledger(error) => ServerError::Protocol(error),
+                ManagedLaunchError::UnknownKey => ServerError::UnknownContext,
+                _ => ServerError::Internal,
+            })
+    }
+
+    fn pending_flags(&self, snapshot: &LayoutSnapshot) -> [bool; 2] {
+        let mut flags = [false; 2];
+        for (flag, pane) in flags.iter_mut().zip(snapshot.panes) {
+            *flag = pane.is_some_and(|pane| self.is_resize_pending(pane.target));
+        }
+        flags
+    }
+}
+
+fn known_reply(
+    global: &GlobalAuthority,
+    key: OperationKey,
+    payload: &[u8],
+    now_secs: u64,
+) -> Result<Option<Vec<u8>>, ServerError> {
+    match global.ledger.existing_admission(key, payload, now_secs)? {
+        None => Ok(None),
+        Some(Admission::InProgress) => status_reply(key, OperationStatus::InProgress).map(Some),
+        Some(Admission::Completed(outcome)) => {
+            status_reply(key, OperationStatus::Completed(outcome)).map(Some)
+        }
+        Some(Admission::Execute) => Err(ServerError::Internal),
+    }
+}
+
+fn rejected_reply(key: OperationKey, code: RejectionCode) -> Result<Vec<u8>, ServerError> {
+    encode_response(Response {
+        key,
+        body: ResponseBody::Rejected(code),
+    })
+}
+
+fn status_reply(key: OperationKey, status: OperationStatus) -> Result<Vec<u8>, ServerError> {
+    encode_response(Response {
+        key,
+        body: ResponseBody::Status(status),
+    })
 }
 
 fn map_connect_registry_error(error: RegistryError) -> ServerError {
@@ -2857,5 +3851,1624 @@ mod tests {
         let event_debug = format!("{current:?}");
         assert!(event_debug.contains("cursor: \"<redacted>\""));
         assert!(!event_debug.contains("ChildExited"));
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::{LayoutResizeError, MultiSessionOwner, SplitError, SplitFailure};
+    use crate::control_protocol::{Command, ReadSource, TargetRef};
+    use crate::managed_launch::LaunchJournalPort;
+    use crate::managed_launch_protocol::{encode_launch_request, EnvironmentEntry, LaunchRequest};
+    use crate::pane_layout::{LayoutError, Rect, SplitDirection};
+    use crate::protocol::{Ledger, OperationKey, OperationStatus, Outcome, ProtocolError};
+    use crate::response_protocol::RejectionCode;
+    use crate::server::{EffectSink, ReadResult};
+    use crate::server_storage::{LaunchRecord, LaunchState};
+    use crate::session_registry::{RegistryError, SessionState};
+    use crate::split_protocol::{encode_split_request, SplitRequest, SplitResult};
+    use std::cell::RefCell;
+    use std::io;
+    use std::rc::Rc;
+
+    const GENERATION: u64 = 73;
+    const LEASE: u64 = 1;
+    const NOW: u64 = 2;
+    const ROOT_ROWS: u16 = 24;
+    const ROOT_COLUMNS: u16 = 81;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Effect {
+        Prepare(u64),
+        JournalPreflight,
+        Record(LaunchState),
+        Spawn(u64),
+        Resize {
+            session: u64,
+            rows: u16,
+            columns: u16,
+        },
+        Input(u64),
+    }
+
+    type Log = Rc<RefCell<Vec<Effect>>>;
+
+    struct Sink {
+        session: u64,
+        log: Log,
+    }
+
+    impl EffectSink for Sink {
+        fn validate(&self, _command: Command<'_>) -> Result<(), RejectionCode> {
+            Ok(())
+        }
+
+        fn read(
+            &mut self,
+            _source: ReadSource,
+            _max_text_bytes: usize,
+            _max_lines: u16,
+        ) -> Result<ReadResult, Outcome> {
+            Ok(ReadResult {
+                text: String::new(),
+                revision: 1,
+                truncated: false,
+            })
+        }
+
+        fn input(&mut self, _command: Command<'_>) -> Outcome {
+            self.log.borrow_mut().push(Effect::Input(self.session));
+            Outcome::Applied
+        }
+
+        fn poll(&mut self) -> Result<(), Outcome> {
+            Ok(())
+        }
+
+        fn child_exited(&self) -> bool {
+            false
+        }
+
+        fn screen_revision(&self) -> Option<u64> {
+            Some(1)
+        }
+    }
+
+    struct Journal {
+        log: Log,
+        preflight_failure: bool,
+        record_failure: Option<LaunchState>,
+    }
+
+    impl LaunchJournalPort for Journal {
+        fn preflight_launch(&self, _key: OperationKey, _session: u64) -> io::Result<()> {
+            self.log.borrow_mut().push(Effect::JournalPreflight);
+            if self.preflight_failure {
+                Err(io::Error::other("PRIVATE-JOURNAL"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn record(&mut self, record: LaunchRecord) -> io::Result<()> {
+            self.log.borrow_mut().push(Effect::Record(record.state));
+            if self.record_failure == Some(record.state) {
+                Err(io::Error::other("PRIVATE-JOURNAL"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct Fixture {
+        owner: MultiSessionOwner<Sink>,
+        log: Log,
+        journal: Journal,
+        first: TargetRef,
+    }
+
+    fn key(sequence: u64) -> OperationKey {
+        OperationKey {
+            generation: GENERATION,
+            lease: LEASE,
+            sequence,
+        }
+    }
+
+    fn launch_bytes(key: OperationKey, rows: u16, columns: u16, env_value: &[u8]) -> Vec<u8> {
+        let environment = [EnvironmentEntry {
+            name: b"SPLIT_TEST_VALUE",
+            value: env_value,
+        }];
+        let mut bytes = Vec::new();
+        encode_launch_request(
+            &LaunchRequest {
+                key,
+                rows,
+                columns,
+                requested_executable: b"/bin/sh",
+                requested_working_directory: b"/",
+                client_working_directory: b"/",
+                arguments: &[],
+                environment: &environment,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        bytes
+    }
+
+    fn split_bytes(
+        key: OperationKey,
+        target: TargetRef,
+        revision: u64,
+        direction: SplitDirection,
+        (rows, columns): (u16, u16),
+        env_value: &[u8],
+    ) -> Vec<u8> {
+        let environment = [EnvironmentEntry {
+            name: b"SPLIT_TEST_VALUE",
+            value: env_value,
+        }];
+        let launch = LaunchRequest {
+            key,
+            rows,
+            columns,
+            requested_executable: b"/bin/sh",
+            requested_working_directory: b"/",
+            client_working_directory: b"/",
+            arguments: &[],
+            environment: &environment,
+        };
+        let mut bytes = Vec::new();
+        encode_split_request(
+            &SplitRequest {
+                key,
+                target,
+                expected_layout_revision: revision,
+                direction,
+                launch: &launch,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        bytes
+    }
+
+    fn fixture() -> Fixture {
+        let mut ledger = Ledger::new(GENERATION).unwrap();
+        ledger.open_lease(LEASE, 1).unwrap();
+        let mut owner = MultiSessionOwner::with_ledger(ledger, true).unwrap();
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let mut journal = Journal {
+            log: Rc::clone(&log),
+            preflight_failure: false,
+            record_failure: None,
+        };
+        let spawn_log = Rc::clone(&log);
+        let result = owner
+            .execute_launch(
+                &launch_bytes(key(1), ROOT_ROWS, ROOT_COLUMNS, b"first"),
+                NOW,
+                &mut journal,
+                |_, target| Ok::<_, ()>(target.session),
+                move |session| {
+                    Ok::<_, ()>(Sink {
+                        session,
+                        log: spawn_log,
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(result.outcome, Outcome::Applied);
+        log.borrow_mut().clear();
+        Fixture {
+            owner,
+            log,
+            journal,
+            first: result.target.unwrap(),
+        }
+    }
+
+    fn planned_size(direction: SplitDirection) -> (u16, u16) {
+        match direction {
+            SplitDirection::Left | SplitDirection::Right => (24, 40),
+            SplitDirection::Up => (11, 81),
+            SplitDirection::Down => (12, 81),
+        }
+    }
+
+    fn rect(x: u16, y: u16, rows: u16, columns: u16) -> Rect {
+        Rect {
+            x,
+            y,
+            rows,
+            columns,
+        }
+    }
+
+    /// Run one split with fakes; `spawn_ok`/`resize_ok` inject known failures.
+    fn split(
+        fixture: &mut Fixture,
+        payload: &[u8],
+        spawn_ok: bool,
+        resize_ok: bool,
+    ) -> Result<SplitResult, SplitError> {
+        let prepare_log = Rc::clone(&fixture.log);
+        let spawn_log = Rc::clone(&fixture.log);
+        let resize_log = Rc::clone(&fixture.log);
+        fixture.owner.execute_split(
+            payload,
+            NOW,
+            &mut fixture.journal,
+            move |_, target| {
+                prepare_log
+                    .borrow_mut()
+                    .push(Effect::Prepare(target.session));
+                Ok::<_, ()>(target.session)
+            },
+            move |session| {
+                spawn_log.borrow_mut().push(Effect::Spawn(session));
+                if spawn_ok {
+                    Ok(Sink {
+                        session,
+                        log: Rc::clone(&spawn_log),
+                    })
+                } else {
+                    Err("PRIVATE-SPAWN")
+                }
+            },
+            move |sink: &mut Sink, rows, columns| {
+                resize_log.borrow_mut().push(Effect::Resize {
+                    session: sink.session,
+                    rows,
+                    columns,
+                });
+                if resize_ok {
+                    Ok(())
+                } else {
+                    Err("PRIVATE-RESIZE")
+                }
+            },
+        )
+    }
+
+    fn no_effects_split(fixture: &mut Fixture, payload: &[u8]) -> Result<SplitResult, SplitError> {
+        fixture.owner.execute_split(
+            payload,
+            NOW,
+            &mut fixture.journal,
+            |_, _| -> Result<u64, ()> { panic!("must not prepare") },
+            |_| -> Result<Sink, ()> { panic!("must not spawn") },
+            |_: &mut Sink, _, _| -> Result<(), ()> { panic!("must not resize") },
+        )
+    }
+
+    fn ledger_status(fixture: &Fixture, sequence: u64) -> OperationStatus {
+        fixture
+            .owner
+            .global
+            .ledger
+            .status(key(sequence), NOW)
+            .unwrap()
+    }
+
+    fn assert_no_input(fixture: &Fixture) {
+        assert!(!fixture
+            .log
+            .borrow()
+            .iter()
+            .any(|effect| matches!(effect, Effect::Input(_))));
+    }
+
+    #[test]
+    fn layout_is_established_by_the_first_applied_launch() {
+        let fixture = fixture();
+        let snapshot = fixture.owner.layout_snapshot().unwrap();
+        assert_eq!(snapshot.revision, 1);
+        assert_eq!((snapshot.rows, snapshot.columns), (ROOT_ROWS, ROOT_COLUMNS));
+        assert_eq!(snapshot.pane_count(), 1);
+        assert_eq!(snapshot.panes[0].unwrap().target, fixture.first);
+    }
+
+    #[test]
+    fn applied_split_in_each_direction_spawns_once_and_resizes_existing_once() {
+        let cases = [
+            (
+                SplitDirection::Left,
+                rect(41, 0, 24, 40),
+                rect(0, 0, 24, 40),
+            ),
+            (
+                SplitDirection::Right,
+                rect(0, 0, 24, 40),
+                rect(41, 0, 24, 40),
+            ),
+            (SplitDirection::Up, rect(0, 12, 12, 81), rect(0, 0, 11, 81)),
+            (
+                SplitDirection::Down,
+                rect(0, 0, 11, 81),
+                rect(0, 12, 12, 81),
+            ),
+        ];
+        for (direction, existing_rect, new_rect) in cases {
+            let mut fixture = fixture();
+            let payload = split_bytes(
+                key(2),
+                fixture.first,
+                1,
+                direction,
+                planned_size(direction),
+                b"env",
+            );
+            let result = split(&mut fixture, &payload, true, true).unwrap();
+            assert_eq!(result.outcome, Outcome::Applied);
+            assert_eq!(result.committed_layout_revision, 2);
+            assert_eq!(result.existing_target, fixture.first);
+            let new_target = result.new_target.unwrap();
+            assert_eq!(new_target.session, 2);
+            assert_eq!(
+                *fixture.log.borrow(),
+                [
+                    Effect::Prepare(2),
+                    Effect::JournalPreflight,
+                    Effect::Record(LaunchState::Intent),
+                    Effect::Spawn(2),
+                    Effect::Record(LaunchState::Spawned),
+                    Effect::Record(LaunchState::Applied),
+                    Effect::Resize {
+                        session: 1,
+                        rows: existing_rect.rows,
+                        columns: existing_rect.columns,
+                    },
+                ],
+                "{direction:?}"
+            );
+            let snapshot = fixture.owner.layout_snapshot().unwrap();
+            assert_eq!(snapshot.revision, 2);
+            let rect_of = |target| {
+                snapshot
+                    .panes
+                    .into_iter()
+                    .flatten()
+                    .find(|pane| pane.target == target)
+                    .unwrap()
+                    .rect
+            };
+            assert_eq!(rect_of(fixture.first), existing_rect);
+            assert_eq!(rect_of(new_target), new_rect);
+            assert_eq!((new_rect.rows, new_rect.columns), planned_size(direction));
+            assert_eq!(
+                fixture.owner.launches.state(new_target),
+                Ok(SessionState::Applied)
+            );
+            assert_eq!(
+                ledger_status(&fixture, 2),
+                OperationStatus::Completed(Outcome::Applied)
+            );
+            assert_no_input(&fixture);
+        }
+    }
+
+    #[test]
+    fn duplicate_after_commit_returns_original_result_despite_stale_revision() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            (24, 40),
+            b"env",
+        );
+        let first = split(&mut fixture, &payload, true, true).unwrap();
+        // Advance the layout so the original expected revision is stale.
+        let resized = fixture
+            .owner
+            .resize_layout(2, 30, 101, |_: &mut Sink, _, _| Ok::<_, ()>(()))
+            .unwrap();
+        assert_eq!(resized.revision, 3);
+        fixture.log.borrow_mut().clear();
+
+        let retry = no_effects_split(&mut fixture, &payload).unwrap();
+        assert_eq!(retry, first);
+        let mut first_bytes = Vec::new();
+        let mut retry_bytes = Vec::new();
+        crate::split_protocol::encode_split_result(&first, &mut first_bytes).unwrap();
+        crate::split_protocol::encode_split_result(&retry, &mut retry_bytes).unwrap();
+        assert_eq!(first_bytes, retry_bytes);
+        assert!(fixture.log.borrow().is_empty());
+        assert_eq!(fixture.owner.launches.records().count(), 2);
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 3);
+    }
+
+    #[test]
+    fn changed_payloads_conflict_before_effects_even_at_capacity() {
+        let mut fixture = fixture();
+        let original = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            (24, 40),
+            b"env",
+        );
+        split(&mut fixture, &original, true, true).unwrap();
+        assert!(matches!(
+            fixture.owner.launches.next_target(),
+            Err(RegistryError::Capacity)
+        ));
+        fixture.log.borrow_mut().clear();
+        let stale_target = TargetRef {
+            occupant_revision: 2,
+            ..fixture.first
+        };
+        let changed = [
+            split_bytes(
+                key(2),
+                fixture.first,
+                1,
+                SplitDirection::Left,
+                (24, 40),
+                b"env",
+            ),
+            split_bytes(
+                key(2),
+                stale_target,
+                1,
+                SplitDirection::Right,
+                (24, 40),
+                b"env",
+            ),
+            split_bytes(
+                key(2),
+                fixture.first,
+                2,
+                SplitDirection::Right,
+                (24, 40),
+                b"env",
+            ),
+            split_bytes(
+                key(2),
+                fixture.first,
+                1,
+                SplitDirection::Right,
+                (24, 40),
+                b"enw",
+            ),
+        ];
+        for payload in changed {
+            assert_ne!(payload, original);
+            let error = no_effects_split(&mut fixture, &payload).unwrap_err();
+            assert_eq!(
+                error.ledger_error(),
+                Some(&ProtocolError::OperationConflict)
+            );
+        }
+        assert!(fixture.log.borrow().is_empty());
+        assert_eq!(
+            ledger_status(&fixture, 2),
+            OperationStatus::Completed(Outcome::Applied)
+        );
+    }
+
+    #[test]
+    fn rejected_new_splits_record_failed_without_ids_layout_or_effects() {
+        let mut fixture = fixture();
+        let stale_target = TargetRef {
+            occupant_revision: 9,
+            ..fixture.first
+        };
+        let cases = [
+            (
+                split_bytes(
+                    key(2),
+                    fixture.first,
+                    7,
+                    SplitDirection::Right,
+                    (24, 40),
+                    b"env",
+                ),
+                SplitFailure::StaleLayout,
+            ),
+            (
+                split_bytes(
+                    key(3),
+                    stale_target,
+                    1,
+                    SplitDirection::Right,
+                    (24, 40),
+                    b"env",
+                ),
+                SplitFailure::StaleTarget,
+            ),
+            (
+                split_bytes(
+                    key(4),
+                    fixture.first,
+                    1,
+                    SplitDirection::Right,
+                    (24, 41),
+                    b"env",
+                ),
+                SplitFailure::LaunchSizeMismatch,
+            ),
+        ];
+        for (payload, expected) in cases {
+            let next_before = fixture.owner.launches.next_target();
+            let error = no_effects_split(&mut fixture, &payload).unwrap_err();
+            let (reason, result) = error.failure().unwrap();
+            assert_eq!(reason, expected);
+            assert_eq!(result.outcome, Outcome::Failed);
+            assert_eq!(result.committed_layout_revision, 0);
+            assert_eq!(result.new_target, None);
+            assert_eq!(
+                ledger_status(&fixture, result.key.sequence),
+                OperationStatus::Completed(Outcome::Failed)
+            );
+            assert_eq!(fixture.owner.launches.next_target(), next_before);
+            assert_eq!(fixture.owner.launches.records().count(), 1);
+            assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 1);
+            assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 1);
+            // The exact retry reports the same recorded result, still with no effects.
+            let retry = no_effects_split(&mut fixture, &payload).unwrap_err();
+            assert_eq!(retry.failure().unwrap().1, result);
+        }
+        assert!(fixture.log.borrow().is_empty());
+
+        // A geometry rejection from the layout is also Failed before effects.
+        let mut narrow = narrow_fixture();
+        let payload = split_bytes(
+            key(2),
+            narrow.first,
+            1,
+            SplitDirection::Left,
+            (24, 20),
+            b"env",
+        );
+        let error = no_effects_split(&mut narrow, &payload).unwrap_err();
+        assert_eq!(
+            error.failure().unwrap().0,
+            SplitFailure::Layout(LayoutError::LayoutTooSmall)
+        );
+        assert_eq!(narrow.owner.launches.records().count(), 1);
+    }
+
+    fn narrow_fixture() -> Fixture {
+        let mut ledger = Ledger::new(GENERATION).unwrap();
+        ledger.open_lease(LEASE, 1).unwrap();
+        let mut owner = MultiSessionOwner::with_ledger(ledger, true).unwrap();
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let mut journal = Journal {
+            log: Rc::clone(&log),
+            preflight_failure: false,
+            record_failure: None,
+        };
+        let spawn_log = Rc::clone(&log);
+        let result = owner
+            .execute_launch(
+                &launch_bytes(key(1), 24, 40, b"narrow"),
+                NOW,
+                &mut journal,
+                |_, target| Ok::<_, ()>(target.session),
+                move |session| {
+                    Ok::<_, ()>(Sink {
+                        session,
+                        log: spawn_log,
+                    })
+                },
+            )
+            .unwrap();
+        log.borrow_mut().clear();
+        Fixture {
+            owner,
+            log,
+            journal,
+            first: result.target.unwrap(),
+        }
+    }
+
+    #[test]
+    fn third_session_and_missing_layout_fail_before_effects() {
+        let mut fixture = fixture();
+        let spawn_log = Rc::clone(&fixture.log);
+        let second = fixture
+            .owner
+            .execute_launch(
+                &launch_bytes(key(2), 10, 40, b"second"),
+                NOW,
+                &mut fixture.journal,
+                |_, target| Ok::<_, ()>(target.session),
+                move |session| {
+                    Ok::<_, ()>(Sink {
+                        session,
+                        log: spawn_log,
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(second.outcome, Outcome::Applied);
+        // The layout belongs to the first launch only.
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 1);
+        fixture.log.borrow_mut().clear();
+        let payload = split_bytes(
+            key(3),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            (24, 40),
+            b"env",
+        );
+        let error = no_effects_split(&mut fixture, &payload).unwrap_err();
+        assert_eq!(error.failure().unwrap().0, SplitFailure::Capacity);
+        assert_eq!(error.to_string(), "pane or session capacity is exhausted");
+        assert_eq!(fixture.owner.launches.records().count(), 2);
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 1);
+        assert!(fixture.log.borrow().is_empty());
+
+        let mut ledger = Ledger::new(GENERATION).unwrap();
+        ledger.open_lease(LEASE, 1).unwrap();
+        let owner = MultiSessionOwner::<Sink>::with_ledger(ledger, true).unwrap();
+        let mut empty = Fixture {
+            owner,
+            log: Rc::new(RefCell::new(Vec::new())),
+            journal: Journal {
+                log: Rc::new(RefCell::new(Vec::new())),
+                preflight_failure: false,
+                record_failure: None,
+            },
+            first: fixture.first,
+        };
+        assert!(empty.owner.layout_snapshot().is_none());
+        let error = no_effects_split(&mut empty, &payload).unwrap_err();
+        assert_eq!(error.failure().unwrap().0, SplitFailure::NoLayout);
+        assert_eq!(empty.owner.launches.records().count(), 0);
+    }
+
+    #[test]
+    fn malformed_and_wrong_generation_payloads_reject_before_ledger() {
+        let mut fixture = fixture();
+        let mut payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            (24, 40),
+            b"env",
+        );
+        payload[80] = 1; // nonzero reserved byte
+        assert!(matches!(
+            no_effects_split(&mut fixture, &payload),
+            Err(SplitError::InvalidPayload(_))
+        ));
+        assert_eq!(ledger_status(&fixture, 2), OperationStatus::NotAdmitted);
+        let wrong = OperationKey {
+            generation: GENERATION + 1,
+            ..key(2)
+        };
+        let wrong_target = TargetRef {
+            generation: GENERATION + 1,
+            ..fixture.first
+        };
+        let payload = split_bytes(
+            wrong,
+            wrong_target,
+            1,
+            SplitDirection::Right,
+            (24, 40),
+            b"env",
+        );
+        assert!(matches!(
+            no_effects_split(&mut fixture, &payload),
+            Err(SplitError::GenerationMismatch)
+        ));
+        assert_eq!(ledger_status(&fixture, 2), OperationStatus::NotAdmitted);
+    }
+
+    #[test]
+    fn preparation_and_journal_preflight_failures_record_failed_without_reservation() {
+        for preflight in [false, true] {
+            let mut fixture = fixture();
+            let payload = split_bytes(
+                key(2),
+                fixture.first,
+                1,
+                SplitDirection::Right,
+                (24, 40),
+                b"env",
+            );
+            fixture.journal.preflight_failure = preflight;
+            let error = fixture
+                .owner
+                .execute_split(
+                    &payload,
+                    NOW,
+                    &mut fixture.journal,
+                    |_, target| {
+                        if preflight {
+                            Ok(target.session)
+                        } else {
+                            Err("PRIVATE-PREPARE")
+                        }
+                    },
+                    |_| -> Result<Sink, ()> { panic!("must not spawn") },
+                    |_: &mut Sink, _, _| -> Result<(), ()> { panic!("must not resize") },
+                )
+                .unwrap_err();
+            let expected = if preflight {
+                SplitFailure::JournalPreflightFailed
+            } else {
+                SplitFailure::PreparationFailed
+            };
+            assert_eq!(error.failure().unwrap().0, expected);
+            assert_eq!(fixture.owner.launches.records().count(), 1);
+            assert_eq!(fixture.owner.launches.next_target().unwrap().session, 2);
+            assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 1);
+            assert_eq!(
+                ledger_status(&fixture, 2),
+                OperationStatus::Completed(Outcome::Failed)
+            );
+            let rendered = format!("{error:?} {error} {:?}", fixture.owner);
+            assert!(!rendered.contains("PRIVATE"));
+        }
+    }
+
+    #[test]
+    fn known_spawn_failure_before_commit_is_failed_and_keeps_layout() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Down,
+            (12, 81),
+            b"env",
+        );
+        let error = split(&mut fixture, &payload, false, true).unwrap_err();
+        let (reason, result) = error.failure().unwrap();
+        assert_eq!(reason, SplitFailure::LaunchFailed);
+        assert_eq!(result.new_target, None);
+        assert_eq!(
+            *fixture.log.borrow(),
+            [
+                Effect::Prepare(2),
+                Effect::JournalPreflight,
+                Effect::Record(LaunchState::Intent),
+                Effect::Spawn(2),
+                Effect::Record(LaunchState::Failed),
+            ]
+        );
+        // The identity is spent by the known launch failure, as for launches.
+        let spent = fixture.owner.launches.records().nth(1).unwrap();
+        assert_eq!(spent.state, SessionState::Failed);
+        assert!(!spent.has_effects);
+        let snapshot = fixture.owner.layout_snapshot().unwrap();
+        assert_eq!((snapshot.revision, snapshot.pane_count()), (1, 1));
+        assert_eq!(
+            ledger_status(&fixture, 2),
+            OperationStatus::Completed(Outcome::Failed)
+        );
+        fixture.log.borrow_mut().clear();
+        let retry = no_effects_split(&mut fixture, &payload).unwrap_err();
+        assert_eq!(retry.failure().unwrap().1, result);
+    }
+
+    #[test]
+    fn post_spawn_journal_fault_commits_unknown_retains_child_and_never_respawns() {
+        for failed_state in [LaunchState::Spawned, LaunchState::Applied] {
+            let mut fixture = fixture();
+            fixture.journal.record_failure = Some(failed_state);
+            let payload = split_bytes(
+                key(2),
+                fixture.first,
+                1,
+                SplitDirection::Right,
+                (24, 40),
+                b"env",
+            );
+            let result = split(&mut fixture, &payload, true, true).unwrap();
+            assert_eq!(result.outcome, Outcome::Unknown);
+            assert_eq!(result.committed_layout_revision, 2);
+            let new_target = result.new_target.unwrap();
+            assert_eq!(
+                fixture.owner.launches.state(new_target),
+                Ok(SessionState::Unknown)
+            );
+            assert!(fixture.owner.launches.effects(new_target).is_ok());
+            assert!(fixture.owner.launches.effects(fixture.first).is_ok());
+            assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 2);
+            assert!(fixture.log.borrow().contains(&Effect::Resize {
+                session: 1,
+                rows: 24,
+                columns: 40
+            }));
+            assert_eq!(
+                ledger_status(&fixture, 2),
+                OperationStatus::Completed(Outcome::Unknown)
+            );
+            fixture.log.borrow_mut().clear();
+            let retry = no_effects_split(&mut fixture, &payload).unwrap();
+            assert_eq!(retry, result);
+            assert!(fixture.log.borrow().is_empty());
+            assert_no_input(&fixture);
+        }
+    }
+
+    #[test]
+    fn existing_session_resize_failure_is_partial_and_layout_stays_committed() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Up,
+            (11, 81),
+            b"env",
+        );
+        let result = split(&mut fixture, &payload, true, false).unwrap();
+        assert_eq!(result.outcome, Outcome::Partial);
+        assert_eq!(result.committed_layout_revision, 2);
+        let new_target = result.new_target.unwrap();
+        assert_eq!(
+            fixture.owner.launches.state(new_target),
+            Ok(SessionState::Applied)
+        );
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 2);
+        assert_eq!(
+            ledger_status(&fixture, 2),
+            OperationStatus::Completed(Outcome::Partial)
+        );
+        fixture.log.borrow_mut().clear();
+        assert_eq!(no_effects_split(&mut fixture, &payload).unwrap(), result);
+        assert!(fixture.log.borrow().is_empty());
+
+        // The existing pane is pending at its desired split rectangle; the
+        // new pane was spawned at its planned size and is not pending.
+        let pending = fixture.owner.pending_resizes();
+        assert_eq!(pending.iter().flatten().count(), 1);
+        let entry = pending.into_iter().flatten().next().unwrap();
+        assert_eq!(entry.target, fixture.first);
+        assert_eq!(entry.desired, (12, 81));
+        assert_eq!(entry.confirmed, (ROOT_ROWS, ROOT_COLUMNS));
+        assert!(!format!("{entry:?}").contains(&GENERATION.to_string()));
+        assert_no_input(&fixture);
+    }
+
+    fn recording_resize(
+        log: &Log,
+        fail: bool,
+    ) -> impl FnMut(&mut Sink, u16, u16) -> Result<(), ()> {
+        let log = Rc::clone(log);
+        move |sink: &mut Sink, rows, columns| {
+            log.borrow_mut().push(Effect::Resize {
+                session: sink.session,
+                rows,
+                columns,
+            });
+            if fail {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn same_size_resize_layout_retries_only_pending_split_resize_without_new_revision() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Up,
+            (11, 81),
+            b"env",
+        );
+        assert_eq!(
+            split(&mut fixture, &payload, true, false).unwrap().outcome,
+            Outcome::Partial
+        );
+        fixture.log.borrow_mut().clear();
+
+        // Still failing: ResizePending again, same revision, only the pending pane.
+        let error = fixture
+            .owner
+            .resize_layout(
+                2,
+                ROOT_ROWS,
+                ROOT_COLUMNS,
+                recording_resize(&fixture.log, true),
+            )
+            .unwrap_err();
+        match error {
+            LayoutResizeError::ResizePending { snapshot, failed } => {
+                assert_eq!(snapshot.revision, 2);
+                // Up places the existing pane second (bottom).
+                assert_eq!(failed, [false, true]);
+            }
+            other => panic!("expected pending resize, got {other:?}"),
+        }
+        assert_eq!(
+            *fixture.log.borrow(),
+            [Effect::Resize {
+                session: 1,
+                rows: 12,
+                columns: 81
+            }]
+        );
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 2);
+        assert_eq!(fixture.owner.pending_resizes().iter().flatten().count(), 1);
+        fixture.log.borrow_mut().clear();
+
+        // Succeeding: Ok, same revision, pending cleared, exactly one call.
+        let snapshot = fixture
+            .owner
+            .resize_layout(
+                2,
+                ROOT_ROWS,
+                ROOT_COLUMNS,
+                recording_resize(&fixture.log, false),
+            )
+            .unwrap();
+        assert_eq!(snapshot.revision, 2);
+        assert_eq!(
+            *fixture.log.borrow(),
+            [Effect::Resize {
+                session: 1,
+                rows: 12,
+                columns: 81
+            }]
+        );
+        assert_eq!(fixture.owner.pending_resizes(), [None, None]);
+        fixture.log.borrow_mut().clear();
+
+        // Nothing pending: a same-size call has no PTY effect.
+        fixture
+            .owner
+            .resize_layout(
+                2,
+                ROOT_ROWS,
+                ROOT_COLUMNS,
+                recording_resize(&fixture.log, false),
+            )
+            .unwrap();
+        assert!(fixture.log.borrow().is_empty());
+        assert_no_input(&fixture);
+    }
+
+    #[test]
+    fn same_size_resize_layout_retries_failed_root_resize_panes_only() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            (24, 40),
+            b"env",
+        );
+        split(&mut fixture, &payload, true, true).unwrap();
+        fixture.log.borrow_mut().clear();
+        let log = Rc::clone(&fixture.log);
+        let error = fixture
+            .owner
+            .resize_layout(2, 30, 101, move |sink: &mut Sink, rows, columns| {
+                log.borrow_mut().push(Effect::Resize {
+                    session: sink.session,
+                    rows,
+                    columns,
+                });
+                if sink.session == 2 {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            LayoutResizeError::ResizePending { ref snapshot, failed }
+                if snapshot.revision == 3 && failed == [false, true]
+        ));
+        assert_eq!(fixture.log.borrow().len(), 2);
+        let pending = fixture.owner.pending_resizes();
+        let entry = pending.into_iter().flatten().next().unwrap();
+        assert_eq!(pending.iter().flatten().count(), 1);
+        assert_eq!(entry.target.session, 2);
+        assert_eq!((entry.desired, entry.confirmed), ((30, 50), (24, 40)));
+        fixture.log.borrow_mut().clear();
+
+        let error = fixture
+            .owner
+            .resize_layout(3, 30, 101, recording_resize(&fixture.log, true))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            LayoutResizeError::ResizePending { ref snapshot, failed }
+                if snapshot.revision == 3 && failed == [false, true]
+        ));
+        let only_second = [Effect::Resize {
+            session: 2,
+            rows: 30,
+            columns: 50,
+        }];
+        assert_eq!(*fixture.log.borrow(), only_second);
+        fixture.log.borrow_mut().clear();
+
+        let snapshot = fixture
+            .owner
+            .resize_layout(3, 30, 101, recording_resize(&fixture.log, false))
+            .unwrap();
+        assert_eq!(snapshot.revision, 3);
+        assert_eq!(*fixture.log.borrow(), only_second);
+        assert_eq!(fixture.owner.pending_resizes(), [None, None]);
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 3);
+        assert_no_input(&fixture);
+    }
+
+    #[test]
+    fn resize_layout_applies_absolute_sizes_rejects_small_and_reports_pending() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            (24, 40),
+            b"env",
+        );
+        split(&mut fixture, &payload, true, true).unwrap();
+        fixture.log.borrow_mut().clear();
+        let log = Rc::clone(&fixture.log);
+        let mut record = move |sink: &mut Sink, rows: u16, columns: u16| {
+            log.borrow_mut().push(Effect::Resize {
+                session: sink.session,
+                rows,
+                columns,
+            });
+            Ok::<_, ()>(())
+        };
+
+        // Same size: no revision change and no PTY effect.
+        let same = fixture.owner.resize_layout(2, 24, 81, &mut record).unwrap();
+        assert_eq!(same.revision, 2);
+        assert!(fixture.log.borrow().is_empty());
+
+        // Too small for two 20-column panes, and stale: no change, no effect.
+        assert!(matches!(
+            fixture.owner.resize_layout(2, 24, 40, &mut record),
+            Err(LayoutResizeError::Layout(LayoutError::LayoutTooSmall))
+        ));
+        assert!(matches!(
+            fixture.owner.resize_layout(1, 30, 101, &mut record),
+            Err(LayoutResizeError::Layout(LayoutError::StaleRevision))
+        ));
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 2);
+        assert!(fixture.log.borrow().is_empty());
+
+        let grown = fixture
+            .owner
+            .resize_layout(2, 30, 101, &mut record)
+            .unwrap();
+        assert_eq!(grown.revision, 3);
+        assert_eq!(
+            *fixture.log.borrow(),
+            [
+                Effect::Resize {
+                    session: 1,
+                    rows: 30,
+                    columns: 50
+                },
+                Effect::Resize {
+                    session: 2,
+                    rows: 30,
+                    columns: 50
+                },
+            ]
+        );
+
+        let error = fixture
+            .owner
+            .resize_layout(3, 20, 61, |sink: &mut Sink, _, _| {
+                if sink.session == 2 {
+                    Err("PRIVATE-RESIZE")
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        match error {
+            LayoutResizeError::ResizePending { snapshot, failed } => {
+                assert_eq!(snapshot.revision, 4);
+                assert_eq!(failed, [false, true]);
+            }
+            other => panic!("expected pending resize, got {other:?}"),
+        }
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 4);
+        assert_no_input(&fixture);
+    }
+}
+
+#[cfg(test)]
+mod runtime_helper_tests {
+    //! Deterministic coverage of the owner helpers used by the multi-session
+    //! runtime: typed-key input, root resize, split authorization, scoped
+    //! observation and launch status.
+    use super::{MultiSessionOwner, RootResizeReply};
+    use crate::control_protocol::{Command, ReadSource, TargetRef};
+    use crate::handshake_protocol::{Hello, CAPABILITY_INPUT, CAPABILITY_READ};
+    use crate::managed_launch::LaunchJournalPort;
+    use crate::managed_launch_protocol::{encode_launch_request, LaunchRequest};
+    use crate::pane_layout::SplitDirection;
+    use crate::protocol::{Ledger, OperationKey, OperationStatus, Outcome};
+    use crate::response_protocol::{decode_response_payload, RejectionCode, ResponseBody};
+    use crate::server::{Connection, EffectSink, ReadResult, ServerError, SessionReply};
+    use crate::server_storage::LaunchRecord;
+    use crate::session_protocol::{encode_session_request, SessionHello, SessionRequest};
+    use crate::split_protocol::{decode_split_request, encode_split_request, SplitRequest};
+    use crate::terminal::Key;
+    use crate::ui_protocol::{
+        decode_ui_request, encode_key_input, KeyInput, RootResize, UiRequest,
+    };
+    use std::io;
+
+    const GENERATION: u64 = 91;
+    const INTERNAL: u64 = 1;
+    const NOW: u64 = 5;
+
+    #[derive(Default)]
+    struct Sink {
+        delivered: Vec<Key>,
+        resizes: Vec<(u16, u16)>,
+        fail_resize: bool,
+    }
+
+    impl EffectSink for Sink {
+        fn validate(&self, _: Command<'_>) -> Result<(), RejectionCode> {
+            Ok(())
+        }
+        fn read(&mut self, _: ReadSource, _: usize, _: u16) -> Result<ReadResult, Outcome> {
+            Err(Outcome::Failed)
+        }
+        fn input(&mut self, _: Command<'_>) -> Outcome {
+            Outcome::Applied
+        }
+        fn poll(&mut self) -> Result<(), Outcome> {
+            Ok(())
+        }
+        fn child_exited(&self) -> bool {
+            false
+        }
+        fn screen_revision(&self) -> Option<u64> {
+            Some(1)
+        }
+    }
+
+    struct Journal;
+
+    impl LaunchJournalPort for Journal {
+        fn preflight_launch(&self, _: OperationKey, _: u64) -> io::Result<()> {
+            Ok(())
+        }
+        fn record(&mut self, _: LaunchRecord) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn launch(key: OperationKey, rows: u16, columns: u16) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        encode_launch_request(
+            &LaunchRequest {
+                key,
+                rows,
+                columns,
+                requested_executable: b"/bin/sh",
+                requested_working_directory: b"/",
+                client_working_directory: b"/",
+                arguments: &[],
+                environment: &[],
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        bytes
+    }
+
+    fn owner_with_first(allow_input: bool) -> (MultiSessionOwner<Sink>, TargetRef) {
+        let mut ledger = Ledger::new(GENERATION).unwrap();
+        ledger.open_lease(INTERNAL, 0).unwrap();
+        let mut owner = MultiSessionOwner::with_ledger(ledger, allow_input).unwrap();
+        let key = OperationKey {
+            generation: GENERATION,
+            lease: INTERNAL,
+            sequence: 1,
+        };
+        let result = owner
+            .execute_launch(
+                &launch(key, 24, 81),
+                NOW,
+                &mut Journal,
+                |_, _| Ok::<_, ()>(()),
+                |()| Ok::<_, ()>(Sink::default()),
+            )
+            .unwrap();
+        (owner, result.target.unwrap())
+    }
+
+    fn connect(owner: &mut MultiSessionOwner<Sink>, target: TargetRef, nonce: u64) -> Connection {
+        let hello = SessionHello {
+            hello: Hello {
+                nonce,
+                required_capabilities: CAPABILITY_READ,
+                optional_capabilities: CAPABILITY_INPUT,
+            },
+            resume: None,
+        };
+        owner.connect(target, &hello, NOW).unwrap().0
+    }
+
+    fn key(connection: &Connection, sequence: u64) -> OperationKey {
+        OperationKey {
+            generation: GENERATION,
+            lease: connection.lease(),
+            sequence,
+        }
+    }
+
+    fn claim(owner: &mut MultiSessionOwner<Sink>, connection: &Connection, target: TargetRef) {
+        let payload = encode_session_request(&SessionRequest::Claim {
+            key: key(connection, 1),
+            target,
+            expected_owner_revision: 1,
+            ttl_seconds: 30,
+        })
+        .unwrap();
+        let SessionReply::Payload(reply) = owner.handle_session(connection, &payload, NOW).unwrap()
+        else {
+            panic!("claim reply");
+        };
+        assert_eq!(
+            decode_response_payload(&reply).unwrap().body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+    }
+
+    fn keys(
+        owner: &mut MultiSessionOwner<Sink>,
+        connection: &Connection,
+        payload: &[u8],
+    ) -> ResponseBody<'static> {
+        let UiRequest::KeyInput(view) = decode_ui_request(payload).unwrap() else {
+            panic!("key input");
+        };
+        let bytes = owner
+            .handle_key_input(
+                connection,
+                &view,
+                payload,
+                NOW,
+                |_| Ok(()),
+                |sink| {
+                    sink.delivered.extend(view.keys());
+                    Outcome::Applied
+                },
+            )
+            .unwrap();
+        match decode_response_payload(&bytes).unwrap().body {
+            ResponseBody::Status(status) => ResponseBody::Status(status),
+            ResponseBody::Rejected(code) => ResponseBody::Rejected(code),
+            ResponseBody::Read { .. } => panic!("unexpected read"),
+        }
+    }
+
+    fn key_payload(key: OperationKey, target: TargetRef, revision: u64) -> Vec<u8> {
+        encode_key_input(&KeyInput {
+            key,
+            target,
+            expected_owner_revision: revision,
+            keys: &[Key::Char('a'), Key::Enter],
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn key_input_requires_input_capability_ownership_and_never_replays() {
+        let (mut owner, first) = owner_with_first(true);
+        let connection = connect(&mut owner, first, 1);
+        // No ownership yet: rejected before admission, nothing delivered.
+        let early = key_payload(key(&connection, 2), first, 1);
+        assert_eq!(
+            keys(&mut owner, &connection, &early),
+            ResponseBody::Rejected(RejectionCode::Unauthorized)
+        );
+        claim(&mut owner, &connection, first);
+        let payload = key_payload(key(&connection, 3), first, 2);
+        assert_eq!(
+            keys(&mut owner, &connection, &payload),
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        // Exact duplicate returns the recorded status without re-delivery.
+        assert_eq!(
+            keys(&mut owner, &connection, &payload),
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        let delivered = owner
+            .launches
+            .effects(first)
+            .unwrap()
+            .effects
+            .delivered
+            .clone();
+        assert_eq!(delivered, vec![Key::Char('a'), Key::Enter]);
+        // Another lease's key is unauthorized.
+        let foreign = key_payload(
+            OperationKey {
+                lease: connection.lease() + 7,
+                ..key(&connection, 4)
+            },
+            first,
+            2,
+        );
+        assert_eq!(
+            keys(&mut owner, &connection, &foreign),
+            ResponseBody::Rejected(RejectionCode::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn key_input_without_server_input_or_outside_pinned_scope_is_rejected() {
+        let (mut owner, first) = owner_with_first(false);
+        let read_only = connect(&mut owner, first, 1);
+        assert_eq!(read_only.selected_capabilities() & CAPABILITY_INPUT, 0);
+        let payload = key_payload(key(&read_only, 1), first, 1);
+        assert_eq!(
+            keys(&mut owner, &read_only, &payload),
+            ResponseBody::Rejected(RejectionCode::Unauthorized)
+        );
+
+        let (mut owner, first) = owner_with_first(true);
+        let connection = connect(&mut owner, first, 1);
+        let other = TargetRef {
+            pane: 9,
+            session: 9,
+            ..first
+        };
+        let payload = key_payload(key(&connection, 1), other, 1);
+        assert_eq!(
+            keys(&mut owner, &connection, &payload),
+            ResponseBody::Rejected(RejectionCode::Unauthorized)
+        );
+        assert!(owner
+            .launches
+            .effects(first)
+            .unwrap()
+            .effects
+            .delivered
+            .is_empty());
+    }
+
+    #[test]
+    fn root_resize_records_outcomes_and_duplicates_do_not_resize_again() {
+        let (mut owner, first) = owner_with_first(true);
+        let connection = connect(&mut owner, first, 1);
+        let request = RootResize {
+            key: key(&connection, 1),
+            expected_layout_revision: 1,
+            rows: 30,
+            columns: 100,
+        };
+        let payload = crate::ui_protocol::encode_root_resize(&request).unwrap();
+        let resize = |sink: &mut Sink, rows, columns| {
+            sink.resizes.push((rows, columns));
+            if sink.fail_resize {
+                Err(())
+            } else {
+                Ok(())
+            }
+        };
+        let RootResizeReply::Resized { snapshot, pending } = owner
+            .handle_root_resize(&connection, request, &payload, NOW, resize)
+            .unwrap()
+        else {
+            panic!("resized");
+        };
+        assert_eq!(
+            (snapshot.revision, snapshot.rows, snapshot.columns),
+            (2, 30, 100)
+        );
+        assert_eq!(pending, [false, false]);
+        let RootResizeReply::Response(duplicate) = owner
+            .handle_root_resize(&connection, request, &payload, NOW, resize)
+            .unwrap()
+        else {
+            panic!("duplicate");
+        };
+        assert_eq!(
+            decode_response_payload(&duplicate).unwrap().body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        assert_eq!(
+            owner.launches.effects(first).unwrap().effects.resizes,
+            vec![(30, 100)]
+        );
+
+        // Stale revision: Failed, no PTY effect.
+        let stale = RootResize {
+            key: key(&connection, 2),
+            ..request
+        };
+        let payload = crate::ui_protocol::encode_root_resize(&stale).unwrap();
+        assert!(matches!(
+            owner
+                .handle_root_resize(&connection, stale, &payload, NOW, resize)
+                .unwrap(),
+            RootResizeReply::LayoutRejected(_)
+        ));
+        assert_eq!(
+            owner.launches.effects(first).unwrap().effects.resizes.len(),
+            1
+        );
+
+        // A failing PTY resize is Partial with the pane marked pending.
+        owner
+            .launches
+            .session_mut(first)
+            .unwrap()
+            .effects
+            .fail_resize = true;
+        let grow = RootResize {
+            key: key(&connection, 3),
+            expected_layout_revision: 2,
+            rows: 31,
+            columns: 100,
+        };
+        let payload = crate::ui_protocol::encode_root_resize(&grow).unwrap();
+        let RootResizeReply::Resized { pending, .. } = owner
+            .handle_root_resize(&connection, grow, &payload, NOW, resize)
+            .unwrap()
+        else {
+            panic!("pending");
+        };
+        assert_eq!(pending, [true, false]);
+        let RootResizeReply::Response(again) = owner
+            .handle_root_resize(&connection, grow, &payload, NOW, resize)
+            .unwrap()
+        else {
+            panic!("duplicate");
+        };
+        assert_eq!(
+            decode_response_payload(&again).unwrap().body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Partial))
+        );
+    }
+
+    #[test]
+    fn root_resize_and_split_require_input_capability_and_own_lease() {
+        let (mut owner, first) = owner_with_first(false);
+        let connection = connect(&mut owner, first, 1);
+        let request = RootResize {
+            key: key(&connection, 1),
+            expected_layout_revision: 1,
+            rows: 30,
+            columns: 100,
+        };
+        let payload = crate::ui_protocol::encode_root_resize(&request).unwrap();
+        let RootResizeReply::Response(bytes) = owner
+            .handle_root_resize(&connection, request, &payload, NOW, |_: &mut Sink, _, _| {
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+        else {
+            panic!("rejected");
+        };
+        assert_eq!(
+            decode_response_payload(&bytes).unwrap().body,
+            ResponseBody::Rejected(RejectionCode::Unauthorized)
+        );
+        assert_eq!(owner.layout_snapshot().unwrap().revision, 1);
+
+        let launch_request = LaunchRequest {
+            key: key(&connection, 2),
+            rows: 24,
+            columns: 40,
+            requested_executable: b"/bin/zsh",
+            requested_working_directory: b"/",
+            client_working_directory: b"/",
+            arguments: &[],
+            environment: &[],
+        };
+        let mut split = Vec::new();
+        encode_split_request(
+            &SplitRequest {
+                key: key(&connection, 2),
+                target: first,
+                expected_layout_revision: 1,
+                direction: SplitDirection::Right,
+                launch: &launch_request,
+            },
+            &mut split,
+        )
+        .unwrap();
+        let view = decode_split_request(&split).unwrap();
+        assert_eq!(
+            owner.authorize_split(&connection, &view, NOW),
+            Err(ServerError::Unauthorized)
+        );
+
+        let (mut owner, first) = owner_with_first(true);
+        let connection = connect(&mut owner, first, 1);
+        let view = decode_split_request(&split).unwrap();
+        // Both owners issue the same first client lease, so the bytes apply.
+        assert_eq!(view.key().lease, connection.lease());
+        assert_eq!(owner.authorize_split(&connection, &view, NOW), Ok(()));
+        let other = TargetRef {
+            pane: 5,
+            session: 5,
+            ..first
+        };
+        let mut scoped = Vec::new();
+        encode_split_request(
+            &SplitRequest {
+                key: key(&connection, 2),
+                target: other,
+                expected_layout_revision: 1,
+                direction: SplitDirection::Right,
+                launch: &launch_request,
+            },
+            &mut scoped,
+        )
+        .unwrap();
+        assert_eq!(
+            owner.authorize_split(&connection, &decode_split_request(&scoped).unwrap(), NOW),
+            Err(ServerError::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn observation_is_scoped_and_layout_is_shared_with_read_connections() {
+        let (mut owner, first) = owner_with_first(false);
+        let connection = connect(&mut owner, first, 1);
+        assert_eq!(
+            owner
+                .observe_target(&connection, first, NOW, |sink| sink.delivered.len())
+                .unwrap(),
+            0
+        );
+        let other = TargetRef {
+            pane: 4,
+            session: 4,
+            ..first
+        };
+        assert_eq!(
+            owner
+                .observe_target(&connection, other, NOW, |_| ())
+                .unwrap_err(),
+            ServerError::Unauthorized
+        );
+        let (layout, pending) = owner.layout_view(&connection, NOW).unwrap().unwrap();
+        assert_eq!(layout.panes[0].unwrap().target, first);
+        assert_eq!(pending, [None, None]);
+        assert_eq!(owner.first_pane_target(), Some(first));
+        assert_eq!(owner.lease_target(connection.lease()), Some(first));
+        assert_eq!(
+            owner.lease_target(INTERNAL),
+            None,
+            "internal lease has no grant"
+        );
+        // Launch status for another lease's key is unauthorized.
+        assert_eq!(
+            owner
+                .launch_status(
+                    &connection,
+                    OperationKey {
+                        generation: GENERATION,
+                        lease: INTERNAL,
+                        sequence: 1,
+                    },
+                    NOW,
+                )
+                .unwrap_err(),
+            ServerError::Unauthorized
+        );
     }
 }

@@ -965,3 +965,202 @@ P3A-LAYOUT-TASK.md contract. Parent owns module export, API review and integrate
 checks. Scope is pure fixed-two-pane geometry, nonmutating preview/guarded
 commit, atomic validated resize, hit testing and boundary tests; no menu/runtime
 or PTY launch yet. Inspect live ownership/results before assuming delivery.
+
+## New-machine setup and host-gate reruns — 2026-10-18
+
+Fresh Apple Silicon Mac (macOS 26.6.1, build 25G76, arm64) at HEAD
+`e93929b`. Rust was absent; installed through the official rustup installer
+(`--profile minimal`, stable, rustfmt and clippy): rustc/cargo 1.99.1, Clippy
+0.1.99, the same version as the earlier verified machine. Default
+`CARGO_HOME=~/.cargo`; no temporary cache path was needed. Cargo registry and
+loopback/pathname socket access both work in this environment.
+
+`cargo build --locked` passed. `python3 scripts/verify_non_ui.py` returned 0
+with all eight checks passed. `cargo test --locked --offline`: 443 passed,
+14 ignored (373 lib/4 ignored, 36 binary, p2_host 4/9 ignored, p3_pathname
+1/1 ignored, remaining integration targets all passing).
+
+Previously environment-blocked ignored checks were run here by the parent:
+
+- `cargo test --locked --offline --test p2_host -- --ignored --test-threads=1`:
+  9 passed, 0 failed (5.41 s). This is the first agent-captured raw pass of the
+  corrected outer-PTY suite; the earlier "all corrected" was operator-only.
+- `cargo test --locked --offline --test p3_pathname -- --ignored`:
+  `pathname_server_cli_context_reuse` passed (0.68 s), confirming the earlier
+  operator result with captured output.
+
+These are automated fixture results. They do not establish manual Apple
+Terminal behavior: the clipboard sentinel retest and the remaining manual
+checklist stay pending.
+
+Launcher defect found and fixed: `bin/panelink` derived the checkout from
+`dirname "$0"`, so the README's `~/.local/bin/panelink` symlink resolved to
+`~/.local` and reported "Build Panelink first". It now follows symlinks
+before locating the checkout. Checked through the symlink from `/tmp`:
+`--version` 0, `doctor` 1, unknown option 2; direct `./bin/panelink` unchanged.
+The verifier passed again afterwards. Not committed (user deferred commits).
+
+OpenCode on this machine reports version 1.19.0 (not the 2.0.32 recorded
+previously). Loopback bind succeeds here, so the earlier ACP EPERM blocker may
+not apply; the MiMo task has still not been run and no identity claim is made.
+
+## P3A waves 1–2: menu, split codec, composition, split transaction — 2026-10-18
+
+Parent specified wave 1 in `P3A-WAVE1-TASKS.md` and dispatched three parallel
+exclusive-file tasks plus one wave-2 task through the harness's implementation
+subagents. Model selection is not exposed by this harness, so no gpt-6-luna
+assignment is claimed for this work. Parent reviewed the diffs, owns the
+`src/lib.rs` exports (`split_menu`, `split_protocol`) and `terminal::compose`.
+
+- Wave 1A `src/split_menu.rs` (`P3A-MENU.md`): pure four-item menu with
+  captured target/revision, `can_split`-derived enablement, consumed-while-open
+  input, clamped normal/compact/too-small overlay; 21 tests.
+- Wave 1B `src/split_protocol.rs` (`P3A-SPLIT-CODEC.md`): schema-7 request
+  (96-byte prefix + exact embedded schema-6 launch, same key), status query and
+  128-byte result; 14 tests. Parent accepts `Partial` as a valid split result
+  outcome (layout committed, resize pending), unlike schema 6.
+- Wave 1C `src/terminal/compose.rs` (`P3A-COMPOSE.md`): offset-aware two-pane
+  compositor with divider, overlay clipping, commit-after-write; private
+  `render.rs` internals take a placement, public output unchanged; 15 tests.
+- Wave 2 (`P3A-SPLIT-TRANSACTION.md`): `MultiSessionOwner::execute_split`,
+  `resize_layout`, `layout_snapshot`; coordinator `execute_admitted` so the
+  split key is admitted once with the full split bytes; `PtyEffects::resize`.
+  Real-PTY `tests/p3_split.rs` proves two distinct children, per-target ACKs,
+  `stty size` after split and root resize, lost-ack replay without a second
+  child, and teardown reaping.
+
+Parent-accepted deviations: (1) layout commits after the child is acquired,
+not with a `starting` leaf before spawn — the pure layout has no starting-leaf
+state and a pre-spawn commit would spend one of two session slots on an empty
+pane. Known spawn failure is therefore `Failed` with no layout change;
+`Partial` means resize pending; post-spawn journal/attach uncertainty is
+`Unknown` with the child retained and layout committed. (2) A duplicate of a
+previously failed split returns the same Failed result with reason
+`PreviouslyFailed`. Layout, ledger and split result remain volatile.
+
+Verification (parent): `python3 scripts/verify_non_ui.py` 8/8 passed;
+rustdoc with `-D warnings` passed; `tests/p3_split.rs` passed 3 parent reruns;
+full `cargo test --locked --offline` reaches 508 passed/14 ignored on clean
+runs. Two pre-existing intermittent failures were observed under repeated
+full-suite load: `server_startup::tests::explicit_startup_commits_metadata_and_keeps_singleton_while_child_lives`
+(src/server_startup.rs:305) and `p3_detach::interrupt_delivers_sigint_after_a_ready_marker`
+(tests/p3_detach.rs:125). Both also failed on an untouched HEAD worktree
+(2 failures in 10 full runs), so they predate P3A; not fixed or weakened here.
+
+Not done: no runtime route (ServerDriver still owns a single StateOwner), no
+interactive client, no host mouse enablement, no Apple Terminal acceptance.
+Phase 3A remains open.
+
+Independent reviewer pass on waves 1–2 (read-only) found no double-spawn or
+abandoned-child path. It raised three findings, all fixed and re-verified by
+the parent:
+- High: same-size `resize_layout` skipped pending PTY resizes. Per-pane
+  pending/confirmed size is now tracked, same-size calls retry only pending
+  panes without a revision change, and `pending_resizes()` exposes the state.
+- Medium: the menu allowed activation in a 5x14–19 viewport. Interaction is
+  now gated on the 5x20 terminal minimum; the menu shows TooSmall below that.
+- Low: the real-PTY proof used `/bin/sh`. `tests/p3_split.rs` now runs the
+  scenario with `/bin/zsh -f` (explicit empty HOME/ZDOTDIR) plus an sh variant.
+
+Parent re-verification: verifier 8/8, rustdoc clean, `p3_split` 2/2 across
+3 reruns, full suite 513 passed / 0 failed / 14 ignored.
+
+## Descriptor/spawn gate closed — 2026-10-18
+
+On the user's instruction ("close it"), the parent reran the outstanding gate
+evidence on this host. The accepted-socket/managed-exec race fixture passed
+6/6, the other pathname fixtures passed, `p3_fd_inheritance` 4/4 passed, and
+the atomic PTY and concurrent-spawn tests passed. The gate is closed for
+macOS/aarch64 with Rust 1.99.1. Foreign/native concurrent spawn is explicitly
+out of scope, and the minimum macOS version is still unset. See the
+"Gate closure" section of P3-SPAWN-DESCRIPTOR-GATE.md. This allows API launch
+routing (P3A wave 3) through the single owner path. It does not complete
+Phase 3.
+
+## P3A wave 3: multi-session server and interactive client — 2026-10-19
+
+- W3A (`P3A-RUNTIME.md`): new `panelink serve` runtime (`multi_runtime.rs`,
+  `multi_startup.rs`) over `MultiSessionOwner`. It sits alongside the unchanged
+  one-child `server-probe`. Routes: schemas 1/2/4/5, 6 (status only), 7 (split)
+  and a new schema-8 UI protocol (`ui_protocol.rs`: layout, styled screen
+  snapshot, key input, root resize). The server uses one connection per pane,
+  attached through a Hello AttachTarget trailer. Split, keys and resize need
+  `--allow-input`; keys also need input ownership. The first child launches
+  through `execute_launch` with schema 6.
+  - Changes outside the agent's file list: opt-in snapshot frames in
+    `transport.rs` (approved by the parent).
+  - Review fixes: inherited `PANELINK_*` filtered before preflight; schema-4
+    watch/reconcile mapped to the pinned target; exact two-pane partition
+    validation; pathname test fails by default, skipping only with an explicit
+    env var on EPERM/EACCES.
+- W3B (`P3A-CLIENT.md`): `panelink attach` interactive client (`ui_client/`).
+  - It renders through the compositor, routes keys to the focused pane and
+    opens the split menu on right-click or Ctrl-B `s`. Menu input never
+    reaches a child. Mouse events are not forwarded to panes.
+  - A split uses the client's own env/cwd (minus `PANELINK_*`) and `/bin/zsh`.
+    The client then focuses the new pane. Ctrl-X detaches; children survive.
+  - `src/terminal/checkpoint_load.rs` loads styled snapshots.
+  - Review fixes:
+    - Proactive lease renewal.
+    - Restore-first exit with bounded network work.
+    - Nonblocking `/dev/tty` diagnostics.
+    - Validated receipts.
+    - Bootstrap reuses an existing context, so 70 attach cycles do not leak
+      leases.
+- Parent also fixed `scripts/verify_non_ui.py`. It now prefers `~/.cargo` when
+  that directory has a registry; previously a recreated, empty
+  `/private/tmp/panelink-p2-cargo-home` broke offline checks.
+
+Parent verification: verifier 8/8; rustdoc -D warnings clean; p3a_attach_host
+5/5, p3a_runtime, p3a_serve_pathname and p3_split pass in repeated runs;
+full suite 562 passed / 0 failed / 14 ignored.
+
+Automated host coverage uses an outer-PTY fixture, not Apple Terminal. These
+are not verified:
+- real Apple Terminal right-click delivery;
+- the manual feel of the client;
+- live 1,500-second lease renewal.
+
+Phase 3A exit requires that manual check; the phase is not marked complete.
+Known limits: no function/Alt keys over the wire; full-screen snapshot per
+change (~0.9 MB max); application-cursor mode not carried in snapshots.
+
+## Zero-configuration `panelink` — 2026-10-19
+
+The user asked that typing `panelink` should just work. Two delegations made
+no progress (an empty result, then an auth-broker timeout), so the parent
+implemented `src/default_open.rs` directly:
+- `panelink` opens the workspace, or reattaches if it is already running.
+- `panelink stop` ends the workspace.
+- `panelink probe` runs the old disposable probe.
+- When the last shell exits, the server stops and the client shows a notice.
+
+The reviewer raised four High findings (pid race and identity; lock-probe
+TOCTOU; context-create retry; root and ancestor validation) and one Medium
+(client server identity). All were fixed with a lifecycle lock, pid plus
+start-time identity, an EEXIST-only retry, ancestor and 0700 checks, and a
+socket-inode check. Verification: verifier 8/8, rustdoc clean, full suite 581
+passed / 0 failed / 15 ignored, and `p3a_default_open` 5/5 across 5 runs.
+The real-environment smoke test passes. See `P3A-DEFAULT-OPEN.md`. Phase 3A
+now awaits only the user's Apple Terminal check.
+
+## Phase 3A complete — 2026-10-19
+
+The user confirmed in Apple Terminal that plain `panelink` works:
+right-click split, typing in both panes, Control-B navigation mode, and
+Ctrl-X detach and reattach. The earlier "Ctrl-B doesn't work" report came from
+pressing Command-B, which Apple Terminal does not pass to programs.
+
+Final parent verification:
+- `verify_non_ui.py` 8/8 checks pass; rustdoc with `-D warnings` is clean.
+- Full suite: 588 passed / 0 failed / 15 ignored.
+- `p3a_default_open` passes 6/6 across repeated runs.
+
+Phase 3A is marked done and committed under the user's phase-completion
+authorization. `.codegraph/` is now in `.gitignore`.
+
+Still open and not part of 3A:
+- the Phase 2 clipboard sentinel and full manual checklist;
+- the remaining Phase 3 runtime items (event/lifecycle/stop contracts, more
+  than two panes);
+- Phase 4 OpenCode identity.

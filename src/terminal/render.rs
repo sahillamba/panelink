@@ -5,6 +5,25 @@ use std::io::{self, Write};
 use unicode_width::UnicodeWidthChar;
 
 use super::{unsafe_for_host, Color, ScreenSnapshot, SnapshotCell};
+use crate::pane_layout::Rect;
+
+/// Host placement of a snapshot: a cell origin plus an optional host-space
+/// rectangle whose cells must not be written (an overlay drawn on top).
+#[derive(Clone, Copy)]
+pub(super) struct Placement {
+    /// Host row of snapshot row zero.
+    pub(super) row: u16,
+    /// Host column of snapshot column zero.
+    pub(super) column: u16,
+    /// Host cells that this placement must leave untouched.
+    pub(super) exclude: Option<Rect>,
+}
+
+const HOST_ORIGIN: Placement = Placement {
+    row: 0,
+    column: 0,
+    exclude: None,
+};
 
 /// Stream a visible snapshot as basic ANSI controls and cell content.
 ///
@@ -25,7 +44,7 @@ pub fn render<W: Write>(
     output.write_all(b"\x1b[2J")?;
 
     for row in 0..snapshot.rows() {
-        write_row(output, snapshot, row)?;
+        paint_row(output, snapshot, row, HOST_ORIGIN)?;
     }
 
     output.write_all(b"\x1b[0m")?;
@@ -90,14 +109,7 @@ pub fn render_diff<W: Write>(
     output.write_all(b"\x1b[?7l")?;
 
     for row in 0..snapshot.rows() {
-        if !row_changed(snapshot, previous, row) {
-            continue;
-        }
-        if row_topology_requires_repaint(snapshot, previous, row) {
-            write_row(output, snapshot, row)?;
-        } else {
-            write_changed_row(output, snapshot, previous, row)?;
-        }
+        paint_row_diff(output, snapshot, previous, row, HOST_ORIGIN)?;
     }
 
     output.write_all(b"\x1b[0m")?;
@@ -109,7 +121,40 @@ pub fn render_diff<W: Write>(
     Ok(())
 }
 
-fn validate_snapshot(
+/// Paint every cell of one row of a validated snapshot at `placement`.
+///
+/// Emits only positioned cells; mode, cursor and SGR-reset framing belong to
+/// the caller.
+pub(super) fn paint_row<W: Write>(
+    output: &mut W,
+    snapshot: &ScreenSnapshot,
+    row: u16,
+    placement: Placement,
+) -> io::Result<()> {
+    write_row(output, snapshot, row, placement)
+}
+
+/// Paint the cells of one row that differ between two validated, same-size
+/// snapshots, using the same row-topology and changed-cell rules as
+/// [`render_diff`]. An unchanged row emits nothing.
+pub(super) fn paint_row_diff<W: Write>(
+    output: &mut W,
+    snapshot: &ScreenSnapshot,
+    previous: &ScreenSnapshot,
+    row: u16,
+    placement: Placement,
+) -> io::Result<()> {
+    if !row_changed(snapshot, previous, row) {
+        return Ok(());
+    }
+    if row_topology_requires_repaint(snapshot, previous, row) {
+        write_row(output, snapshot, row, placement)
+    } else {
+        write_changed_row(output, snapshot, previous, row, placement)
+    }
+}
+
+pub(super) fn validate_snapshot(
     snapshot: &ScreenSnapshot,
     host_rows: u16,
     host_columns: u16,
@@ -151,7 +196,12 @@ fn write_cursor<W: Write>(output: &mut W, snapshot: &ScreenSnapshot) -> io::Resu
     write!(output, "\x1b[{};{}H", cursor_row + 1, cursor_column + 1)
 }
 
-fn write_row<W: Write>(output: &mut W, snapshot: &ScreenSnapshot, row: u16) -> io::Result<()> {
+fn write_row<W: Write>(
+    output: &mut W,
+    snapshot: &ScreenSnapshot,
+    row: u16,
+    placement: Placement,
+) -> io::Result<()> {
     let mut column = 0;
     while column < snapshot.columns() {
         let cell = snapshot.cell(row, column).ok_or_else(|| {
@@ -162,7 +212,7 @@ fn write_row<W: Write>(output: &mut W, snapshot: &ScreenSnapshot, row: u16) -> i
         })?;
 
         if cell.is_wide_continuation() {
-            write_positioned_cell(output, row, column, cell, CellContent::Blank, 1)?;
+            write_cell(output, placement, row, column, cell, CellContent::Blank, 1)?;
             column += 1;
             continue;
         }
@@ -173,8 +223,9 @@ fn write_row<W: Write>(output: &mut W, snapshot: &ScreenSnapshot, row: u16) -> i
                     .cell(row, column + 1)
                     .is_some_and(SnapshotCell::is_wide_continuation);
             if has_continuation {
-                write_positioned_cell(
+                write_cell(
                     output,
+                    placement,
                     row,
                     column,
                     cell,
@@ -186,8 +237,9 @@ fn write_row<W: Write>(output: &mut W, snapshot: &ScreenSnapshot, row: u16) -> i
                 // A wide cell without its continuation cannot be trusted to
                 // occupy two host cells. Keep its fallback inside this row.
                 let occupied_width = usize::from(snapshot.columns() - column).min(2);
-                write_positioned_cell(
+                write_cell(
                     output,
+                    placement,
                     row,
                     column,
                     cell,
@@ -204,7 +256,7 @@ fn write_row<W: Write>(output: &mut W, snapshot: &ScreenSnapshot, row: u16) -> i
         } else {
             CellContent::Text(cell.text(), 1)
         };
-        write_positioned_cell(output, row, column, cell, content, 1)?;
+        write_cell(output, placement, row, column, cell, content, 1)?;
         column += 1;
     }
     Ok(())
@@ -278,6 +330,7 @@ fn write_changed_row<W: Write>(
     snapshot: &ScreenSnapshot,
     previous: &ScreenSnapshot,
     row: u16,
+    placement: Placement,
 ) -> io::Result<()> {
     let mut column = 0;
     while column < snapshot.columns() {
@@ -309,8 +362,9 @@ fn write_changed_row<W: Write>(
                 )
             })?;
             if cell != old || next != old_next {
-                write_positioned_cell(
+                write_cell(
                     output,
+                    placement,
                     row,
                     column,
                     cell,
@@ -326,7 +380,7 @@ fn write_changed_row<W: Write>(
             // A valid row skips paired continuations after rendering the lead.
             // Keep a defensive path if the topology contract changes later.
             if cell != old {
-                write_positioned_cell(output, row, column, cell, CellContent::Blank, 1)?;
+                write_cell(output, placement, row, column, cell, CellContent::Blank, 1)?;
             }
             column += 1;
             continue;
@@ -338,7 +392,7 @@ fn write_changed_row<W: Write>(
             } else {
                 CellContent::Text(cell.text(), 1)
             };
-            write_positioned_cell(output, row, column, cell, content, 1)?;
+            write_cell(output, placement, row, column, cell, content, 1)?;
         }
         column += 1;
     }
@@ -351,15 +405,79 @@ enum CellContent<'a> {
     Fallback,
 }
 
-fn write_positioned_cell<W: Write>(
+/// Translate one logical cell by `placement` and paint it, clipping against
+/// the placement's excluded rectangle.
+///
+/// A cell whose host footprint is entirely visible is painted unchanged. A
+/// partially excluded footprint (a wide glyph straddling the exclusion edge)
+/// paints only its visible host columns: `?` for a visible lead of non-blank
+/// content and a blank for any other visible column, so no glyph can extend
+/// into the excluded rectangle.
+fn write_cell<W: Write>(
     output: &mut W,
+    placement: Placement,
     row: u16,
     column: u16,
     cell: &SnapshotCell,
     content: CellContent<'_>,
     occupied_width: usize,
 ) -> io::Result<()> {
-    write!(output, "\x1b[{};{}H", row + 1, column + 1)?;
+    let host_row = u32::from(placement.row) + u32::from(row);
+    let host_column = u32::from(placement.column) + u32::from(column);
+    let Some(exclude) = placement.exclude else {
+        return write_positioned_cell(output, host_row, host_column, cell, content, occupied_width);
+    };
+
+    let visible = |offset: usize| -> bool {
+        let Some(column) = usize::try_from(host_column)
+            .ok()
+            .and_then(|column| column.checked_add(offset))
+            .and_then(|column| u16::try_from(column).ok())
+        else {
+            return true;
+        };
+        let Ok(row) = u16::try_from(host_row) else {
+            return true;
+        };
+        !exclude.contains(column, row)
+    };
+
+    if (0..occupied_width).all(visible) {
+        return write_positioned_cell(output, host_row, host_column, cell, content, occupied_width);
+    }
+
+    let blank_content = matches!(content, CellContent::Blank);
+    for offset in 0..occupied_width {
+        if !visible(offset) {
+            continue;
+        }
+        let partial = if offset == 0 && !blank_content {
+            CellContent::Fallback
+        } else {
+            CellContent::Blank
+        };
+        let offset = u32::try_from(offset).unwrap_or(u32::MAX);
+        write_positioned_cell(
+            output,
+            host_row,
+            host_column.saturating_add(offset),
+            cell,
+            partial,
+            1,
+        )?;
+    }
+    Ok(())
+}
+
+fn write_positioned_cell<W: Write>(
+    output: &mut W,
+    host_row: u32,
+    host_column: u32,
+    cell: &SnapshotCell,
+    content: CellContent<'_>,
+    occupied_width: usize,
+) -> io::Result<()> {
+    write!(output, "\x1b[{};{}H", host_row + 1, host_column + 1)?;
     write_sgr(output, cell)?;
 
     match content {

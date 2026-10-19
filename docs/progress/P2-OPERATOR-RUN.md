@@ -88,3 +88,13 @@ unchanged. The interpreter for the launcher itself remains portable `/bin/sh`;
 the visible child shell is zsh. No home shell configuration or login-shell
 default was changed. Shell syntax and argument forwarding were checked; live
 zsh host behavior awaits the next operator launch.
+
+## Agent-captured host suite pass — 2026-10-18
+
+On the new development Mac the parent ran
+`cargo test --locked --offline --test p2_host -- --ignored --test-threads=1`:
+all 9 corrected outer-PTY scenarios passed (5.41 s), with `/dev/tty` access
+permitted. This supplies the raw automated evidence missing from the earlier
+"all corrected" confirmation. The clipboard sentinel manual retest, live zsh
+launcher observation and the full manual Apple Terminal checklist remain
+pending; these fixtures do not certify them.

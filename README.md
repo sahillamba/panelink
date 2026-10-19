@@ -1,12 +1,53 @@
 # Panelink
 
-Panelink is a planned Rust terminal multiplexer and persistent workspace runtime for Apple Silicon Macs. Alongside the one-shot terminal probe, the executable now includes an experimental foreground server/control CLI for one PTY child. Short-lived control commands can reuse a durable caller context while that server is running. This is an integrated prototype, not a general multiplexer, daemon, or provider-recovery system. Panelink's original application code is intended for the MIT license.
+Panelink is an experimental Rust terminal multiplexer for Apple Silicon Macs.
+It runs inside your existing terminal (Apple Terminal first). Your shells live
+in a background workspace, so closing the window does not kill them.
+Panelink's original application code is intended for the MIT license.
 
-**Implementation roadmap:** [ROADMAP.md](ROADMAP.md) tracks the current phase, ownership, and verification steps.
+## Quick start
 
-For a fresh Mac, see the [clone, setup, build and test guide](docs/SETUP.md).
+Build once and put the launcher on your PATH (see [SETUP.md](docs/SETUP.md)
+for installing Rust):
 
-Current work: Phase 3 integration continues while Phase 2 host acceptance remains pending. The integrated prototype runs one child under a foreground server and exposes authenticated control requests for explicit target reads, bounded reconciliation/watches, status, ownership, and optional input. The server persists monotonically advancing generations within its initialized storage domain; a private client context reuses one lease and records uncertain operations for explicit resync. This does not provide multiple panes/sessions, layout operations, runtime event subscriptions, or OpenCode/provider recovery. Input is opt-in with `--allow-input`; the default server does not advertise the input capability. The corrected pathname CLI acceptance scenario is operator-confirmed passing outside the sandbox; local bind remains restricted by EPERM. Current integrated test totals and ignored cases are recorded in [INTEGRATION.md](docs/progress/INTEGRATION.md), not inferred from component-only checks. The bounded decoder, replacement terminal core, host IO loop, restoration guard, and one-shot probe are described in their linked progress notes below; Apple Terminal acceptance remains incomplete. Selected components retain their [third-party notices](THIRD_PARTY_NOTICES.md). The interface is planned as a terminal UI inside existing terminal applications; the earlier desktop GUI hypothesis has been superseded. Some workflow and integration choices remain open.
+```sh
+cargo build --locked
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$PWD/bin/panelink" "$HOME/.local/bin/panelink"
+```
+
+Then, in any terminal:
+
+```sh
+panelink
+```
+
+That's it. The first run starts your workspace with one shell. Later runs
+reattach to it.
+
+| Action | How |
+| --- | --- |
+| Split a pane | Right-click it, then pick Left/Right/Up/Down (or press `l`/`r`/`u`/`d`) |
+| Navigation mode | Press **Control**-B (the Control key, not Command). A `NAV` bar appears at the bottom |
+| ...then split | `r` right, `l` left, `u` up, `d` down (also `%` and `"`), or `s` for the menu |
+| ...then switch pane | Arrow keys, Tab or `o` (stays in NAV mode so you can keep moving) |
+| ...then leave NAV mode | Esc (or wait 4 seconds); `x` detaches |
+| Focus a pane | Click it |
+| Detach (shells keep running) | Ctrl-X |
+| Reattach | `panelink` |
+| Close the workspace | `exit` in every shell, or `panelink stop` |
+
+Current limits: at most two panes, no tabs. Function keys, Alt combinations
+and Ctrl keys other than Ctrl-C are not yet sent to shells. There is no
+provider (OpenCode) session recovery.
+
+Workspace state lives in `~/Library/Application Support/Panelink` (private,
+mode 0700). Set `PANELINK_HOME` to use a different directory. The background
+server's output goes to `server.log` there.
+
+**Implementation roadmap:** [ROADMAP.md](ROADMAP.md) tracks phases and
+verification evidence. Selected components retain their
+[third-party notices](THIRD_PARTY_NOTICES.md).
 
 - [Research and architecture recommendation](docs/PANELINK-RESEARCH.md)
 - [Product questions and spec handoff plan](docs/PANELINK-DISCOVERY.md)
@@ -22,42 +63,15 @@ Cargo commands and reports failures automatically. Ignored host/pathname tests
 and live provider acceptance remain separate, uncompleted gates; a successful
 component run does not certify the five non-UI milestones.
 
-## CLI
+## Advanced commands
 
-For this development checkout, the launcher at `bin/panelink` opens the current
-disposable zsh probe (`/bin/zsh`) when called without arguments and forwards explicit
-subcommands to the built binary. Build once with `cargo build --locked`, then
-link it into the existing user PATH directory:
+The commands below are lower-level tools for development and testing. You do
+not need them for normal use. Run `panelink --help` for the list. `panelink probe`
+opens the old disposable single-shell probe. Rebuild after source changes; the
+launcher runs `target/debug/panelink` from this checkout.
 
-```sh
-mkdir -p "$HOME/.local/bin"
-ln -sfn "$PWD/bin/panelink" "$HOME/.local/bin/panelink"
-export PATH="$HOME/.local/bin:$PATH"
-rehash
-panelink
-```
-
-Add the `PATH` export to your shell startup file if you want it in future
-terminals. The symlink points to this checkout, so recreate it if you move the
-repository. See [SETUP.md](docs/SETUP.md) for a fresh-machine build guide.
-
-The launcher compiles private temporary terminfo and removes it after the probe
-exits. Ctrl-X quits the probe and stops its child; this default is not persistent
-server detach. Explicit commands such as `panelink --help`, `panelink control …`
-and `panelink server-probe …` retain their normal behavior. Rebuild after source
-changes; the launcher uses `target/debug/panelink` from this checkout.
-
-After installing a Rust toolchain, run these commands from the repository root:
-
-```sh
-cargo run -- --help
-cargo run -- --version
-cargo run -- doctor
-```
-
-With no arguments, Panelink prints help. `doctor` reports the target and the limits of the current prototype; it exits with status 1 because the persistent multiplexer and host/pathname acceptance are still unsupported. Unknown commands or extra arguments exit with status 2. The `server-probe` command below launches one child; `control` attaches short-lived clients to that foreground server.
-
-Future implementers should read these documents before starting. Confirmed user requirements, engineering proposals, and unresolved decisions are distinguished. Dependencies require a concrete justification for saved effort and maintenance; there is no blanket approval to add libraries.
+`doctor` reports the target and the limits of the current prototype, and
+exits with status 1. Unknown commands or extra arguments exit with status 2.
 
 ## Experimental terminal probe
 
@@ -166,3 +180,40 @@ initialized caller context explicitly if Events are needed; the CLI never
 replaces an old context silently. Input remains separately opt-in on the server.
 Socketpair/private-PTY live-watch checks pass locally; the expanded actual CLI
 pathname fixture remains a separate external acceptance check.
+
+## Low-level split panes (`serve` + `attach`)
+
+Plain `panelink` runs these two pieces for you. Use them directly only when
+you need a server in a specific directory. `panelink serve` is a foreground
+server for up to two panes. `panelink attach` is a full-screen client for it
+that you run inside a terminal.
+
+Reuse the build and terminfo setup above. Then, in Terminal A:
+
+```sh
+"$panelink_bin" serve --directory "$server_dir" --terminfo "$probe_terminfo_dir" --initialize --allow-input -- /bin/zsh -i
+```
+
+In Terminal B, using the same three paths:
+
+```sh
+"$panelink_bin" attach --directory "$server_dir" --context-dir "$context_dir/attach"
+```
+
+- Typing goes to the focused pane. The client claims input ownership on each
+  pane. If another client owns a pane, a status line says so and no keys are
+  sent.
+- A left-click focuses a pane. This changes only local presentation.
+- To open the split menu, right-click a pane, or press Control-B (navigation
+  mode) and then `s`. Choose an item with the arrow keys and Enter, with
+  `l`/`r`/`u`/`d`, or with a click. Esc closes the menu. While the menu is
+  open, it receives all input and the panes receive none.
+- A split launches one new `/bin/zsh`. It uses the attach client's own
+  working directory and environment, minus `PANELINK_*`. The new pane gets
+  focus.
+- Ctrl-X detaches. The shells keep running on the server, and you can run
+  `attach` again to reconnect. Ctrl-C in Terminal A stops the server and its
+  shells.
+- Mouse events are never forwarded to applications in panes.
+
+See [P3A-CLIENT.md](docs/progress/P3A-CLIENT.md) for limits and evidence.

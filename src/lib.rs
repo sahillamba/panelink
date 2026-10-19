@@ -20,6 +20,8 @@ pub mod scoped_watch_protocol;
 pub mod server;
 pub mod session_protocol;
 pub mod session_registry;
+pub mod split_menu;
+pub mod split_protocol;
 pub mod watch_protocol;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -30,6 +32,12 @@ pub mod server_io;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod server_runtime;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod multi_runtime;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod multi_startup;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod server_pty;
@@ -60,3 +68,6 @@ pub mod terminal;
 
 #[cfg(unix)]
 pub mod screen_checkpoint;
+
+#[cfg(unix)]
+pub mod ui_protocol;

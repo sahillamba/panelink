@@ -78,3 +78,22 @@ marker. The accepted-socket/managed-exec race remains unresolved until that
 run succeeds. The cooperative gate covers Panelink paths that use it; this
 fixture makes no inheritance guarantee for unrelated native or injected
 process-spawn callers.
+
+## Successful host run — 2026-10-18 (new Mac)
+
+macOS 26.6.1 (25G76), arm64, rustc 1.99.1, default `CARGO_HOME`. Parent ran:
+
+~~~sh
+cargo test --locked --offline --lib transport::tests::accepted_socket_exec_race_excludes_accepted_descriptor -- --ignored --exact --test-threads=1 --nocapture
+~~~
+
+Result: 1 passed on each of 6 serial runs (~0.61 s each). The pathname bind,
+pre-accept barrier, held-gate `TimedOut` probe, managed spawn and clean child
+descriptor scan all completed. In the same session, the other ignored pathname
+fixtures (`transport::...pathname_listener_authenticates_and_removes_only_its_socket`,
+`peer_identity::...pathname_connection_reports_same_user_in_a_private_fixture`)
+passed. `client_context::tests::separate_process_lock_probe` fails if run
+directly; this is expected, because it is a helper that only its parent test
+should spawn (it needs the parent's environment), and its parent test passes in
+the normal suite. The accepted-socket/managed-exec race is resolved for
+Panelink-cooperating paths on this host.

@@ -1,8 +1,18 @@
 #!/bin/sh
-# Development launcher: keep normal subcommands and open the shell probe by default.
+# Development launcher: runs this checkout's built binary. `panelink` alone
+# opens (or reattaches to) your workspace; arguments pass through unchanged.
 set -eu
 
-project_root=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+# Resolve symlinks (e.g. ~/.local/bin/panelink) so the checkout is found.
+script_path=$0
+while [ -L "$script_path" ]; do
+    link_target=$(readlink "$script_path")
+    case $link_target in
+        /*) script_path=$link_target ;;
+        *) script_path=$(dirname "$script_path")/$link_target ;;
+    esac
+done
+project_root=$(CDPATH= cd "$(dirname "$script_path")/.." && pwd -P)
 binary="$project_root/target/debug/panelink"
 
 if [ ! -x "$binary" ]; then
@@ -10,17 +20,4 @@ if [ ! -x "$binary" ]; then
     exit 1
 fi
 
-if [ "$#" -gt 0 ]; then
-    exec "$binary" "$@"
-fi
-
-terminfo_dir="$(mktemp -d "${TMPDIR:-/tmp}/panelink-terminfo.XXXXXX")"
-trap 'rm -rf "$terminfo_dir"' EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-/usr/bin/tic -x -o "$terminfo_dir" "$project_root/docs/terminfo/panelink-probe.terminfo"
-# Keep the launcher alive to remove its private terminfo directory after exit.
-status=0
-"$binary" pty-probe --terminfo "$terminfo_dir" -- /bin/zsh || status=$?
-exit "$status"
+exec "$binary" "$@"
