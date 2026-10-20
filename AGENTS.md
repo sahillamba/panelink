@@ -4,16 +4,18 @@
 
 Read `README.md`, `docs/SPEC.md`, `docs/PANELINK-DISCOVERY.md`, and `docs/PREBUILD.md` before changing the application. The current product runs inside existing terminal applications on Apple Silicon Macs. The archived desktop GUI proposal is superseded.
 
-Implementation is in progress. Read `ROADMAP.md` and `docs/progress/` before working; the roadmap is the durable status and resume entrypoint. The user authorized implementation with `gpt-6-luna` at xhigh effort for bounded tasks, supervised by the parent agent. Follow phase order and exclusive file ownership. Unresolved product decisions remain unresolved; use the documented prototype assumptions only within their scope.
+Implementation is paused after scoped stop and saved-history checkpoints. Read `ROADMAP.md` and the current handoff at `docs/progress/SESSION.md` before resuming; the roadmap is the durable status entrypoint. Follow phase order and preserve unresolved product decisions; use documented prototype assumptions only within their scope.
 
-User reaffirmed on 2026-10-18: always delegate bounded work to `gpt-6-luna`,
-using xhigh effort for implementation/design that needs it and medium effort
-for smaller tasks. The parent specifies scope, reviews and verifies results.
+Delegation update: the user subsequently instructed "stop putting agents on
+anything do yourself"; do the next implementation directly unless the user
+explicitly requests an agent (as they did for the independent reviewer).
+Historical Luna assignments in older progress notes are completed work, not
+an instruction to delegate on resume.
 
-The user requested continuous work through the five non-UI milestones on
-2026-10-18, with automated tests for new behavior and no manual verification
-handoffs. Build runnable checks and execute those permitted by the environment;
-record blocked acceptance honestly rather than counting skipped tests as passes.
+The user paused work on 2026-10-21. Resume only on a new instruction. On
+resumption, retain the earlier automated-test/no-manual-handoff requirements:
+run permitted checks and record blocked acceptance honestly rather than
+counting skipped tests as passes.
 
 ## Rust guidance
 

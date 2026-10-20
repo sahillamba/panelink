@@ -287,20 +287,14 @@ scrollback rows and 8 MiB on disk per managed session, plus one latest normal
 and one latest alternate screen checkpoint. Target capture of changed screens
 at least every five seconds while running, plus detach and orderly stop;
 retain for 30 days after session end and offer a per-session clear operation.
-Only private visible-screen checkpoint capture is now implemented in the
-two-pane server, as recorded in
-[P5-LIVE-CAPTURE.md](progress/P5-LIVE-CAPTURE.md). These defaults are not a
-claim that the engine exports scrollback or that the full retention/recovery
-contract works. The vendored engine epoch/reset contract, full memory and
-provenance review, scrollback storage, recovery and deletion remain gates.
-
-Implementation update (2026-10-20): the preceding paragraph describes the
-earlier checkpoint-only state. Normal scrollback extraction, bounded
-sanitized row storage, gap/reset indicators, read-only CLI show/search,
-30-day ended-session pruning and explicit stopped-workspace clear are now
-implemented under [P5-SAVED-HISTORY.md](progress/P5-SAVED-HISTORY.md).
-Complete layout restoration, provider conversation resume, and the V-HISTORY
-reboot scenario remain unproved; no stored bytes are replayed.
+The scoped two-pane history slice is implemented under
+[P5-SAVED-HISTORY.md](progress/P5-SAVED-HISTORY.md): bounded normalized normal
+scrollback, separate latest normal/alternate visible-screen checkpoints,
+gap/reset indicators, read-only CLI show/search, 30-day ended-session pruning
+and explicit stopped-workspace clear. These are prototype defaults, not a
+claim that the full retention/recovery contract works. Complete layout
+restoration, provider conversation resume and V-HISTORY reboot/partial-tail
+acceptance remain unproved; no stored bytes are replayed.
 
 ### Meaning of saved history
 

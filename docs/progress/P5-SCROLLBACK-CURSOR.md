@@ -72,3 +72,8 @@ never executes or replays stored bytes. Intervening RIS resets beyond the
 latest observable epoch, terminal output that enters and leaves scrollback
 within one 16 KiB parser feed, and corrupted records must produce honest
 capture gaps. Retention, deletion, search and recovery UI remain open.
+
+This was the next gate at the time of the cursor-only slice. The subsequent
+scoped writer and CLI are done at `f82d968`; current open V-HISTORY gates and
+pause state are in [P5-SAVED-HISTORY.md](P5-SAVED-HISTORY.md) and
+[ROADMAP.md](../../ROADMAP.md).

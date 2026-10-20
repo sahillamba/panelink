@@ -1,18 +1,19 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: P5 bounded saved normal history and read-only CLI recovery integrated (2026-10-20); full reboot/layout history acceptance and provider recovery remain open
-last-updated: 2026-10-20
+current-phase: PAUSED (2026-10-21); scoped Phase 3B stop and P5 saved-history slices DONE; parent Phase 3 and Phase 5 milestones remain OPEN
+last-updated: 2026-10-21
 last-verified: 2026-10-20 — final verifier 8/8 after reviewer fixes; Rust 500 library + 93 binary, scrollback cursor 6/6, saved-row codec 1/1, history store 10/10, screen-checkpoint 3/3 and real close/history runtime 5/5; full suite 15 ignored; VT100 focused history tests 5/5; strict Clippy/fmt/rustdoc and component fingerprints pass
-next-action: Finish full V-HISTORY reboot/layout/partial-tail acceptance and history crash-repair/throughput review, then Phase 3 runtime/host gates and Phase 4 live OpenCode identity. The scoped saved-history CLI is usable but complete workspace/provider recovery remains separate.
+next-action: On explicit resume, inspect git status and this handoff, then address full V-HISTORY reboot/layout and post-rename/failed-end-sync acceptance; Phase 3 runtime/host and Phase 4 live OpenCode identity remain open. Do not start new work while paused.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
-history-saved-rows: scoped saved-row slice integrated; 1,024 normal rows/8 MiB segment, 30-day ended retention, stopped-workspace clear and read-only history CLI; unrecorded output, incomplete-temp recovery and V-HISTORY reboot/layout acceptance remain open — see docs/progress/P5-SAVED-HISTORY.md
-blocked-on: clipboard sentinel retest and remaining manual Apple Terminal acceptance; live OpenCode identity unproved. New machine (2026-10-18): p2_host 9/9 and p3_pathname ignored fixtures pass with captured output; /dev/tty, pathname and loopback bind permitted; OpenCode here is 1.19.0 and the MiMo task has not run
-setup: new Mac 2026-10-18, rustup stable 1.99.1, verifier 8/8, 443 passed/14 ignored; launcher symlink fix uncommitted — see INTEGRATION.md "New-machine setup"
+history-saved-rows: scoped P5 saved-history slice DONE at f82d968; 1,024 normal rows/8 MiB segment, 30-day ended retention, stopped-workspace clear and read-only history CLI; unrecorded output, incomplete-temp recovery and V-HISTORY reboot/layout acceptance remain open — see docs/progress/P5-SAVED-HISTORY.md
+blocked-on: Phase 2 clipboard sentinel/full Apple Terminal acceptance and Phase 4 live OpenCode identity remain unproved; Phase 3 expanded pathname watch/host acceptance remains separate. OpenCode 1.19.0 was installed on the new Mac, but live identity/switch proof was not run. Ignored test cases are not passes.
+setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust/Cargo 1.99.1 last verified, verifier 8/8 at f82d968, launcher available. Older new-machine evidence is in INTEGRATION.md.
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 phase-3a: DONE — 2026-10-19 — see docs/progress/P3A-DEFAULT-OPEN.md and INTEGRATION.md
-phase-3b-stop: integrated and verified — 2026-10-20 — see docs/progress/P3B-CLOSE-CORE.md and P3B-CLOSE-RUNTIME.md; broader Phase 3 remains open
+phase-3b-stop: DONE as scoped two-pane stop slice — 2026-10-20 — checkpoint c3e207e; broader Phase 3 remains open
+phase-p5-saved-history: DONE as scoped saved-row/checkpoint/CLI slice — 2026-10-20 — checkpoint f82d968; full V-HISTORY and Phase 5 remain open
 ```
 
 ## Control commands
@@ -31,13 +32,16 @@ phase-3b-stop: integrated and verified — 2026-10-20 — see docs/progress/P3B-
 | Architecture, ambiguity, security review, integration | Parent orchestrator | inherited |
 | Escalation after two failed attempts at same defect | Parent orchestrator | inherited |
 
-User authorized implementation and cheaper-model delegation on 2026-10-17. No token-cost telemetry is available; report model assignments, not invented savings.
+The table above is historical routing, not a current delegation instruction.
+The user's later direct-work instruction in AGENTS.md applies on resume;
+delegate only when newly requested. No token-cost telemetry is available.
 
-Continuous non-UI work authorization (2026-10-18): finish the five milestones
+Historical non-UI work authorization (2026-10-18): finish the five milestones
 in [NON-UI-EXECUTION.md](docs/progress/NON-UI-EXECUTION.md) with automated tests.
 Do not hand the user manual verification tasks or mark environment-blocked
 checks as passed. Continue independent implementation/testing while a specific
 acceptance gate is blocked; do not bypass that gate in enabled behavior.
+The user's 2026-10-21 pause now takes precedence until a new instruction.
 
 ## Architecture and constraints
 
@@ -164,7 +168,11 @@ adopts a larger bound. Launch/stop permission is not inferred from input or
 focus. If a prerequisite is blocked, advance pure layout/menu/tests without
 enabling an unsafe or nonfunctional split action.
 
-## Phase 3B — per-pane lifecycle/stop (integrated 2026-10-20)
+Phase 3A was committed at `e1126c7`. The historical design/ownership notes
+below this section describe the development sequence; the current pause
+handoff above and docs/progress/SESSION.md supersede them on resume.
+
+## Phase 3B — per-pane lifecycle/stop (scoped slice DONE 2026-10-20)
 
 The user chose stop before history. Any authenticated same-UID client may
 explicitly close a pane without acquiring input ownership or a separate stop
@@ -179,29 +187,31 @@ The last child exiting still ends the workspace. See P3B-CLOSE-CORE.md,
 P3B-CLOSE-CLIENT.md and P3B-CLOSE-RUNTIME.md for contracts and limitations.
 
 Verification: `python3 scripts/verify_non_ui.py` 8/8; full Rust library
-500 passed/4 ignored, binary 93 passed, 15 ignored in total; initial close/runtime
-2/2 (the combined close/capture suite is now 4/4); `p3a_default_open` 6 passed/1 ignored. Fixed a length-before-indexing
-bug in the pane-status decoder and tested every truncated prefix. The
+500 passed/4 ignored, binary 93 passed, 15 ignored in total; initial
+close/runtime 2/2, subsequently expanded to 5/5 with saved-history coverage;
+`p3a_default_open` 6 passed/1 ignored. Fixed a length-before-indexing bug
+in the pane-status decoder and tested every truncated prefix. The
 prototype still blocks its owner tick for up to approximately two seconds
 during a close and does not durably restore live sessions after a crash.
 This slice does not complete the wider Phase 3 gates.
 
-Next history defaults selected by the user: store under the private per-user
+History defaults selected by the user for the scoped P5 slice: store under the private per-user
 Panelink application directory (`history/`); retain at most the engine's 1,024
 normal scrollback rows and 8 MiB per session on disk, plus latest committed
 normal and alternate screen checkpoints; target at most five seconds between
 captures of changed screens and capture on detach/stop; retain 30 days after
 session end, with per-session clear. Saved history is read-only, never replayed,
-and distinct from provider conversations. These are prototype defaults; the
-VT100 epoch/reset export, provenance review, scrollback persistence and recovery
-UI remain unimplemented.
+and distinct from provider conversations. These are prototype defaults;
+the implemented subset and remaining recovery gates are in the saved-history
+follow-up below.
 
-Live visible-screen checkpoint capture is now integrated with the two-pane
+The earlier live-checkpoint slice integrated visible-screen capture with the two-pane
 server and checked together with pane-close lifecycle behavior. The store can
 reopen committed checkpoints after server shutdown, and capture failures keep
 shells running. Alternate screens that enter and leave between PTY read chunks
-can be missed; saved scrollback, retention, per-session deletion and recovery
-UI remain unimplemented. See [P5-LIVE-CAPTURE.md](docs/progress/P5-LIVE-CAPTURE.md).
+can be missed. Its original evidence predates saved scrollback and CLI
+recovery; see [P5-LIVE-CAPTURE.md](docs/progress/P5-LIVE-CAPTURE.md) and the
+subsequent saved-history follow-up below.
 
 Saved-history follow-up: the owner now writes normalized normal scrollback in
 bounded per-target segments, marks gaps and RIS epochs, records confirmed exit
@@ -219,11 +229,12 @@ open.
 - [ ] Persist and acknowledge binding revisions; demonstrate or explicitly reject current-at-crash claims.
 - [ ] Implement last-confirmed/manual fallback without latest-session heuristics.
 
-## Phase 5 — workspaces, selection, history (not started)
+## Phase 5 — workspaces, selection, history (in progress; scoped saved history DONE)
 
 - [ ] Resolve hierarchy; implement keyboard layout operations.
 - [ ] Mouse routing, selection copying and context menus on Apple Terminal.
-- [ ] Bounded normal history and screen checkpoints, safe search/recovery, retention/deletion.
+- [x] Scoped two-pane saved normal scrollback and visible-screen checkpoints, bounded read-only CLI show/search, 30-day ended-session pruning and stopped-workspace clear; see P5-SAVED-HISTORY.md. Does not imply workspace or provider recovery.
+- [ ] Full V-HISTORY reboot/layout recovery, partial-tail repair, deterministic post-rename/failed-end-sync fault evidence and representative throughput; see P5-SAVED-HISTORY.md and docs/SPEC.md.
 
 ## Phase 6 — alpha measurements and review evidence (not started)
 
@@ -232,7 +243,13 @@ open.
 
 ## Resume protocol
 
-Read this file, AGENTS.md, docs/progress/*.md, then git status. Probe rustc/cargo/provider availability without printing secrets. Check source files against phase ownership and claims. Run current phase verification if tools exist. Continue first incomplete task and update STATE, evidence and last-verified before stopping. Do not assume an active subagent survives a session. Never discard uncommitted changes. Source files plus written evidence are the handoff; chat is optional context.
+On an explicit resume request, read this file, AGENTS.md and the current
+handoff in docs/progress/SESSION.md, then inspect git status and history.
+Read the evidence for the chosen first incomplete gate. Probe toolchain/provider
+availability without printing secrets; run permitted verification and record
+blocked acceptance separately. Follow the user's direct-work instruction in
+AGENTS.md. Never discard uncommitted changes. The older checkpoint paragraphs
+below are historical evidence, not live task or delegation assignments.
 
 Immediate resume handoff (2026-10-18): read P3A-RIGHT-CLICK-SPLITS.md,
 P3A-LAYOUT-TASK.md, P3A-LAYOUT.md and P3A-MIMO-MENU-TASK.md. The Luna layout

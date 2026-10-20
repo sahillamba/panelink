@@ -119,3 +119,10 @@ failure that leaves its shell usable; see
 close/capture runtime 4/4, history-store 4/4 and the earlier default-open
 suite 6 passed/1 ignored. This does not complete bounded scrollback, retention,
 clear, restart recovery UI or the other milestone gates.
+
+Pause update 2026-10-21: the scoped stop and saved-history slices are done at
+local commits `c3e207e` and `f82d968`; see [SESSION.md](SESSION.md) for the
+current handoff. The five-milestone queue is historical authorization, now
+paused until a new user instruction. Full V-HISTORY/layout recovery, provider
+identity and host acceptance remain open. Work directly unless the user
+explicitly requests an agent; do not turn skipped fixtures into passes.

@@ -1164,3 +1164,39 @@ Still open and not part of 3A:
 - the remaining Phase 3 runtime items (event/lifecycle/stop contracts, more
   than two panes);
 - Phase 4 OpenCode identity.
+
+## Scoped stop and saved-history completion — pause checkpoint 2026-10-21
+
+This section supersedes the earlier "stop/history pending" statements above.
+The two-pane Phase 3B stop/close slice and the P5 bounded saved-history slice
+are marked **DONE in their stated scope** in ROADMAP.md. Their source and
+evidence are at local checkpoint commits `c3e207e` and `f82d968`, respectively;
+`e1126c7` completed Phase 3A. They do **not** complete the parent Phase 3,
+Phase 5, M1 or M4 acceptance gates. The user paused work after these commits;
+local `main` was ahead of `origin/main` by three and no push was requested.
+
+Close/stop uses authenticated same-UID access, a confirmed client action or
+explicit CLI command, keyed deduplication and bounded HUP/KILL cleanup.
+Auto-exit collapses a two-pane layout, preserves the surviving PTY and permits
+re-split under fresh session identities. Saved history has private normalized
+normal-scroll rows (1,024 rows/8 MiB segment per target), separate latest
+normal/alternate screen checkpoints, gaps/RIS epochs, read-only CLI
+list/show/search and stopped-workspace clear. Ended records become eligible
+for 30-day pruning. Saved bytes are not process state or provider conversations
+and are not replayed into a terminal or child.
+
+Final `python3 scripts/verify_non_ui.py` returned 0 with 8/8 checks passed:
+root Rust library **500 passed/4 ignored**, binary **93 passed**, complete
+Rust suite **15 ignored**; decoder 39 passed; Python 31 passed; component
+fingerprints matched; fmt, strict all-target Clippy, build and Markdown
+153 files/0 findings passed. Focused cursor 6/6, history store 10/10,
+screen-checkpoint 3/3 and close/history runtime 5/5 passed. Strict rustdoc
+passed. The independent reviewer initially requested changes; required
+scoped fixes and follow-up tests are recorded in P5-SAVED-HISTORY.md.
+
+Still open: full V-HISTORY reboot/layout and partial-tail acceptance;
+deterministic post-rename and failed-end-sync injection; interrupted-temp
+repair and disk throughput; remaining Phase 2/3 host checks; Phase 4 live
+OpenCode identity. Do not count ignored fixtures or this scoped library/CLI
+evidence as those outcomes. The current next action and pause rule are in
+[ROADMAP.md](../../ROADMAP.md) and [SESSION.md](SESSION.md).

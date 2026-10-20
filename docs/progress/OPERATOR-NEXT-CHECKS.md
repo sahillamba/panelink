@@ -1,5 +1,12 @@
 # Remaining operator checks — 2026-10-18
 
+Pause update (2026-10-21): this is an **archived optional operator checklist**,
+not a task for the user while work is paused. It predates the completed scoped
+Phase 3A, Phase 3B and P5 saved-history slices. For current status and
+automated acceptance first read [ROADMAP.md](../../ROADMAP.md) and
+[SESSION.md](SESSION.md). Missing raw host/clipboard evidence remains open;
+neither this checklist nor ignored fixture results count as a pass.
+
 These three checks are still pending operator evidence. This checklist is a
 handoff, not runtime acceptance. The existing Ctrl-X return-to-shell check is
 operator-confirmed; use Ctrl-X below to exit the combined zsh/clipboard run.

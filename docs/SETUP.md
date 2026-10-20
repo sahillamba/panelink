@@ -1,8 +1,9 @@
 # Clone, build and test Panelink
 
 This guide starts from a fresh Apple Silicon Mac. Panelink is an experimental
-Rust project; a successful build does not mean the unfinished multiplexer UI,
-multi-pane split flow, or every host acceptance gate is implemented.
+two-pane terminal multiplexer with right-click splits, explicit pane close,
+and bounded saved history. A successful build does not certify the remaining
+host, OpenCode identity or full reboot/layout recovery gates.
 
 ## Requirements
 
@@ -51,6 +52,21 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 python3 scripts/verify_non_ui.py
 ```
+
+For focused saved-history and pane-lifecycle regression checks:
+
+```sh
+cargo test --locked --offline --test p3b_close_runtime -- --test-threads=1
+cargo test --locked --offline --test p5_history_store
+cargo test --locked --offline --test p5_history_rows
+cargo test --locked --offline --test p5_scrollback_cursor
+```
+
+The outer-PTY close/history fixture is run serially because parallel startup
+has previously timed out before its assertions. The fixed verifier passed
+8/8 at commit `f82d968`; 15 Rust tests were ignored, not passed. See
+[the saved-history evidence](progress/P5-SAVED-HISTORY.md) for the executed
+checks and remaining recovery cases.
 
 The final command repeats a bounded offline suite that includes the vendored
 decoder, component fingerprints, Rust tests, lint, build and documentation
@@ -113,12 +129,29 @@ workspace. `panelink probe` runs the older disposable single-shell probe.
 These need access to the host terminal device, which some restricted
 environments deny.
 
+If this repository has newer local commits than its remote, clone access alone
+will not include them until the repository owner explicitly pushes them. Check
+`git log -1 --oneline` and `git status -sb` against the handoff before using
+the commit IDs below as evidence on a different Mac.
+
+In the attached client, right-click a pane and select **Close pane**, or press
+Control-B then `x` and confirm with `y`. From a shell, `panelink panes` lists
+the live panes and `panelink close N` stops pane N. `panelink history list`
+prints saved five-number target IDs; `history show TARGET` and `history search
+TARGET TEXT` inspect sanitized retained rows and the latest separate screen
+checkpoints. After `panelink stop`, `history clear TARGET` deletes that exact
+target's Panelink history. Saved content never resumes a live process or an
+OpenCode conversation. Full usage is in [README.md](../README.md).
+
 ## Continue implementation
 
-Start with [ROADMAP.md](../ROADMAP.md), then read the named task and evidence
-files for the first incomplete item. The right-click split phase is in
-`docs/progress/P3A-RIGHT-CLICK-SPLITS.md`; its bounded layout groundwork and
-current external-model handoff are in `P3A-LAYOUT.md` and
-`P3A-MIMO-MENU-TASK.md`. A previous OpenCode ACP launch was blocked in its
-execution environment; do not assume the MiMo task ran. Verify the current
-Git worktree and commit state before editing.
+The project is paused. On an explicit resume request, start with
+[ROADMAP.md](../ROADMAP.md), [SESSION.md](progress/SESSION.md), and the
+current Git status/history. The scoped Phase 3B stop slice and P5 saved-history
+slice are done at checkpoint commits `c3e207e` and `f82d968`; their parent
+Phase 3 and Phase 5 milestones are still open. The next history gates are
+the full V-HISTORY reboot/layout and partial-tail acceptance, a deterministic
+post-rename/failed-end-sync test, and disk-throughput review. Do the next
+implementation directly unless the user explicitly requests an agent. The
+user subsequently requested publication on 2026-10-21; check the remote
+tracking state rather than assuming a different clone has these commits.

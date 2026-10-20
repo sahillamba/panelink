@@ -1,5 +1,53 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Current pause handoff — 2026-10-21 (read this first)
+
+**Paused at local `main` commit `f82d968`** after the user requested a stop.
+At the start of this handoff, the working tree was clean; `main` was three
+commits ahead of `origin/main` (`e1126c7`, `c3e207e`, `f82d968`). These commits
+were authorized locally; no push was requested. Check status again before
+editing or any source-control action. This handoff/documentation refresh is
+post-`f82d968` work and should not be mistaken for another source phase.
+The user subsequently requested a push on 2026-10-21; inspect remote
+tracking state after publication rather than treating the earlier no-push
+observation as the current instruction.
+
+**Done within their explicitly bounded scope:** Phase 3A two-pane splits
+(`e1126c7`); Phase 3B individual pane stop/close, auto-collapse, re-split and
+CLI/menu actions (`c3e207e`); P5 sanitized visible screen checkpoints, bounded
+normal scrollback and read-only `panelink history list|show|search`, plus
+stopped-workspace `clear` (`c3e207e`, `f82d968`). The later user-requested
+independent reviewer found close-output, row-retry, clear-lock, end-time and
+cursor issues. The parent addressed them before `f82d968`; see
+[P5-SAVED-HISTORY.md](P5-SAVED-HISTORY.md). The final eight-check verifier
+passed 8/8 (root library 500 passed/4 ignored, binary 93 passed, 15 Rust
+ignored overall; cursor 6/6, history store 10/10, screen-checkpoint 3/3,
+close/history runtime 5/5, decoder 39, Python 31). Strict Clippy, fmt,
+rustdoc and component fingerprints passed. Earlier test failures and their
+reruns remain recorded in the evidence; ignored tests are not acceptance.
+
+**Open gates, not phase-completion claims:** parent Phase 3 still needs wider
+event/watch/launch/layout contracts and host acceptance; parent Phase 5 still
+needs full V-HISTORY reboot/layout and partial-tail acceptance. A deterministic
+post-rename fsync-fault test, expiry after actual end-time sync failure,
+interrupted temporary-file repair and representative disk-throughput review
+remain unproved. Phase 2 Apple Terminal/clipboard sentinel acceptance and
+Phase 4 live OpenCode identity/session-switch proof are also open. Normal
+scrollback/checkpoints are distinct from provider conversations; no stored
+terminal effects are replayed. The firm review, workspace hierarchy and
+broader release options remain unresolved.
+
+**On explicit resume:** read [ROADMAP.md](../../ROADMAP.md), AGENTS.md,
+[SETUP.md](../SETUP.md), [P3B-CLOSE-RUNTIME.md](P3B-CLOSE-RUNTIME.md),
+[P5-LIVE-CAPTURE.md](P5-LIVE-CAPTURE.md) and
+[P5-SAVED-HISTORY.md](P5-SAVED-HISTORY.md). Inspect the current Git tree and
+run targeted tests for the chosen gap. Use `python3 scripts/verify_non_ui.py`
+for the integrated suite, counting ignored/blocked cases separately. Follow
+the later user instruction to implement directly unless they specifically
+request an agent. Await that instruction before beginning another phase.
+
+## Historical checkpoints (superseded where inconsistent with the above)
+
 Authority: user requested implementation, parent orchestration, gpt-6-luna xhigh where possible, and durable status for interruptions.
 
 P1A, P1B and P1C source tasks are finished. Parent reviewed integration and independently verified 21 passing tests, formatting and Clippy with warnings denied. See INTEGRATION.md for actual commands, limits, fixes and next step. All task ownership is released after reports; no active agent is required for resumption.
