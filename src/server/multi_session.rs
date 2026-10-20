@@ -11,6 +11,10 @@ use super::{
     terminal_outcome, Connection, EffectSink, EventPage, GlobalAuthority, OwnerMutation,
     OwnerObservation, RequestPreflight, ServerError, SessionHandler, SessionReply, TargetState,
 };
+use crate::close_protocol::{
+    decode_close_request, CloseCodecError, CloseOutcome, CloseRejection, CloseRequest, CloseResult,
+    StopOutcome,
+};
 use crate::control_protocol::{Command, TargetRef};
 use crate::event_journal::{EventCursor, EventJournal};
 use crate::event_protocol::Event;
@@ -18,6 +22,7 @@ use crate::handshake_protocol::{Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT, CA
 use crate::input_owner::{InputOwner, Owner};
 use crate::managed_launch::{LaunchJournalPort, ManagedLaunchCoordinator, ManagedLaunchError};
 use crate::managed_launch_protocol::{decode_launch_request, LaunchRequestView, LaunchResult};
+use crate::pane_layout::PaneGeometry;
 use crate::pane_layout::{LayoutError, LayoutSnapshot, PaneLayout};
 use crate::protocol::{
     Admission, Ledger, OperationKey, OperationStatus, Outcome, ProtocolError, MAX_ACTIVE_LEASES,
@@ -124,8 +129,12 @@ pub struct MultiSessionOwner<E: EffectSink> {
     launches: ManagedLaunchCoordinator<TargetState<E>>,
     /// Volatile layout established by the first Applied `execute_launch`.
     layout: Option<PaneLayout>,
-    /// The one committed split this two-pane prototype can retain.
-    committed_split: Option<SplitResult>,
+    /// Every committed split result, retained for exact-duplicate retries.
+    /// Bounded by the coordinator's retained launch results, because each
+    /// committed split spends one launch identity.
+    committed_splits: Vec<SplitResult>,
+    /// Every recorded close result, retained for exact duplicates and status.
+    close_results: Vec<CloseResult>,
     /// Bounded per-pane size state keyed by full target: last confirmed
     /// absolute PTY size and, while a resize is pending, the desired size.
     pane_sizes: [Option<PaneSizeState>; 2],
@@ -170,7 +179,8 @@ impl<E: EffectSink> fmt::Debug for MultiSessionOwner<E> {
             .field("active_leases", &self.global.grants.len())
             .field("launches", &self.launches)
             .field("layout_established", &self.layout.is_some())
-            .field("split_committed", &self.committed_split.is_some())
+            .field("committed_splits", &self.committed_splits.len())
+            .field("close_results", &self.close_results.len())
             .field(
                 "pending_resizes",
                 &self
@@ -365,7 +375,8 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             },
             launches,
             layout: None,
-            committed_split: None,
+            committed_splits: Vec::new(),
+            close_results: Vec::new(),
             pane_sizes: [None; 2],
         })
     }
@@ -386,6 +397,22 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     /// Return a copy of the current pane layout, if one is established.
     pub fn layout_snapshot(&self) -> Option<LayoutSnapshot> {
         self.layout.as_ref().map(PaneLayout::snapshot)
+    }
+
+    /// Visit only currently retained process handles for server-owned
+    /// maintenance (for example checkpoint capture). No target lookup or
+    /// caller authority is inferred from this internal iteration.
+    pub fn for_each_effects_mut(&mut self, mut visit: impl FnMut(TargetRef, &mut E)) {
+        let targets: Vec<_> = self
+            .launches
+            .records()
+            .map(|record| record.target)
+            .collect();
+        for target in targets {
+            if let Ok(session) = self.launches.session_mut(target) {
+                visit(target, &mut session.effects);
+            }
+        }
     }
 
     /// Return every layout pane whose absolute PTY resize is still pending.
@@ -538,6 +565,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             let _ = self.global.ledger.complete(key, Outcome::Failed);
             return Err(SplitError::InternalInvariant);
         }
+        // Known-failed launch records outside the layout hold no child and
+        // may be retired so their slot can host this split.
+        self.reclaim_failed_slots();
         let (preview, new_target) = match self.plan_split(&request) {
             Ok(plan) => plan,
             Err(reason) => return self.finish_split_failed(failed, reason),
@@ -629,13 +659,15 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             existing_target: request.target(),
             new_target: Some(new_target),
         };
-        self.committed_split = Some(result);
+        self.committed_splits.push(result);
         if self.global.ledger.complete(key, outcome).is_err() {
             let unknown = SplitResult {
                 outcome: Outcome::Unknown,
                 ..result
             };
-            self.committed_split = Some(unknown);
+            if let Some(entry) = self.committed_splits.last_mut() {
+                *entry = unknown;
+            }
             return Ok(unknown);
         }
         Ok(result)
@@ -693,8 +725,12 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         target: TargetRef,
         admission: Admission,
     ) -> Result<SplitResult, SplitError> {
-        if let Some(result) = self.committed_split.filter(|result| result.key == key) {
-            return Ok(result);
+        if let Some(result) = self
+            .committed_splits
+            .iter()
+            .find(|result| result.key == key)
+        {
+            return Ok(*result);
         }
         match admission {
             // Exact bytes match a split this owner recorded as Failed, so the
@@ -1164,6 +1200,10 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     ///
     /// A session error does not prevent the other retained target from being
     /// visited. The first encountered session or registry error is returned.
+    /// After polling, an exited pane with a live-or-present sibling is
+    /// collapsed out of the layout and its slot retired; the survivor gets
+    /// one absolute resize through [`EffectSink::apply_size`] (recorded as
+    /// resize-pending on failure, retried by [`Self::resize_layout`]).
     pub fn poll(&mut self, now_secs: u64) -> Result<(), ServerError> {
         self.global.expire(now_secs);
 
@@ -1196,6 +1236,12 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             {
                 first_error.get_or_insert(ServerError::Internal);
             }
+        }
+        // A pane whose shell exited while its sibling lives is removed; the
+        // sibling fills the root through its effects' absolute resize. The
+        // last remaining pane keeps its tombstone so the workspace can close.
+        if self.collapse_exited_panes().is_err() {
+            first_error.get_or_insert(ServerError::Internal);
         }
 
         first_error.map_or(Ok(()), Err)
@@ -1512,6 +1558,443 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     }
 }
 
+/// Maximum close results one owner retains for exact duplicates and status.
+pub const MAX_RETAINED_CLOSE_RESULTS: usize = 4_096;
+
+/// Fixed, redacted failures of the trusted close transaction.
+///
+/// Admitted rejections (stale target/layout, no layout, already closed) are
+/// not errors: they are returned as `Ok` [`CloseResult`]s with a
+/// [`CloseOutcome::Rejected`] outcome and recorded `Failed` in the ledger.
+pub enum CloseError {
+    /// The schema-9 payload is malformed; nothing was admitted.
+    InvalidPayload(CloseCodecError),
+    /// The key generation is not this owner's generation.
+    GenerationMismatch,
+    /// Ledger validation, conflict, or capacity rejected the key before effects.
+    Ledger(ProtocolError),
+    /// The key is admitted but has no terminal retained result yet.
+    InProgress,
+    /// The bounded close-result store is full; nothing was admitted.
+    Capacity,
+    /// An internal invariant failed; the ledger records `Unknown` when admitted.
+    InternalInvariant,
+}
+
+impl CloseError {
+    /// Return the protocol classification without formatting payload data.
+    pub fn ledger_error(&self) -> Option<&ProtocolError> {
+        match self {
+            Self::Ledger(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Debug for CloseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPayload(error) => f.debug_tuple("InvalidPayload").field(error).finish(),
+            Self::GenerationMismatch => f.write_str("GenerationMismatch"),
+            Self::Ledger(_) => f.write_str("Ledger(<redacted>)"),
+            Self::InProgress => f.write_str("InProgress"),
+            Self::Capacity => f.write_str("Capacity"),
+            Self::InternalInvariant => f.write_str("InternalInvariant"),
+        }
+    }
+}
+
+impl fmt::Display for CloseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InvalidPayload(_) => "pane close payload is invalid",
+            Self::GenerationMismatch => "pane close generation is invalid",
+            Self::Ledger(ProtocolError::OperationConflict) => {
+                "operation key was reused with a different pane close"
+            }
+            Self::Ledger(_) => "pane close ledger validation failed",
+            Self::InProgress => "pane close result is not yet available",
+            Self::Capacity => "pane close result capacity is exhausted",
+            Self::InternalInvariant => "pane close invariant failed",
+        })
+    }
+}
+
+impl std::error::Error for CloseError {}
+
+/// Read-only status of one current layout pane.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct PaneStatus {
+    /// Complete pane identity and its current layout rectangle.
+    pub geometry: PaneGeometry,
+    /// Lifecycle state of the pane's session record.
+    pub state: SessionState,
+    /// Whether the pane's child is still running as far as the owner knows.
+    pub live: bool,
+    /// Whether the pane's absolute PTY resize is still pending.
+    pub resize_pending: bool,
+}
+
+impl fmt::Debug for PaneStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaneStatus")
+            .field("geometry", &self.geometry)
+            .field("state", &self.state)
+            .field("live", &self.live)
+            .field("resize_pending", &self.resize_pending)
+            .finish()
+    }
+}
+
+impl<E: EffectSink> MultiSessionOwner<E> {
+    /// Authorize one schema-9 close from a live connection before
+    /// [`Self::execute_close`].
+    ///
+    /// User decision (2026-10-19): any authenticated same-UID client may
+    /// explicitly stop an individual pane session; there is no separate stop
+    /// grant, no Input capability requirement and no target pin. The key must
+    /// still use the connection's own lease and this generation. This grants
+    /// no launch authority and claims no input ownership.
+    pub fn authorize_close(
+        &self,
+        connection: &Connection,
+        request: &CloseRequest,
+        now_secs: u64,
+    ) -> Result<(), ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        if request.key.lease != connection.lease || request.key.generation != self.global.generation
+        {
+            return Err(ServerError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    /// Execute or observe one trusted schema-9 pane close.
+    ///
+    /// The caller must authorize first ([`Self::authorize_close`]). Ordering:
+    /// decode; exact-payload duplicate lookup (returning the retained result
+    /// before any layout or target check; changed bytes conflict); bounded
+    /// result capacity; admission of the exact bytes; then target/revision
+    /// validation. A rejection there records `Failed` and has no effect.
+    /// Otherwise the pane's child receives exactly one bounded stop through
+    /// [`EffectSink::stop`] (HUP, wait, KILL, wait). On `Exited`/`Escalated`
+    /// the session is recorded `Exited`; when a sibling pane exists the layout
+    /// collapses (the sibling fills the root and receives one absolute resize
+    /// through `resize`) and the closed session's slot is retired, so a later
+    /// split receives a fresh, never-reused identity. Closing the only pane
+    /// keeps its tombstone so [`Self::all_sessions_ended`] becomes true. On
+    /// `Unknown` the layout and record are unchanged; a later observed exit
+    /// collapses the pane through [`Self::poll`]. No input is sent or
+    /// replayed and no process is respawned.
+    pub fn execute_close<RE, Resize>(
+        &mut self,
+        payload: &[u8],
+        now_secs: u64,
+        mut resize: Resize,
+    ) -> Result<CloseResult, CloseError>
+    where
+        Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
+    {
+        let request = decode_close_request(payload).map_err(CloseError::InvalidPayload)?;
+        let key = request.key;
+        if key.generation != self.global.generation {
+            return Err(CloseError::GenerationMismatch);
+        }
+        if let Some(admission) = self
+            .global
+            .ledger
+            .existing_admission(key, payload, now_secs)
+            .map_err(CloseError::Ledger)?
+        {
+            return match self.retained_close(key) {
+                Some(result) => Ok(result),
+                None if matches!(admission, Admission::InProgress) => Err(CloseError::InProgress),
+                None => Err(CloseError::InternalInvariant),
+            };
+        }
+        if self.close_results.len() >= MAX_RETAINED_CLOSE_RESULTS {
+            return Err(CloseError::Capacity);
+        }
+        match self
+            .global
+            .ledger
+            .admit(key, payload, now_secs)
+            .map_err(CloseError::Ledger)?
+        {
+            Admission::Execute => {}
+            Admission::InProgress | Admission::Completed(_) => {
+                return Err(CloseError::InternalInvariant)
+            }
+        }
+
+        let target = request.target;
+        let result = match self.plan_close(&request) {
+            Err(rejection) => CloseResult {
+                key,
+                outcome: CloseOutcome::Rejected(rejection),
+                target: Some(target),
+                layout_revision: self.layout_revision(),
+                survivor_resize_pending: false,
+            },
+            Ok(()) => {
+                let stop = match self.launches.session_mut(target) {
+                    Ok(session) => session.effects.stop(),
+                    Err(_) => {
+                        let _ = self.global.ledger.complete(key, Outcome::Unknown);
+                        return Err(CloseError::InternalInvariant);
+                    }
+                };
+                let mut pending = false;
+                let stop = match stop {
+                    StopOutcome::Unknown => StopOutcome::Unknown,
+                    exited => match self.finish_pane_exit(target, &mut resize) {
+                        Ok(survivor_pending) => {
+                            pending = survivor_pending;
+                            exited
+                        }
+                        // The child reported exit but the owner could not
+                        // record it; never claim the close completed.
+                        Err(()) => StopOutcome::Unknown,
+                    },
+                };
+                CloseResult {
+                    key,
+                    outcome: CloseOutcome::Stopped(stop),
+                    target: Some(target),
+                    layout_revision: self.layout_revision(),
+                    survivor_resize_pending: pending,
+                }
+            }
+        };
+        self.close_results.push(result);
+        if self
+            .global
+            .ledger
+            .complete(key, result.ledger_outcome())
+            .is_err()
+        {
+            return Err(CloseError::InternalInvariant);
+        }
+        Ok(result)
+    }
+
+    /// Observe a retained close result for one of the caller's own keys.
+    ///
+    /// A key never admitted in the live ledger returns a `NotAdmitted`
+    /// rejection result; a key admitted for another operation kind returns
+    /// `UnknownContext`.
+    pub fn close_status(
+        &self,
+        connection: &Connection,
+        key: OperationKey,
+        now_secs: u64,
+    ) -> Result<CloseResult, ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        if key.lease != connection.lease || key.generation != self.global.generation {
+            return Err(ServerError::Unauthorized);
+        }
+        match self.global.ledger.status(key, now_secs)? {
+            OperationStatus::NotAdmitted => Ok(CloseResult {
+                key,
+                outcome: CloseOutcome::Rejected(CloseRejection::NotAdmitted),
+                target: None,
+                layout_revision: 0,
+                survivor_resize_pending: false,
+            }),
+            OperationStatus::InProgress | OperationStatus::Completed(_) => {
+                self.retained_close(key).ok_or(ServerError::UnknownContext)
+            }
+        }
+    }
+
+    /// Return every current layout pane with its lifecycle and resize state.
+    ///
+    /// Entries follow the layout's spatial order; unused entries are `None`.
+    /// A pane whose child exited but has not yet been collapsed by
+    /// [`Self::poll`] is reported with `live == false`.
+    pub fn pane_statuses(&self) -> [Option<PaneStatus>; 2] {
+        let Some(layout) = self.layout_snapshot() else {
+            return [None, None];
+        };
+        layout.panes.map(|pane| {
+            pane.map(|geometry| {
+                let state = self
+                    .launches
+                    .state(geometry.target)
+                    .unwrap_or(SessionState::Failed);
+                let exited = self
+                    .launches
+                    .effects(geometry.target)
+                    .map_or(true, |session| session.effects.child_exited());
+                PaneStatus {
+                    geometry,
+                    state,
+                    live: !exited && !matches!(state, SessionState::Exited | SessionState::Failed),
+                    resize_pending: self.is_resize_pending(geometry.target),
+                }
+            })
+        })
+    }
+
+    /// Observe [`Self::pane_statuses`] for a live Read-capable connection.
+    ///
+    /// Like [`Self::layout_view`], pane geometry and lifecycle are shared
+    /// metadata visible to any Read connection regardless of its pinned target.
+    pub fn pane_view(
+        &self,
+        connection: &Connection,
+        now_secs: u64,
+    ) -> Result<[Option<PaneStatus>; 2], ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        if connection.selected_capabilities & CAPABILITY_READ == 0 {
+            return Err(ServerError::Unauthorized);
+        }
+        Ok(self.pane_statuses())
+    }
+
+    fn retained_close(&self, key: OperationKey) -> Option<CloseResult> {
+        self.close_results
+            .iter()
+            .find(|result| result.key == key)
+            .copied()
+    }
+
+    fn layout_revision(&self) -> u64 {
+        self.layout
+            .as_ref()
+            .map_or(0, |layout| layout.snapshot().revision)
+    }
+
+    fn plan_close(&self, request: &CloseRequest) -> Result<(), CloseRejection> {
+        let layout = self.layout.as_ref().ok_or(CloseRejection::NoLayout)?;
+        let current = layout.snapshot();
+        let target = request.target;
+        let in_layout = current
+            .panes
+            .into_iter()
+            .flatten()
+            .any(|pane| pane.target == target);
+        if !in_layout {
+            return Err(if self.launches.is_retired(target) {
+                CloseRejection::AlreadyClosed
+            } else {
+                CloseRejection::StaleTarget
+            });
+        }
+        if self.launches.effects(target).is_err() {
+            return Err(CloseRejection::StaleTarget);
+        }
+        if current.pane_count() == 1
+            && matches!(self.launches.state(target), Ok(SessionState::Exited))
+        {
+            // The last pane's tombstone is retained so the workspace closes.
+            return Err(CloseRejection::AlreadyClosed);
+        }
+        if request.expected_layout_revision != current.revision {
+            return Err(CloseRejection::StaleLayout);
+        }
+        Ok(())
+    }
+
+    /// Record an observed exit and remove the pane when a sibling remains.
+    ///
+    /// Returns whether the survivor's absolute resize is pending. The last
+    /// remaining pane keeps its `Exited` tombstone record and layout entry.
+    fn finish_pane_exit<RE, Resize>(
+        &mut self,
+        target: TargetRef,
+        resize: &mut Resize,
+    ) -> Result<bool, ()>
+    where
+        Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
+    {
+        if self.launches.state(target) != Ok(SessionState::Exited) {
+            self.launches.note_exited(target).map_err(|_| ())?;
+        }
+        let Some(layout) = self.layout.as_mut() else {
+            return Ok(false);
+        };
+        let before = layout.snapshot();
+        if before.pane_count() < 2
+            || !before
+                .panes
+                .into_iter()
+                .flatten()
+                .any(|pane| pane.target == target)
+        {
+            return Ok(false);
+        }
+        let collapsed = layout.collapse(target, before.revision).map_err(|_| ())?;
+        for slot in &mut self.pane_sizes {
+            if slot.is_some_and(|state| state.target == target) {
+                *slot = None;
+            }
+        }
+        // The retired handle's child already exited; dropping it releases
+        // the PTY without another wait window.
+        drop(self.launches.retire(target).map_err(|_| ())?);
+        let survivor = collapsed.panes[0].ok_or(())?;
+        let survivor_exited = self
+            .launches
+            .effects(survivor.target)
+            .map_or(true, |session| session.effects.child_exited());
+        if survivor_exited {
+            // Both shells ended; the survivor is the workspace's last
+            // tombstone and needs no PTY resize.
+            return Ok(false);
+        }
+        Ok(!self.apply_pane_size(survivor.target, survivor.rect, resize))
+    }
+
+    /// Collapse every exited pane that still has a sibling in the layout.
+    fn collapse_exited_panes(&mut self) -> Result<(), ()> {
+        // At most one collapse is possible in the two-pane prototype.
+        let Some(layout) = self.layout.as_ref() else {
+            return Ok(());
+        };
+        let snapshot = layout.snapshot();
+        if snapshot.pane_count() < 2 {
+            return Ok(());
+        }
+        let exited = snapshot
+            .panes
+            .into_iter()
+            .flatten()
+            .find(|pane| matches!(self.launches.state(pane.target), Ok(SessionState::Exited)));
+        match exited {
+            Some(pane) => self
+                .finish_pane_exit(pane.target, &mut |effects: &mut E, rows, columns| {
+                    effects.apply_size(rows, columns)
+                })
+                .map(|_| ()),
+            None => Ok(()),
+        }
+    }
+
+    /// Retire known-failed launch records outside the layout so their slots
+    /// can host a new split. Identities stay spent.
+    fn reclaim_failed_slots(&mut self) {
+        // Without a layout no split can succeed; keep every record so
+        // `all_sessions_ended` is unaffected by a doomed split attempt.
+        let Some(layout) = self.layout_snapshot() else {
+            return;
+        };
+        let layout_targets = layout.panes.map(|pane| pane.map(|p| p.target));
+        let mut failed = [None; SESSION_CAPACITY];
+        for (slot, record) in failed.iter_mut().zip(self.launches.records()) {
+            if record.state == SessionState::Failed
+                && !record.has_effects
+                && !layout_targets.contains(&Some(record.target))
+            {
+                *slot = Some(record.target);
+            }
+        }
+        for target in failed.into_iter().flatten() {
+            let _ = self.launches.retire(target);
+        }
+    }
+}
+
 fn known_reply(
     global: &GlobalAuthority,
     key: OperationKey,
@@ -1600,6 +2083,10 @@ impl<E: EffectSink> EffectSink for TargetState<E> {
 
     fn screen_revision(&self) -> Option<u64> {
         self.effects.screen_revision()
+    }
+
+    fn stop(&mut self) -> StopOutcome {
+        self.effects.stop()
     }
 }
 
@@ -5472,3 +5959,6 @@ mod runtime_helper_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod close_tests;

@@ -19,6 +19,14 @@ use crate::session_registry::{
 use std::fmt;
 use std::io;
 
+/// Maximum launch results one coordinator retains for exact-duplicate lookup.
+///
+/// Results outlive retired session slots so an exact retry of a launch whose
+/// session was later closed still returns its original result. This matches
+/// the launch journal's own key bound, so it never limits launches further
+/// than the journal already does.
+pub const MAX_RETAINED_LAUNCH_RESULTS: usize = 4_096;
+
 /// Narrow journal operations needed by one launch transaction.
 ///
 /// The real implementation delegates to [`LaunchJournal`]. Implementations
@@ -132,15 +140,17 @@ struct OperationEntry {
 
 /// One generation's bounded launch transaction owner.
 ///
-/// Exactly two identity/result entries are retained, including failed and
-/// exited sessions. A successfully returned child handle is never removed or
-/// replaced. One emergency slot protects an unexpectedly rejected handle
-/// attachment; the coordinator latches unhealthy immediately afterward.
+/// At most two session records are retained at once, including failed and
+/// exited sessions until they are explicitly retired. A successfully returned
+/// child handle is never replaced; it is only released by [`Self::retire`]
+/// after its child exited. Launch results are retained up to
+/// [`MAX_RETAINED_LAUNCH_RESULTS`] for exact duplicates, including results
+/// of retired sessions. One emergency slot protects an unexpectedly rejected
+/// handle attachment; the coordinator latches unhealthy immediately afterward.
 pub struct ManagedLaunchCoordinator<E> {
     generation: u64,
     registry: SessionRegistry<E>,
-    operations: [Option<OperationEntry>; SESSION_CAPACITY],
-    operation_len: usize,
+    operations: Vec<OperationEntry>,
     emergency_effect: Option<E>,
     unhealthy: bool,
 }
@@ -149,7 +159,8 @@ impl<E> fmt::Debug for ManagedLaunchCoordinator<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ManagedLaunchCoordinator")
             .field("generation", &"<redacted>")
-            .field("used_sessions", &self.operation_len)
+            .field("used_sessions", &self.registry.records().len())
+            .field("retained_results", &self.operations.len())
             .field(
                 "emergency_effect_retained",
                 &self.emergency_effect.is_some(),
@@ -167,8 +178,7 @@ impl<E> ManagedLaunchCoordinator<E> {
         Ok(Self {
             generation,
             registry,
-            operations: [None; SESSION_CAPACITY],
-            operation_len: 0,
+            operations: Vec::with_capacity(SESSION_CAPACITY),
             emergency_effect: None,
             unhealthy: false,
         })
@@ -206,6 +216,26 @@ impl<E> ManagedLaunchCoordinator<E> {
             return Err(RegistryError::IllegalTransition);
         }
         self.registry.transition(target, SessionState::Exited)
+    }
+
+    /// Release the slot of one `Exited` or `Failed` session.
+    ///
+    /// The returned handle (if any) is handed to the caller, which decides
+    /// when it is dropped. The identity stays spent and its launch result stays
+    /// retained for exact duplicates; a later launch receives a fresh session
+    /// ID. Live or uncertain sessions are rejected with `IllegalTransition`.
+    pub fn retire(&mut self, target: TargetRef) -> Result<Option<E>, RegistryError> {
+        self.registry.retire(target)
+    }
+
+    /// Whether this exact target was issued in this generation and retired.
+    pub fn is_retired(&self, target: TargetRef) -> bool {
+        self.registry.is_retired(target)
+    }
+
+    /// Number of retired session records in this generation.
+    pub const fn retired_count(&self) -> u64 {
+        self.registry.retired()
     }
 
     /// Observe a retained process-effects handle without transferring ownership.
@@ -286,10 +316,7 @@ impl<E> ManagedLaunchCoordinator<E> {
                 .ok_or(ManagedLaunchError::KeyOwnedElsewhere);
         }
 
-        let target = self
-            .registry
-            .next_target()
-            .map_err(ManagedLaunchError::Registry)?;
+        let target = self.next_target().map_err(ManagedLaunchError::Registry)?;
         let prepared =
             prepare(request, target).map_err(|_| ManagedLaunchError::PreparationFailed)?;
         journal
@@ -345,10 +372,7 @@ impl<E> ManagedLaunchCoordinator<E> {
             self.unhealthy = true;
             return Err(ManagedLaunchError::Unhealthy);
         }
-        let target = self
-            .registry
-            .next_target()
-            .map_err(ManagedLaunchError::Registry)?;
+        let target = self.next_target().map_err(ManagedLaunchError::Registry)?;
         if target != expected_target {
             return Err(ManagedLaunchError::InternalInvariant);
         }
@@ -366,8 +390,15 @@ impl<E> ManagedLaunchCoordinator<E> {
     }
 
     /// Pure preflight of the identity the next reservation would receive.
+    ///
+    /// Also requires room for one more retained launch result; exhaustion is
+    /// reported as `IdentifierExhausted` because no new identity may be issued.
     pub(crate) fn next_target(&self) -> Result<TargetRef, RegistryError> {
-        self.registry.next_target()
+        let target = self.registry.next_target()?;
+        if self.operations.len() >= MAX_RETAINED_LAUNCH_RESULTS {
+            return Err(RegistryError::IdentifierExhausted);
+        }
+        Ok(target)
     }
 
     /// Reserve, journal, spawn and attach after admission and preflight.
@@ -567,27 +598,19 @@ impl<E> ManagedLaunchCoordinator<E> {
     }
 
     fn entry(&self, key: OperationKey) -> Option<&OperationEntry> {
-        self.operations[..self.operation_len]
-            .iter()
-            .flatten()
-            .find(|entry| entry.key == key)
+        self.operations.iter().find(|entry| entry.key == key)
     }
 
     fn store_entry(&mut self, key: OperationKey, result: LaunchResult) -> Result<(), ()> {
-        if self.entry(key).is_some() || self.operation_len >= SESSION_CAPACITY {
+        if self.entry(key).is_some() || self.operations.len() >= MAX_RETAINED_LAUNCH_RESULTS {
             return Err(());
         }
-        self.operations[self.operation_len] = Some(OperationEntry { key, result });
-        self.operation_len += 1;
+        self.operations.push(OperationEntry { key, result });
         Ok(())
     }
 
     fn store_existing_result(&mut self, key: OperationKey, result: LaunchResult) {
-        if let Some(entry) = self.operations[..self.operation_len]
-            .iter_mut()
-            .flatten()
-            .find(|entry| entry.key == key)
-        {
+        if let Some(entry) = self.operations.iter_mut().find(|entry| entry.key == key) {
             entry.result = result;
         } else {
             self.unhealthy = true;
@@ -708,7 +731,7 @@ mod tests {
     use crate::response_protocol::RejectionCode;
     use crate::server::{EffectSink, ReadResult};
     use crate::server_storage::{LaunchRecord, LaunchState};
-    use crate::session_registry::SessionState;
+    use crate::session_registry::{RegistryError, SessionState};
     use std::fmt;
     use std::io;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1381,6 +1404,95 @@ mod tests {
         assert_eq!(owner.records().count(), 2);
         drop(owner);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn retiring_ended_sessions_admits_fresh_ids_and_keeps_exact_duplicates() {
+        let (mut owner, mut ledger, events, drops) = setup();
+        let mut journal = FakeJournal::new(&events);
+        let launch = |owner: &mut ManagedLaunchCoordinator<TrackedHandle>,
+                      ledger: &mut Ledger,
+                      journal: &mut FakeJournal,
+                      sequence: u64,
+                      exited: bool| {
+            let drops = Arc::clone(&drops);
+            owner.execute(
+                &payload(key(sequence), b"/bin/sh", &[]),
+                NOW,
+                ledger,
+                journal,
+                |_, _| Ok::<_, ()>(()),
+                move |_| Ok::<_, ()>(TrackedHandle::new(&drops, exited)),
+            )
+        };
+        let first = launch(&mut owner, &mut ledger, &mut journal, 1, true).unwrap();
+        let second = launch(&mut owner, &mut ledger, &mut journal, 2, false).unwrap();
+        let first_target = result_target(first);
+        assert!(matches!(
+            launch(&mut owner, &mut ledger, &mut journal, 3, false),
+            Err(ManagedLaunchError::Registry(RegistryError::Capacity))
+        ));
+        // Live and not-yet-exited sessions cannot be retired.
+        assert_eq!(
+            owner.retire(result_target(second)).err(),
+            Some(RegistryError::IllegalTransition)
+        );
+        assert_eq!(
+            owner.retire(first_target).err(),
+            Some(RegistryError::IllegalTransition)
+        );
+        owner.note_exited(first_target).unwrap();
+        let handle = owner.retire(first_target).unwrap().expect("handle");
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(handle);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(owner.is_retired(first_target));
+        assert_eq!(owner.retired_count(), 1);
+        assert_eq!(owner.state(first_target), Err(RegistryError::InvalidTarget));
+
+        // An exact duplicate of the retired launch returns its original
+        // result without preparation or spawn.
+        let duplicate = owner
+            .execute(
+                &payload(key(1), b"/bin/sh", &[]),
+                NOW,
+                &mut ledger,
+                &mut journal,
+                |_, _| -> Result<(), ()> { panic!("duplicate must not prepare") },
+                |_| -> Result<TrackedHandle, ()> { panic!("duplicate must not spawn") },
+            )
+            .unwrap();
+        assert_eq!(duplicate, first);
+        assert_eq!(owner.status(key(1), NOW, &ledger).unwrap(), first);
+
+        let third = launch(&mut owner, &mut ledger, &mut journal, 4, false).unwrap();
+        let third_target = result_target(third);
+        assert_eq!(third.outcome, Outcome::Applied);
+        assert_eq!(third_target.session, 3);
+        assert_ne!(third_target, first_target);
+        assert_eq!(owner.records().count(), 2);
+        assert!(matches!(
+            launch(&mut owner, &mut ledger, &mut journal, 5, false),
+            Err(ManagedLaunchError::Registry(RegistryError::Capacity))
+        ));
+    }
+
+    #[test]
+    fn retained_launch_results_are_bounded() {
+        let (mut owner, _ledger, _events, _drops) = setup();
+        for sequence in 1..=super::MAX_RETAINED_LAUNCH_RESULTS as u64 {
+            owner
+                .store_entry(
+                    key(sequence),
+                    crate::managed_launch_protocol::LaunchResult {
+                        key: key(sequence),
+                        outcome: Outcome::Failed,
+                        target: None,
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(owner.next_target(), Err(RegistryError::IdentifierExhausted));
     }
 
     #[test]

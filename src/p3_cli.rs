@@ -8,6 +8,10 @@ use super::{
     capture_child_arguments, os_str_byte_len, preflight_serve_launch, prepare_probe, ProbeRequest,
 };
 use panelink::client_context::{ContextError, ContextFile, ReconcileResult};
+use panelink::close_protocol::{
+    decode_close_result, encode_close_request, encode_close_status_query, CloseOutcome,
+    CloseRejection, CloseRequest, CloseResult, CloseStatusQuery, StopOutcome,
+};
 use panelink::control_protocol::{
     encode_request_payload, Command as ControlCommand, ControlRequest, ReadSource, TargetRef,
     MAX_INPUT_TEXT_BYTES,
@@ -19,6 +23,7 @@ use panelink::handshake_protocol::{
 };
 use panelink::launch::{Environment, LaunchContext};
 use panelink::managed_launch_protocol::LaunchRequest;
+use panelink::multi_runtime::{decode_pane_reply, encode_pane_query, PaneReply};
 use panelink::multi_startup::{StartedMultiServer, StartupLaunch};
 use panelink::pane_layout::SplitDirection;
 use panelink::protocol::{OperationKey, OperationStatus, Outcome};
@@ -30,6 +35,7 @@ use panelink::session_protocol::{
     decode_session_info, encode_session_hello, encode_session_request, LeaseRef, SessionHello,
     SessionInfo, SessionRequest,
 };
+use panelink::session_registry::SessionState;
 use panelink::split_protocol::{decode_split_result, encode_split_request, SplitRequest};
 use panelink::terminal::Key;
 use panelink::transport::{AuthenticatedStream, PrivateListener};
@@ -43,9 +49,11 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{self, Write as IoWrite};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CLIENT_DEADLINE: Duration = Duration::from_secs(2);
@@ -54,6 +62,8 @@ const SERVER_READ_BYTES: u32 = 4_096;
 const SERVER_READ_LINES: u16 = 24;
 const OWNER_TTL_SECONDS: u32 = 30;
 const MAX_CONTROL_ARGUMENT_BYTES: usize = 65_536;
+/// Bounded wait for queued replies after the last session ended.
+const LAST_REPLY_LINGER: Duration = Duration::from_millis(250);
 
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 static NONCE_SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -101,6 +111,12 @@ enum Action {
         owner_revision: u64,
         text: String,
     },
+    Panes,
+    Close {
+        target: TargetRef,
+        layout_revision: u64,
+    },
+    CloseStatus(u64),
     Show,
     Describe,
     Resync,
@@ -308,6 +324,12 @@ fn parse_control(args: &[OsString]) -> Result<Control, ()> {
                 text,
             }
         }
+        "panes" => Action::Panes,
+        "close" => Action::Close {
+            target: parse_target(next_utf8(args, &mut index)?)?,
+            layout_revision: parse_nonzero_decimal(next_utf8(args, &mut index)?)?,
+        },
+        "close-status" => Action::CloseStatus(parse_nonzero_decimal(next_utf8(args, &mut index)?)?),
         "show" => Action::Show,
         "describe" => Action::Describe,
         "resync" => Action::Resync,
@@ -657,6 +679,15 @@ fn run_existing_control(directory: PathBuf, path: PathBuf, action: Action) -> i3
             owner_revision,
             text,
         } => ui_keys(&mut context, &mut stream, target, owner_revision, &text),
+        Action::Panes => match request_panes(&mut stream, 1) {
+            Ok(panes) => emit_json(&panes_json(&panes), 0),
+            Err(error) => emit_failure(error),
+        },
+        Action::Close {
+            target,
+            layout_revision,
+        } => control_close(&mut context, &mut stream, target, layout_revision),
+        Action::CloseStatus(sequence) => control_close_status(&context, &mut stream, sequence),
         Action::Describe => describe(&mut stream),
         Action::Detach => detach(&mut stream),
         Action::Read(target) => control_read(&mut context, &mut stream, target),
@@ -1379,6 +1410,19 @@ fn run_serve(request: ServerProbe) -> i32 {
     };
     let startup = started.startup();
     let mut driver = started.into_driver();
+    // Capture is best-effort: a history filesystem failure never prevents
+    // running shells or their authenticated control socket from starting.
+    let history_path = request.directory.join("history");
+    let history_ready = match fs::DirBuilder::new().mode(0o700).create(&history_path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => true,
+        Err(_) => false,
+    };
+    if history_ready {
+        if let Ok(store) = panelink::history_store::HistoryStore::open(&history_path) {
+            driver.enable_history(store);
+        }
+    }
     let generation = driver.generation();
     let mut line =
         String::from("{\"ok\":true,\"action\":\"serve\",\"state\":\"running\",\"generation\":");
@@ -1389,9 +1433,10 @@ fn run_serve(request: ServerProbe) -> i32 {
     }
     let _ = write!(
         line,
-        ",\"startup_outcome\":\"{}\",\"rows\":{rows},\"columns\":{columns},\"allow_input\":{}}}",
+        ",\"startup_outcome\":\"{}\",\"rows\":{rows},\"columns\":{columns},\"allow_input\":{},\"history_capture\":\"{}\"}}",
         outcome_name(startup.outcome),
-        request.allow_input
+        request.allow_input,
+        if driver.history_available() && !driver.history_capture_failed() { "enabled" } else { "unavailable" }
     );
     let clock = monotonic_clock(Instant::now());
     if !write_json(&line) {
@@ -1401,6 +1446,7 @@ fn run_serve(request: ServerProbe) -> i32 {
         return 1;
     }
     let mut failed = false;
+    let mut reported_capture_failure = false;
     while !stop.load(Ordering::Relaxed) {
         if driver.verify_storage().is_err() {
             failed = true;
@@ -1409,9 +1455,19 @@ fn run_serve(request: ServerProbe) -> i32 {
         // A per-session poll error (for example one exited child) does not
         // stop the server or its sibling session.
         let _ = driver.tick(&clock);
+        if driver.history_capture_failed() && !reported_capture_failure {
+            eprintln!("panelink: screen history capture failed; shells remain running (see history storage)");
+            reported_capture_failure = true;
+        } else if !driver.history_capture_failed() {
+            reported_capture_failure = false;
+        }
         // When every shell has exited there is nothing left to serve: stop
         // so the next `panelink` starts a fresh workspace.
         if driver.owner().all_sessions_ended() {
+            // The tick that ended the last session may have queued a reply
+            // (for example the result of closing the last pane). Give its
+            // worker a short, bounded moment to write it before workers stop.
+            thread::sleep(LAST_REPLY_LINGER);
             break;
         }
         match listener.accept(deadline_after(SERVER_ACCEPT_SLICE)) {
@@ -1658,6 +1714,424 @@ fn ui_split(
     }
     json.push('}');
     emit_json(&json, if applied { 0 } else { 1 })
+}
+
+/// Client wait for one close reply: the server's bounded stop (HUP, 1 s, KILL,
+/// 1 s) runs before it replies, and its worker waits up to 3.5 s.
+const CLOSE_CLIENT_DEADLINE: Duration = Duration::from_millis(4_500);
+
+/// One schema-9 pane status exchange.
+fn request_panes(
+    stream: &mut AuthenticatedStream,
+    request_id: u64,
+) -> Result<PaneReply, &'static str> {
+    let bytes = exchange_with_id(stream, request_id, &encode_pane_query())?;
+    decode_pane_reply(&bytes).map_err(|_| "response_invalid")
+}
+
+fn session_state_name(state: SessionState) -> &'static str {
+    match state {
+        SessionState::Reserved => "reserved",
+        SessionState::Intent => "intent",
+        SessionState::Spawned => "spawned",
+        SessionState::Applied => "applied",
+        SessionState::Failed => "failed",
+        SessionState::Unknown => "unknown",
+        SessionState::Exited => "exited",
+    }
+}
+
+fn panes_json(panes: &PaneReply) -> String {
+    let mut json = String::from("{\"ok\":true,\"action\":\"panes\"");
+    let _ = write!(
+        json,
+        ",\"layout_revision\":{},\"rows\":{},\"columns\":{},\"pane_count\":{},\"panes\":[",
+        panes.layout_revision,
+        panes.rows,
+        panes.columns,
+        panes.panes.iter().flatten().count()
+    );
+    for (index, pane) in panes.panes.iter().flatten().enumerate() {
+        if index != 0 {
+            json.push(',');
+        }
+        let _ = write!(json, "{{\"index\":{},\"target\":", index + 1);
+        push_target(&mut json, pane.target);
+        let _ = write!(
+            json,
+            ",\"state\":\"{}\",\"live\":{},\"x\":{},\"y\":{},\"rows\":{},\"columns\":{},\"resize_pending\":{}}}",
+            session_state_name(pane.state),
+            pane.live,
+            pane.rect.x,
+            pane.rect.y,
+            pane.rect.rows,
+            pane.rect.columns,
+            pane.resize_pending
+        );
+    }
+    json.push_str("]}");
+    json
+}
+
+/// Fixed name of a close outcome and, for a rejection, its reason.
+pub(super) fn close_outcome_names(outcome: CloseOutcome) -> (&'static str, Option<&'static str>) {
+    match outcome {
+        CloseOutcome::Stopped(StopOutcome::Exited) => ("exited", None),
+        CloseOutcome::Stopped(StopOutcome::Escalated) => ("escalated", None),
+        CloseOutcome::Stopped(StopOutcome::Unknown) => ("unknown", None),
+        CloseOutcome::Rejected(reason) => (
+            "rejected",
+            Some(match reason {
+                CloseRejection::NoLayout => "no_layout",
+                CloseRejection::StaleTarget => "stale_target",
+                CloseRejection::StaleLayout => "stale_layout",
+                CloseRejection::AlreadyClosed => "already_closed",
+                CloseRejection::NotAdmitted => "not_admitted",
+            }),
+        ),
+    }
+}
+
+/// Whether a close stopped the pane's child and removed the pane.
+pub(super) const fn close_stopped(outcome: CloseOutcome) -> bool {
+    matches!(
+        outcome,
+        CloseOutcome::Stopped(StopOutcome::Exited | StopOutcome::Escalated)
+    )
+}
+
+fn close_json(action: &'static str, key: OperationKey, result: &CloseResult) -> String {
+    let (outcome, reason) = close_outcome_names(result.outcome);
+    let mut json = String::from("{\"ok\":");
+    json.push_str(if close_stopped(result.outcome) {
+        "true"
+    } else {
+        "false"
+    });
+    json.push_str(",\"action\":");
+    push_json_string(&mut json, action);
+    let _ = write!(
+        json,
+        ",\"sequence\":{},\"outcome\":\"{outcome}\",\"reason\":",
+        key.sequence
+    );
+    match reason {
+        Some(reason) => {
+            let _ = write!(json, "\"{reason}\"");
+        }
+        None => json.push_str("null"),
+    }
+    let _ = write!(
+        json,
+        ",\"layout_revision\":{},\"survivor_resize_pending\":{},\"target\":",
+        result.layout_revision, result.survivor_resize_pending
+    );
+    match result.target {
+        Some(target) => push_target(&mut json, target),
+        None => json.push_str("null"),
+    }
+    json.push('}');
+    json
+}
+
+/// Send one schema-9 close and read its reply within the close deadline.
+///
+/// Returns the decoded result for exactly `key`; any other reply is invalid.
+fn exchange_close(
+    stream: &mut AuthenticatedStream,
+    request_id: u64,
+    key: OperationKey,
+    payload: &[u8],
+) -> Result<CloseResult, &'static str> {
+    let deadline = deadline_after(CLOSE_CLIENT_DEADLINE);
+    let frame =
+        Frame::new(MessageKind::Request, request_id, payload).map_err(|_| "request_invalid")?;
+    stream
+        .write_frame(&frame, deadline)
+        .map_err(|_| "transport_failed")?;
+    let frame = stream
+        .read_frame(deadline)
+        .map_err(|_| "transport_failed")?;
+    if frame.request_id() != request_id {
+        return Err("response_invalid");
+    }
+    match frame.kind() {
+        MessageKind::Response => match decode_close_result(frame.payload()) {
+            Ok(result) if result.key == key => Ok(result),
+            _ => Err("response_invalid"),
+        },
+        MessageKind::Error => Err("server_rejected"),
+        _ => Err("response_invalid"),
+    }
+}
+
+fn close_request_payload(
+    key: OperationKey,
+    target: TargetRef,
+    layout_revision: u64,
+) -> Result<Vec<u8>, &'static str> {
+    let mut payload = Vec::new();
+    encode_close_request(
+        &CloseRequest {
+            key,
+            target,
+            expected_layout_revision: layout_revision,
+        },
+        &mut payload,
+    )
+    .map_err(|_| "request_invalid")?;
+    Ok(payload)
+}
+
+/// Reserve one durable key, send exactly one close for it and acknowledge
+/// the validated result. On any failure the key stays uncertain in the
+/// context and is never resent; status settles it later.
+fn reserved_close(
+    context: &mut ContextFile,
+    stream: &mut AuthenticatedStream,
+    request_id: u64,
+    target: TargetRef,
+    layout_revision: u64,
+) -> Result<(OperationKey, CloseResult), &'static str> {
+    let key = candidate_key(context.context());
+    let payload = close_request_payload(key, target, layout_revision)?;
+    let reserved = context
+        .reserve()
+        .map_err(|error| context_error_label(&error))?;
+    if reserved != key {
+        return Err("context_key_mismatch");
+    }
+    let result = exchange_close(stream, request_id, key, &payload)?;
+    context
+        .ack(key)
+        .map_err(|error| context_error_label(&error))?;
+    Ok((key, result))
+}
+
+/// `control ... close TARGET LAYOUT_REV`: explicit stop of one pane session.
+fn control_close(
+    context: &mut ContextFile,
+    stream: &mut AuthenticatedStream,
+    target: TargetRef,
+    layout_revision: u64,
+) -> i32 {
+    match reserved_close(context, stream, 1, target, layout_revision) {
+        Ok((key, result)) => emit_json(
+            &close_json("close", key, &result),
+            if close_stopped(result.outcome) { 0 } else { 1 },
+        ),
+        Err(error) => emit_failure(error),
+    }
+}
+
+/// `control ... close-status SEQUENCE`: observe a retained close result for
+/// one of this context's keys without changing the context.
+fn control_close_status(
+    context: &ContextFile,
+    stream: &mut AuthenticatedStream,
+    sequence: u64,
+) -> i32 {
+    let state = context.context();
+    let key = OperationKey {
+        generation: state.generation(),
+        lease: state.lease(),
+        sequence,
+    };
+    match close_status_exchange(stream, 1, key) {
+        Ok(result) => emit_json(
+            &close_json("close-status", key, &result),
+            if close_stopped(result.outcome) { 0 } else { 1 },
+        ),
+        Err(error) => emit_failure(error),
+    }
+}
+
+fn close_status_exchange(
+    stream: &mut AuthenticatedStream,
+    request_id: u64,
+    key: OperationKey,
+) -> Result<CloseResult, &'static str> {
+    let mut payload = Vec::new();
+    encode_close_status_query(CloseStatusQuery { key }, &mut payload)
+        .map_err(|_| "request_invalid")?;
+    exchange_close(stream, request_id, key, &payload)
+}
+
+/// Why a [`WorkspaceLink`] close produced no result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CloseFailure {
+    /// The server refused the request before admission; nothing was stopped.
+    Refused,
+    /// The request may have been admitted but no result was observed.
+    Unknown,
+    /// The request could not be sent (local or transport failure).
+    NotSent(&'static str),
+}
+
+/// One short-lived connection for the user-facing `panelink panes` and
+/// `panelink close`, on a reusable private context file.
+///
+/// A fresh Hello issues a new 30-minute lease, and live leases are capped, so
+/// these commands resume one CLI lease instead of opening a new one per run.
+/// The context's exclusive lock is held for the whole command, serializing
+/// concurrent invocations. A context the server no longer recognizes (a new
+/// workspace generation, or its pinned pane was closed) is replaced; an
+/// operation left uncertain on such a lease is unobservable and is reported,
+/// never resent.
+pub(super) struct WorkspaceLink {
+    context: ContextFile,
+    stream: AuthenticatedStream,
+    next_request: u64,
+    /// An earlier close on a now-unrecognized lease never settled.
+    pub(super) discarded_uncertain: bool,
+}
+
+impl WorkspaceLink {
+    /// Resume (or create) the CLI context at `context_path` against the server
+    /// in `directory`.
+    pub(super) fn open(directory: &Path, context_path: &Path) -> Result<Self, &'static str> {
+        let mut discarded_uncertain = false;
+        if fs::symlink_metadata(context_path).is_ok() {
+            let context = ContextFile::open_existing(
+                context_path,
+                deadline_after(CLOSE_CLIENT_DEADLINE + CLIENT_DEADLINE),
+            )
+            .map_err(|error| context_error_label(&error))?;
+            let mut stream = connect_stream(directory)?;
+            match handshake(&mut stream, Some(context.context())) {
+                Ok(_) => {
+                    let mut link = Self {
+                        context,
+                        stream,
+                        next_request: 1,
+                        discarded_uncertain,
+                    };
+                    link.settle_uncertain()?;
+                    return Ok(link);
+                }
+                Err("server_rejected" | "context_mismatch") => {
+                    // The lease is unknown to this server, so no result for
+                    // it can ever be observed; replace the record while it
+                    // is still locked.
+                    discarded_uncertain = context.context().uncertain().is_some();
+                    fs::remove_file(context_path).map_err(|_| "context_storage_failed")?;
+                    drop(context);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let mut stream = connect_stream(directory)?;
+        let welcome = handshake(&mut stream, None)?;
+        let context = ContextFile::create(
+            context_path,
+            welcome.generation,
+            welcome.lease,
+            deadline_after(CLIENT_DEADLINE),
+        )
+        .map_err(|error| context_error_label(&error))?;
+        Ok(Self {
+            context,
+            stream,
+            next_request: 1,
+            discarded_uncertain,
+        })
+    }
+
+    fn request_id(&mut self) -> u64 {
+        let id = self.next_request;
+        self.next_request += 1;
+        id
+    }
+
+    /// Settle an earlier uncertain key by schema-2 status; never resend it.
+    /// Returns the observed status when a key was uncertain.
+    fn settle_uncertain(&mut self) -> Result<Option<OperationStatus>, &'static str> {
+        let Some(key) = self.context.context().uncertain() else {
+            return Ok(None);
+        };
+        let payload = encode_session_request(&SessionRequest::OperationStatus { key })
+            .map_err(|_| "request_invalid")?;
+        let id = self.request_id();
+        let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
+        let response = decode_response_payload(&bytes).map_err(|_| "response_invalid")?;
+        if response.key != key {
+            return Err("response_invalid");
+        }
+        let ResponseBody::Status(status) = response.body else {
+            return Err("response_invalid");
+        };
+        match self
+            .context
+            .reconcile(key, status)
+            .map_err(|error| context_error_label(&error))?
+        {
+            ReconcileResult::Cleared => Ok(Some(status)),
+            ReconcileResult::StillInProgress => Err("operation_uncertain"),
+        }
+    }
+
+    /// Current layout panes in spatial order.
+    pub(super) fn panes(&mut self) -> Result<PaneReply, &'static str> {
+        let id = self.request_id();
+        request_panes(&mut self.stream, id)
+    }
+
+    /// Send exactly one close for `target` at `layout_revision`.
+    ///
+    /// A lost reply is settled once by a close status query on a resumed
+    /// connection (observation only); the close itself is never resent.
+    pub(super) fn close(
+        &mut self,
+        directory: &Path,
+        target: TargetRef,
+        layout_revision: u64,
+    ) -> Result<CloseResult, CloseFailure> {
+        let key = candidate_key(self.context.context());
+        let payload =
+            close_request_payload(key, target, layout_revision).map_err(CloseFailure::NotSent)?;
+        let reserved = self
+            .context
+            .reserve()
+            .map_err(|error| CloseFailure::NotSent(context_error_label(&error)))?;
+        if reserved != key {
+            return Err(CloseFailure::NotSent("context_key_mismatch"));
+        }
+        let id = self.request_id();
+        let outcome = exchange_close(&mut self.stream, id, key, &payload);
+        drop(payload);
+        let result = match outcome {
+            Ok(result) => result,
+            Err("server_rejected") => {
+                // An Error frame: settle the key by status on this stream.
+                // Only a key the ledger never admitted is a clean refusal.
+                return match self.settle_uncertain() {
+                    Ok(Some(OperationStatus::NotAdmitted)) => Err(CloseFailure::Refused),
+                    _ => Err(CloseFailure::Unknown),
+                };
+            }
+            Err(_) => self.observe_lost_close(directory, key)?,
+        };
+        let _ = self.context.ack(key);
+        Ok(result)
+    }
+
+    fn observe_lost_close(
+        &mut self,
+        directory: &Path,
+        key: OperationKey,
+    ) -> Result<CloseResult, CloseFailure> {
+        let mut stream = connect_stream(directory).map_err(|_| CloseFailure::Unknown)?;
+        handshake(&mut stream, Some(self.context.context())).map_err(|_| CloseFailure::Unknown)?;
+        self.stream = stream;
+        self.next_request = 1;
+        let id = self.request_id();
+        match close_status_exchange(&mut self.stream, id, key) {
+            Ok(result) if result.outcome != CloseOutcome::Rejected(CloseRejection::NotAdmitted) => {
+                Ok(result)
+            }
+            _ => Err(CloseFailure::Unknown),
+        }
+    }
 }
 
 /// Type printable text plus Enter as typed keys (never replayed).
@@ -2014,7 +2488,7 @@ fn fresh_nonce() -> u64 {
 fn print_help() {
     let _ = writeln!(
         io::stdout().lock(),
-        "Usage:\n  panelink server-probe --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink serve --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink control --directory DIR --context FILE init [TARGET]\n  panelink control --directory DIR --context FILE show|describe|resync|detach\n  panelink control --directory DIR --context FILE layout\n  panelink control --directory DIR --context FILE split TARGET LAYOUT_REV left|right|up|down [--cwd DIR]\n  panelink control --directory DIR --context FILE keys TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE read TARGET\n  panelink control --directory DIR --context FILE reconcile TARGET\n  panelink control --directory DIR --context FILE watch TARGET GEN:SEQ LIMIT WAIT_MS\n  panelink control --directory DIR --context FILE claim|release TARGET OWNER_REV\n  panelink control --directory DIR --context FILE handoff TARGET OWNER_REV RECIPIENT_LEASE\n  panelink control --directory DIR --context FILE text|paste|submit TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE interrupt TARGET OWNER_REV\n  panelink control --directory DIR --context FILE status SEQUENCE\n  panelink control --directory DIR --context FILE receipt THROUGH_SEQUENCE\nTARGET is generation:workspace:pane:session:occupant_revision. Use --initialize only for a new empty server directory.\nserve is an experimental two-pane server (at most one split). split launches /bin/zsh with this CLI process's own cwd (or --cwd) and environment and needs a serve started with --allow-input. init TARGET pins a new context to one serve pane; layout, split and keys work only against serve.\n  panelink attach --directory DIR --context-dir CONTEXT_DIR\nattach is an experimental full-screen client for serve (run it inside a terminal): one connection and one private context file per pane under CONTEXT_DIR (created 0700 if missing). Keys go to the focused pane; left-click focuses; right-click or Ctrl-B then s opens the split menu; Ctrl-X detaches (server-owned shells keep running)."
+        "Usage:\n  panelink server-probe --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink serve --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink control --directory DIR --context FILE init [TARGET]\n  panelink control --directory DIR --context FILE show|describe|resync|detach\n  panelink control --directory DIR --context FILE layout\n  panelink control --directory DIR --context FILE split TARGET LAYOUT_REV left|right|up|down [--cwd DIR]\n  panelink control --directory DIR --context FILE keys TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE panes\n  panelink control --directory DIR --context FILE close TARGET LAYOUT_REV\n  panelink control --directory DIR --context FILE close-status SEQUENCE\n  panelink control --directory DIR --context FILE read TARGET\n  panelink control --directory DIR --context FILE reconcile TARGET\n  panelink control --directory DIR --context FILE watch TARGET GEN:SEQ LIMIT WAIT_MS\n  panelink control --directory DIR --context FILE claim|release TARGET OWNER_REV\n  panelink control --directory DIR --context FILE handoff TARGET OWNER_REV RECIPIENT_LEASE\n  panelink control --directory DIR --context FILE text|paste|submit TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE interrupt TARGET OWNER_REV\n  panelink control --directory DIR --context FILE status SEQUENCE\n  panelink control --directory DIR --context FILE receipt THROUGH_SEQUENCE\nTARGET is generation:workspace:pane:session:occupant_revision. Use --initialize only for a new empty server directory.\nserve is an experimental two-pane server (at most one split). split launches /bin/zsh with this CLI process's own cwd (or --cwd) and environment and needs a serve started with --allow-input. init TARGET pins a new context to one serve pane; layout, split, keys, panes and close work only against serve. close stops one pane's shell (HUP, then KILL after 1 s) and exits 0 only when it exited or was escalated.\n  panelink attach --directory DIR --context-dir CONTEXT_DIR\nattach is an experimental full-screen client for serve (run it inside a terminal): one connection and one private context file per pane under CONTEXT_DIR (created 0700 if missing). Keys go to the focused pane; left-click focuses; right-click or Ctrl-B then s opens the split menu; Ctrl-X detaches (server-owned shells keep running)."
     );
 }
 
@@ -2469,6 +2943,163 @@ mod tests {
         ] {
             assert!(control(&malformed).is_err(), "accepted {malformed:?}");
         }
+    }
+
+    fn control_args(extra: &[&str]) -> Result<CliCommand, ()> {
+        let mut values = vec![
+            "control",
+            "--directory",
+            "/private/tmp/pl-serve",
+            "--context",
+            "/private/tmp/c.ctx",
+        ];
+        values.extend_from_slice(extra);
+        parse(args(&values))
+    }
+
+    #[test]
+    fn parser_accepts_exact_panes_close_and_close_status_forms() {
+        let Ok(CliCommand::Control(parsed)) = control_args(&["panes"]) else {
+            panic!("panes");
+        };
+        assert!(matches!(parsed.action, Action::Panes));
+        let Ok(CliCommand::Control(parsed)) = control_args(&["close", "7:2:3:4:5", "4"]) else {
+            panic!("close");
+        };
+        assert!(matches!(
+            parsed.action,
+            Action::Close { target, layout_revision: 4 } if target == test_target()
+        ));
+        let Ok(CliCommand::Control(parsed)) = control_args(&["close-status", "9"]) else {
+            panic!("close-status");
+        };
+        assert!(matches!(parsed.action, Action::CloseStatus(9)));
+        for malformed in [
+            vec!["panes", "extra"],
+            vec!["close"],
+            vec!["close", "7:2:3:4:5"],
+            vec!["close", "7:2:3:4:5", "0"],
+            vec!["close", "7:2:3:4", "1"],
+            vec!["close", "7:2:3:4:5", "1", "extra"],
+            vec!["close", "7:2:3:4:5", "-1"],
+            vec!["close-status"],
+            vec!["close-status", "0"],
+            vec!["close-status", "1", "2"],
+        ] {
+            assert!(control_args(&malformed).is_err(), "accepted {malformed:?}");
+        }
+    }
+
+    fn close_result(outcome: CloseOutcome, pending: bool) -> CloseResult {
+        CloseResult {
+            key: OperationKey {
+                generation: 7,
+                lease: 3,
+                sequence: 2,
+            },
+            outcome,
+            target: Some(test_target()),
+            layout_revision: 5,
+            survivor_resize_pending: pending,
+        }
+    }
+
+    #[test]
+    fn close_json_reports_every_outcome_with_fixed_names() {
+        let key = OperationKey {
+            generation: 7,
+            lease: 3,
+            sequence: 2,
+        };
+        let json = close_json(
+            "close",
+            key,
+            &close_result(CloseOutcome::Stopped(StopOutcome::Exited), false),
+        );
+        assert_eq!(
+            json,
+            "{\"ok\":true,\"action\":\"close\",\"sequence\":2,\"outcome\":\"exited\",\"reason\":null,\"layout_revision\":5,\"survivor_resize_pending\":false,\"target\":\"7:2:3:4:5\"}"
+        );
+        let json = close_json(
+            "close",
+            key,
+            &close_result(CloseOutcome::Stopped(StopOutcome::Escalated), true),
+        );
+        assert!(json.starts_with("{\"ok\":true,") && json.contains("\"outcome\":\"escalated\""));
+        assert!(json.contains("\"survivor_resize_pending\":true"));
+        let json = close_json(
+            "close",
+            key,
+            &close_result(CloseOutcome::Stopped(StopOutcome::Unknown), false),
+        );
+        assert!(json.starts_with("{\"ok\":false,") && json.contains("\"outcome\":\"unknown\""));
+        for (reason, name) in [
+            (CloseRejection::NoLayout, "no_layout"),
+            (CloseRejection::StaleTarget, "stale_target"),
+            (CloseRejection::StaleLayout, "stale_layout"),
+            (CloseRejection::AlreadyClosed, "already_closed"),
+        ] {
+            let json = close_json(
+                "close",
+                key,
+                &close_result(CloseOutcome::Rejected(reason), false),
+            );
+            assert!(json.starts_with("{\"ok\":false,"));
+            assert!(json.contains(&format!("\"reason\":\"{name}\"")), "{json}");
+        }
+        let not_admitted = CloseResult {
+            target: None,
+            layout_revision: 0,
+            ..close_result(CloseOutcome::Rejected(CloseRejection::NotAdmitted), false)
+        };
+        let json = close_json("close-status", key, &not_admitted);
+        assert!(json.contains("\"reason\":\"not_admitted\"") && json.ends_with("\"target\":null}"));
+    }
+
+    #[test]
+    fn panes_json_lists_one_based_indexes_in_layout_order() {
+        use panelink::multi_runtime::PaneEntry;
+        use panelink::pane_layout::Rect;
+        let second = TargetRef {
+            pane: 6,
+            session: 6,
+            ..test_target()
+        };
+        let reply = PaneReply {
+            layout_revision: 3,
+            rows: 24,
+            columns: 81,
+            panes: [
+                Some(PaneEntry {
+                    target: test_target(),
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        rows: 24,
+                        columns: 40,
+                    },
+                    state: SessionState::Applied,
+                    live: true,
+                    resize_pending: false,
+                }),
+                Some(PaneEntry {
+                    target: second,
+                    rect: Rect {
+                        x: 41,
+                        y: 0,
+                        rows: 24,
+                        columns: 40,
+                    },
+                    state: SessionState::Exited,
+                    live: false,
+                    resize_pending: true,
+                }),
+            ],
+        };
+        assert_eq!(
+            panes_json(&reply),
+            "{\"ok\":true,\"action\":\"panes\",\"layout_revision\":3,\"rows\":24,\"columns\":81,\"pane_count\":2,\"panes\":[{\"index\":1,\"target\":\"7:2:3:4:5\",\"state\":\"applied\",\"live\":true,\"x\":0,\"y\":0,\"rows\":24,\"columns\":40,\"resize_pending\":false},{\"index\":2,\"target\":\"7:2:6:6:5\",\"state\":\"exited\",\"live\":false,\"x\":41,\"y\":0,\"rows\":24,\"columns\":40,\"resize_pending\":true}]}"
+        );
     }
 
     #[test]

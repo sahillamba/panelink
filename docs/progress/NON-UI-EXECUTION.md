@@ -99,3 +99,23 @@ history/binding stores plus recovery/retention. No user manual verification is
 requested. All blocked checks remain uncompleted, and no phase-completion commit
 has been made. Preserve source/ownership evidence and continue independent work
 when model capacity is available.
+
+Update 2026-10-20: Phase 3A was completed and committed. The user selected
+per-pane lifecycle/stop before history and then requested direct work without
+agents. Phase 3B now integrates authenticated close, pane listing, CLI and
+confirmed client actions, with real-PTY/runtime acceptance; see
+[P3B-CLOSE-RUNTIME.md](P3B-CLOSE-RUNTIME.md). History work has started with a
+private checkpoint-store library and restart-read tests, but no live capture,
+scrollback export, retention or recovery UI; see
+[P5-HISTORY-STORE.md](P5-HISTORY-STORE.md). The final integrated verifier was
+8/8; a preceding 7/8 run failed a storage-lock test once, and that test passed
+in isolation before the full rerun passed. These additions do not complete
+the five non-UI milestones or the outstanding host/provider acceptance gates.
+
+Follow-up 2026-10-20: live visible-screen checkpoint capture is now wired to
+the two-pane server and tested together with close/exit and a corrupt-storage
+failure that leaves its shell usable; see
+[P5-LIVE-CAPTURE.md](P5-LIVE-CAPTURE.md). The verifier passed 8/8, real
+close/capture runtime 4/4, history-store 4/4 and the earlier default-open
+suite 6 passed/1 ignored. This does not complete bounded scrollback, retention,
+clear, restart recovery UI or the other milestone gates.

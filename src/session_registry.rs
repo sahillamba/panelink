@@ -1,11 +1,13 @@
 //! Fixed-capacity session identity and lifecycle storage for the managed-launch
 //! prototype.
 //!
-//! This module owns exactly two non-reusable session records for one nonzero
-//! generation. It does not create processes, persist intents, authenticate
-//! callers, manage grants, or own a command ledger. Its caller must keep one
-//! generation-wide ledger and grant table and durably record an intent before
-//! spawning a child.
+//! This module owns at most two live session records for one nonzero
+//! generation. A record that reached `Exited` or `Failed` may be explicitly
+//! retired to free its slot; its identity stays spent because session IDs come
+//! from a monotonic counter and are never reused. It does not create processes,
+//! persist intents, authenticate callers, manage grants, or own a command
+//! ledger. Its caller must keep one generation-wide ledger and grant table and
+//! durably record an intent before spawning a child.
 //!
 //! The target mapping is synthetic prototype scaffolding only: workspace 1,
 //! pane equal to session ID, session ID allocated from 1, and occupant revision
@@ -15,7 +17,7 @@ use crate::control_protocol::TargetRef;
 use std::error::Error;
 use std::fmt;
 
-/// Maximum number of session identities retained in one generation.
+/// Maximum number of session records retained at once in one generation.
 pub const SESSION_CAPACITY: usize = 2;
 
 /// Lifecycle state recorded for one reserved session identity.
@@ -42,7 +44,7 @@ pub enum SessionState {
 pub enum RegistryError {
     /// A registry generation must be nonzero.
     InvalidGeneration,
-    /// Both session identities for this generation have been spent.
+    /// Both session slots are occupied by retained records.
     Capacity,
     /// The next session identity cannot be advanced without wrapping.
     IdentifierExhausted,
@@ -144,6 +146,7 @@ pub struct SessionRegistry<E> {
     slots: [Option<SessionSlot<E>>; SESSION_CAPACITY],
     len: usize,
     next_session: u64,
+    retired: u64,
 }
 
 impl<E> fmt::Debug for SessionRegistry<E> {
@@ -151,6 +154,7 @@ impl<E> fmt::Debug for SessionRegistry<E> {
         f.debug_struct("SessionRegistry")
             .field("generation", &"<redacted>")
             .field("used_slots", &self.len)
+            .field("retired", &self.retired)
             .field("records", &"<redacted>")
             .finish()
     }
@@ -168,6 +172,7 @@ impl<E> SessionRegistry<E> {
             slots: std::array::from_fn(|_| None),
             len: 0,
             next_session: 1,
+            retired: 0,
         })
     }
 
@@ -361,6 +366,62 @@ impl<E> SessionRegistry<E> {
         })
     }
 
+    /// Remove one `Exited` or `Failed` record and free its slot.
+    ///
+    /// Any retained process-effects handle is returned so the caller decides
+    /// when it is dropped. The identity remains spent: [`Self::reserve`] never
+    /// issues a session ID at or below one already issued, and
+    /// [`Self::is_retired`] keeps recognizing the retired target. Live,
+    /// reserved, intent and unknown records cannot be retired.
+    pub fn retire(&mut self, target: TargetRef) -> Result<Option<E>, RegistryError> {
+        let index = self.index_for(target)?;
+        let state = self.slots[index]
+            .as_ref()
+            .map(|slot| slot.state)
+            .ok_or(RegistryError::InvalidTarget)?;
+        if !matches!(state, SessionState::Exited | SessionState::Failed) {
+            return Err(RegistryError::IllegalTransition);
+        }
+        let retired = self
+            .retired
+            .checked_add(1)
+            .ok_or(RegistryError::IdentifierExhausted)?;
+        let slot = self.slots[index]
+            .take()
+            .ok_or(RegistryError::InvalidTarget)?;
+        // Keep occupied slots contiguous in reservation order.
+        for position in index..self.len - 1 {
+            self.slots[position] = self.slots[position + 1].take();
+        }
+        self.len -= 1;
+        self.retired = retired;
+        Ok(slot.effects)
+    }
+
+    /// Whether this exact target was issued by this registry and later retired.
+    ///
+    /// Retired identities are recognized from the monotonic counter and the
+    /// synthetic target mapping, so no unbounded tombstone list is kept.
+    pub fn is_retired(&self, target: TargetRef) -> bool {
+        target.generation == self.generation
+            && target.workspace == 1
+            && target.occupant_revision == 1
+            && target.pane == target.session
+            && target.session != 0
+            && target.session < self.next_session
+            && self.index_for(target).is_err()
+    }
+
+    /// Number of session identities issued in this generation so far.
+    pub const fn issued(&self) -> u64 {
+        self.next_session - 1
+    }
+
+    /// Number of records retired in this generation so far.
+    pub const fn retired(&self) -> u64 {
+        self.retired
+    }
+
     fn index_for(&self, target: TargetRef) -> Result<usize, RegistryError> {
         self.slots[..self.len]
             .iter()
@@ -552,6 +613,98 @@ mod tests {
         assert_eq!(registry.state(second), Ok(SessionState::Exited));
         assert_eq!(registry.effects(second).unwrap().id, 20);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn retiring_ended_records_frees_slots_without_reusing_identities() {
+        let (mut registry, drops) = empty_registry();
+        let first = registry.reserve().unwrap();
+        registry.transition(first, SessionState::Failed).unwrap();
+        let second = intent_target(&mut registry);
+        registry
+            .attach_spawned(second, TrackedHandle::new(20, "secret", &drops))
+            .unwrap();
+        registry.transition(second, SessionState::Applied).unwrap();
+        assert_eq!(registry.reserve(), Err(RegistryError::Capacity));
+
+        // A live record cannot be retired.
+        assert_eq!(
+            registry.retire(second).err(),
+            Some(RegistryError::IllegalTransition)
+        );
+        // A failed record without effects retires and frees one slot.
+        assert!(registry.retire(first).unwrap().is_none());
+        assert!(registry.is_retired(first));
+        assert!(!registry.is_retired(second));
+        assert_eq!(registry.state(first), Err(RegistryError::InvalidTarget));
+        assert_eq!(
+            registry.transition(first, SessionState::Intent),
+            Err(RegistryError::InvalidTarget)
+        );
+        assert_eq!(
+            registry.retire(first).err(),
+            Some(RegistryError::InvalidTarget)
+        );
+
+        let third = registry.reserve().unwrap();
+        assert_eq!(third.session, 3);
+        assert_eq!(third.pane, 3);
+        assert_ne!(third, first);
+        assert_ne!(third, second);
+        let records: Vec<_> = registry.records().collect();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.target)
+                .collect::<Vec<_>>(),
+            [second, third],
+            "slots stay contiguous in reservation order"
+        );
+        assert_eq!(registry.reserve(), Err(RegistryError::Capacity));
+
+        // An exited record returns its retained handle to the caller.
+        registry.transition(second, SessionState::Exited).unwrap();
+        let handle = registry.retire(second).unwrap().expect("retained handle");
+        assert_eq!(handle.id, 20);
+        assert_eq!(drops.load(Ordering::SeqCst), 0, "caller decides the drop");
+        drop(handle);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.records().len(), 1);
+        assert_eq!(registry.issued(), 3);
+        assert_eq!(registry.retired(), 2);
+        assert_eq!(registry.reserve().unwrap().session, 4);
+        for spent in [first, second] {
+            assert!(registry.is_retired(spent));
+            assert_eq!(
+                registry.effects(spent).err(),
+                Some(RegistryError::InvalidTarget)
+            );
+        }
+        assert!(!registry.is_retired(TargetRef {
+            session: 9,
+            pane: 9,
+            ..first
+        }));
+    }
+
+    #[test]
+    fn non_ended_states_cannot_be_retired() {
+        for state in [
+            SessionState::Reserved,
+            SessionState::Intent,
+            SessionState::Spawned,
+            SessionState::Applied,
+            SessionState::Unknown,
+        ] {
+            let (mut registry, target, drops) = registry_in_state(state);
+            assert_eq!(
+                registry.retire(target).err(),
+                Some(RegistryError::IllegalTransition),
+                "{state:?}"
+            );
+            assert_eq!(registry.state(target), Ok(state));
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[test]

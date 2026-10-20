@@ -13,20 +13,26 @@
 //! the pane; without it a fresh Hello attaches to the first layout pane and a
 //! resume Hello to its lease's pinned target.
 
+use crate::close_protocol::{
+    decode_close_request, decode_close_result, decode_close_status_query, encode_close_result,
+    CloseResult, CLOSE_RESULT_BYTES, CLOSE_SCHEMA,
+};
 use crate::control_protocol::TargetRef;
 use crate::event_protocol::{encode_event, Event};
 use crate::handshake_protocol::{
     encode_welcome, validate_welcome, Welcome, CAPABILITY_EVENTS, CAPABILITY_READ,
 };
+use crate::history_store::HistoryStore;
 use crate::managed_launch_prepare::prepare_launch;
 use crate::managed_launch_protocol::{decode_launch_result, decode_status_query};
+use crate::pane_layout::Rect;
 use crate::protocol::OperationKey;
 use crate::protocol_wire::{Frame, MessageKind};
 use crate::response_protocol::decode_response_payload;
 use crate::scoped_watch_protocol::{
     decode_reconciliation, decode_watch_request, encode_watch_end, WatchEnd, WatchRequest,
 };
-use crate::server::multi_session::MultiSessionOwner;
+use crate::server::multi_session::{CloseError, MultiSessionOwner};
 use crate::server::{Connection, ServerError};
 use crate::server_io::{
     MAX_CONNECTIONS, OWNER_QUEUE_CAPACITY, OWNER_REPLY_DEADLINE, READ_DEADLINE, STOP_POLL_INTERVAL,
@@ -38,6 +44,7 @@ use crate::session_protocol::{
     decode_session_hello, decode_session_info, decode_session_request, SessionHello,
     SessionRequest, SESSION_HELLO_FRESH_BYTES, SESSION_HELLO_RESUME_BYTES,
 };
+use crate::session_registry::SessionState;
 use crate::split_protocol::{decode_split_request, decode_split_result};
 use crate::transport::{AuthenticatedStream, OwnedFrame};
 use crate::ui_protocol::{
@@ -59,6 +66,14 @@ pub const MAX_PENDING_WATCHES: usize = 8;
 
 /// Write deadline for one Snapshot frame (at most about 0.9 MB).
 pub const SNAPSHOT_WRITE_DEADLINE: Duration = Duration::from_secs(2);
+
+/// How long a worker waits for the owner's reply to a schema-9 close.
+///
+/// The owner runs the bounded stop (HUP, 1 s, KILL, 1 s) synchronously inside
+/// [`MultiServerDriver::tick`], so a close reply can take about 2 s plus queue
+/// latency. Other requests keep [`OWNER_REPLY_DEADLINE`]. This stays below
+/// the attach client's 4 s close deadline.
+pub const CLOSE_REPLY_DEADLINE: Duration = Duration::from_millis(3_500);
 
 const MAX_ERROR_LABEL_BYTES: usize = 128;
 const DETACHED_ACK: [u8; 4] = [0, 2, 0, 2];
@@ -284,6 +299,13 @@ pub struct MultiServerDriver {
     owner: MultiSessionOwner<PtyEffects>,
     storage: ServerStorage,
     terminfo: PathBuf,
+    history: Option<Arc<HistoryStore>>,
+    history_failure: Arc<AtomicBool>,
+}
+
+struct HistoryCapture<'a> {
+    store: Option<&'a Arc<HistoryStore>>,
+    failure: &'a Arc<AtomicBool>,
 }
 
 impl fmt::Debug for MultiServerDriver {
@@ -299,6 +321,7 @@ impl Drop for MultiServerDriver {
     fn drop(&mut self) {
         self.hub.shutdown();
         self.settle_pending_watches();
+        self.capture_now();
     }
 }
 
@@ -318,7 +341,44 @@ impl MultiServerDriver {
             owner,
             storage,
             terminfo,
+            history: None,
+            history_failure: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Opt in to private checkpoint capture for this server generation.
+    /// Existing and subsequently split sessions share one owner-thread writer.
+    pub fn enable_history(&mut self, store: HistoryStore) {
+        let store = Arc::new(store);
+        self.owner.for_each_effects_mut(|target, effects| {
+            effects.enable_capture(
+                Arc::clone(&store),
+                Arc::clone(&self.history_failure),
+                target,
+            );
+        });
+        self.history = Some(store);
+    }
+
+    /// Force a capture without interrupting any PTY if storage fails.
+    pub fn capture_now(&mut self) {
+        self.owner
+            .for_each_effects_mut(|_, effects| effects.capture_now());
+    }
+
+    /// Sticky failure indicator, including panes retired after a failed write.
+    pub fn history_capture_failed(&self) -> bool {
+        self.history_failure.load(Ordering::Relaxed)
+    }
+
+    /// Sticky capture failure signal shared with retired panes.
+    pub fn history_failure_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.history_failure)
+    }
+
+    /// Whether a private checkpoint writer was opened for this server.
+    pub fn history_available(&self) -> bool {
+        self.history.is_some()
     }
 
     /// Admit one kernel-authenticated connection within the worker cap.
@@ -380,10 +440,20 @@ impl MultiServerDriver {
                 &mut self.owner,
                 &mut self.storage,
                 &self.terminfo,
+                HistoryCapture {
+                    store: self.history.as_ref(),
+                    failure: &self.history_failure,
+                },
                 &envelope.request,
                 clock(),
                 self.pending_watches.len() < MAX_PENDING_WATCHES,
             );
+            // Detach is an observation boundary, not a process stop. Save
+            // changed visible screens after the owner's request is handled.
+            if matches!(&envelope.request, MultiRequest::Request { payload, .. } if crate::session_protocol::decode_session_request(payload).is_ok_and(|request| matches!(request, SessionRequest::Detach)))
+            {
+                self.capture_now();
+            }
             match result {
                 // A lost acknowledgment never undoes or resends an effect.
                 DispatchResult::Reply(reply) => {
@@ -435,6 +505,271 @@ pub(crate) fn split_prepare(
 }
 
 // ---------------------------------------------------------------------------
+// Schema-9 pane status (kind 3 query, kind 0x8003 reply).
+//
+// Read-only companion of the schema-9 close codec in `close_protocol`: lists
+// the current layout panes with lifecycle state so a caller can choose a
+// complete target and the current layout revision for a close. It carries no
+// pane content. All integers are big-endian.
+//
+// Query, exactly 8 bytes: schema 9, kind 3, four zero bytes.
+//
+// Reply, exactly 136 bytes:
+// | Offset | Size | Field |
+// | 0 | 2 | schema 9 |
+// | 2 | 2 | kind 0x8003 |
+// | 4 | 4 | reserved, zero |
+// | 8 | 8 | layout revision; 0 only when no layout exists |
+// | 16 | 2 | root rows |
+// | 18 | 2 | root columns |
+// | 20 | 4 | reserved, zero |
+// | 24 | 56 | pane entry 0 |
+// | 80 | 56 | pane entry 1 |
+//
+// Pane entry: target (5 x u64), rect x/y/rows/columns (4 x u16), state (u8:
+// 1 Reserved, 2 Intent, 3 Spawned, 4 Applied, 5 Failed, 6 Unknown,
+// 7 Exited), flags (u8: bit0 present, bit1 live, bit2 resize pending), six
+// zero bytes. An absent entry is all zero.
+// ---------------------------------------------------------------------------
+
+/// Exact size of a schema-9 pane status query.
+pub const PANE_QUERY_BYTES: usize = 8;
+/// Exact size of a schema-9 pane status reply.
+pub const PANE_REPLY_BYTES: usize = 136;
+
+const PANE_QUERY_KIND: u16 = 3;
+const PANE_REPLY_KIND: u16 = 0x8003;
+const PANE_ENTRY_BYTES: usize = 56;
+const PANE_FLAG_PRESENT: u8 = 1;
+const PANE_FLAG_LIVE: u8 = 2;
+const PANE_FLAG_RESIZE_PENDING: u8 = 4;
+
+/// One current layout pane in a [`PaneReply`].
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct PaneEntry {
+    /// Complete identity of the pane occupant.
+    pub target: TargetRef,
+    /// Pane rectangle in the root content area.
+    pub rect: Rect,
+    /// Lifecycle state of the pane's session record.
+    pub state: SessionState,
+    /// Whether the child is still running as far as the owner knows.
+    pub live: bool,
+    /// Whether the pane's absolute PTY resize is still pending.
+    pub resize_pending: bool,
+}
+
+impl fmt::Debug for PaneEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaneEntry")
+            .field("target", &"<redacted>")
+            .field("rect", &self.rect)
+            .field("state", &self.state)
+            .field("live", &self.live)
+            .field("resize_pending", &self.resize_pending)
+            .finish()
+    }
+}
+
+/// Current layout panes in spatial order; unused entries are `None`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneReply {
+    /// Layout revision a close must name; 0 when no layout exists.
+    pub layout_revision: u64,
+    /// Root rows.
+    pub rows: u16,
+    /// Root columns.
+    pub columns: u16,
+    /// Spatially ordered panes (left/top first).
+    pub panes: [Option<PaneEntry>; 2],
+}
+
+/// Fixed, redacted pane-status codec failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneCodecError;
+
+impl fmt::Display for PaneCodecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("pane status payload is invalid")
+    }
+}
+
+impl std::error::Error for PaneCodecError {}
+
+/// Encode the fixed schema-9 pane status query.
+pub fn encode_pane_query() -> [u8; PANE_QUERY_BYTES] {
+    let mut bytes = [0_u8; PANE_QUERY_BYTES];
+    bytes[..2].copy_from_slice(&CLOSE_SCHEMA.to_be_bytes());
+    bytes[2..4].copy_from_slice(&PANE_QUERY_KIND.to_be_bytes());
+    bytes
+}
+
+/// Decode exactly one schema-9 pane status query.
+pub fn decode_pane_query(bytes: &[u8]) -> Result<(), PaneCodecError> {
+    if bytes == encode_pane_query() {
+        Ok(())
+    } else {
+        Err(PaneCodecError)
+    }
+}
+
+const fn session_state_code(state: SessionState) -> u8 {
+    match state {
+        SessionState::Reserved => 1,
+        SessionState::Intent => 2,
+        SessionState::Spawned => 3,
+        SessionState::Applied => 4,
+        SessionState::Failed => 5,
+        SessionState::Unknown => 6,
+        SessionState::Exited => 7,
+    }
+}
+
+const fn session_state_from_code(code: u8) -> Option<SessionState> {
+    Some(match code {
+        1 => SessionState::Reserved,
+        2 => SessionState::Intent,
+        3 => SessionState::Spawned,
+        4 => SessionState::Applied,
+        5 => SessionState::Failed,
+        6 => SessionState::Unknown,
+        7 => SessionState::Exited,
+        _ => return None,
+    })
+}
+
+fn target_valid(target: TargetRef) -> bool {
+    target.generation != 0
+        && target.workspace != 0
+        && target.pane != 0
+        && target.session != 0
+        && target.occupant_revision != 0
+}
+
+/// Validate and encode one pane status reply.
+pub fn encode_pane_reply(reply: &PaneReply) -> Result<[u8; PANE_REPLY_BYTES], PaneCodecError> {
+    let present = reply.panes.iter().flatten().count();
+    if (reply.layout_revision == 0) != (present == 0) {
+        return Err(PaneCodecError);
+    }
+    let mut bytes = [0_u8; PANE_REPLY_BYTES];
+    bytes[..2].copy_from_slice(&CLOSE_SCHEMA.to_be_bytes());
+    bytes[2..4].copy_from_slice(&PANE_REPLY_KIND.to_be_bytes());
+    bytes[8..16].copy_from_slice(&reply.layout_revision.to_be_bytes());
+    bytes[16..18].copy_from_slice(&reply.rows.to_be_bytes());
+    bytes[18..20].copy_from_slice(&reply.columns.to_be_bytes());
+    for (index, entry) in reply.panes.iter().enumerate() {
+        let Some(entry) = entry else {
+            continue;
+        };
+        if !target_valid(entry.target) {
+            return Err(PaneCodecError);
+        }
+        let base = 24 + index * PANE_ENTRY_BYTES;
+        let target = entry.target;
+        for (slot, value) in [
+            target.generation,
+            target.workspace,
+            target.pane,
+            target.session,
+            target.occupant_revision,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            bytes[base + slot * 8..base + slot * 8 + 8].copy_from_slice(&value.to_be_bytes());
+        }
+        let rect = entry.rect;
+        for (slot, value) in [rect.x, rect.y, rect.rows, rect.columns]
+            .into_iter()
+            .enumerate()
+        {
+            bytes[base + 40 + slot * 2..base + 42 + slot * 2].copy_from_slice(&value.to_be_bytes());
+        }
+        bytes[base + 48] = session_state_code(entry.state);
+        bytes[base + 49] = PANE_FLAG_PRESENT
+            | if entry.live { PANE_FLAG_LIVE } else { 0 }
+            | if entry.resize_pending {
+                PANE_FLAG_RESIZE_PENDING
+            } else {
+                0
+            };
+    }
+    Ok(bytes)
+}
+
+/// Decode and validate exactly one pane status reply.
+pub fn decode_pane_reply(bytes: &[u8]) -> Result<PaneReply, PaneCodecError> {
+    // The reply comes from the socket. Validate the entire fixed-size frame
+    // before any indexed field reads (including the header).
+    if bytes.len() != PANE_REPLY_BYTES {
+        return Err(PaneCodecError);
+    }
+    let read_u16 = |offset: usize| u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
+    let read_u64 = |offset: usize| {
+        let mut field = [0_u8; 8];
+        field.copy_from_slice(&bytes[offset..offset + 8]);
+        u64::from_be_bytes(field)
+    };
+    if read_u16(0) != CLOSE_SCHEMA
+        || read_u16(2) != PANE_REPLY_KIND
+        || bytes[4..8].iter().any(|byte| *byte != 0)
+        || bytes[20..24].iter().any(|byte| *byte != 0)
+    {
+        return Err(PaneCodecError);
+    }
+    let mut panes = [None; 2];
+    for (index, slot) in panes.iter_mut().enumerate() {
+        let base = 24 + index * PANE_ENTRY_BYTES;
+        let entry = &bytes[base..base + PANE_ENTRY_BYTES];
+        let flags = entry[49];
+        if flags & PANE_FLAG_PRESENT == 0 {
+            if entry.iter().any(|byte| *byte != 0) {
+                return Err(PaneCodecError);
+            }
+            continue;
+        }
+        if flags & !(PANE_FLAG_PRESENT | PANE_FLAG_LIVE | PANE_FLAG_RESIZE_PENDING) != 0
+            || entry[50..].iter().any(|byte| *byte != 0)
+        {
+            return Err(PaneCodecError);
+        }
+        let target = TargetRef {
+            generation: read_u64(base),
+            workspace: read_u64(base + 8),
+            pane: read_u64(base + 16),
+            session: read_u64(base + 24),
+            occupant_revision: read_u64(base + 32),
+        };
+        if !target_valid(target) {
+            return Err(PaneCodecError);
+        }
+        *slot = Some(PaneEntry {
+            target,
+            rect: Rect {
+                x: read_u16(base + 40),
+                y: read_u16(base + 42),
+                rows: read_u16(base + 44),
+                columns: read_u16(base + 46),
+            },
+            state: session_state_from_code(entry[48]).ok_or(PaneCodecError)?,
+            live: flags & PANE_FLAG_LIVE != 0,
+            resize_pending: flags & PANE_FLAG_RESIZE_PENDING != 0,
+        });
+    }
+    let reply = PaneReply {
+        layout_revision: read_u64(8),
+        rows: read_u16(16),
+        columns: read_u16(18),
+        panes,
+    };
+    if (reply.layout_revision == 0) != reply.panes.iter().flatten().next().is_none() {
+        return Err(PaneCodecError);
+    }
+    Ok(reply)
+}
+
+// ---------------------------------------------------------------------------
 // Owner-thread dispatch. Everything below `dispatch` runs on the owner thread.
 // ---------------------------------------------------------------------------
 
@@ -464,6 +799,7 @@ fn dispatch(
     owner: &mut MultiSessionOwner<PtyEffects>,
     storage: &mut ServerStorage,
     terminfo: &std::path::Path,
+    history: HistoryCapture<'_>,
     request: &MultiRequest,
     now: u64,
     pending_capacity: bool,
@@ -508,8 +844,11 @@ fn dispatch(
                 Err(_) => reply(MultiReply::Error("invalid_watch_request")),
             },
             Some([0, 6]) => dispatch_launch(owner, connection, payload, now),
-            Some([0, 7]) => dispatch_split(owner, storage, terminfo, connection, payload, now),
+            Some([0, 7]) => {
+                dispatch_split(owner, storage, terminfo, history, connection, payload, now)
+            }
             Some([0, 8]) => dispatch_ui(owner, connection, payload, now),
+            Some([0, 9]) => dispatch_close(owner, connection, payload, now),
             _ => reply(MultiReply::Error("unsupported_request_schema")),
         },
     }
@@ -561,6 +900,7 @@ fn dispatch_split(
     owner: &mut MultiSessionOwner<PtyEffects>,
     storage: &mut ServerStorage,
     terminfo: &std::path::Path,
+    history: HistoryCapture<'_>,
     connection: &Connection,
     payload: &[u8],
     now: u64,
@@ -585,8 +925,26 @@ fn dispatch_split(
         payload,
         now,
         &mut journal,
-        split_prepare(terminfo),
-        |prepared| prepared.spawn().map(PtyEffects::new).map_err(|_| ()),
+        |request, target| {
+            split_prepare(terminfo)(request, target).map(|prepared| (prepared, target))
+        },
+        |prepared| {
+            let (prepared, target) = prepared;
+            prepared
+                .spawn()
+                .map(|session| {
+                    let mut effects = PtyEffects::new(session);
+                    if let Some(store) = history.store {
+                        effects.enable_capture(
+                            Arc::clone(store),
+                            Arc::clone(history.failure),
+                            target,
+                        );
+                    }
+                    effects
+                })
+                .map_err(|_| ())
+        },
         |effects: &mut PtyEffects, rows, columns| effects.resize(rows, columns),
     );
     let result = match result {
@@ -615,6 +973,89 @@ fn dispatch_split(
     match crate::split_protocol::encode_split_result(&result, &mut bytes) {
         Ok(_) => reply(MultiReply::Response(bytes)),
         Err(_) => reply(MultiReply::Error("invalid_split_result")),
+    }
+}
+
+/// Schema-9 route: explicit pane close, close status, and pane status.
+///
+/// A close runs [`MultiSessionOwner::execute_close`] synchronously on the
+/// owner thread. Its bounded stop (HUP, 1 s, KILL, 1 s) can therefore block
+/// this tick, and every other queued request, for about 2 s. This is accepted
+/// for the two-pane prototype; the closing worker waits up to
+/// [`CLOSE_REPLY_DEADLINE`] for the reply.
+fn dispatch_close(
+    owner: &mut MultiSessionOwner<PtyEffects>,
+    connection: &Connection,
+    payload: &[u8],
+    now: u64,
+) -> DispatchResult {
+    if let Ok(query) = decode_close_status_query(payload) {
+        return match owner.close_status(connection, query.key, now) {
+            Ok(result) => close_reply(&result),
+            Err(error) => self::error(&error),
+        };
+    }
+    if decode_pane_query(payload).is_ok() {
+        return match owner.pane_view(connection, now) {
+            Ok(statuses) => {
+                let layout = owner.layout_snapshot();
+                let reply_value = PaneReply {
+                    layout_revision: layout.map_or(0, |layout| layout.revision),
+                    rows: layout.map_or(0, |layout| layout.rows),
+                    columns: layout.map_or(0, |layout| layout.columns),
+                    panes: statuses.map(|status| {
+                        status.map(|status| PaneEntry {
+                            target: status.geometry.target,
+                            rect: status.geometry.rect,
+                            state: status.state,
+                            live: status.live,
+                            resize_pending: status.resize_pending,
+                        })
+                    }),
+                };
+                match encode_pane_reply(&reply_value) {
+                    Ok(bytes) => reply(MultiReply::Response(bytes.to_vec())),
+                    Err(_) => reply(MultiReply::Error("invalid_pane_status")),
+                }
+            }
+            Err(error) => self::error(&error),
+        };
+    }
+    let request = match decode_close_request(payload) {
+        Ok(request) => request,
+        Err(_) => return reply(MultiReply::Error("invalid_close_request")),
+    };
+    if let Err(error) = owner.authorize_close(connection, &request, now) {
+        return self::error(&error);
+    }
+    match owner.execute_close(payload, now, |effects: &mut PtyEffects, rows, columns| {
+        effects.resize(rows, columns)
+    }) {
+        Ok(result) => close_reply(&result),
+        Err(error) => reply(MultiReply::Error(close_error_label(&error))),
+    }
+}
+
+fn close_reply(result: &CloseResult) -> DispatchResult {
+    let mut bytes = Vec::with_capacity(CLOSE_RESULT_BYTES);
+    match encode_close_result(result, &mut bytes) {
+        Ok(_) => reply(MultiReply::Response(bytes)),
+        Err(_) => reply(MultiReply::Error("invalid_close_result")),
+    }
+}
+
+/// Fixed lower-snake-case label for a close that produced no result.
+fn close_error_label(error: &CloseError) -> &'static str {
+    match error {
+        CloseError::InvalidPayload(_) => "invalid_close_request",
+        CloseError::GenerationMismatch => "wrong_generation",
+        CloseError::Ledger(crate::protocol::ProtocolError::OperationConflict) => {
+            "operation_conflict"
+        }
+        CloseError::Ledger(_) => "close_ledger_rejected",
+        CloseError::InProgress => "close_in_progress",
+        CloseError::Capacity => "close_capacity",
+        CloseError::InternalInvariant => "close_failed",
     }
 }
 
@@ -926,6 +1367,10 @@ enum RequestSchema {
     UiScreen(TargetRef),
     UiKeys(OperationKey),
     UiResize(OperationKey),
+    /// Schema-9 close request or close status query for this key.
+    Close(OperationKey),
+    /// Schema-9 pane status query.
+    Panes,
 }
 
 fn classify(payload: &[u8]) -> Option<RequestSchema> {
@@ -954,6 +1399,17 @@ fn classify(payload: &[u8]) -> Option<RequestSchema> {
             UiRequest::KeyInput(view) => Some(RequestSchema::UiKeys(view.key())),
             UiRequest::RootResize(resize) => Some(RequestSchema::UiResize(resize.key)),
         },
+        [0, 9] => {
+            if let Ok(request) = decode_close_request(payload) {
+                Some(RequestSchema::Close(request.key))
+            } else if let Ok(query) = decode_close_status_query(payload) {
+                Some(RequestSchema::Close(query.key))
+            } else {
+                decode_pane_query(payload)
+                    .ok()
+                    .map(|()| RequestSchema::Panes)
+            }
+        }
         _ => None,
     }
 }
@@ -990,6 +1446,10 @@ fn response_matches(schema: RequestSchema, payload: &[u8]) -> bool {
             decode_resize_reply(payload).is_ok_and(|result| result.key == key)
                 || decode_response_payload(payload).is_ok_and(|response| response.key == key)
         }
+        RequestSchema::Close(key) => {
+            decode_close_result(payload).is_ok_and(|result| result.key == key)
+        }
+        RequestSchema::Panes => decode_pane_reply(payload).is_ok(),
     }
 }
 
@@ -1033,7 +1493,12 @@ fn run_worker(
         return;
     };
     drop(frame);
-    let Some(answer) = submit(sender, stop, MultiRequest::Hello { hello, target }) else {
+    let Some(answer) = submit(
+        sender,
+        stop,
+        MultiRequest::Hello { hello, target },
+        OWNER_REPLY_DEADLINE,
+    ) else {
         return;
     };
     let (connection, welcome) = match answer {
@@ -1099,6 +1564,12 @@ fn run_worker(
             }
             continue;
         }
+        // A close's bounded stop runs inside the owner tick; wait longer.
+        let reply_deadline = if matches!(schema, RequestSchema::Close(_)) {
+            CLOSE_REPLY_DEADLINE
+        } else {
+            OWNER_REPLY_DEADLINE
+        };
         let Some(answer) = submit(
             sender,
             stop,
@@ -1106,6 +1577,7 @@ fn run_worker(
                 connection,
                 payload: frame.into_payload(),
             },
+            reply_deadline,
         ) else {
             return;
         };
@@ -1203,6 +1675,7 @@ fn submit(
     sender: &SyncSender<MultiEnvelope>,
     stop: &AtomicBool,
     request: MultiRequest,
+    reply_deadline: Duration,
 ) -> Option<MultiReply> {
     if stop.load(Ordering::Acquire) {
         return None;
@@ -1215,7 +1688,7 @@ fn submit(
     if sender.try_send(envelope).is_err() {
         return None;
     }
-    let deadline = Instant::now().checked_add(OWNER_REPLY_DEADLINE)?;
+    let deadline = Instant::now().checked_add(reply_deadline)?;
     loop {
         if stop.load(Ordering::Acquire) {
             return None;
@@ -1306,6 +1779,211 @@ mod tests {
         session: 2,
         occupant_revision: 1,
     };
+
+    const KEY: OperationKey = OperationKey {
+        generation: 3,
+        lease: 4,
+        sequence: 5,
+    };
+
+    fn close_request_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        crate::close_protocol::encode_close_request(
+            &crate::close_protocol::CloseRequest {
+                key: KEY,
+                target: TARGET,
+                expected_layout_revision: 2,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        bytes
+    }
+
+    fn sample_pane_reply() -> PaneReply {
+        PaneReply {
+            layout_revision: 7,
+            rows: 24,
+            columns: 81,
+            panes: [
+                Some(PaneEntry {
+                    target: TARGET,
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        rows: 24,
+                        columns: 40,
+                    },
+                    state: SessionState::Applied,
+                    live: true,
+                    resize_pending: false,
+                }),
+                Some(PaneEntry {
+                    target: TargetRef {
+                        pane: 3,
+                        session: 3,
+                        ..TARGET
+                    },
+                    rect: Rect {
+                        x: 41,
+                        y: 0,
+                        rows: 24,
+                        columns: 40,
+                    },
+                    state: SessionState::Exited,
+                    live: false,
+                    resize_pending: true,
+                }),
+            ],
+        }
+    }
+
+    #[test]
+    fn schema_nine_close_status_and_pane_queries_are_classified_and_matched() {
+        let request = close_request_bytes();
+        assert!(matches!(
+            classify(&request),
+            Some(RequestSchema::Close(key)) if key == KEY
+        ));
+        let mut query = Vec::new();
+        crate::close_protocol::encode_close_status_query(
+            crate::close_protocol::CloseStatusQuery { key: KEY },
+            &mut query,
+        )
+        .unwrap();
+        assert!(matches!(
+            classify(&query),
+            Some(RequestSchema::Close(key)) if key == KEY
+        ));
+        assert!(matches!(
+            classify(&encode_pane_query()),
+            Some(RequestSchema::Panes)
+        ));
+        // Malformed schema-9 shapes never reach the owner.
+        let mut truncated = request.clone();
+        truncated.pop();
+        assert!(classify(&truncated).is_none());
+        let mut reserved = request;
+        reserved[79] = 1;
+        assert!(classify(&reserved).is_none());
+        let mut pane = encode_pane_query();
+        pane[7] = 1;
+        assert!(classify(&pane).is_none());
+
+        // Only a close result for exactly this key is forwarded.
+        let result = CloseResult {
+            key: KEY,
+            outcome: crate::close_protocol::CloseOutcome::Stopped(
+                crate::close_protocol::StopOutcome::Escalated,
+            ),
+            target: Some(TARGET),
+            layout_revision: 3,
+            survivor_resize_pending: false,
+        };
+        let mut bytes = Vec::new();
+        encode_close_result(&result, &mut bytes).unwrap();
+        assert!(response_matches(RequestSchema::Close(KEY), &bytes));
+        let other = OperationKey { sequence: 6, ..KEY };
+        assert!(!response_matches(RequestSchema::Close(other), &bytes));
+        assert!(!response_matches(RequestSchema::Panes, &bytes));
+        let panes = encode_pane_reply(&sample_pane_reply()).unwrap();
+        assert!(response_matches(RequestSchema::Panes, &panes));
+        assert!(!response_matches(RequestSchema::Close(KEY), &panes));
+    }
+
+    #[test]
+    fn pane_reply_round_trips_and_rejects_malformed_bytes() {
+        let reply = sample_pane_reply();
+        let bytes = encode_pane_reply(&reply).unwrap();
+        assert_eq!(bytes.len(), PANE_REPLY_BYTES);
+        assert_eq!(decode_pane_reply(&bytes), Ok(reply));
+
+        let single = PaneReply {
+            panes: [reply.panes[0], None],
+            ..reply
+        };
+        let bytes = encode_pane_reply(&single).unwrap();
+        assert_eq!(decode_pane_reply(&bytes), Ok(single));
+        assert!(bytes[80..].iter().all(|byte| *byte == 0));
+
+        let empty = PaneReply {
+            layout_revision: 0,
+            rows: 0,
+            columns: 0,
+            panes: [None, None],
+        };
+        assert_eq!(
+            decode_pane_reply(&encode_pane_reply(&empty).unwrap()),
+            Ok(empty)
+        );
+        // A revision without panes, or panes without a revision, is invalid.
+        assert!(encode_pane_reply(&PaneReply {
+            layout_revision: 1,
+            ..empty
+        })
+        .is_err());
+        assert!(encode_pane_reply(&PaneReply {
+            layout_revision: 0,
+            ..reply
+        })
+        .is_err());
+
+        let good = encode_pane_reply(&reply).unwrap();
+        for len in 0..PANE_REPLY_BYTES {
+            assert!(decode_pane_reply(&good[..len]).is_err(), "length {len}");
+        }
+        assert!(decode_pane_reply(&good[..PANE_REPLY_BYTES - 1]).is_err());
+        for (offset, value) in [
+            (1, 8),
+            (3, 1),
+            (5, 1),
+            (21, 1),
+            (24 + 48, 9),
+            (24 + 49, 8),
+            (24 + 50, 1),
+            (24, 0),
+        ] {
+            let mut bad = good;
+            if offset == 24 {
+                bad[24..32].fill(0);
+            } else {
+                bad[offset] = value;
+            }
+            assert!(decode_pane_reply(&bad).is_err(), "offset {offset}");
+        }
+        // Absent entries must be all zero.
+        let mut bad = encode_pane_reply(&single).unwrap();
+        bad[100] = 1;
+        assert!(decode_pane_reply(&bad).is_err());
+        // Debug never prints the target identity.
+        let debug = format!("{:?}", reply.panes[0].unwrap());
+        assert!(debug.contains("<redacted>") && !debug.contains("generation"));
+    }
+
+    #[test]
+    fn close_errors_map_to_fixed_lower_snake_case_labels() {
+        for (error, label) in [
+            (
+                CloseError::InvalidPayload(crate::close_protocol::CloseCodecError::Truncated),
+                "invalid_close_request",
+            ),
+            (CloseError::GenerationMismatch, "wrong_generation"),
+            (
+                CloseError::Ledger(crate::protocol::ProtocolError::OperationConflict),
+                "operation_conflict",
+            ),
+            (
+                CloseError::Ledger(crate::protocol::ProtocolError::LeaseExpired),
+                "close_ledger_rejected",
+            ),
+            (CloseError::InProgress, "close_in_progress"),
+            (CloseError::Capacity, "close_capacity"),
+            (CloseError::InternalInvariant, "close_failed"),
+        ] {
+            assert_eq!(close_error_label(&error), label);
+            assert!(label.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
+        }
+    }
 
     #[test]
     fn schema_four_watch_maps_onto_the_target_session_and_is_classified_legacy() {

@@ -1,14 +1,16 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: 3A DONE (2026-10-19, usable two-pane `panelink`); Phase 3 runtime gates and Phase 2 manual host checks remain open
-last-updated: 2026-10-18
-last-verified: 2026-10-19 — verifier 8/8; full Rust 588 passed/0 failed/15 ignored; rustdoc clean; p3a_default_open 6/6 x4; Ctrl-B NAV mode added
-next-action: Phase 3A complete and committed. Choose next: lifecycle/stop and history work queued before 3A, raising the 2-pane capacity, wider key support (function/Alt/Ctrl keys over schema 8), or Phase 4 OpenCode identity (OpenCode 1.19.0 installed; loopback bind now permitted).
+current-phase: 3B lifecycle/stop integrated; P5 live checkpoint capture integrated (2026-10-20), broader history still open; Phase 3 runtime gates and Phase 2 manual host checks remain open
+last-updated: 2026-10-20
+last-verified: 2026-10-20 — verifier 8/8; Rust 500 library + 93 binary, history store 4/4 and real close/capture runtime 4/4; full suite 15 ignored, p3a_default_open 6/6 (1 ignored); strict Clippy/fmt/rustdoc and component fingerprints pass
+next-action: Review/test both pane close and live capture together; then settle VT100 history export/reset cursor and post-patch memory/provenance gate, followed by retention/recovery. Keep Phase 2 manual acceptance and Phase 4 live OpenCode identity open.
+history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 blocked-on: clipboard sentinel retest and remaining manual Apple Terminal acceptance; live OpenCode identity unproved. New machine (2026-10-18): p2_host 9/9 and p3_pathname ignored fixtures pass with captured output; /dev/tty, pathname and loopback bind permitted; OpenCode here is 1.19.0 and the MiMo task has not run
 setup: new Mac 2026-10-18, rustup stable 1.99.1, verifier 8/8, 443 passed/14 ignored; launcher symlink fix uncommitted — see INTEGRATION.md "New-machine setup"
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 phase-3a: DONE — 2026-10-19 — see docs/progress/P3A-DEFAULT-OPEN.md and INTEGRATION.md
+phase-3b-stop: integrated and verified — 2026-10-20 — see docs/progress/P3B-CLOSE-CORE.md and P3B-CLOSE-RUNTIME.md; broader Phase 3 remains open
 ```
 
 ## Control commands
@@ -159,6 +161,45 @@ split, additional splits report capacity until an explicit capacity review
 adopts a larger bound. Launch/stop permission is not inferred from input or
 focus. If a prerequisite is blocked, advance pure layout/menu/tests without
 enabling an unsafe or nonfunctional split action.
+
+## Phase 3B — per-pane lifecycle/stop (integrated 2026-10-20)
+
+The user chose stop before history. Any authenticated same-UID client may
+explicitly close a pane without acquiring input ownership or a separate stop
+grant; this prototype policy does not grant launch authority. Right-click
+Close pane and Ctrl-B then `x` require confirmation. `panelink panes` and
+`panelink close N` operate on the default workspace; low-level `control panes`,
+`control close TARGET REV`, and `control close-status SEQUENCE` use complete
+targets and keyed status. A stopped child gets HUP, then KILL after a bounded
+wait when needed. An exited pane collapses automatically when another pane
+survives; that sibling fills the root, and a later split gets a new session ID.
+The last child exiting still ends the workspace. See P3B-CLOSE-CORE.md,
+P3B-CLOSE-CLIENT.md and P3B-CLOSE-RUNTIME.md for contracts and limitations.
+
+Verification: `python3 scripts/verify_non_ui.py` 8/8; full Rust library
+500 passed/4 ignored, binary 93 passed, 15 ignored in total; initial close/runtime
+2/2 (the combined close/capture suite is now 4/4); `p3a_default_open` 6 passed/1 ignored. Fixed a length-before-indexing
+bug in the pane-status decoder and tested every truncated prefix. The
+prototype still blocks its owner tick for up to approximately two seconds
+during a close and does not durably restore live sessions after a crash.
+This slice does not complete the wider Phase 3 gates.
+
+Next history defaults selected by the user: store under the private per-user
+Panelink application directory (`history/`); retain at most the engine's 1,024
+normal scrollback rows and 8 MiB per session on disk, plus latest committed
+normal and alternate screen checkpoints; target at most five seconds between
+captures of changed screens and capture on detach/stop; retain 30 days after
+session end, with per-session clear. Saved history is read-only, never replayed,
+and distinct from provider conversations. These are prototype defaults; the
+VT100 epoch/reset export, provenance review, scrollback persistence and recovery
+UI remain unimplemented.
+
+Live visible-screen checkpoint capture is now integrated with the two-pane
+server and checked together with pane-close lifecycle behavior. The store can
+reopen committed checkpoints after server shutdown, and capture failures keep
+shells running. Alternate screens that enter and leave between PTY read chunks
+can be missed; saved scrollback, retention, per-session deletion and recovery
+UI remain unimplemented. See [P5-LIVE-CAPTURE.md](docs/progress/P5-LIVE-CAPTURE.md).
 
 ## Phase 4 — early OpenCode identity gate (not started)
 

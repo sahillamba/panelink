@@ -89,6 +89,30 @@ pub trait EffectSink {
     fn screen_revision(&self) -> Option<u64> {
         None
     }
+
+    /// Explicitly stop the managed child within bounded windows.
+    ///
+    /// Implementations send HUP to the child process group, wait a bounded
+    /// window, escalate to KILL, wait another bounded window, and report what
+    /// was observed. This never sends caller input and never respawns. The
+    /// default for sinks without process control reports `Exited` only when
+    /// the child has already exited, and otherwise `Unknown`.
+    fn stop(&mut self) -> crate::close_protocol::StopOutcome {
+        if self.child_exited() {
+            crate::close_protocol::StopOutcome::Exited
+        } else {
+            crate::close_protocol::StopOutcome::Unknown
+        }
+    }
+
+    /// Apply one absolute PTY size, used when a layout change happens without
+    /// a caller-supplied resize port (for example automatic pane collapse).
+    ///
+    /// The default reports `Failed` (unsupported); the caller then records the
+    /// size as resize-pending rather than assuming it was applied.
+    fn apply_size(&mut self, _rows: u16, _columns: u16) -> Result<(), Outcome> {
+        Err(Outcome::Failed)
+    }
 }
 
 /// Opaque connection capability created only by [`StateOwner::connect`].

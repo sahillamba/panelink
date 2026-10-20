@@ -39,6 +39,9 @@ pub(crate) const DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const OP_DEADLINE: Duration = Duration::from_millis(400);
 /// Longer deadline for the split request (the server spawns a child).
 pub(crate) const SPLIT_DEADLINE: Duration = Duration::from_secs(2);
+/// Deadline for an explicit close: the server's bounded stop may take a 1 s
+/// HUP window plus a 1 s KILL window before it replies.
+pub(crate) const CLOSE_DEADLINE: Duration = Duration::from_secs(4);
 /// Bound for each detach-time exchange (release, settle, receipt).
 pub(crate) const DETACH_DEADLINE: Duration = Duration::from_millis(500);
 /// Server lease lifetime (`protocol::LEASE_TTL_SECS`); only a resume Hello

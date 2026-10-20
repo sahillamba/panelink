@@ -220,6 +220,17 @@ Mouse hit testing distinguishes sidebar, tab strip, pane border, pane content, m
 
 Right-click opens an original context menu with only applicable operations. Confirmed split actions are Split Left, Split Right, Split Up and Split Down, relative to the clicked pane. The proposed detailed contract is in [PANE-LAYOUT.md](PANE-LAYOUT.md), prepared independently of the unresolved workspace/tab hierarchy. Other initial menu proposals are new shell, start OpenCode, rename, zoom/unzoom, move, copy, paste and close. Closing a live process must use explicit stop semantics and a confirmation appropriate to that action; ordinary detach needs no stop confirmation under the recommended lifetime policy.
 
+Prototype lifecycle decision (2026-10-20): an authenticated same-UID client may
+stop an individual pane without a separate stop grant. This does not confer
+launch or input authority. The interactive menu and Ctrl-B then `x` prompt for
+confirmation; `panelink close N` is an explicit command. Stop sends HUP to the
+pane's process group, waits one second, then sends KILL if still alive and
+waits one more second. Exit, escalation, and uncertainty have separate results.
+If one pane's shell exits, its live sibling expands to fill the layout and a
+later split receives a fresh session identity. The last shell's exit ends the
+workspace. This is a scoped two-pane behavior, not a decision about the
+broader workspace/agent authorization policy.
+
 Selection starts in one pane, stays within its content, supports wrapped lines and Unicode cell widths, and copies after mouse release. Preserve selection across ordinary output where possible; resize or buffer changes must have defined behavior. Recommend a snapshot of selected text at copy time with stable history coordinates, clearing selection on resize or screen-buffer switch in the first release. Keyboard copy mode must work while output continues.
 
 Copy/paste should use macOS clipboard commands from the local attached client without interpolating text into shell code. Clipboard errors are visible and do not exit the session. Forward paste with the active pane's bracketed-paste semantics. Do not blindly forward host input escape sequences to a pane with different terminal modes.
@@ -269,6 +280,19 @@ Keep approvals and model/account choices inside OpenCode. Resume must target a s
 ## Proposed storage and recovery contract
 
 All Panelink metadata and retained terminal history stay on the local Mac. Recommended baseline: a per-user application data directory with restrictive permissions, versioned JSON metadata, and separate bounded history segments. Exact location, line/byte/age limits, and rotation policy remain engineering decisions to document.
+
+Prototype history defaults chosen 2026-10-20: `history/` under the private
+per-user Panelink application directory; at most 1,024 retained normal
+scrollback rows and 8 MiB on disk per managed session, plus one latest normal
+and one latest alternate screen checkpoint. Target capture of changed screens
+at least every five seconds while running, plus detach and orderly stop;
+retain for 30 days after session end and offer a per-session clear operation.
+Only private visible-screen checkpoint capture is now implemented in the
+two-pane server, as recorded in
+[P5-LIVE-CAPTURE.md](progress/P5-LIVE-CAPTURE.md). These defaults are not a
+claim that the engine exports scrollback or that the full retention/recovery
+contract works. The vendored engine epoch/reset contract, full memory and
+provenance review, scrollback storage, recovery and deletion remain gates.
 
 ### Meaning of saved history
 

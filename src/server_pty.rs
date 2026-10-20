@@ -4,15 +4,33 @@
 //! terminal, socket, client attachment, scheduler, durable launch record, or
 //! process-recovery mechanism.
 
+use crate::close_protocol::StopOutcome;
+use crate::control_protocol::TargetRef;
 use crate::control_protocol::{
     Command, ReadSource, MAX_INPUT_TEXT_BYTES, MAX_READ_BYTES, MAX_READ_LINES,
 };
+use crate::history_store::HistoryStore;
 use crate::protocol::Outcome;
 use crate::response_protocol::RejectionCode;
+use crate::screen_checkpoint::{self, CheckpointMetadata, ScreenBuffer};
 use crate::server::{EffectSink, ReadResult};
 use crate::terminal::{Key, PumpOutcome, ScreenSnapshot, TerminalSession, TerminalSize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+const CAPTURE_INTERVAL: Duration = Duration::from_secs(5);
+
+struct Capture {
+    store: Arc<HistoryStore>,
+    failure: Arc<AtomicBool>,
+    target: TargetRef,
+    last_revision: Option<u64>,
+    last_buffer: Option<ScreenBuffer>,
+    last_attempt: Option<Instant>,
+    failed: bool,
+}
 
 /// Maximum display text returned by a schema-1 read after its 90-byte response
 /// metadata prefix is accounted for.
@@ -29,9 +47,12 @@ const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(2);
 pub struct PtyEffects {
     session: TerminalSession,
     revision: u64,
+    output_sequence: u64,
     last_pty_eof: bool,
     last_child_exited: bool,
     failed: bool,
+    stopped: bool,
+    capture: Option<Capture>,
 }
 
 impl std::fmt::Debug for PtyEffects {
@@ -41,6 +62,7 @@ impl std::fmt::Debug for PtyEffects {
             .field("pty_eof", &self.last_pty_eof)
             .field("child_exited", &self.last_child_exited)
             .field("failed", &self.failed)
+            .field("stopped", &self.stopped)
             .finish()
     }
 }
@@ -53,9 +75,12 @@ impl PtyEffects {
         Self {
             session,
             revision: 1,
+            output_sequence: 0,
             last_pty_eof,
             last_child_exited,
             failed: false,
+            stopped: false,
+            capture: None,
         }
     }
 
@@ -64,11 +89,108 @@ impl PtyEffects {
         self.revision
     }
 
+    /// Install a server-owned checkpoint writer for this exact session.
+    /// Failure to save a screen never interrupts the PTY or input.
+    pub fn enable_capture(
+        &mut self,
+        store: Arc<HistoryStore>,
+        failure: Arc<AtomicBool>,
+        target: TargetRef,
+    ) {
+        self.capture = Some(Capture {
+            store,
+            failure,
+            target,
+            last_revision: None,
+            last_buffer: None,
+            last_attempt: None,
+            failed: false,
+        });
+        self.capture_screen(true);
+    }
+
+    /// Whether a checkpoint write has failed since capture was installed.
+    pub fn capture_failed(&self) -> bool {
+        self.capture.as_ref().is_some_and(|capture| capture.failed)
+    }
+
+    /// Save the latest visible screen on detach or orderly server shutdown.
+    pub fn capture_now(&mut self) {
+        self.capture_screen(true);
+    }
+
+    fn capture_screen(&mut self, force: bool) {
+        let Some(capture) = self.capture.as_mut() else {
+            return;
+        };
+        let buffer = if self.session.snapshot().alternate_screen() {
+            ScreenBuffer::Alternate
+        } else {
+            ScreenBuffer::Normal
+        };
+        if capture.last_revision == Some(self.revision)
+            && capture.last_buffer == Some(buffer)
+            && !capture.failed
+        {
+            return;
+        }
+        // Throttle failed writes too: otherwise a damaged destination or
+        // removed directory would trigger an encode/fsync on every owner tick.
+        if !force
+            && capture.last_buffer == Some(buffer)
+            && capture
+                .last_attempt
+                .is_some_and(|at| at.elapsed() < CAPTURE_INTERVAL)
+        {
+            return;
+        }
+        capture.last_attempt = Some(Instant::now());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|time| u64::try_from(time.as_millis()).ok());
+        let result = (|| {
+            let metadata = CheckpointMetadata::new(
+                capture.target,
+                self.output_sequence,
+                now.ok_or(())?,
+                self.revision,
+            )
+            .map_err(|_| ())?;
+            let screen = self.session.snapshot();
+            let bytes = screen_checkpoint::encode(screen, &metadata).map_err(|_| ())?;
+            capture
+                .store
+                .save(capture.target, buffer, &bytes)
+                .map_err(|_| ())
+        })();
+        if result.is_ok() {
+            capture.last_revision = Some(self.revision);
+            capture.last_buffer = Some(buffer);
+            capture.failed = false;
+        } else {
+            capture.failed = true;
+            capture.failure.store(true, Ordering::Relaxed);
+        }
+    }
+
     fn is_live(&self) -> bool {
-        !self.failed && !self.last_pty_eof && !self.last_child_exited
+        !self.failed && !self.stopped && !self.last_pty_eof && !self.last_child_exited
     }
 
     fn observe_progress(&mut self, progress: PumpOutcome) -> bool {
+        if progress.bytes_read != 0 {
+            match self.output_sequence.checked_add(progress.bytes_read as u64) {
+                Some(next) => self.output_sequence = next,
+                None => {
+                    // Terminal IO continues even when capture ordering is exhausted.
+                    if let Some(capture) = &self.capture {
+                        capture.failure.store(true, Ordering::Relaxed);
+                    }
+                    self.capture = None;
+                }
+            }
+        }
         let lifecycle_changed = progress.pty_eof != self.last_pty_eof
             || progress.child_exited != self.last_child_exited;
         self.last_pty_eof = progress.pty_eof;
@@ -266,9 +388,14 @@ impl EffectSink for PtyEffects {
         if self.failed {
             return Err(Outcome::Unknown);
         }
+        if self.stopped {
+            // The PTY was closed by an explicit stop; nothing remains to pump.
+            return Ok(());
+        }
         match self.session.pump() {
             Ok(progress) => {
                 if self.observe_progress(progress) {
+                    self.capture_screen(progress.child_exited || progress.pty_eof);
                     Ok(())
                 } else {
                     Err(Outcome::Unknown)
@@ -285,6 +412,35 @@ impl EffectSink for PtyEffects {
         // A terminal-adapter failure does not prove that its child has exited.
         self.session.exit_status().is_some()
     }
+
+    fn apply_size(&mut self, rows: u16, columns: u16) -> Result<(), Outcome> {
+        self.resize(rows, columns)
+    }
+
+    /// Explicitly stop this child: HUP, bounded wait, KILL, bounded wait.
+    ///
+    /// Uses the core's cached cleanup, so it is idempotent and keeps the
+    /// restore-first ordering of [`TerminalSession::shutdown`]. Pending input
+    /// is discarded first and is never replayed. After this call the PTY is
+    /// closed; later reads report `Unknown` and input is rejected.
+    fn stop(&mut self) -> StopOutcome {
+        self.capture_screen(true);
+        self.session.discard_pending_input();
+        let already_exited = self.session.exit_status().is_some();
+        let result = self.session.shutdown();
+        // The PTY is closed: no further pump, input or resize. The retained
+        // snapshot stays readable.
+        self.stopped = true;
+        self.last_child_exited = self.session.exit_status().is_some();
+        if result.is_err() || self.session.exit_status().is_none() {
+            return StopOutcome::Unknown;
+        }
+        if !already_exited && self.session.kill_escalated() {
+            StopOutcome::Escalated
+        } else {
+            StopOutcome::Exited
+        }
+    }
 }
 
 impl PtyEffects {
@@ -298,6 +454,9 @@ impl PtyEffects {
     pub fn resize(&mut self, rows: u16, columns: u16) -> Result<(), Outcome> {
         if self.failed {
             return Err(Outcome::Unknown);
+        }
+        if self.stopped {
+            return Err(Outcome::Failed);
         }
         let size = TerminalSize::new(rows, columns).map_err(|_| Outcome::Failed)?;
         if self.session.size() == size {
@@ -323,6 +482,7 @@ impl PtyEffects {
         match self.revision.checked_add(1) {
             Some(next) => {
                 self.revision = next;
+                self.capture_screen(false);
                 Ok(())
             }
             None => {

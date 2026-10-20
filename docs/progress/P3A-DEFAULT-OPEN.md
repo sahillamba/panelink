@@ -137,6 +137,10 @@ What changed in `src/ui_client/state.rs`:
     move several times.
   - `x` or Ctrl-X detaches; Esc or any other key leaves NAV mode.
   - NAV mode ends by itself after 4 s without a key.
+
+Phase 3B supersedes the historical `x` detach binding above: `x` now prompts
+to close the focused pane; only `y` confirms. Ctrl-X still detaches from NAV
+mode and from the ordinary client. See [P3B-CLOSE-CLIENT.md](P3B-CLOSE-CLIENT.md).
 - No key pressed in NAV mode reaches a shell.
 
 Two related client fixes:

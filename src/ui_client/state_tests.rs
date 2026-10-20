@@ -1,5 +1,6 @@
 use super::*;
 use crossterm_input::Decoder;
+use panelink::protocol::OperationKey;
 use panelink::screen_checkpoint::{decode, encode, CheckpointMetadata};
 use panelink::ui_protocol::UiPane;
 
@@ -66,6 +67,8 @@ struct Fake {
     pastes: Vec<TargetRef>,
     splits: Vec<SplitPlan>,
     split_reply: Option<Result<TargetRef, &'static str>>,
+    closes: Vec<ClosePlan>,
+    close_reply: Option<Result<CloseOutcome, &'static str>>,
 }
 
 impl Effects for Fake {
@@ -80,6 +83,23 @@ impl Effects for Fake {
     fn split(&mut self, plan: SplitPlan) -> Result<TargetRef, &'static str> {
         self.splits.push(plan);
         self.split_reply.unwrap_or(Ok(target(2)))
+    }
+    fn close(&mut self, plan: ClosePlan) -> Result<CloseResult, &'static str> {
+        self.closes.push(plan);
+        let outcome = self
+            .close_reply
+            .unwrap_or(Ok(CloseOutcome::Stopped(StopOutcome::Exited)))?;
+        Ok(CloseResult {
+            key: OperationKey {
+                generation: 7,
+                lease: 1,
+                sequence: self.closes.len() as u64,
+            },
+            outcome,
+            target: Some(plan.target),
+            layout_revision: plan.expected_layout_revision + 1,
+            survivor_resize_pending: false,
+        })
     }
 }
 
@@ -402,9 +422,320 @@ fn navigation_mode_moves_focus_between_panes_and_stays_active() {
 }
 
 #[test]
-fn navigation_mode_x_detaches() {
+fn navigation_mode_ctrl_x_still_detaches() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     app.set_layout(one_pane(1));
-    assert_eq!(feed(&mut app, &mut fake, b"\x02x"), Flow::Quit);
+    assert_eq!(feed(&mut app, &mut fake, b"\x02\x18"), Flow::Quit);
+    assert!(fake.closes.is_empty());
+}
+
+/// Two panes, pane 2 focused, with pending typed keys flushed first.
+fn two_focused_on_second() -> (App, Fake) {
+    let mut app = App::new(24, 81).unwrap();
+    let fake = Fake::default();
+    app.set_layout(two_panes());
+    app.focus_target(target(2));
+    (app, fake)
+}
+
+fn status(app: &App) -> Option<&'static str> {
+    app.status.map(|s| s.0)
+}
+
+#[test]
+fn ctrl_b_x_asks_for_confirmation_and_y_closes_the_focused_pane() {
+    let (mut app, mut fake) = two_focused_on_second();
+    assert_eq!(feed(&mut app, &mut fake, b"\x02x"), Flow::Continue);
+    assert!(app.confirm_open());
+    assert!(!app.nav_active());
+    assert!(fake.closes.is_empty(), "nothing is sent before y");
+    let text = screen_text(&app);
+    assert!(text.contains("Close pane 2? (y/n)"), "{text}");
+
+    feed(&mut app, &mut fake, b"y");
+    assert!(!app.confirm_open());
+    assert_eq!(
+        fake.closes,
+        vec![ClosePlan {
+            target: target(2),
+            expected_layout_revision: 2,
+        }]
+    );
+    assert_eq!(status(&app), Some("pane closed"));
+    // Focus leaves the closed pane at once; typing goes to the survivor.
+    assert_eq!(app.focus(), Some(target(1)));
+    feed(&mut app, &mut fake, b"k");
+    app.flush(Instant::now(), &mut fake);
+    assert_eq!(fake.keys, vec![(target(1), vec![Key::Char('k')])]);
+}
+
+#[test]
+fn confirmation_keys_and_cancel_keys_never_reach_the_child() {
+    for (cancel, label) in [
+        (&b"n"[..], "n"),
+        (b"N", "N"),
+        (b"\x1b", "Esc"),
+        (b"q", "other key"),
+        (b"\r", "Enter"),
+        (b"\x03", "Ctrl-C"),
+        (b"\x1b[200~y\x1b[201~", "paste"),
+        (b"\x1b[<0;5;5M", "left click"),
+        (b"\x1b[<2;5;5M", "right click"),
+    ] {
+        let (mut app, mut fake) = two_focused_on_second();
+        feed(&mut app, &mut fake, b"ab\x02x");
+        assert!(app.confirm_open(), "{label}");
+        feed(&mut app, &mut fake, cancel);
+        assert!(!app.confirm_open(), "{label}");
+        assert!(!app.menu_open(), "{label}: the click did not open the menu");
+        assert!(fake.closes.is_empty(), "{label}");
+        assert_eq!(status(&app), Some("close cancelled"), "{label}");
+        assert_eq!(app.focus(), Some(target(2)), "{label}");
+        app.flush(Instant::now(), &mut fake);
+        // Only the keys typed before Ctrl-B reached the pane.
+        assert_eq!(
+            fake.keys,
+            vec![(target(2), vec![Key::Char('a'), Key::Char('b')])],
+            "{label}"
+        );
+        assert!(fake.pastes.is_empty(), "{label}");
+    }
+}
+
+#[test]
+fn releases_do_not_cancel_the_prompt() {
+    let (mut app, mut fake) = two_focused_on_second();
+    feed(&mut app, &mut fake, b"\x02x\x1b[<2;5;5m\x1b[<0;5;5m");
+    assert!(app.confirm_open());
+    feed(&mut app, &mut fake, b"Y");
+    assert_eq!(fake.closes.len(), 1);
+}
+
+#[test]
+fn menu_close_item_uses_captured_target_and_server_revision_after_confirmation() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(two_panes());
+    // Right-click pane 2 while pane 1 has focus.
+    feed(&mut app, &mut fake, b"\x1b[<2;50;5M\x1b[<2;50;5m");
+    assert!(app.menu_open());
+    let text = render_text(&app);
+    assert!(text.contains("Close pane"), "{text}");
+    // No letter shortcut reaches the close row: x is consumed.
+    feed(&mut app, &mut fake, b"x");
+    assert!(app.menu_open() && !app.confirm_open());
+    // Up from the first (disabled) item wraps to "Close pane".
+    feed(&mut app, &mut fake, b"\x1b[A\r");
+    assert!(!app.menu_open());
+    assert!(app.confirm_open());
+    assert!(fake.closes.is_empty());
+    // A newer layout revision arrives; the captured one (2) is still used.
+    let mut newer = two_panes();
+    newer.revision = 3;
+    app.set_layout(newer);
+    assert!(app.confirm_open());
+    feed(&mut app, &mut fake, b"y");
+    assert_eq!(
+        fake.closes,
+        vec![ClosePlan {
+            target: target(2),
+            expected_layout_revision: 2,
+        }]
+    );
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty());
+    assert_eq!(app.focus(), Some(target(1)));
+}
+
+#[test]
+fn menu_close_on_single_pane_warns_that_the_workspace_ends() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(4));
+    feed(&mut app, &mut fake, b"\x02s\x1b[F\r");
+    assert!(app.confirm_open());
+    let text = screen_text(&app);
+    assert!(text.contains("This is the last pane"), "{text}");
+    feed(&mut app, &mut fake, b"y");
+    assert_eq!(
+        fake.closes,
+        vec![ClosePlan {
+            target: target(1),
+            expected_layout_revision: 4,
+        }]
+    );
+    assert_eq!(status(&app), Some("last pane closed; workspace closing"));
+}
+
+#[test]
+fn close_results_map_to_fixed_status_messages_and_never_retry() {
+    for (reply, message, focus_moves) in [
+        (
+            Ok(CloseOutcome::Stopped(StopOutcome::Exited)),
+            "pane closed",
+            true,
+        ),
+        (
+            Ok(CloseOutcome::Stopped(StopOutcome::Escalated)),
+            "pane closed (forced)",
+            true,
+        ),
+        (
+            Ok(CloseOutcome::Stopped(StopOutcome::Unknown)),
+            "close status unknown; the pane may still be running",
+            false,
+        ),
+        (
+            Ok(CloseOutcome::Rejected(CloseRejection::StaleLayout)),
+            "close rejected: layout changed",
+            false,
+        ),
+        (
+            Ok(CloseOutcome::Rejected(CloseRejection::StaleTarget)),
+            "close rejected: pane changed",
+            false,
+        ),
+        (
+            Ok(CloseOutcome::Rejected(CloseRejection::AlreadyClosed)),
+            "pane already closed",
+            false,
+        ),
+        (Err("connection lost"), "connection lost", false),
+    ] {
+        let (mut app, mut fake) = two_focused_on_second();
+        fake.close_reply = Some(reply);
+        feed(&mut app, &mut fake, b"\x02xy");
+        assert_eq!(fake.closes.len(), 1, "{message}: exactly one request");
+        assert_eq!(status(&app), Some(message));
+        let expected = if focus_moves { target(1) } else { target(2) };
+        assert_eq!(app.focus(), Some(expected), "{message}");
+        // Nothing is resent later.
+        app.expire_status(Instant::now() + Duration::from_secs(10));
+        app.flush(Instant::now(), &mut fake);
+        assert_eq!(fake.closes.len(), 1, "{message}");
+        assert!(fake.keys.is_empty(), "{message}");
+    }
+}
+
+#[test]
+fn resize_pending_flag_is_reported() {
+    let result = CloseResult {
+        key: OperationKey {
+            generation: 7,
+            lease: 1,
+            sequence: 1,
+        },
+        outcome: CloseOutcome::Stopped(StopOutcome::Escalated),
+        target: Some(target(2)),
+        layout_revision: 3,
+        survivor_resize_pending: true,
+    };
+    assert_eq!(
+        close_message(&result, false),
+        "pane closed (forced; resize pending)"
+    );
+    let exited = CloseResult {
+        outcome: CloseOutcome::Stopped(StopOutcome::Exited),
+        ..result
+    };
+    assert_eq!(
+        close_message(&exited, false),
+        "pane closed (resize pending)"
+    );
+    assert_eq!(
+        close_message(&exited, true),
+        "last pane closed; workspace closing"
+    );
+}
+
+/// Pane 2 alone after pane 1 was removed (revision 3, full root).
+fn survivor_only() -> LayoutReply {
+    LayoutReply {
+        revision: 3,
+        rows: 24,
+        columns: 81,
+        panes: [
+            Some(UiPane {
+                target: target(2),
+                rect: rect(0, 0, 24, 81),
+                pending_confirmed: None,
+            }),
+            None,
+        ],
+        divider: None,
+    }
+}
+
+#[test]
+fn layout_shrink_repairs_focus_drops_stale_keys_and_frees_the_screen_cache() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(two_panes());
+    let left = blank_checkpoint(24, 40, 1);
+    app.load_screen(target(1), 5, &decode(&left).unwrap())
+        .unwrap();
+    // Keys typed into pane 1 are still batched when its shell exits.
+    feed(&mut app, &mut fake, b"zz");
+    app.set_layout(survivor_only());
+    assert_eq!(app.focus(), Some(target(2)));
+    assert_eq!(app.screen_revision(target(1)), None);
+    app.flush(Instant::now(), &mut fake);
+    assert!(fake.keys.is_empty(), "keys for a removed pane are dropped");
+    // Single full-root pane, no divider; nothing from the old split remains.
+    let text = render_text(&app);
+    assert!(!text.contains('|'), "{text}");
+    assert!(text.contains("connecting..."), "{text}");
+    // Typing goes to the survivor.
+    feed(&mut app, &mut fake, b"w");
+    app.flush(Instant::now(), &mut fake);
+    assert_eq!(fake.keys, vec![(target(2), vec![Key::Char('w')])]);
+}
+
+#[test]
+fn auto_collapse_cancels_a_prompt_for_the_removed_pane() {
+    let (mut app, mut fake) = two_focused_on_second();
+    app.focus_target(target(1));
+    feed(&mut app, &mut fake, b"\x02x");
+    assert!(app.confirm_open());
+    app.set_layout(survivor_only());
+    assert!(!app.confirm_open());
+    assert_eq!(status(&app), Some("pane already closed"));
+    feed(&mut app, &mut fake, b"y");
+    assert!(fake.closes.is_empty());
+    app.flush(Instant::now(), &mut fake);
+    assert_eq!(
+        fake.keys,
+        vec![(target(2), vec![Key::Char('y')])],
+        "after cancellation, typing is normal again"
+    );
+}
+
+#[test]
+fn split_works_again_after_a_close_shrinks_the_layout() {
+    let (mut app, mut fake) = two_focused_on_second();
+    feed(&mut app, &mut fake, b"\x02r");
+    assert!(fake.splits.is_empty(), "at capacity");
+    // Close pane 1; the server then reports the collapsed layout.
+    app.focus_target(target(1));
+    feed(&mut app, &mut fake, b"\x02xy");
+    assert_eq!(app.focus(), Some(target(2)));
+    app.set_layout(survivor_only());
+    fake.split_reply = Some(Ok(target(3)));
+    feed(&mut app, &mut fake, b"\x02d");
+    assert_eq!(
+        fake.splits,
+        vec![SplitPlan {
+            target: target(2),
+            expected_layout_revision: 3,
+            direction: SplitDirection::Down,
+            rows: 12,
+            columns: 81,
+        }]
+    );
+    assert_eq!(app.focus(), Some(target(3)));
+    // The menu also offers splits again on the survivor.
+    feed(&mut app, &mut fake, b"\x1b[<2;5;5M");
+    let text = render_text(&app);
+    assert!(text.contains("Split Right"), "{text}");
+    assert!(!text.contains("Pane limit"), "{text}");
 }

@@ -31,8 +31,11 @@ reattach to it.
 | Navigation mode | Press **Control**-B (the Control key, not Command). A `NAV` bar appears at the bottom |
 | ...then split | `r` right, `l` left, `u` up, `d` down (also `%` and `"`), or `s` for the menu |
 | ...then switch pane | Arrow keys, Tab or `o` (stays in NAV mode so you can keep moving) |
-| ...then leave NAV mode | Esc (or wait 4 seconds); `x` detaches |
+| ...then close focused pane | `x`, then `y` to confirm; the last pane ends the workspace |
+| ...then leave NAV mode | Esc (or wait 4 seconds); Ctrl-X detaches |
 | Focus a pane | Click it |
+| Close pane from the menu | Right-click the pane, choose Close pane, then press `y` to confirm |
+| List/close panes from a shell | `panelink panes`; `panelink close 1` (or `2`) |
 | Detach (shells keep running) | Ctrl-X |
 | Reattach | `panelink` |
 | Close the workspace | `exit` in every shell, or `panelink stop` |
@@ -44,6 +47,14 @@ provider (OpenCode) session recovery.
 Workspace state lives in `~/Library/Application Support/Panelink` (private,
 mode 0700). Set `PANELINK_HOME` to use a different directory. The background
 server's output goes to `server.log` there.
+
+The server now saves its latest sanitized visible normal and alternate screen
+checkpoints per pane in the private `server/history/` directory (under
+`PANELINK_HOME`, if set). They are read-only recovery data, not live-process
+state or a complete transcript. An initial `serve` response reports whether
+capture started; a later write failure appears in `server.log` while shells
+continue running. Saved scrollback, history browsing, retention and recovery
+UI are still in progress.
 
 **Implementation roadmap:** [ROADMAP.md](ROADMAP.md) tracks phases and
 verification evidence. Selected components retain their
@@ -211,6 +222,11 @@ In Terminal B, using the same three paths:
 - A split launches one new `/bin/zsh`. It uses the attach client's own
   working directory and environment, minus `PANELINK_*`. The new pane gets
   focus.
+- The menu's Close pane action and Ctrl-B then `x` require `y` confirmation.
+  Closing sends HUP to that pane's process group, then KILL after a bounded
+  wait if needed. If its sibling remains, the sibling fills the workspace;
+  the last shell exiting ends the workspace. `panelink panes` lists the
+  default workspace and `panelink close N` closes its numbered pane.
 - Ctrl-X detaches. The shells keep running on the server, and you can run
   `attach` again to reconnect. Ctrl-C in Terminal A stops the server and its
   shells.

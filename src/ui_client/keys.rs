@@ -4,7 +4,7 @@
 use crossterm_input::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use panelink::split_menu::MenuInput;
+use panelink::split_menu::{ConfirmInput, MenuInput};
 use panelink::terminal::Key;
 
 /// What one key press means while the menu is closed.
@@ -93,6 +93,33 @@ pub(crate) fn menu_input(event: &Event) -> MenuInput {
             None => MenuInput::Other,
         },
         _ => MenuInput::Other,
+    }
+}
+
+/// Translate any host event into the close prompt's input vocabulary.
+///
+/// Only an unmodified (or shifted) `y` confirms. Every other key press,
+/// paste and mouse press cancels; key releases, mouse releases/motion/wheel,
+/// focus and resize events are ignored so a stray release cannot cancel the
+/// prompt that a click just opened. Every result is consumed by the prompt.
+pub(crate) fn confirm_input(event: &Event) -> ConfirmInput {
+    match event {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+            match key.code {
+                KeyCode::Char('y' | 'Y') if plain && key.kind == KeyEventKind::Press => {
+                    ConfirmInput::Yes
+                }
+                _ => ConfirmInput::Cancel,
+            }
+        }
+        Event::Key(_) => ConfirmInput::Ignore,
+        Event::Paste(_) => ConfirmInput::Cancel,
+        Event::Mouse(mouse) => match mouse_button(mouse) {
+            Some((true, _)) => ConfirmInput::Cancel,
+            _ => ConfirmInput::Ignore,
+        },
+        Event::FocusGained | Event::FocusLost | Event::Resize(_, _) => ConfirmInput::Ignore,
     }
 }
 
@@ -188,6 +215,42 @@ mod tests {
         assert_eq!(
             menu_input(&decode(b"\x1b[200~x\x1b[201~")),
             MenuInput::Other
+        );
+    }
+
+    #[test]
+    fn only_y_confirms_and_other_presses_cancel() {
+        assert_eq!(confirm_input(&decode(b"y")), ConfirmInput::Yes);
+        assert_eq!(confirm_input(&decode(b"Y")), ConfirmInput::Yes);
+        for bytes in [
+            &b"n"[..],
+            b"N",
+            b"\x1b",
+            b"\r",
+            b"x",
+            b" ",
+            b"\x19", // Ctrl-Y
+            b"\x03",
+            b"\x02",
+            b"\x1b[A",
+            b"\x1b[200~y\x1b[201~",
+            b"\x1b[<0;5;5M",
+            b"\x1b[<2;5;5M",
+        ] {
+            assert_eq!(
+                confirm_input(&decode(bytes)),
+                ConfirmInput::Cancel,
+                "{bytes:?}"
+            );
+        }
+        // Releases and wheel events do not cancel.
+        assert_eq!(
+            confirm_input(&decode(b"\x1b[<2;5;5m")),
+            ConfirmInput::Ignore
+        );
+        assert_eq!(
+            confirm_input(&decode(b"\x1b[<64;1;1M")),
+            ConfirmInput::Ignore
         );
     }
 }

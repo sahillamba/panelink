@@ -635,6 +635,197 @@ fn stop_inner() -> Result<bool, OpenError> {
     Ok(true)
 }
 
+/// Private context file reused by `panelink panes` and `panelink close`.
+///
+/// It lives in the private state root (not `contexts/`, which belongs to the
+/// attach client), so both commands resume one lease instead of issuing a new
+/// one per run.
+const CLI_CONTEXT_NAME: &str = "cli.ctx";
+
+const NO_WORKSPACE: &str = "no workspace is running";
+
+/// The default workspace's state root when its server is running; located
+/// exactly as `panelink stop` does, and never starts a server.
+fn running_workspace() -> Result<Option<StateRoot>, OpenError> {
+    let state = prepare()?;
+    if !server_lock_held(&state.server)
+        || endpoint_state(&state.socket_path()) != EndpointState::Socket
+    {
+        return Ok(None);
+    }
+    Ok(Some(state))
+}
+
+fn workspace_link(state: &StateRoot) -> Result<crate::p3_cli::WorkspaceLink, &'static str> {
+    let link =
+        crate::p3_cli::WorkspaceLink::open(&state.server, &state.root.join(CLI_CONTEXT_NAME))?;
+    if link.discarded_uncertain {
+        eprintln!("panelink: note: an earlier close from a previous workspace was never confirmed");
+    }
+    Ok(link)
+}
+
+/// Human-readable one-line description of one pane.
+pub(crate) fn pane_line(index: usize, pane: &panelink::multi_runtime::PaneEntry) -> String {
+    let target = pane.target;
+    format!(
+        "  {index}  {:<7} {}x{} at col {}, row {}  (target {}:{}:{}:{}:{})",
+        if pane.live { "running" } else { "exited" },
+        pane.rect.rows,
+        pane.rect.columns,
+        pane.rect.x,
+        pane.rect.y,
+        target.generation,
+        target.workspace,
+        target.pane,
+        target.session,
+        target.occupant_revision
+    )
+}
+
+/// `panelink panes`: list the default workspace's panes in layout order.
+pub(crate) fn panes() -> i32 {
+    let state = match running_workspace() {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            eprintln!("panelink: {NO_WORKSPACE}");
+            return 1;
+        }
+        Err(error) => {
+            eprintln!("panelink: {}", error.message());
+            return 1;
+        }
+    };
+    let reply = match workspace_link(&state).and_then(|mut link| link.panes()) {
+        Ok(reply) => reply,
+        Err(_) => {
+            eprintln!("panelink: could not read the workspace panes");
+            return 1;
+        }
+    };
+    let count = reply.panes.iter().flatten().count();
+    println!(
+        "{count} pane{} (layout revision {}, {}x{}):",
+        if count == 1 { "" } else { "s" },
+        reply.layout_revision,
+        reply.rows,
+        reply.columns
+    );
+    for (index, pane) in reply.panes.iter().flatten().enumerate() {
+        println!("{}", pane_line(index + 1, pane));
+    }
+    0
+}
+
+/// Parse a 1-based pane index argument; `None` is a usage error.
+pub(crate) fn parse_pane_index(value: &std::ffi::OsStr) -> Option<usize> {
+    let text = value.to_str()?;
+    if text.is_empty() || text.len() > 4 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<usize>().ok().filter(|index| *index != 0)
+}
+
+/// User-facing result of one `panelink close` (message, exit code).
+pub(crate) fn close_message(
+    index: usize,
+    last_pane: bool,
+    result: Result<panelink::close_protocol::CloseResult, crate::p3_cli::CloseFailure>,
+) -> (String, i32) {
+    use crate::p3_cli::CloseFailure;
+    use panelink::close_protocol::{CloseOutcome, CloseRejection, StopOutcome};
+    let result = match result {
+        Ok(result) => result,
+        Err(CloseFailure::Refused) => {
+            return (
+                "close refused by the server; nothing was stopped".to_owned(),
+                1,
+            )
+        }
+        Err(CloseFailure::Unknown) => {
+            return (
+                format!("close status unknown; pane {index} may still be running"),
+                1,
+            )
+        }
+        Err(CloseFailure::NotSent(_)) => {
+            return ("close not sent; nothing was stopped".to_owned(), 1)
+        }
+    };
+    let how = match result.outcome {
+        CloseOutcome::Stopped(StopOutcome::Exited) => "exited",
+        CloseOutcome::Stopped(StopOutcome::Escalated) => "escalated: SIGKILL",
+        CloseOutcome::Stopped(StopOutcome::Unknown) => {
+            return (
+                format!("close status unknown; pane {index} may still be running"),
+                1,
+            )
+        }
+        CloseOutcome::Rejected(reason) => {
+            let why = match reason {
+                CloseRejection::StaleLayout => "the layout changed",
+                CloseRejection::StaleTarget => "the pane changed",
+                CloseRejection::AlreadyClosed => "the pane is already closed",
+                CloseRejection::NoLayout => "the workspace has no panes",
+                CloseRejection::NotAdmitted => "the server did not admit it",
+            };
+            return (
+                format!("close rejected: {why}; run 'panelink panes' and retry"),
+                1,
+            );
+        }
+    };
+    let mut message = format!("closed pane {index} ({how})");
+    if last_pane {
+        message.push_str("; the workspace has ended");
+    } else if result.survivor_resize_pending {
+        message.push_str("; the remaining pane's resize is pending");
+    }
+    (message, 0)
+}
+
+/// `panelink close INDEX`: explicitly stop one pane of the default workspace.
+pub(crate) fn close(index: usize) -> i32 {
+    let state = match running_workspace() {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            eprintln!("panelink: {NO_WORKSPACE}");
+            return 1;
+        }
+        Err(error) => {
+            eprintln!("panelink: {}", error.message());
+            return 1;
+        }
+    };
+    let mut link = match workspace_link(&state) {
+        Ok(link) => link,
+        Err(_) => {
+            eprintln!("panelink: could not connect to the workspace");
+            return 1;
+        }
+    };
+    let reply = match link.panes() {
+        Ok(reply) => reply,
+        Err(_) => {
+            eprintln!("panelink: could not read the workspace panes");
+            return 1;
+        }
+    };
+    let count = reply.panes.iter().flatten().count();
+    let Some(pane) = reply.panes.iter().flatten().nth(index - 1) else {
+        eprintln!("panelink: no pane {index}; run 'panelink panes'");
+        return 1;
+    };
+    let result = link.close(&state.server, pane.target, reply.layout_revision);
+    let (message, code) = close_message(index, count == 1, result);
+    if code == 0 {
+        println!("panelink: {message}");
+    } else {
+        eprintln!("panelink: {message}");
+    }
+    code
+}
+
 /// Whether storage at `server_dir` can be opened (diagnostic helper for tests).
 #[cfg(test)]
 fn storage_openable(server_dir: &Path) -> bool {
@@ -842,6 +1033,91 @@ mod tests {
         drop(held);
         assert!(lifecycle_lock(&state, Duration::from_millis(100)).is_ok());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pane_index_accepts_only_small_positive_decimals() {
+        for (text, expected) in [("1", Some(1)), ("2", Some(2)), ("0042", Some(42))] {
+            assert_eq!(parse_pane_index(std::ffi::OsStr::new(text)), expected);
+        }
+        for text in ["", "0", "-1", "+1", "1.0", "x", "12345", " 1"] {
+            assert_eq!(
+                parse_pane_index(std::ffi::OsStr::new(text)),
+                None,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn close_messages_and_exit_codes_cover_every_outcome() {
+        use crate::p3_cli::CloseFailure;
+        use panelink::close_protocol::{CloseOutcome, CloseRejection, CloseResult, StopOutcome};
+        use panelink::control_protocol::TargetRef;
+        use panelink::protocol::OperationKey;
+        let result = |outcome, pending| {
+            Ok(CloseResult {
+                key: OperationKey {
+                    generation: 1,
+                    lease: 2,
+                    sequence: 3,
+                },
+                outcome,
+                target: Some(TargetRef {
+                    generation: 1,
+                    workspace: 1,
+                    pane: 2,
+                    session: 2,
+                    occupant_revision: 1,
+                }),
+                layout_revision: 4,
+                survivor_resize_pending: pending,
+            })
+        };
+        let exited = CloseOutcome::Stopped(StopOutcome::Exited);
+        let escalated = CloseOutcome::Stopped(StopOutcome::Escalated);
+        assert_eq!(
+            close_message(2, false, result(exited, false)),
+            ("closed pane 2 (exited)".to_owned(), 0)
+        );
+        assert_eq!(
+            close_message(2, false, result(escalated, false)),
+            ("closed pane 2 (escalated: SIGKILL)".to_owned(), 0)
+        );
+        assert_eq!(
+            close_message(1, true, result(exited, false)),
+            (
+                "closed pane 1 (exited); the workspace has ended".to_owned(),
+                0
+            )
+        );
+        assert_eq!(close_message(1, false, result(exited, true)).1, 0);
+        let (message, code) = close_message(
+            2,
+            false,
+            result(CloseOutcome::Stopped(StopOutcome::Unknown), false),
+        );
+        assert!(message.starts_with("close status unknown"), "{message}");
+        assert_eq!(code, 1);
+        let (message, code) = close_message(
+            2,
+            false,
+            result(CloseOutcome::Rejected(CloseRejection::StaleLayout), false),
+        );
+        assert!(message.starts_with("close rejected"), "{message}");
+        assert_eq!(code, 1);
+        for failure in [
+            CloseFailure::Refused,
+            CloseFailure::Unknown,
+            CloseFailure::NotSent("transport_failed"),
+        ] {
+            let (message, code) = close_message(2, false, Err(failure));
+            assert_eq!(code, 1);
+            assert!(!message.contains("transport_failed"), "{message}");
+        }
+        assert!(close_message(2, false, Err(CloseFailure::Unknown))
+            .0
+            .starts_with("close status unknown"));
     }
 
     #[test]

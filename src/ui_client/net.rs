@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use panelink::close_protocol::{
+    decode_close_result, encode_close_request, CloseOutcome, CloseRequest, CloseResult, StopOutcome,
+};
 use panelink::control_protocol::TargetRef;
 use panelink::launch::{Environment, LaunchContext};
 use panelink::managed_launch_protocol::LaunchRequest;
@@ -19,9 +22,10 @@ use panelink::ui_protocol::{
 
 use super::conn::{
     connect, context_path, ensure_context_dir, handshake, parse_context_name, Bootstrap,
-    InputResult, LeaseAction, PaneConn, Reply, ResumeError, DEADLINE, OP_DEADLINE, SPLIT_DEADLINE,
+    InputResult, LeaseAction, PaneConn, Reply, ResumeError, CLOSE_DEADLINE, DEADLINE, OP_DEADLINE,
+    SPLIT_DEADLINE,
 };
-use super::state::{App, Effects, SplitPlan};
+use super::state::{App, ClosePlan, Effects, SplitPlan};
 
 const LAYOUT_INTERVAL: Duration = Duration::from_millis(250);
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
@@ -440,6 +444,45 @@ impl Net {
     }
 }
 
+/// How one close reply frame was classified.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum CloseReply {
+    /// A valid schema-9 result for exactly this key (admitted; terminal).
+    Result(CloseResult),
+    /// A schema-1 response for this key (for example a pre-admission
+    /// rejection): terminal, never admitted.
+    Refused,
+    /// Anything else; the key stays unacknowledged.
+    Invalid,
+}
+
+/// Classify a response payload for close `key`.
+pub(crate) fn classify_close_reply(key: OperationKey, bytes: &[u8]) -> CloseReply {
+    match decode_close_result(bytes) {
+        Ok(result) if result.key == key => CloseReply::Result(result),
+        Ok(_) => CloseReply::Invalid,
+        Err(_) if decode_response_payload(bytes).is_ok_and(|response| response.key == key) => {
+            CloseReply::Refused
+        }
+        Err(_) => CloseReply::Invalid,
+    }
+}
+
+/// Encode one schema-9 close request for exactly the captured plan.
+pub(crate) fn encode_close(key: OperationKey, plan: ClosePlan) -> Result<Vec<u8>, &'static str> {
+    let mut payload = Vec::new();
+    encode_close_request(
+        &CloseRequest {
+            key,
+            target: plan.target,
+            expected_layout_revision: plan.expected_layout_revision,
+        },
+        &mut payload,
+    )
+    .map_err(|_| "close request invalid")?;
+    Ok(payload)
+}
+
 fn fetch_screen(pane: &mut PaneConn, app: &mut App, target: TargetRef) -> Result<(), &'static str> {
     let query = encode_screen_query(target).map_err(|_| "request_invalid")?;
     let bytes = match pane.request(&query)? {
@@ -537,6 +580,57 @@ impl Effects for Net {
         self.panes.push(attached);
         self.next_layout = now;
         Ok(new_target)
+    }
+
+    fn close(&mut self, plan: ClosePlan) -> Result<CloseResult, &'static str> {
+        let index = self
+            .close_connection(plan.target)
+            .ok_or("close not sent: no connected pane")?;
+        let pane = &mut self.panes[index];
+        // The server's bounded stop may take about 2 s before it replies.
+        // One fresh key; a lost reply is settled by status, never resent.
+        pane.set_deadline(CLOSE_DEADLINE);
+        let result = pane.keyed(|key| encode_close(key, plan));
+        pane.set_deadline(OP_DEADLINE);
+        let (key, reply) = result?;
+        let bytes = match reply {
+            Reply::Response(bytes) => bytes,
+            Reply::Error(label) => return Err(label),
+            Reply::Snapshot(_) => return Err("close reply invalid"),
+        };
+        let result = match classify_close_reply(key, &bytes) {
+            CloseReply::Result(result) => result,
+            CloseReply::Refused => {
+                let _ = pane.ack(key);
+                return Err("close rejected by the server");
+            }
+            CloseReply::Invalid => return Err("close reply invalid"),
+        };
+        // Every schema-9 result for our key (including a stale rejection) was
+        // admitted and is terminal.
+        let _ = pane.ack_admitted(key);
+        if matches!(
+            result.outcome,
+            CloseOutcome::Stopped(StopOutcome::Exited | StopOutcome::Escalated)
+        ) {
+            // The closed pane's connection is dropped now; the collapsed
+            // layout is fetched on the next poll (through a survivor).
+            self.panes.retain(|pane| pane.target != plan.target);
+        }
+        self.next_layout = Instant::now();
+        Ok(result)
+    }
+}
+
+impl Net {
+    /// Index of the connection used for a close: the target's own pinned
+    /// connection when connected, otherwise any connected pane. Every same-UID
+    /// lease may close any pane; the key always uses that connection's lease.
+    fn close_connection(&self, target: TargetRef) -> Option<usize> {
+        self.panes
+            .iter()
+            .position(|pane| pane.target == target && pane.connected())
+            .or_else(|| self.panes.iter().position(PaneConn::connected))
     }
 }
 
@@ -675,6 +769,86 @@ mod tests {
         assert_eq!(view.launch().client_working_directory(), b"/private/tmp");
         assert_eq!(view.launch().arguments().count(), 0);
         assert_eq!(view.launch().environment().count(), 1);
+    }
+
+    fn close_fixture() -> (OperationKey, ClosePlan) {
+        let key = OperationKey {
+            generation: 9,
+            lease: 3,
+            sequence: 8,
+        };
+        let plan = ClosePlan {
+            target: TargetRef {
+                generation: 9,
+                workspace: 1,
+                pane: 2,
+                session: 2,
+                occupant_revision: 1,
+            },
+            expected_layout_revision: 17,
+        };
+        (key, plan)
+    }
+
+    #[test]
+    fn close_request_carries_exact_key_captured_target_and_revision() {
+        let (key, plan) = close_fixture();
+        let bytes = encode_close(key, plan).unwrap();
+        let request = panelink::close_protocol::decode_close_request(&bytes).unwrap();
+        assert_eq!(request.key, key);
+        assert_eq!(request.target, plan.target);
+        assert_eq!(request.expected_layout_revision, 17);
+        // A zero revision is refused locally, before anything is sent.
+        let stale = ClosePlan {
+            expected_layout_revision: 0,
+            ..plan
+        };
+        assert_eq!(encode_close(key, stale), Err("close request invalid"));
+    }
+
+    #[test]
+    fn close_replies_are_matched_to_the_exact_key() {
+        use panelink::close_protocol::{encode_close_result, CloseRejection};
+        use panelink::response_protocol::encode_response_payload;
+        let (key, plan) = close_fixture();
+        let result = CloseResult {
+            key,
+            outcome: CloseOutcome::Stopped(StopOutcome::Escalated),
+            target: Some(plan.target),
+            layout_revision: 18,
+            survivor_resize_pending: false,
+        };
+        let mut bytes = Vec::new();
+        encode_close_result(&result, &mut bytes).unwrap();
+        assert_eq!(
+            classify_close_reply(key, &bytes),
+            CloseReply::Result(result)
+        );
+
+        let other = OperationKey { sequence: 9, ..key };
+        assert_eq!(classify_close_reply(other, &bytes), CloseReply::Invalid);
+        assert_eq!(classify_close_reply(key, &bytes[..40]), CloseReply::Invalid);
+
+        let rejected = CloseResult {
+            outcome: CloseOutcome::Rejected(CloseRejection::StaleLayout),
+            layout_revision: 18,
+            ..result
+        };
+        let mut bytes = Vec::new();
+        encode_close_result(&rejected, &mut bytes).unwrap();
+        assert_eq!(
+            classify_close_reply(key, &bytes),
+            CloseReply::Result(rejected)
+        );
+
+        let refusal = panelink::response_protocol::Response {
+            key,
+            body: ResponseBody::Rejected(panelink::response_protocol::RejectionCode::Unauthorized),
+        };
+        let mut bytes = Vec::new();
+        encode_response_payload(&refusal, &mut bytes).unwrap();
+        assert_eq!(classify_close_reply(key, &bytes), CloseReply::Refused);
+        assert_eq!(classify_close_reply(other, &bytes), CloseReply::Invalid);
     }
 
     #[test]

@@ -1,11 +1,14 @@
-//! Pure, terminal-independent model of the four-item split context menu.
+//! Pure, terminal-independent model of the pane context menu (four split
+//! items and one "Close pane" item) and of the close confirmation prompt.
 //!
 //! The menu captures one complete pane target and layout revision from a
 //! single [`LayoutSnapshot`] when it opens, owns every input while open, and
 //! returns exactly the captured values on activation. It performs no terminal
-//! IO, rendering, process launch, or layout mutation. Item availability is
+//! IO, rendering, process launch, or layout mutation. Split availability is
 //! advisory presentation derived from [`PaneLayout::can_split`]; the trusted
-//! split owner remains authoritative and revalidates on submission.
+//! split owner remains authoritative and revalidates on submission. The close
+//! item is always enabled (the menu always holds a captured target); it never
+//! closes anything itself and only asks the caller to show a [`CloseConfirm`].
 
 use crate::control_protocol::TargetRef;
 use crate::pane_layout::{
@@ -15,8 +18,12 @@ use crate::pane_layout::{
 use std::error::Error;
 use std::fmt;
 
-/// Number of menu items; the menu always lists all four split directions.
+/// Number of split items; the menu always lists all four split directions.
 pub const ITEM_COUNT: usize = 4;
+/// Number of selectable menu rows: the four split items and "Close pane".
+pub const ROW_COUNT: usize = ITEM_COUNT + 1;
+/// Row index of the "Close pane" item, after the four split items.
+const CLOSE_ROW: usize = ITEM_COUNT;
 /// Fixed item order presented by the menu.
 pub const MENU_DIRECTIONS: [SplitDirection; ITEM_COUNT] = [
     SplitDirection::Left,
@@ -30,14 +37,15 @@ pub const SPLIT_MIN_COLUMNS: u16 = 2 * MIN_PANE_COLUMNS + 1;
 pub const SPLIT_MIN_ROWS: u16 = 2 * MIN_PANE_ROWS + 1;
 /// Prototype pane capacity reported in the capacity-disabled reason.
 pub const PANE_LIMIT: u8 = 2;
-/// Height of the normal bordered overlay: title border, four items, status, border.
-pub const NORMAL_ROWS: u16 = 7;
+/// Height of the normal bordered overlay: title border, five items, status, border.
+pub const NORMAL_ROWS: u16 = 8;
 /// Preferred width of the normal bordered overlay.
 pub const NORMAL_COLUMNS: u16 = 52;
 /// Narrowest viewport that still uses the bordered overlay.
 pub const MIN_NORMAL_COLUMNS: u16 = 24;
-/// Height of the compact overlay: four item rows and one status row.
-pub const COMPACT_ROWS: u16 = 5;
+/// Height of the compact overlay: five item rows and one status row. In a
+/// viewport of exactly [`MIN_MENU_ROWS`] rows the status row is omitted.
+pub const COMPACT_ROWS: u16 = 6;
 /// Shortest viewport in which the menu is interactive: the terminal-core
 /// pane minimum. Anything shorter is [`OverlayMode::TooSmall`].
 pub const MIN_MENU_ROWS: u16 = MIN_PANE_ROWS;
@@ -45,12 +53,16 @@ pub const MIN_MENU_ROWS: u16 = MIN_PANE_ROWS;
 /// pane minimum. Anything narrower is [`OverlayMode::TooSmall`].
 pub const MIN_MENU_COLUMNS: u16 = MIN_PANE_COLUMNS;
 /// Maximum number of overlay rows produced by [`MenuState::overlay_lines`].
-pub const MAX_OVERLAY_ROWS: usize = 7;
+pub const MAX_OVERLAY_ROWS: usize = 8;
 /// Maximum width in columns (and bytes) of one overlay row.
 pub const MAX_OVERLAY_COLUMNS: usize = 240;
 
-const TITLE: &str = " Split pane ";
+const TITLE: &str = " Pane ";
 const ENABLED_HINT: &str = "Enter: split  Esc: close";
+/// The close row deliberately has no letter shortcut: a stray letter typed
+/// into the open menu must never start a close (Ctrl-B `x` is the keyboard path).
+const CLOSE_LABEL: &str = "Close pane";
+const CLOSE_HINT: &str = "Enter: close this pane (asks y/n)";
 const TOO_SMALL_TEXT: &str = "Enlarge terminal to use the split menu";
 const ELLIPSIS: &[u8; 3] = b"...";
 
@@ -170,6 +182,7 @@ pub enum MenuInput {
     /// Close the menu without an action.
     Cancel,
     /// A typed character; `l`, `r`, `u`, `d` (any case) select and activate.
+    /// No letter selects "Close pane".
     Letter(char),
     /// A mouse button press at a viewport cell.
     MousePress {
@@ -241,6 +254,33 @@ impl fmt::Debug for SplitIntent {
     }
 }
 
+/// Exact close request values captured when the menu or prompt opened.
+///
+/// `position` and `last_pane` are presentation only (the prompt text); the
+/// server decides from `target` and `expected_layout_revision` alone.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct CloseIntent {
+    /// Complete target captured at open; never re-resolved from focus.
+    pub target: TargetRef,
+    /// Layout revision captured from the same snapshot as `target`.
+    pub expected_layout_revision: u64,
+    /// Spatial pane position, 1 (left/top) or 2 (right/bottom).
+    pub position: u8,
+    /// Whether this is the only pane, so closing it ends the workspace.
+    pub last_pane: bool,
+}
+
+impl fmt::Debug for CloseIntent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CloseIntent")
+            .field("target", &"[redacted]")
+            .field("expected_layout_revision", &"[redacted]")
+            .field("position", &self.position)
+            .field("last_pane", &self.last_pane)
+            .finish()
+    }
+}
+
 /// Result of offering one input to the menu.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuResponse {
@@ -252,6 +292,9 @@ pub enum MenuResponse {
     Closed,
     /// The menu consumed the input, closed, and requests this split.
     Activated(SplitIntent),
+    /// The menu consumed the input, closed, and asks the caller to confirm
+    /// closing the captured pane. Nothing has been closed.
+    CloseRequested(CloseIntent),
 }
 
 /// Failure to open the menu; the previous menu state is left unchanged.
@@ -277,9 +320,9 @@ impl Error for MenuOpenError {}
 /// Overlay presentation chosen for the current viewport.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OverlayMode {
-    /// Bordered box with a title, four items and a status row.
+    /// Bordered box with a title, five items and a status row.
     Normal,
-    /// Borderless, full-width, five rows: four items and a status row.
+    /// Borderless, full-width: five items and, when room, a status row.
     Compact,
     /// Viewport too small for items; one status row, only Cancel is accepted.
     TooSmall,
@@ -520,9 +563,16 @@ impl MenuState {
         self.open.map(|menu| menu.items)
     }
 
-    /// Returns the direction of the selected item.
+    /// Returns the direction of the selected split item; `None` when the
+    /// menu is closed or the "Close pane" item is selected.
     pub fn selected(&self) -> Option<SplitDirection> {
-        self.open.map(|menu| menu.items[menu.selected].direction)
+        self.open
+            .and_then(|menu| menu.items.get(menu.selected).map(|item| item.direction))
+    }
+
+    /// Returns whether the open menu has the "Close pane" item selected.
+    pub fn close_selected(&self) -> bool {
+        self.open.is_some_and(|menu| menu.selected == CLOSE_ROW)
     }
 
     /// Returns the overlay mode for the current viewport.
@@ -555,7 +605,10 @@ impl MenuState {
         let response = menu.handle(input);
         self.open = match response {
             MenuResponse::Consumed => Some(menu),
-            MenuResponse::NotOpen | MenuResponse::Closed | MenuResponse::Activated(_) => None,
+            MenuResponse::NotOpen
+            | MenuResponse::Closed
+            | MenuResponse::Activated(_)
+            | MenuResponse::CloseRequested(_) => None,
         };
         response
     }
@@ -571,7 +624,8 @@ impl fmt::Debug for MenuState {
                 .field("target", &"[redacted]")
                 .field("layout_revision", &"[redacted]")
                 .field("mode", &menu.mode)
-                .field("selected", &menu.items[menu.selected].direction)
+                .field("selected", &self.selected())
+                .field("close_selected", &self.close_selected())
                 .field("items", &menu.items)
                 .field("overlay", &menu.rect)
                 .finish(),
@@ -583,6 +637,8 @@ impl fmt::Debug for MenuState {
 struct OpenMenu {
     target: TargetRef,
     revision: u64,
+    position: u8,
+    last_pane: bool,
     items: [MenuItem; ITEM_COUNT],
     selected: usize,
     anchor: (u16, u16),
@@ -613,9 +669,16 @@ impl OpenMenu {
         });
         let selected = items.iter().position(|item| item.is_enabled()).unwrap_or(0);
         let (mode, rect) = place(anchor, viewport);
+        let index = snapshot
+            .panes
+            .iter()
+            .position(|entry| entry.is_some_and(|entry| entry.target == pane.target))
+            .unwrap_or(0);
         Self {
             target: pane.target,
             revision: snapshot.revision,
+            position: if index == 0 { 1 } else { 2 },
+            last_pane: snapshot.pane_count() <= 1,
             items,
             selected,
             anchor,
@@ -634,11 +697,11 @@ impl OpenMenu {
         }
         match input {
             MenuInput::Up => {
-                self.selected = (self.selected + ITEM_COUNT - 1) % ITEM_COUNT;
+                self.selected = (self.selected + ROW_COUNT - 1) % ROW_COUNT;
                 MenuResponse::Consumed
             }
             MenuInput::Down => {
-                self.selected = (self.selected + 1) % ITEM_COUNT;
+                self.selected = (self.selected + 1) % ROW_COUNT;
                 MenuResponse::Consumed
             }
             MenuInput::Home => {
@@ -646,7 +709,7 @@ impl OpenMenu {
                 MenuResponse::Consumed
             }
             MenuInput::End => {
-                self.selected = ITEM_COUNT - 1;
+                self.selected = ROW_COUNT - 1;
                 MenuResponse::Consumed
             }
             MenuInput::Activate => self.activate_selected(),
@@ -671,7 +734,14 @@ impl OpenMenu {
     }
 
     fn activate_selected(&self) -> MenuResponse {
-        let item = self.items[self.selected];
+        let Some(item) = self.items.get(self.selected).copied() else {
+            return MenuResponse::CloseRequested(CloseIntent {
+                target: self.target,
+                expected_layout_revision: self.revision,
+                position: self.position,
+                last_pane: self.last_pane,
+            });
+        };
         if item.is_enabled() {
             MenuResponse::Activated(SplitIntent {
                 target: self.target,
@@ -691,13 +761,13 @@ impl OpenMenu {
         match self.mode {
             OverlayMode::Normal => {
                 let inner = x > self.rect.x && x - self.rect.x < self.rect.columns - 1;
-                if (1..=ITEM_COUNT).contains(&row) && inner {
+                if (1..=ROW_COUNT).contains(&row) && inner {
                     Hit::Item(row - 1)
                 } else {
                     Hit::Chrome
                 }
             }
-            OverlayMode::Compact if row < ITEM_COUNT => Hit::Item(row),
+            OverlayMode::Compact if row < ROW_COUNT => Hit::Item(row),
             OverlayMode::Compact | OverlayMode::TooSmall => Hit::Chrome,
         }
     }
@@ -705,7 +775,7 @@ impl OpenMenu {
     fn item_style(&self, index: usize) -> OverlayStyle {
         if index == self.selected {
             OverlayStyle::Selected
-        } else if self.items[index].is_enabled() {
+        } else if self.items.get(index).is_none_or(|item| item.is_enabled()) {
             OverlayStyle::Normal
         } else {
             OverlayStyle::Disabled
@@ -713,9 +783,10 @@ impl OpenMenu {
     }
 
     fn status(&self) -> StatusText {
-        match self.items[self.selected].availability {
-            Availability::Enabled => StatusText(None),
-            Availability::Disabled(reason) => StatusText(Some(reason)),
+        match self.items.get(self.selected).map(|item| item.availability) {
+            None => StatusText::Close,
+            Some(Availability::Enabled) => StatusText::Split(None),
+            Some(Availability::Disabled(reason)) => StatusText::Split(Some(reason)),
         }
     }
 
@@ -728,7 +799,7 @@ impl OpenMenu {
         match self.mode {
             OverlayMode::Normal => {
                 lines.push(OverlayLine::border(width, Some(TITLE)));
-                for index in 0..ITEM_COUNT {
+                for index in 0..ROW_COUNT {
                     lines.push(OverlayLine::boxed(
                         width,
                         self.item_style(index),
@@ -743,18 +814,20 @@ impl OpenMenu {
                 lines.push(OverlayLine::border(width, None));
             }
             OverlayMode::Compact => {
-                for index in 0..ITEM_COUNT {
+                for index in 0..ROW_COUNT {
                     lines.push(OverlayLine::plain(
                         width,
                         self.item_style(index),
                         &self.item_label(index),
                     ));
                 }
-                lines.push(OverlayLine::plain(
-                    width,
-                    OverlayStyle::Status,
-                    &self.status(),
-                ));
+                if usize::from(self.rect.rows) > ROW_COUNT {
+                    lines.push(OverlayLine::plain(
+                        width,
+                        OverlayStyle::Status,
+                        &self.status(),
+                    ));
+                }
             }
             OverlayMode::TooSmall => {
                 lines.push(OverlayLine::plain(
@@ -769,41 +842,45 @@ impl OpenMenu {
 
     fn item_label(&self, index: usize) -> ItemLabel {
         ItemLabel {
-            item: self.items[index],
+            item: self.items.get(index).copied(),
             selected: index == self.selected,
         }
     }
 }
 
+/// One menu row label; `item` is `None` for the "Close pane" row.
 struct ItemLabel {
-    item: MenuItem,
+    item: Option<MenuItem>,
     selected: bool,
 }
 
 impl fmt::Display for ItemLabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let marker = if self.selected { "> " } else { "  " };
-        let suffix = if self.item.is_enabled() {
-            ""
-        } else {
-            " - disabled"
+        let Some(item) = self.item else {
+            return write!(f, "{marker}{CLOSE_LABEL}");
         };
+        let suffix = if item.is_enabled() { "" } else { " - disabled" };
         write!(
             f,
             "{marker}{} [{}]{suffix}",
-            direction_label(self.item.direction),
-            shortcut(self.item.direction)
+            direction_label(item.direction),
+            shortcut(item.direction)
         )
     }
 }
 
-struct StatusText(Option<DisabledReason>);
+enum StatusText {
+    Split(Option<DisabledReason>),
+    Close,
+}
 
 impl fmt::Display for StatusText {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Some(reason) => reason.fmt(f),
-            None => f.write_str(ENABLED_HINT),
+        match self {
+            Self::Split(Some(reason)) => reason.fmt(f),
+            Self::Split(None) => f.write_str(ENABLED_HINT),
+            Self::Close => f.write_str(CLOSE_HINT),
         }
     }
 }
@@ -876,11 +953,13 @@ fn place(anchor: (u16, u16), viewport: (u16, u16)) -> (OverlayMode, Rect) {
             columns: width,
         };
         (OverlayMode::Normal, rect)
-    } else if interactive && rows >= COMPACT_ROWS {
+    } else if interactive {
+        // `interactive` guarantees at least MIN_MENU_ROWS (= ROW_COUNT) rows.
+        let height = rows.min(COMPACT_ROWS);
         let rect = Rect {
             x: 0,
-            y: anchor_y.min(rows - COMPACT_ROWS),
-            rows: COMPACT_ROWS,
+            y: anchor_y.min(rows - height),
+            rows: height,
             columns: capped_columns,
         };
         (OverlayMode::Compact, rect)
@@ -900,6 +979,116 @@ fn place(anchor: (u16, u16), viewport: (u16, u16)) -> (OverlayMode, Rect) {
             columns: 0,
         };
         (OverlayMode::TooSmall, rect)
+    }
+}
+
+// The compact overlay must fit all selectable rows at the interactive minimum.
+const _: () = assert!(MIN_MENU_ROWS as usize >= ROW_COUNT);
+
+/// Input to the close confirmation prompt, already decoded by the caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfirmInput {
+    /// `y` or `Y`: confirm the close.
+    Yes,
+    /// Any other key press, paste or mouse press: cancel without closing.
+    Cancel,
+    /// Releases, focus and resize events: consumed, prompt stays open.
+    Ignore,
+}
+
+/// Result of offering one input to the confirmation prompt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfirmResponse {
+    /// No prompt is open; the caller should route the input normally.
+    NotOpen,
+    /// The prompt consumed the input and stays open.
+    Consumed,
+    /// The prompt consumed the input and closed without an action.
+    Cancelled,
+    /// The prompt consumed the input, closed, and requests this close.
+    Confirmed(CloseIntent),
+}
+
+/// Explicit y/n confirmation for closing one captured pane.
+///
+/// While open the prompt owns every input; nothing reaches a pane. Only
+/// [`ConfirmInput::Yes`] confirms. The intent is returned exactly as
+/// captured; it is never re-resolved from focus or a newer layout.
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+pub struct CloseConfirm {
+    pending: Option<CloseIntent>,
+}
+
+impl CloseConfirm {
+    /// Returns a closed prompt.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Opens (or replaces) the prompt for one captured intent.
+    pub fn open(&mut self, intent: CloseIntent) {
+        self.pending = Some(intent);
+    }
+
+    /// Returns whether the prompt is open and owns all input.
+    pub fn is_open(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Returns the captured intent while open.
+    pub fn intent(&self) -> Option<CloseIntent> {
+        self.pending
+    }
+
+    /// Offers one input. While open every input is consumed.
+    pub fn handle(&mut self, input: ConfirmInput) -> ConfirmResponse {
+        let Some(intent) = self.pending else {
+            return ConfirmResponse::NotOpen;
+        };
+        match input {
+            ConfirmInput::Yes => {
+                self.pending = None;
+                ConfirmResponse::Confirmed(intent)
+            }
+            ConfirmInput::Cancel => {
+                self.pending = None;
+                ConfirmResponse::Cancelled
+            }
+            ConfirmInput::Ignore => ConfirmResponse::Consumed,
+        }
+    }
+
+    /// One fixed-width prompt row of `width` columns (at most
+    /// [`MAX_OVERLAY_COLUMNS`]); `None` when closed or `width` is zero.
+    pub fn overlay_line(&self, width: u16) -> Option<OverlayLine> {
+        let intent = self.pending?;
+        let width = usize::from(width).min(MAX_OVERLAY_COLUMNS);
+        (width > 0)
+            .then(|| OverlayLine::plain(width, OverlayStyle::Selected, &ConfirmPrompt(intent)))
+    }
+}
+
+impl fmt::Debug for CloseConfirm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CloseConfirm")
+            .field("pending", &self.pending)
+            .finish()
+    }
+}
+
+struct ConfirmPrompt(CloseIntent);
+
+impl fmt::Display for ConfirmPrompt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.last_pane {
+            write!(
+                f,
+                " Close pane {}? This is the last pane; the workspace ends. (y/n) ",
+                self.0.position
+            )
+        } else {
+            write!(f, " Close pane {}? (y/n) ", self.0.position)
+        }
     }
 }
 
@@ -1281,7 +1470,7 @@ mod tests {
         assert!(menu.is_open());
         assert_eq!(menu.selected(), Some(SplitDirection::Up));
         let lines = menu.overlay_lines();
-        let status = lines.as_slice()[5];
+        let status = lines.as_slice()[6];
         assert_eq!(status.style(), OverlayStyle::Status);
         assert!(status
             .text()
@@ -1293,12 +1482,18 @@ mod tests {
     #[test]
     fn navigation_wraps_and_letter_shortcuts_are_case_insensitive() {
         let mut menu = open_keyboard(&single(20, 81));
+        // Up from the first item wraps to the last row, "Close pane".
+        assert_eq!(menu.handle(MenuInput::Up), MenuResponse::Consumed);
+        assert!(menu.close_selected());
+        assert_eq!(menu.selected(), None);
         assert_eq!(menu.handle(MenuInput::Up), MenuResponse::Consumed);
         assert_eq!(menu.selected(), Some(SplitDirection::Down));
         assert_eq!(menu.handle(MenuInput::Down), MenuResponse::Consumed);
+        assert!(menu.close_selected());
+        assert_eq!(menu.handle(MenuInput::Down), MenuResponse::Consumed);
         assert_eq!(menu.selected(), Some(SplitDirection::Left));
         assert_eq!(menu.handle(MenuInput::End), MenuResponse::Consumed);
-        assert_eq!(menu.selected(), Some(SplitDirection::Down));
+        assert!(menu.close_selected());
         assert_eq!(menu.handle(MenuInput::Home), MenuResponse::Consumed);
         assert_eq!(menu.selected(), Some(SplitDirection::Left));
         assert_eq!(menu.handle(MenuInput::Letter('q')), MenuResponse::Consumed);
@@ -1393,16 +1588,19 @@ mod tests {
                 OverlayStyle::Normal,
                 OverlayStyle::Normal,
                 OverlayStyle::Normal,
+                OverlayStyle::Normal,
                 OverlayStyle::Status,
                 OverlayStyle::Border,
             ]));
-            assert!(lines.as_slice()[0].text().starts_with("+- Split pane -"));
+            assert!(lines.as_slice()[0].text().starts_with("+- Pane -"));
             assert!(lines.as_slice()[1].text().starts_with("| > Split Left [L]"));
+            let close_row = lines.as_slice()[5].text();
+            assert_eq!(close_row.trim_end_matches(['|', ' ']), "|   Close pane");
         }
     }
 
     #[test]
-    fn compact_overlay_uses_exactly_five_full_width_rows_at_5x20() {
+    fn compact_overlay_uses_five_item_rows_at_5x20_and_adds_status_at_6_rows() {
         let layout = single(5, 20);
         let mut menu = MenuState::new();
         menu.open_at_pointer(&layout, 19, 4, 5, 20).expect("open");
@@ -1423,9 +1621,23 @@ mod tests {
         assert_eq!(texts[1], "  Split Right [R]...");
         assert_eq!(texts[2], "  Split Up [U] - ...");
         assert_eq!(texts[3], "  Split Down [D] ...");
-        assert_eq!(texts[4], "Split Left needs ...");
+        assert_eq!(texts[4], "  Close pane        ");
         assert_eq!(lines.as_slice()[1].style(), OverlayStyle::Disabled);
-        assert_eq!(lines.as_slice()[4].style(), OverlayStyle::Status);
+        assert_eq!(lines.as_slice()[4].style(), OverlayStyle::Normal);
+
+        // One more row adds the status row.
+        let mut tall = MenuState::new();
+        tall.open_at_pointer(&single(6, 20), 0, 0, 6, 20)
+            .expect("open");
+        assert_eq!(tall.mode(), Some(OverlayMode::Compact));
+        assert_eq!(
+            tall.overlay_rect().map(|rect| rect.rows),
+            Some(COMPACT_ROWS)
+        );
+        assert_line_invariants(&tall);
+        let lines = tall.overlay_lines();
+        assert_eq!(lines.as_slice()[5].text(), "Split Left needs ...");
+        assert_eq!(lines.as_slice()[5].style(), OverlayStyle::Status);
 
         // Clicking the second compact row selects Right and stays open (disabled).
         let press = MenuInput::MousePress {
@@ -1435,13 +1647,14 @@ mod tests {
         };
         assert_eq!(menu.handle(press), MenuResponse::Consumed);
         assert_eq!(menu.selected(), Some(SplitDirection::Right));
-        // The status row is chrome.
+        // The status row (6-row viewport) is chrome.
         let status = MenuInput::MousePress {
             x: 3,
-            y: 4,
+            y: 5,
             right: false,
         };
-        assert_eq!(menu.handle(status), MenuResponse::Consumed);
+        assert_eq!(tall.handle(status), MenuResponse::Consumed);
+        assert!(tall.is_open());
         assert!(menu.is_open());
     }
 
@@ -1449,11 +1662,11 @@ mod tests {
     fn compact_overlay_is_clamped_vertically_in_short_wide_viewport() {
         let layout = single(20, 81);
         let mut menu = MenuState::new();
-        menu.open_at_pointer(&layout, 70, 5, 6, 81).expect("open");
+        menu.open_at_pointer(&layout, 70, 5, 7, 81).expect("open");
         assert_eq!(menu.mode(), Some(OverlayMode::Compact));
         let rect = menu.overlay_rect().expect("rect");
-        assert_eq!((rect.x, rect.y, rect.rows, rect.columns), (0, 1, 5, 81));
-        assert_inside(rect, 6, 81);
+        assert_eq!((rect.x, rect.y, rect.rows, rect.columns), (0, 1, 6, 81));
+        assert_inside(rect, 7, 81);
         assert_line_invariants(&menu);
     }
 
@@ -1620,6 +1833,149 @@ mod tests {
     }
 
     #[test]
+    fn close_item_is_always_enabled_and_requests_confirmation_with_captures() {
+        // At capacity every split item is disabled but Close stays enabled.
+        let layout = split_right(20, 81);
+        for path in [
+            [MenuInput::End, MenuInput::Up],
+            [MenuInput::Up, MenuInput::Up],
+        ] {
+            let mut menu = MenuState::new();
+            menu.open_at_pointer(&layout, 60, 3, 20, 81)
+                .expect("pane B");
+            // No letter reaches the close row; `x` is consumed, menu stays.
+            assert_eq!(menu.handle(MenuInput::Letter('x')), MenuResponse::Consumed);
+            assert_eq!(menu.handle(MenuInput::Letter('y')), MenuResponse::Consumed);
+            assert!(!menu.close_selected());
+            assert_eq!(menu.handle(path[0]), MenuResponse::Consumed);
+            if path[0] == MenuInput::Up {
+                assert!(menu.close_selected());
+            } else {
+                // End selects the close row; Up then moves back to Down.
+                assert!(menu.close_selected());
+                assert_eq!(menu.handle(path[1]), MenuResponse::Consumed);
+                assert_eq!(menu.selected(), Some(SplitDirection::Down));
+                assert_eq!(menu.handle(MenuInput::Down), MenuResponse::Consumed);
+            }
+            let status = menu.overlay_lines().as_slice()[6];
+            assert!(status.text().contains("close this pane"), "{status:?}");
+            assert_eq!(
+                menu.handle(MenuInput::Activate),
+                MenuResponse::CloseRequested(CloseIntent {
+                    target: target_b(),
+                    expected_layout_revision: 2,
+                    position: 2,
+                    last_pane: false,
+                })
+            );
+            assert!(!menu.is_open());
+        }
+
+        // A single pane is position 1 and the last pane.
+        let mut menu = open_keyboard(&single(20, 81));
+        assert_eq!(menu.handle(MenuInput::End), MenuResponse::Consumed);
+        assert_eq!(
+            menu.handle(MenuInput::Activate),
+            MenuResponse::CloseRequested(CloseIntent {
+                target: target_a(),
+                expected_layout_revision: 1,
+                position: 1,
+                last_pane: true,
+            })
+        );
+    }
+
+    #[test]
+    fn mouse_press_on_close_row_requests_confirmation() {
+        let layout = single(20, 81);
+        let mut menu = MenuState::new();
+        menu.open_at_pointer(&layout, 10, 2, 20, 81).expect("open");
+        let rect = menu.overlay_rect().expect("rect");
+        let close_row = MenuInput::MousePress {
+            x: rect.x + 3,
+            y: rect.y + 5,
+            right: false,
+        };
+        assert!(matches!(
+            menu.handle(close_row),
+            MenuResponse::CloseRequested(intent) if intent.target == target_a()
+        ));
+        // Compact: the fifth row is Close.
+        let mut menu = MenuState::new();
+        menu.open_at_pointer(&single(5, 20), 0, 0, 5, 20)
+            .expect("open");
+        let press = MenuInput::MousePress {
+            x: 1,
+            y: 4,
+            right: false,
+        };
+        assert!(matches!(
+            menu.handle(press),
+            MenuResponse::CloseRequested(_)
+        ));
+    }
+
+    fn intent(last_pane: bool) -> CloseIntent {
+        CloseIntent {
+            target: target_b(),
+            expected_layout_revision: 9,
+            position: 2,
+            last_pane,
+        }
+    }
+
+    #[test]
+    fn confirm_only_yes_confirms_and_every_other_input_cancels_or_is_consumed() {
+        let mut confirm = CloseConfirm::new();
+        assert_eq!(confirm.handle(ConfirmInput::Yes), ConfirmResponse::NotOpen);
+        assert!(confirm.overlay_line(40).is_none());
+
+        confirm.open(intent(false));
+        assert!(confirm.is_open());
+        assert_eq!(
+            confirm.handle(ConfirmInput::Ignore),
+            ConfirmResponse::Consumed
+        );
+        assert!(confirm.is_open());
+        assert_eq!(
+            confirm.handle(ConfirmInput::Yes),
+            ConfirmResponse::Confirmed(intent(false))
+        );
+        assert!(!confirm.is_open());
+        assert_eq!(confirm.handle(ConfirmInput::Yes), ConfirmResponse::NotOpen);
+
+        confirm.open(intent(false));
+        assert_eq!(
+            confirm.handle(ConfirmInput::Cancel),
+            ConfirmResponse::Cancelled
+        );
+        assert!(!confirm.is_open());
+        assert_eq!(confirm.intent(), None);
+    }
+
+    #[test]
+    fn confirm_prompt_names_the_pane_and_warns_for_the_last_pane() {
+        let mut confirm = CloseConfirm::new();
+        confirm.open(intent(false));
+        let line = confirm.overlay_line(81).expect("open");
+        assert_eq!(line.text().len(), 81);
+        assert!(line.text().starts_with(" Close pane 2? (y/n) "));
+        assert_eq!(line.style(), OverlayStyle::Selected);
+        assert!(confirm.overlay_line(0).is_none());
+        assert_eq!(confirm.overlay_line(10).expect("open").text(), " Close ...");
+        assert_eq!(
+            confirm.overlay_line(500).expect("open").text().len(),
+            MAX_OVERLAY_COLUMNS
+        );
+
+        confirm.open(intent(true));
+        let line = confirm.overlay_line(81).expect("open");
+        assert!(line
+            .text()
+            .starts_with(" Close pane 2? This is the last pane; the workspace ends. (y/n)"));
+    }
+
+    #[test]
     fn debug_output_redacts_targets_and_revisions() {
         let mut secret = target_a();
         secret.generation = 9_876_543_210_123;
@@ -1636,9 +1992,21 @@ mod tests {
             expected_layout_revision: 9_876_543_210_128,
             direction: SplitDirection::Left,
         };
+        let close = CloseIntent {
+            target: secret,
+            expected_layout_revision: 9_876_543_210_128,
+            position: 1,
+            last_pane: true,
+        };
+        let mut confirm = CloseConfirm::new();
+        confirm.open(close);
         for rendered in [
             format!("{menu:?}"),
             format!("{intent:?}"),
+            format!("{close:?}"),
+            format!("{confirm:?}"),
+            format!("{:?}", MenuResponse::CloseRequested(close)),
+            format!("{:?}", ConfirmResponse::Confirmed(close)),
             format!("{:?}", MenuResponse::Activated(intent)),
             format!("{:?}", MenuInput::Letter('z')),
         ] {

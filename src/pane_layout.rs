@@ -244,6 +244,63 @@ impl PaneLayout {
         Ok(self.state.snapshot)
     }
 
+    /// Removes one pane of a split layout; the sibling fills the whole root.
+    ///
+    /// The removed target must exactly identify one of the two current panes.
+    /// The survivor keeps its full identity, the divider disappears and the
+    /// revision advances by one. A single-pane layout cannot collapse and
+    /// returns `InvalidLayoutState`. Every rejection leaves the layout
+    /// unchanged. The survivor may then be split again with a fresh target.
+    pub fn collapse(
+        &mut self,
+        removed: TargetRef,
+        expected_revision: u64,
+    ) -> Result<LayoutSnapshot, LayoutError> {
+        if !self.contains_target(removed) {
+            return Err(LayoutError::StaleTarget);
+        }
+        if expected_revision != self.state.snapshot.revision {
+            return Err(LayoutError::StaleRevision);
+        }
+        if self.state.split.is_none() || self.state.snapshot.pane_count() != 2 {
+            return Err(LayoutError::InvalidLayoutState);
+        }
+        let survivor = self
+            .state
+            .snapshot
+            .panes
+            .into_iter()
+            .flatten()
+            .find(|pane| pane.target != removed)
+            .ok_or(LayoutError::InvalidLayoutState)?
+            .target;
+        let next_revision = self
+            .state
+            .snapshot
+            .revision
+            .checked_add(1)
+            .ok_or(LayoutError::RevisionExhausted)?;
+        let rows = self.state.snapshot.rows;
+        let columns = self.state.snapshot.columns;
+        self.state = LayoutState {
+            snapshot: LayoutSnapshot {
+                revision: next_revision,
+                rows,
+                columns,
+                panes: [
+                    Some(PaneGeometry {
+                        target: survivor,
+                        rect: root_rect(rows, columns),
+                    }),
+                    None,
+                ],
+                divider: None,
+            },
+            split: None,
+        };
+        Ok(self.state.snapshot)
+    }
+
     /// Returns the pane covering a cell, excluding the divider and root exterior.
     pub fn hit_test(&self, x: u16, y: u16) -> Option<PaneGeometry> {
         self.state
@@ -1079,6 +1136,126 @@ mod tests {
             Err(LayoutError::RevisionExhausted)
         );
         assert_eq!(layout.snapshot(), before);
+    }
+
+    fn third_target() -> TargetRef {
+        TargetRef {
+            generation: 11,
+            workspace: 22,
+            pane: 99,
+            session: 100,
+            occupant_revision: 1,
+        }
+    }
+
+    #[test]
+    fn collapse_gives_either_survivor_the_root_in_every_direction() {
+        for direction in [
+            SplitDirection::Left,
+            SplitDirection::Right,
+            SplitDirection::Up,
+            SplitDirection::Down,
+        ] {
+            for (removed, survivor) in [
+                (new_target(), existing_target()),
+                (existing_target(), new_target()),
+            ] {
+                let mut layout = PaneLayout::new(existing_target(), 11, 82).expect("layout");
+                let preview = layout
+                    .preview_split(existing_target(), 1, direction, new_target())
+                    .expect("split");
+                layout.commit_split(preview).expect("commit");
+                let collapsed = layout.collapse(removed, 2).expect("collapse");
+                assert_eq!(
+                    collapsed,
+                    LayoutSnapshot {
+                        revision: 3,
+                        rows: 11,
+                        columns: 82,
+                        panes: [geometry(survivor, 0, 0, 11, 82), None],
+                        divider: None,
+                    },
+                    "{direction:?}"
+                );
+                assert_eq!(layout.snapshot(), collapsed);
+                assert_eq!(
+                    layout.hit_test(41, 5).map(|pane| pane.target),
+                    Some(survivor)
+                );
+                // Resizing a collapsed layout keeps one root pane.
+                let resized = layout.resize(3, 12, 83).expect("resize");
+                assert_eq!(resized.panes, [geometry(survivor, 0, 0, 12, 83), None]);
+            }
+        }
+    }
+
+    #[test]
+    fn collapse_rejections_leave_layout_unchanged() {
+        let original = existing_target();
+        let mut single = PaneLayout::new(original, 7, 82).expect("layout");
+        let before = single.snapshot();
+        assert_eq!(
+            single.collapse(original, 1),
+            Err(LayoutError::InvalidLayoutState)
+        );
+        assert_eq!(single.snapshot(), before);
+
+        let mut layout = PaneLayout::new(original, 7, 82).expect("layout");
+        let preview = layout
+            .preview_split(original, 1, SplitDirection::Right, new_target())
+            .expect("split");
+        layout.commit_split(preview).expect("commit");
+        let split = layout.snapshot();
+        assert_eq!(
+            layout.collapse(original, 1),
+            Err(LayoutError::StaleRevision)
+        );
+        let mut stale = original;
+        stale.occupant_revision += 1;
+        assert_eq!(layout.collapse(stale, 2), Err(LayoutError::StaleTarget));
+        assert_eq!(
+            layout.collapse(third_target(), 2),
+            Err(LayoutError::StaleTarget)
+        );
+        assert_eq!(layout.snapshot(), split);
+
+        layout.state.snapshot.revision = u64::MAX;
+        assert_eq!(
+            layout.collapse(original, u64::MAX),
+            Err(LayoutError::RevisionExhausted)
+        );
+        assert_eq!(layout.snapshot().pane_count(), 2);
+    }
+
+    #[test]
+    fn survivor_can_split_again_with_a_fresh_target_after_collapse() {
+        let original = existing_target();
+        let mut layout = PaneLayout::new(original, 7, 82).expect("layout");
+        let preview = layout
+            .preview_split(original, 1, SplitDirection::Right, new_target())
+            .expect("split");
+        let stale_preview = preview;
+        layout.commit_split(preview).expect("commit");
+        layout.collapse(original, 2).expect("collapse");
+        assert_eq!(
+            layout.commit_split(stale_preview),
+            Err(LayoutError::PreviewStale)
+        );
+        assert_eq!(
+            layout.can_split(new_target(), SplitDirection::Down),
+            Err(LayoutError::LayoutTooSmall)
+        );
+        let again = layout
+            .preview_split(new_target(), 3, SplitDirection::Left, third_target())
+            .expect("re-split preview");
+        let committed = layout.commit_split(again).expect("re-split");
+        assert_eq!(committed.revision, 4);
+        assert_eq!(committed.panes[0].expect("new left").target, third_target());
+        assert_eq!(
+            committed.panes[1].expect("survivor right").target,
+            new_target()
+        );
+        assert!(committed.divider.is_some());
     }
 
     #[test]

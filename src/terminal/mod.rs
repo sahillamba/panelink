@@ -813,6 +813,7 @@ pub struct TerminalSession {
     exit_status: Option<ExitStatus>,
     snapshot: ScreenSnapshot,
     cleanup: Option<Result<(), TerminalError>>,
+    kill_sent: bool,
 }
 
 impl fmt::Debug for TerminalSession {
@@ -901,6 +902,7 @@ impl TerminalSession {
             exit_status: None,
             snapshot,
             cleanup: None,
+            kill_sent: false,
         })
     }
 
@@ -1087,6 +1089,16 @@ impl TerminalSession {
     pub fn pending_input_bytes(&self) -> usize {
         self.input.len()
     }
+    /// Whether cleanup had to escalate to SIGKILL after the HUP window.
+    ///
+    /// This is `true` only after [`Self::shutdown`] (or an internal fail-closed
+    /// cleanup) sent KILL to the child process group. Combined with
+    /// [`Self::exit_status`] it distinguishes a graceful HUP exit from an
+    /// escalated one; it does not change cleanup ordering or windows.
+    pub const fn kill_escalated(&self) -> bool {
+        self.kill_sent
+    }
+
     /// Stop and reap the managed child within the two cleanup windows.
     pub fn shutdown(&mut self) -> Result<(), TerminalError> {
         if let Some(result) = &self.cleanup {
@@ -1116,6 +1128,7 @@ impl TerminalSession {
         if self.poll_exit()? {
             return Ok(());
         }
+        self.kill_sent = true;
         let kill_error = send_group_signal(self.process_group, Signal::KILL).err();
         if self.wait_bounded(KILL_WINDOW)? {
             return Ok(());
@@ -1496,6 +1509,58 @@ mod atomic_pty_integration_tests {
         );
         session.shutdown().unwrap();
         assert!(session.master.is_none());
+    }
+
+    #[test]
+    fn shutdown_reports_kill_escalation_only_when_hup_was_ignored() {
+        let size = TerminalSize::new(8, 40).unwrap();
+        let mut graceful = TerminalSession::spawn(
+            &launch(),
+            &[
+                OsString::from("-c"),
+                OsString::from("printf 'GRACE-READY\\n'; while :; do /bin/sleep 10; done"),
+            ],
+            &environment(),
+            size,
+        )
+        .expect("spawn graceful child");
+        pump_until(
+            &mut graceful,
+            |session| snapshot_text(session).contains("GRACE-READY"),
+            "graceful readiness",
+        );
+        assert!(!graceful.kill_escalated());
+        graceful.shutdown().unwrap();
+        assert!(graceful.exit_status().is_some());
+        assert!(
+            !graceful.kill_escalated(),
+            "HUP alone stops a default shell"
+        );
+
+        let mut stubborn = TerminalSession::spawn(
+            &launch(),
+            &[
+                OsString::from("-c"),
+                OsString::from(
+                    "trap '' HUP; printf 'TRAP-READY\\n'; while :; do /bin/sleep 10; done",
+                ),
+            ],
+            &environment(),
+            size,
+        )
+        .expect("spawn HUP-ignoring child");
+        // The marker is printed after the trap is installed.
+        pump_until(
+            &mut stubborn,
+            |session| snapshot_text(session).contains("TRAP-READY"),
+            "HUP-ignoring readiness",
+        );
+        stubborn.shutdown().unwrap();
+        assert!(stubborn.kill_escalated());
+        assert!(stubborn.exit_status().is_some());
+        // Cached cleanup does not change the recorded escalation.
+        stubborn.shutdown().unwrap();
+        assert!(stubborn.kill_escalated());
     }
 
     #[test]

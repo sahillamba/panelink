@@ -8,17 +8,21 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crossterm_input::{Event, KeyCode, KeyModifiers};
+use panelink::close_protocol::{CloseOutcome, CloseRejection, CloseResult, StopOutcome};
 use panelink::control_protocol::TargetRef;
 use panelink::pane_layout::{PaneLayout, Rect, SplitDirection};
 use panelink::screen_checkpoint::ScreenCheckpoint;
-use panelink::split_menu::{MenuResponse, MenuState, OverlayStyle as MenuStyle, SplitIntent};
+use panelink::split_menu::{
+    CloseConfirm, CloseIntent, ConfirmResponse, MenuResponse, MenuState, OverlayStyle as MenuStyle,
+    SplitIntent,
+};
 use panelink::terminal::compose::{
     ComposeFrame, Compositor, OverlayLine, OverlayStyle, OverlayView, PaneContent, PaneView,
 };
 use panelink::terminal::{Key, ScreenSnapshot, TerminalError, TerminalSize};
 use panelink::ui_protocol::{planned_split_size, LayoutReply, MAX_KEYS};
 
-use super::keys::{map_key, menu_input, mouse_button, KeyAction};
+use super::keys::{confirm_input, map_key, menu_input, mouse_button, KeyAction};
 
 /// Largest root the client requests (terminal-core and compositor bound).
 pub(crate) const MAX_ROOT_ROWS: u16 = 80;
@@ -31,7 +35,7 @@ const STATUS_TTL: Duration = Duration::from_secs(3);
 const NAV_TIMEOUT: Duration = Duration::from_secs(4);
 /// Bottom banner shown while navigation mode (after Ctrl-B) is active.
 pub(crate) const NAV_BANNER: &str =
-    " NAV  s menu | l r u d split | arrows/Tab/o focus | x detach | Esc cancel ";
+    " NAV  s menu | l r u d split | arrows/o focus | x close | ^X detach | Esc ";
 const TOO_SMALL: &str = "Panelink: terminal too small for the pane layout; enlarge it";
 
 /// One fully planned split built from a captured menu intent.
@@ -49,6 +53,15 @@ pub(crate) struct SplitPlan {
     pub columns: u16,
 }
 
+/// One confirmed explicit pane close, built from a captured intent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ClosePlan {
+    /// Target captured when the menu or prompt opened.
+    pub target: TargetRef,
+    /// Server layout revision captured together with `target`.
+    pub expected_layout_revision: u64,
+}
+
 /// Network effects requested by input routing.
 pub(crate) trait Effects {
     /// Deliver typed keys to one pane (schema-8 KeyInput).
@@ -58,6 +71,9 @@ pub(crate) trait Effects {
     /// Submit one split on the connection pinned to `plan.target`; return the
     /// new pane after it is connected and claimed.
     fn split(&mut self, plan: SplitPlan) -> Result<TargetRef, &'static str>;
+    /// Submit one schema-9 close with a fresh operation key; return the
+    /// validated server result. Never retried with another key.
+    fn close(&mut self, plan: ClosePlan) -> Result<CloseResult, &'static str>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,6 +105,8 @@ pub(crate) struct App {
     focus: Option<TargetRef>,
     menu: MenuState,
     menu_revision: u64,
+    /// Explicit y/n prompt before any close request is sent.
+    confirm: CloseConfirm,
     /// Navigation mode (entered with Ctrl-B): when it started, if active.
     prefix: Option<Instant>,
     pending: [Key; MAX_KEYS],
@@ -117,6 +135,7 @@ impl App {
             focus: None,
             menu: MenuState::new(),
             menu_revision: 0,
+            confirm: CloseConfirm::new(),
             prefix: None,
             pending: [Key::Enter; MAX_KEYS],
             pending_len: 0,
@@ -139,6 +158,11 @@ impl App {
     #[cfg(test)]
     pub(crate) fn menu_open(&self) -> bool {
         self.menu.is_open()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn confirm_open(&self) -> bool {
+        self.confirm.is_open()
     }
 
     pub(crate) fn take_dirty(&mut self) -> bool {
@@ -180,6 +204,12 @@ impl App {
     /// Adopt one server layout observation. Focus is kept when its pane is
     /// still present, otherwise it moves to the first pane. An open menu
     /// keeps its captured target and revision; the server rejects stale use.
+    ///
+    /// When a pane leaves the layout (explicit close or its shell exited and
+    /// the server collapsed it), batched keys typed for it are dropped (never
+    /// redirected to another pane), an open close prompt for it is cancelled,
+    /// and its screen cache is released. The compositor repaints fully
+    /// because pane rectangles and the divider change.
     pub(crate) fn set_layout(&mut self, reply: LayoutReply) {
         if self.layout == Some(reply) {
             return;
@@ -188,6 +218,18 @@ impl App {
         let present = |target: TargetRef| reply.panes.iter().flatten().any(|p| p.target == target);
         if !self.focus.is_some_and(present) {
             self.focus = reply.panes[0].map(|pane| pane.target);
+        }
+        if self.pending_target.is_some_and(|target| !present(target)) {
+            self.pending_len = 0;
+            self.pending_target = None;
+        }
+        if self
+            .confirm
+            .intent()
+            .is_some_and(|intent| !present(intent.target))
+        {
+            self.confirm = CloseConfirm::new();
+            self.status = Some(("pane already closed", Instant::now()));
         }
         for slot in &mut self.screens {
             if slot.target.is_some_and(|target| !present(target)) {
@@ -271,11 +313,28 @@ impl App {
         now: Instant,
         effects: &mut impl Effects,
     ) -> Flow {
+        if self.confirm.is_open() {
+            // The prompt owns every event; none reaches a pane.
+            self.dirty = true;
+            match self.confirm.handle(confirm_input(event)) {
+                ConfirmResponse::Confirmed(intent) => self.close_pane(intent, now, effects),
+                ConfirmResponse::Cancelled => self.set_status("close cancelled", now),
+                ConfirmResponse::Consumed | ConfirmResponse::NotOpen => {}
+            }
+            return Flow::Continue;
+        }
         if self.menu.is_open() {
             let response = self.menu.handle(menu_input(event));
             self.dirty = true;
-            if let MenuResponse::Activated(intent) = response {
-                self.activate(intent, now, effects);
+            match response {
+                MenuResponse::Activated(intent) => self.activate(intent, now, effects),
+                // The menu's mirror revision is local; use the server
+                // revision captured when the menu opened.
+                MenuResponse::CloseRequested(intent) => self.confirm.open(CloseIntent {
+                    expected_layout_revision: self.menu_revision,
+                    ..intent
+                }),
+                MenuResponse::NotOpen | MenuResponse::Consumed | MenuResponse::Closed => {}
             }
             return Flow::Continue;
         }
@@ -372,11 +431,8 @@ impl App {
         }
         match code {
             KeyCode::Char('s' | 'S') if plain => self.open_for_focused(now),
-            KeyCode::Char('x' | 'X') if plain => {
-                self.flush(now, effects);
-                return Flow::Quit;
-            }
-            // Ctrl-X also detaches from navigation mode.
+            KeyCode::Char('x' | 'X') if plain => self.confirm_close_focused(now),
+            // Ctrl-X detaches, also from navigation mode.
             KeyCode::Char('x' | 'X') if modifiers == KeyModifiers::CONTROL => {
                 self.flush(now, effects);
                 return Flow::Quit;
@@ -420,6 +476,80 @@ impl App {
             now,
             effects,
         );
+    }
+
+    /// Open the close prompt for the focused pane, capturing its target and
+    /// the current server layout revision now.
+    fn confirm_close_focused(&mut self, now: Instant) {
+        let Some(layout) = self.layout else {
+            self.set_status("close unavailable: no layout", now);
+            return;
+        };
+        let Some(focus) = self.focus else {
+            self.set_status("close unavailable: no focused pane", now);
+            return;
+        };
+        let Some(index) = layout
+            .panes
+            .iter()
+            .position(|pane| pane.is_some_and(|pane| pane.target == focus))
+        else {
+            self.set_status("close unavailable: no focused pane", now);
+            return;
+        };
+        self.confirm.open(CloseIntent {
+            target: focus,
+            expected_layout_revision: layout.revision,
+            position: if index == 0 { 1 } else { 2 },
+            last_pane: layout.panes.iter().flatten().count() <= 1,
+        });
+        self.dirty = true;
+    }
+
+    /// Send one confirmed close (one fresh key; never retried) and report
+    /// the server's result. After a confirmed stop, local focus and batched
+    /// keys leave the closed pane at once; the authoritative collapsed layout
+    /// arrives with the next layout poll.
+    fn close_pane(&mut self, intent: CloseIntent, now: Instant, effects: &mut impl Effects) {
+        self.flush(now, effects);
+        let plan = ClosePlan {
+            target: intent.target,
+            expected_layout_revision: intent.expected_layout_revision,
+        };
+        match effects.close(plan) {
+            Ok(result) => {
+                if matches!(
+                    result.outcome,
+                    CloseOutcome::Stopped(StopOutcome::Exited | StopOutcome::Escalated)
+                ) {
+                    self.forget_pane(intent.target);
+                }
+                self.set_status(close_message(&result, intent.last_pane), now);
+            }
+            Err(label) => self.set_status(label, now),
+        }
+    }
+
+    /// Stop routing anything to a pane that the server confirmed stopped.
+    fn forget_pane(&mut self, target: TargetRef) {
+        if self.pending_target == Some(target) {
+            self.pending_len = 0;
+            self.pending_target = None;
+        }
+        if self.focus == Some(target) {
+            self.focus = self
+                .layout
+                .and_then(|layout| {
+                    layout
+                        .panes
+                        .into_iter()
+                        .flatten()
+                        .find(|pane| pane.target != target)
+                })
+                .map(|pane| pane.target)
+                .or(Some(target));
+        }
+        self.dirty = true;
     }
 
     /// Move local focus between panes (presentation only).
@@ -597,6 +727,7 @@ impl App {
 
         let (view_rows, view_columns) = self.viewport();
         let menu_lines = self.menu.overlay_lines();
+        let confirm_line = self.confirm.overlay_line(view_columns);
         let mut lines = [OverlayLine {
             text: "",
             style: OverlayStyle::Normal,
@@ -609,6 +740,21 @@ impl App {
                 };
             }
             Some((rect, menu_lines.len()))
+        } else if let (Some(line), true) = (confirm_line.as_ref(), view_rows > 0) {
+            // The y/n prompt takes precedence over every notice.
+            lines[0] = OverlayLine {
+                text: line.text(),
+                style: compose_style(line.style()),
+            };
+            Some((
+                Rect {
+                    x: 0,
+                    y: view_rows - 1,
+                    rows: 1,
+                    columns: view_columns,
+                },
+                1,
+            ))
         } else {
             let notice = if !fits && self.layout.is_some() {
                 Some((TOO_SMALL, 0))
@@ -651,6 +797,31 @@ impl App {
             }),
         };
         compositor.render(&frame, output)
+    }
+}
+
+/// Fixed status text for one validated close result.
+pub(crate) fn close_message(result: &CloseResult, last_pane: bool) -> &'static str {
+    match result.outcome {
+        CloseOutcome::Stopped(StopOutcome::Exited | StopOutcome::Escalated) if last_pane => {
+            "last pane closed; workspace closing"
+        }
+        CloseOutcome::Stopped(StopOutcome::Exited) if result.survivor_resize_pending => {
+            "pane closed (resize pending)"
+        }
+        CloseOutcome::Stopped(StopOutcome::Exited) => "pane closed",
+        CloseOutcome::Stopped(StopOutcome::Escalated) if result.survivor_resize_pending => {
+            "pane closed (forced; resize pending)"
+        }
+        CloseOutcome::Stopped(StopOutcome::Escalated) => "pane closed (forced)",
+        CloseOutcome::Stopped(StopOutcome::Unknown) => {
+            "close status unknown; the pane may still be running"
+        }
+        CloseOutcome::Rejected(CloseRejection::StaleLayout) => "close rejected: layout changed",
+        CloseOutcome::Rejected(CloseRejection::StaleTarget) => "close rejected: pane changed",
+        CloseOutcome::Rejected(CloseRejection::AlreadyClosed) => "pane already closed",
+        CloseOutcome::Rejected(CloseRejection::NoLayout) => "close rejected: no layout",
+        CloseOutcome::Rejected(CloseRejection::NotAdmitted) => "close rejected by the server",
     }
 }
 

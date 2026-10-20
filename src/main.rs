@@ -107,6 +107,23 @@ where
             }
             return default_open::stop();
         }
+        if arguments.peek().is_some_and(|argument| argument == "panes") {
+            arguments.next();
+            if arguments.next().is_some() {
+                return report_cli_error(CliError::InvalidArguments);
+            }
+            return default_open::panes();
+        }
+        if arguments.peek().is_some_and(|argument| argument == "close") {
+            arguments.next();
+            let index = arguments
+                .next()
+                .and_then(|argument| default_open::parse_pane_index(&argument));
+            return match (index, arguments.next()) {
+                (Some(index), None) => default_open::close(index),
+                _ => report_cli_error(CliError::InvalidArguments),
+            };
+        }
         if arguments.peek().is_some_and(|argument| argument == "probe") {
             arguments.next();
             if arguments.next().is_some() {
@@ -542,10 +559,15 @@ fn print_help() {
     println!("Usage:");
     println!("  panelink              open your workspace (starts it if needed, else reattaches)");
     println!("  panelink stop         stop the workspace and all of its shells");
+    println!("  panelink panes        list the workspace's panes (1 = left/top)");
+    println!("  panelink close <n>    close pane n: hang up its shell (SIGKILL after 1 s);");
+    println!("                        the other pane fills the window; closing the last");
+    println!("                        pane ends the workspace");
     println!();
     println!("In the workspace: right-click a pane to split it; click a pane to focus it.");
     println!("Control-B (not Command-B) enters NAV mode: r/l/u/d split, arrows/Tab switch");
-    println!("pane, s opens the menu, Esc leaves. Ctrl-X detaches (shells keep running).");
+    println!("pane, s opens the menu, x closes the pane (asks y/n), Esc leaves.");
+    println!("Ctrl-X detaches (shells keep running).");
     println!();
     println!("Advanced:");
     println!("  panelink probe        disposable single-shell terminal probe");
