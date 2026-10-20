@@ -14,7 +14,7 @@ Scope: current application manifest/lockfile after one-shot signal-flag adoption
 | rustix | 1.1.5 | yes | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | alloc, fs, process, pty, std, stdio, termios | 891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d |
 | rustix-openpty | 0.2.0 | yes | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | none | 1de16c7c59892b870a6336f185dc10943517f1327447096bbb7bb32cd85e2393 |
 | unicode-width | 0.2.2 | yes | MIT OR Apache-2.0 | cjk, default | b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254 |
-| vt100 | 0.16.2-panelink.1 | yes | MIT | none | local path; vendor/vt100/PROVENANCE.json |
+| vt100 | 0.16.2-panelink.2 | yes | MIT | none | local path; vendor/vt100/PROVENANCE.json |
 | vte | 0.15.0 | yes | Apache-2.0 OR MIT | none | a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd |
 | windows-link | 0.2.1 | no | MIT OR Apache-2.0 | none | f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5 |
 | windows-sys | 0.61.2 | no | MIT OR Apache-2.0 | Win32, Win32_Foundation, Win32_Networking, Win32_Networking_WinSock, Win32_System, Win32_System_Diagnostics, Win32_System_Diagnostics_Debug, default | ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc |
@@ -23,3 +23,5 @@ Scope: current application manifest/lockfile after one-shot signal-flag adoption
 | signal-hook-registry | 1.4.8 | yes | MIT OR Apache-2.0 | none | c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b |
 
 The extracted decoder uses only the already selected bitflags 2.13.2. unicode-width 0.2.2 is now also direct for rendering, with unchanged cjk/default features. Apple custom-build targets are libc/rustix plus signal-hook, whose selected build.rs is empty with extended-siginfo-raw disabled. No cc, extra native dependency or procedural macro is selected. Signal handlers are process-lifetime flags for the one-shot binary only; do not unregister during bounded cleanup. See ../P2-SIGNALS-REVIEW.md. See ../P2-INPUT-REVIEW.md for extraction, license, maintenance, advisory and API evidence.
+
+The `.2` local VT100 source revision adds no package, feature, build script or native component; old host-component metadata and tree files are historical observations from the `.1` selection. The reviewed current sources/patch/fingerprints and memory delta are in [P5-SCROLLBACK-CURSOR.md](../P5-SCROLLBACK-CURSOR.md).

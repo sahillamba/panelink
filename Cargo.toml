@@ -6,7 +6,7 @@ license = "MIT"
 publish = false
 
 [target.'cfg(unix)'.dependencies]
-vt100 = { version = "=0.16.2-panelink.1", path = "vendor/vt100" }
+vt100 = { version = "=0.16.2-panelink.2", path = "vendor/vt100" }
 rustix-openpty = "=0.2.0"
 rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs", "process", "termios"] }
 unicode-width = "=0.2.2"

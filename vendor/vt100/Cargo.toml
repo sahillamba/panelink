@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.70"
 name = "vt100"
-version = "0.16.2-panelink.1"
+version = "0.16.2-panelink.2"
 authors = ["Jesse Luehrs <doy@tozt.net>"]
 build = false
 include = [

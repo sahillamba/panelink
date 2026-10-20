@@ -28,6 +28,9 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use panelink::control_protocol::TargetRef;
+use panelink::history_rows;
+use panelink::history_store::HistoryStore;
 use panelink::transport::AuthenticatedStream;
 
 /// Terminfo source embedded at build time so the binary is self-contained.
@@ -643,6 +646,242 @@ fn stop_inner() -> Result<bool, OpenError> {
 const CLI_CONTEXT_NAME: &str = "cli.ctx";
 
 const NO_WORKSPACE: &str = "no workspace is running";
+
+fn saved_store() -> Result<HistoryStore, &'static str> {
+    let state = resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME"))
+        .map_err(|_| "history directory unavailable")?;
+    HistoryStore::open(&state.server.join("history")).map_err(|_| "history directory unavailable")
+}
+
+/// List recorded targets. This is a read-only filesystem observation and
+/// does not start, attach to, or stop a managed process.
+pub(crate) fn history_list() -> i32 {
+    let result =
+        saved_store().and_then(|store| store.list_targets().map_err(|_| "saved history invalid"));
+    match result {
+        Ok(targets) => {
+            for target in targets {
+                println!(
+                    "{}:{}:{}:{}:{}",
+                    target.generation,
+                    target.workspace,
+                    target.pane,
+                    target.session,
+                    target.occupant_revision
+                );
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("panelink: {error}");
+            1
+        }
+    }
+}
+
+fn parse_history_target(value: &std::ffi::OsStr) -> Option<TargetRef> {
+    let parts = value
+        .to_str()?
+        .split(':')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if parts.len() != 5 || parts.contains(&0) {
+        return None;
+    }
+    Some(TargetRef {
+        generation: parts[0],
+        workspace: parts[1],
+        pane: parts[2],
+        session: parts[3],
+        occupant_revision: parts[4],
+    })
+}
+
+/// Read the retained sanitized rows of exactly one immutable target.
+pub(crate) fn history_show(value: &std::ffi::OsStr) -> i32 {
+    let Some(target) = parse_history_target(value) else {
+        eprintln!("panelink: invalid target");
+        return 2;
+    };
+    let result = saved_store().and_then(|store| {
+        let rows = store
+            .load_rows(target)
+            .map_err(|_| "saved history invalid")?;
+        let screens = store
+            .load_screens(target)
+            .map_err(|_| "saved history invalid")?;
+        Ok((rows, screens))
+    });
+    match result {
+        Ok((Some(saved), screens)) => {
+            println!(
+                "saved history epoch {} (gap: {}, capture disabled: {})",
+                saved.epoch, saved.gap, saved.capture_disabled
+            );
+            for record in saved.records {
+                let Ok(row) = history_rows::decode(&record) else {
+                    eprintln!("panelink: saved history invalid");
+                    return 1;
+                };
+                let mut line = String::new();
+                for column in 0..row.width {
+                    line.push_str(row.cell_text(column).unwrap_or(""));
+                }
+                println!(
+                    "{}:{} {}{}",
+                    row.epoch,
+                    row.ordinal,
+                    line.trim_end(),
+                    if row.wrapped { " ↩" } else { "" }
+                );
+            }
+            for (buffer, bytes) in ["normal", "alternate"].into_iter().zip(screens) {
+                let Some(bytes) = bytes else { continue };
+                let checkpoint = match panelink::screen_checkpoint::decode(&bytes) {
+                    Ok(checkpoint) => checkpoint,
+                    Err(_) => {
+                        eprintln!("panelink: saved history invalid");
+                        return 1;
+                    }
+                };
+                println!(
+                    "checkpoint {buffer} captured at {}:",
+                    checkpoint.metadata().captured_at_unix_ms()
+                );
+                for row in 0..checkpoint.rows() {
+                    let mut line = String::new();
+                    for column in 0..checkpoint.columns() {
+                        if let Some(cell) = checkpoint.cell(row, column) {
+                            line.push_str(cell.text());
+                        }
+                    }
+                    println!("{}", line.trim_end());
+                }
+            }
+            0
+        }
+        Ok((None, _)) => {
+            eprintln!("panelink: no saved history for target");
+            1
+        }
+        Err(error) => {
+            eprintln!("panelink: {error}");
+            1
+        }
+    }
+}
+
+/// Clear only saved Panelink rows and screen checkpoints for the exact target.
+pub(crate) fn history_clear(value: &std::ffi::OsStr) -> i32 {
+    let Some(target) = parse_history_target(value) else {
+        eprintln!("panelink: invalid target");
+        return 2;
+    };
+    let state = match resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME")) {
+        Ok(state) => state,
+        Err(_) => {
+            eprintln!("panelink: history directory unavailable");
+            return 1;
+        }
+    };
+    let _lifecycle = match lifecycle_lock(&state, STOP_TIMEOUT) {
+        Ok(lock) => lock,
+        Err(_) => {
+            eprintln!("panelink: history clear failed");
+            return 1;
+        }
+    };
+    // Direct `panelink serve` does not take lifecycle.lock. Hold the same
+    // verified storage lock it needs throughout deletion; a failed/missing
+    // lock is never interpreted as proof that the server is absent.
+    let _server = match panelink::server_storage::ServerStorage::lock_for_maintenance(&state.server)
+    {
+        Ok(lock) => lock,
+        Err(_) => {
+            eprintln!("panelink: stop the workspace before clearing saved history");
+            return 1;
+        }
+    };
+    match saved_store().and_then(|store| store.clear(target).map_err(|_| "history clear failed")) {
+        Ok(()) => {
+            println!("panelink: saved history cleared");
+            0
+        }
+        Err(error) => {
+            eprintln!("panelink: {error}");
+            1
+        }
+    }
+}
+
+/// Search normalized retained rows and latest committed checkpoints of one
+/// exact target. Query is plain Unicode text; no terminal bytes are executed.
+pub(crate) fn history_search(target_value: &std::ffi::OsStr, query_value: &std::ffi::OsStr) -> i32 {
+    let Some(target) = parse_history_target(target_value) else {
+        eprintln!("panelink: invalid target");
+        return 2;
+    };
+    let Some(query) = query_value.to_str().filter(|value| {
+        !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+    }) else {
+        eprintln!("panelink: invalid search text");
+        return 2;
+    };
+    let result = saved_store().and_then(|store| {
+        let rows = store
+            .load_rows(target)
+            .map_err(|_| "saved history invalid")?;
+        let screens = store
+            .load_screens(target)
+            .map_err(|_| "saved history invalid")?;
+        Ok((rows, screens))
+    });
+    let (rows, screens) = match result {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("panelink: {error}");
+            return 1;
+        }
+    };
+    if let Some(saved) = rows {
+        println!(
+            "saved history epoch {} (gap: {}, capture disabled: {})",
+            saved.epoch, saved.gap, saved.capture_disabled
+        );
+        for record in saved.records {
+            let Ok(row) = history_rows::decode(&record) else {
+                return 1;
+            };
+            let text = (0..row.width)
+                .filter_map(|column| row.cell_text(column))
+                .collect::<String>();
+            if text.contains(query) {
+                println!("row {}:{} {}", row.epoch, row.ordinal, text.trim_end());
+            }
+        }
+    }
+    for (buffer, bytes) in ["normal", "alternate"].into_iter().zip(screens) {
+        let Some(bytes) = bytes else { continue };
+        let Ok(checkpoint) = panelink::screen_checkpoint::decode(&bytes) else {
+            return 1;
+        };
+        for row in 0..checkpoint.rows() {
+            let text = (0..checkpoint.columns())
+                .filter_map(|column| checkpoint.cell(row, column))
+                .map(|cell| cell.text())
+                .collect::<String>();
+            if text.contains(query) {
+                println!(
+                    "checkpoint {buffer} {} row {row}: {}",
+                    checkpoint.metadata().captured_at_unix_ms(),
+                    text.trim_end()
+                );
+            }
+        }
+    }
+    0
+}
 
 /// The default workspace's state root when its server is running; located
 /// exactly as `panelink stop` does, and never starts a server.

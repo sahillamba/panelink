@@ -1,11 +1,13 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: 3B lifecycle/stop integrated; P5 live checkpoint capture integrated (2026-10-20), broader history still open; Phase 3 runtime gates and Phase 2 manual host checks remain open
+current-phase: P5 bounded saved normal history and read-only CLI recovery integrated (2026-10-20); full reboot/layout history acceptance and provider recovery remain open
 last-updated: 2026-10-20
-last-verified: 2026-10-20 — verifier 8/8; Rust 500 library + 93 binary, history store 4/4 and real close/capture runtime 4/4; full suite 15 ignored, p3a_default_open 6/6 (1 ignored); strict Clippy/fmt/rustdoc and component fingerprints pass
-next-action: Review/test both pane close and live capture together; then settle VT100 history export/reset cursor and post-patch memory/provenance gate, followed by retention/recovery. Keep Phase 2 manual acceptance and Phase 4 live OpenCode identity open.
+last-verified: 2026-10-20 — final verifier 8/8 after reviewer fixes; Rust 500 library + 93 binary, scrollback cursor 6/6, saved-row codec 1/1, history store 10/10, screen-checkpoint 3/3 and real close/history runtime 5/5; full suite 15 ignored; VT100 focused history tests 5/5; strict Clippy/fmt/rustdoc and component fingerprints pass
+next-action: Finish full V-HISTORY reboot/layout/partial-tail acceptance and history crash-repair/throughput review, then Phase 3 runtime/host gates and Phase 4 live OpenCode identity. The scoped saved-history CLI is usable but complete workspace/provider recovery remains separate.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
+history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
+history-saved-rows: scoped saved-row slice integrated; 1,024 normal rows/8 MiB segment, 30-day ended retention, stopped-workspace clear and read-only history CLI; unrecorded output, incomplete-temp recovery and V-HISTORY reboot/layout acceptance remain open — see docs/progress/P5-SAVED-HISTORY.md
 blocked-on: clipboard sentinel retest and remaining manual Apple Terminal acceptance; live OpenCode identity unproved. New machine (2026-10-18): p2_host 9/9 and p3_pathname ignored fixtures pass with captured output; /dev/tty, pathname and loopback bind permitted; OpenCode here is 1.19.0 and the MiMo task has not run
 setup: new Mac 2026-10-18, rustup stable 1.99.1, verifier 8/8, 443 passed/14 ignored; launcher symlink fix uncommitted — see INTEGRATION.md "New-machine setup"
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
@@ -200,6 +202,16 @@ reopen committed checkpoints after server shutdown, and capture failures keep
 shells running. Alternate screens that enter and leave between PTY read chunks
 can be missed; saved scrollback, retention, per-session deletion and recovery
 UI remain unimplemented. See [P5-LIVE-CAPTURE.md](docs/progress/P5-LIVE-CAPTURE.md).
+
+Saved-history follow-up: the owner now writes normalized normal scrollback in
+bounded per-target segments, marks gaps and RIS epochs, records confirmed exit
+times, and offers `panelink history list|show|search|clear` for read-only
+recovery and explicit stopped-workspace deletion. Ended records are pruned
+after 30 days on server startup. See
+[P5-SAVED-HISTORY.md](docs/progress/P5-SAVED-HISTORY.md). This does not
+restore workspace layouts, live processes, provider conversations or every
+alternate-screen frame; V-HISTORY's complete reboot/layout acceptance remains
+open.
 
 ## Phase 4 — early OpenCode identity gate (not started)
 

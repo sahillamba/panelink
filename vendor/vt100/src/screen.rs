@@ -7,6 +7,60 @@ const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
 
+/// Cursor after the last normal-history row accepted by a consumer. The
+/// epoch changes on RIS even when the new history is empty.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct HistoryCursor {
+    /// Nonzero engine epoch (initially one).
+    pub epoch: u64,
+    /// Last accepted normal-history ordinal; zero means none in this epoch.
+    pub ordinal: u64,
+}
+
+impl std::fmt::Debug for HistoryCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HistoryCursor { <redacted> }")
+    }
+}
+
+/// Why a history request cannot continue from the supplied cursor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HistoryError {
+    /// A RIS reset changed the epoch; the old cursor is not continuous.
+    Reset,
+    /// The oldest requested row was evicted from the bounded ring.
+    Gap,
+    /// The cursor is malformed or refers to a future row.
+    InvalidCursor,
+    /// Epoch or ordinal exhaustion disabled extraction without stopping parsing.
+    Exhausted,
+}
+
+/// One borrowed normal-history row, never a copy of terminal input or output.
+#[derive(Clone, Copy)]
+pub struct HistoryRow<'a> {
+    /// Ordinal within the current epoch.
+    pub ordinal: u64,
+    /// Source row width, which need not equal the current viewport width.
+    pub width: u16,
+    /// Whether this row auto-wrapped into the following row.
+    pub wrapped: bool,
+    row: &'a crate::row::Row,
+}
+
+impl std::fmt::Debug for HistoryRow<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HistoryRow { <redacted> }")
+    }
+}
+
+impl HistoryRow<'_> {
+    /// Borrow a cell from this retained row, without changing the view offset.
+    pub fn cell(&self, column: u16) -> Option<&crate::Cell> {
+        self.row.get(column)
+    }
+}
+
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum MouseProtocolMode {
@@ -55,6 +109,7 @@ pub enum MouseProtocolEncoding {
 pub struct Screen {
     grid: crate::grid::Grid,
     alternate_grid: crate::grid::Grid,
+    history_epoch: u64,
 
     attrs: crate::attrs::Attrs,
     saved_attrs: crate::attrs::Attrs,
@@ -74,6 +129,7 @@ impl Screen {
         Self {
             grid,
             alternate_grid: crate::grid::Grid::new(size, 0),
+            history_epoch: 1,
 
             attrs: crate::attrs::Attrs::default(),
             saved_attrs: crate::attrs::Attrs::default(),
@@ -121,6 +177,56 @@ impl Screen {
     #[must_use]
     pub fn scrollback(&self) -> usize {
         self.grid().scrollback()
+    }
+
+    /// The current normal-history cursor, including while alternate screen
+    /// is displayed. A cursor is scoped to this parser and its outer target.
+    pub fn history_cursor(&self) -> Result<HistoryCursor, HistoryError> {
+        if self.grid.history_exhausted() {
+            return Err(HistoryError::Exhausted);
+        }
+        Ok(HistoryCursor {
+            epoch: self.history_epoch,
+            ordinal: self.grid.history_ordinal(),
+        })
+    }
+
+    /// Borrow retained normal rows after `cursor` without modifying the
+    /// scrollback view. Returns `Gap` instead of silently skipping evictions,
+    /// and `Reset` even when RIS has not yet produced another history row.
+    pub fn history_after(
+        &self,
+        cursor: HistoryCursor,
+    ) -> Result<impl ExactSizeIterator<Item = HistoryRow<'_>>, HistoryError> {
+        let current = self.history_cursor()?;
+        if cursor.epoch == 0 {
+            return Err(HistoryError::InvalidCursor);
+        }
+        if cursor.epoch > current.epoch {
+            return Err(HistoryError::InvalidCursor);
+        }
+        if cursor.epoch < current.epoch {
+            return Err(HistoryError::Reset);
+        }
+        if cursor.ordinal > current.ordinal {
+            return Err(HistoryError::InvalidCursor);
+        }
+        let rows = self.grid.history_rows();
+        let first = rows
+            .front()
+            .map_or(current.ordinal.saturating_add(1), |row| row.history_ordinal());
+        if first == 0 || cursor.ordinal.saturating_add(1) < first {
+            return Err(HistoryError::Gap);
+        }
+        let skip = usize::try_from(cursor.ordinal.saturating_add(1).saturating_sub(first))
+            .unwrap_or(usize::MAX)
+            .min(rows.len());
+        Ok(rows.iter().skip(skip).map(|row| HistoryRow {
+            ordinal: row.history_ordinal(),
+            width: row.width(),
+            wrapped: row.wrapped(),
+            row,
+        }))
     }
 
     /// Returns the text contents of the terminal.
@@ -996,7 +1102,20 @@ impl Screen {
 
     // ESC c
     pub(crate) fn ris(&mut self) {
-        *self = Self::new(self.grid.size(), self.grid.scrollback_len());
+        let next_epoch = self.history_epoch.checked_add(1);
+        let mut reset = Self::new(self.grid.size(), self.grid.scrollback_len());
+        match next_epoch {
+            Some(next) if !self.grid.history_exhausted() => reset.history_epoch = next,
+            None => {
+                reset.history_epoch = u64::MAX;
+                reset.grid.disable_history_extraction();
+            }
+            Some(next) => {
+                reset.history_epoch = next;
+                reset.grid.disable_history_extraction();
+            }
+        }
+        *self = reset;
     }
 
     // csi codes
@@ -1341,6 +1460,36 @@ impl Screen {
     // CSI r
     pub(crate) fn decstbm(&mut self, (top, bottom): (u16, u16)) {
         self.grid_mut().set_scroll_region(top - 1, bottom - 1);
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::{HistoryError, Screen};
+    use crate::grid::Size;
+
+    #[test]
+    fn epoch_exhaustion_disables_extraction_but_ris_keeps_resetting_screen() {
+        let mut screen = Screen::new(Size { rows: 2, cols: 10 }, 4);
+        screen.history_epoch = u64::MAX;
+        screen.ris();
+        assert_eq!(screen.history_cursor(), Err(HistoryError::Exhausted));
+        screen.ris();
+        assert_eq!(screen.history_cursor(), Err(HistoryError::Exhausted));
+        assert_eq!(screen.size(), (2, 10));
+    }
+
+    #[test]
+    fn exhausted_normal_history_remains_disabled_across_ris() {
+        let mut screen = Screen::new(Size { rows: 2, cols: 10 }, 4);
+        screen.grid.disable_history_extraction();
+        screen.ris();
+        assert_eq!(screen.history_cursor(), Err(HistoryError::Exhausted));
+    }
+
+    #[test]
+    fn screen_metadata_stays_within_the_reviewed_allowance() {
+        assert!(std::mem::size_of::<Screen>() <= 256);
     }
 }
 

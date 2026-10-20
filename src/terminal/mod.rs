@@ -315,7 +315,7 @@ impl SnapshotCell {
         self.inverse
     }
 
-    fn set_from(&mut self, cell: &vt100::Cell) {
+    pub(crate) fn set_from(&mut self, cell: &vt100::Cell) {
         self.text.fill(0);
         self.text_len = 0;
         for scalar in cell.contents().chars() {
@@ -814,6 +814,9 @@ pub struct TerminalSession {
     snapshot: ScreenSnapshot,
     cleanup: Option<Result<(), TerminalError>>,
     kill_sent: bool,
+    preserve_cleanup_output: bool,
+    final_output_complete: bool,
+    final_output_bytes: usize,
 }
 
 impl fmt::Debug for TerminalSession {
@@ -903,6 +906,9 @@ impl TerminalSession {
             snapshot,
             cleanup: None,
             kill_sent: false,
+            preserve_cleanup_output: false,
+            final_output_complete: false,
+            final_output_bytes: 0,
         })
     }
 
@@ -1077,6 +1083,11 @@ impl TerminalSession {
     pub fn snapshot(&self) -> &ScreenSnapshot {
         &self.snapshot
     }
+    /// Borrow the normal history engine, independently of the active buffer.
+    /// Historical cells remain in-memory and must be normalized before disk.
+    pub(crate) fn history_screen(&self) -> &vt100::Screen {
+        self.parser.screen()
+    }
     /// Child exit status, once collected.
     pub const fn exit_status(&self) -> Option<ExitStatus> {
         self.exit_status
@@ -1106,9 +1117,33 @@ impl TerminalSession {
         }
         let result = self.cleanup_child();
         self.parser.callbacks_mut().begin_chunk();
+        if self.preserve_cleanup_output && result.is_ok() {
+            for _ in 0..64 {
+                if self.pty_eof || !self.drain_cleanup_output() {
+                    break;
+                }
+            }
+            self.final_output_complete = self.pty_eof;
+        }
         self.master.take();
         self.cleanup = Some(result.clone());
         result
+    }
+
+    /// Use the same bounded HUP/KILL cleanup while parsing available final
+    /// output into the sanitized snapshot. `false` means EOF was not observed
+    /// and the caller must mark a saved-history gap.
+    pub fn shutdown_with_final_output(&mut self) -> Result<bool, TerminalError> {
+        if self.cleanup.is_none() {
+            self.preserve_cleanup_output = true;
+        }
+        self.shutdown()?;
+        Ok(self.final_output_complete)
+    }
+
+    /// Number of PTY bytes parsed during cleanup before its master closed.
+    pub const fn final_output_bytes(&self) -> usize {
+        self.final_output_bytes
     }
 
     fn cleanup_child(&mut self) -> Result<(), TerminalError> {
@@ -1162,7 +1197,11 @@ impl TerminalSession {
             // A session-leader child cannot complete its controlling-tty close
             // while queued output is never drained on macOS. Discard that
             // output during teardown so the bounded windows can reap it.
-            self.discard_queued_output();
+            if self.preserve_cleanup_output {
+                let _ = self.drain_cleanup_output();
+            } else {
+                self.discard_queued_output();
+            }
             if self.poll_exit()? {
                 return Ok(true);
             }
@@ -1204,6 +1243,34 @@ impl TerminalSession {
         }
         if eof {
             self.pty_eof = true;
+        }
+    }
+
+    /// One nonblocking cleanup read, bounded to the core's PTY chunk size.
+    /// Callback replies are dropped: input has been disabled before signaling.
+    fn drain_cleanup_output(&mut self) -> bool {
+        let Some(master) = self.master.as_mut() else {
+            return false;
+        };
+        let mut buffer = [0_u8; MAX_READ_BYTES];
+        match master.read(&mut buffer) {
+            Ok(0) => {
+                self.pty_eof = true;
+                false
+            }
+            Ok(count) => {
+                self.final_output_bytes = self.final_output_bytes.saturating_add(count);
+                self.parser.callbacks_mut().begin_chunk();
+                self.parser.process(&buffer[..count]);
+                self.parser.callbacks_mut().begin_chunk();
+                self.snapshot.refresh(self.parser.screen(), self.size);
+                true
+            }
+            Err(error) if error.raw_os_error() == Some(Errno::IO.raw_os_error()) => {
+                self.pty_eof = true;
+                false
+            }
+            Err(_) => false,
         }
     }
 }

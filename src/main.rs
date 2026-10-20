@@ -114,6 +114,32 @@ where
             }
             return default_open::panes();
         }
+        if arguments
+            .peek()
+            .is_some_and(|argument| argument == "history")
+        {
+            arguments.next();
+            return match (
+                arguments.next(),
+                arguments.next(),
+                arguments.next(),
+                arguments.next(),
+            ) {
+                (Some(action), None, None, None) if action == "list" => {
+                    default_open::history_list()
+                }
+                (Some(action), Some(target), None, None) if action == "show" => {
+                    default_open::history_show(&target)
+                }
+                (Some(action), Some(target), None, None) if action == "clear" => {
+                    default_open::history_clear(&target)
+                }
+                (Some(action), Some(target), Some(query), None) if action == "search" => {
+                    default_open::history_search(&target, &query)
+                }
+                _ => report_cli_error(CliError::InvalidArguments),
+            };
+        }
         if arguments.peek().is_some_and(|argument| argument == "close") {
             arguments.next();
             let index = arguments

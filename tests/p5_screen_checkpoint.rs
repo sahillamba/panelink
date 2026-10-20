@@ -129,6 +129,30 @@ fn checkpoint_metadata(output_sequence: u64, screen_revision: u64) -> Checkpoint
     .unwrap()
 }
 
+#[test]
+fn hup_final_output_is_captured_or_reported_incomplete_before_pty_close() {
+    let directory = PrivateDir::new().unwrap();
+    let size = TerminalSize::new(8, 60).unwrap();
+    let mut session = launch_shell(
+        "trap 'printf P5-FINAL-ON-HUP\\n; exit 0' HUP; printf P5-HUP-READY\\n; while :; do /bin/sleep 10; done",
+        directory.path(),
+        size,
+    );
+    pump_until(&mut session, |snapshot| {
+        screen_text(snapshot).contains("P5-HUP-READY")
+    });
+    let eof = session.shutdown_with_final_output().unwrap();
+    if eof {
+        assert!(screen_text(session.snapshot()).contains("P5-FINAL-ON-HUP"));
+    } else {
+        // A caller must persist an explicit gap rather than claiming that
+        // cleanup output could be fully recovered without a PTY EOF.
+        assert!(!session.pty_eof());
+    }
+    assert!(session.exit_status().is_some());
+    assert!(session.pump().is_err(), "shutdown keeps the PTY closed");
+}
+
 fn cell_containing<'a>(
     checkpoint: &'a ScreenCheckpoint<'_>,
     text: &str,

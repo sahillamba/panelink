@@ -23,6 +23,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use panelink::control_protocol::TargetRef;
+use panelink::history_rows;
 use panelink::history_store::HistoryStore;
 use panelink::screen_checkpoint::{self, ScreenBuffer};
 use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
@@ -659,6 +660,9 @@ fn panes_and_close_commands_collapse_layout_and_end_workspace() {
         "{stdout}"
     );
     fixture.wait_server_gone();
+    let (code, listed, errors) = fixture.panelink(&["history", "list"]);
+    assert_eq!(code, 0, "{errors}");
+    assert!(!listed.contains("\x1b"), "{listed}");
     // A fresh reader after server teardown sees the committed checkpoint of
     // the last pane; reading does not start a child or interpret terminal IO.
     let committed = HistoryStore::open(&fixture.server_dir().join("history"))
@@ -739,10 +743,12 @@ fn live_capture_and_storage_failure_leave_the_shell_running() {
     let history = fixture.server_dir().join("history");
     let entry = fs::read_dir(&history)
         .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "screen")
+        })
+        .expect("normal checkpoint exists");
     fs::OpenOptions::new()
         .append(true)
         .open(&entry)
@@ -768,6 +774,74 @@ fn live_capture_and_storage_failure_leave_the_shell_running() {
         .unwrap()
         .load(target_ref(&target), ScreenBuffer::Normal)
         .is_err());
+}
+
+#[test]
+fn normal_scrollback_rows_survive_close_without_replaying_the_child() {
+    let fixture = Fixture::new();
+    let mut client = open_client(&fixture);
+    detach(&mut client);
+    drop(client);
+    let (code, init) = fixture.control("rows.ctx", &["init"]);
+    assert_eq!(code, 0, "{init}");
+    let (code, panes) = fixture.control("rows.ctx", &["panes"]);
+    assert_eq!(code, 0, "{panes}");
+    let target = pane_field(&panes, 0, "target").unwrap().to_owned();
+    claim_and_type(
+        &fixture,
+        "rows-input.ctx",
+        &target,
+        "for i in {1..40}; do echo P5ROW-$i; done",
+    );
+    let history_dir = fixture.server_dir().join("history");
+    wait_control("saved normal scrollback", || {
+        let store = HistoryStore::open(&history_dir).ok()?;
+        let saved = store.load_rows(target_ref(&target)).ok()??;
+        (saved.records.len() >= 8).then_some(format!("{} rows", saved.records.len()))
+    });
+    let (code, _, errors) = fixture.panelink(&["history", "clear", &target]);
+    assert_eq!(code, 1, "live server must block clear: {errors}");
+    let (code, stdout, stderr) = fixture.panelink(&["close", "1"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    fixture.wait_server_gone();
+    let (code, listed, errors) = fixture.panelink(&["history", "list"]);
+    assert_eq!(code, 0, "{errors}");
+    assert!(listed.contains(&target));
+    let (code, shown, errors) = fixture.panelink(&["history", "show", &target]);
+    assert_eq!(code, 0, "{errors}");
+    assert!(shown.contains("P5ROW-"));
+    assert!(shown.contains("saved history epoch"));
+    let (code, matches, errors) = fixture.panelink(&["history", "search", &target, "P5ROW-7"]);
+    assert_eq!(code, 0, "{errors}");
+    assert!(matches.contains("P5ROW-7"));
+    let saved = HistoryStore::open(&history_dir)
+        .unwrap()
+        .load_rows(target_ref(&target))
+        .unwrap()
+        .unwrap();
+    assert!(saved.records.len() >= 8);
+    assert!(saved.ended_at_unix_ms != 0);
+    let visible = saved
+        .records
+        .iter()
+        .map(|record| {
+            let row = history_rows::decode(record).unwrap();
+            (0..row.width)
+                .filter_map(|col| row.cell_text(col))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(visible.contains("P5ROW-"), "missing expected saved rows");
+    assert!(!visible.contains("\x1b"));
+    let (code, cleared, errors) = fixture.panelink(&["history", "clear", &target]);
+    assert_eq!(code, 0, "{errors}");
+    assert!(cleared.contains("saved history cleared"));
+    assert!(HistoryStore::open(&history_dir)
+        .unwrap()
+        .load_rows(target_ref(&target))
+        .unwrap()
+        .is_none());
 }
 
 #[test]

@@ -4,6 +4,9 @@ use crate::term::BufWrite as _;
 pub struct Row {
     cells: Vec<crate::Cell>,
     wrapped: bool,
+    // Assigned only when this row enters normal scrollback. Zero means it is
+    // still a drawing row (or extraction was disabled by ordinal exhaustion).
+    ordinal: u64,
 }
 
 impl Row {
@@ -11,6 +14,7 @@ impl Row {
         Self {
             cells: vec![crate::Cell::new(); usize::from(cols)],
             wrapped: false,
+            ordinal: 0,
         }
     }
 
@@ -81,6 +85,18 @@ impl Row {
 
     pub fn wrapped(&self) -> bool {
         self.wrapped
+    }
+
+    pub(crate) fn history_ordinal(&self) -> u64 {
+        self.ordinal
+    }
+
+    pub(crate) fn set_history_ordinal(&mut self, ordinal: u64) {
+        self.ordinal = ordinal;
+    }
+
+    pub(crate) fn width(&self) -> u16 {
+        self.cols()
     }
 
     pub fn clear_wide(&mut self, col: u16) {

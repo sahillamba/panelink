@@ -9,6 +9,7 @@ use crate::control_protocol::TargetRef;
 use crate::control_protocol::{
     Command, ReadSource, MAX_INPUT_TEXT_BYTES, MAX_READ_BYTES, MAX_READ_LINES,
 };
+use crate::history_rows;
 use crate::history_store::HistoryStore;
 use crate::protocol::Outcome;
 use crate::response_protocol::RejectionCode;
@@ -30,6 +31,8 @@ struct Capture {
     last_buffer: Option<ScreenBuffer>,
     last_attempt: Option<Instant>,
     failed: bool,
+    history_cursor: vt100::HistoryCursor,
+    end_pending: bool,
 }
 
 /// Maximum display text returned by a schema-1 read after its 90-byte response
@@ -52,6 +55,7 @@ pub struct PtyEffects {
     last_child_exited: bool,
     failed: bool,
     stopped: bool,
+    exit_recorded: bool,
     capture: Option<Capture>,
 }
 
@@ -80,6 +84,7 @@ impl PtyEffects {
             last_child_exited,
             failed: false,
             stopped: false,
+            exit_recorded: false,
             capture: None,
         }
     }
@@ -97,6 +102,14 @@ impl PtyEffects {
         failure: Arc<AtomicBool>,
         target: TargetRef,
     ) {
+        let history_cursor =
+            self.session
+                .history_screen()
+                .history_cursor()
+                .unwrap_or(vt100::HistoryCursor {
+                    epoch: 1,
+                    ordinal: 0,
+                });
         self.capture = Some(Capture {
             store,
             failure,
@@ -105,8 +118,28 @@ impl PtyEffects {
             last_buffer: None,
             last_attempt: None,
             failed: false,
+            history_cursor,
+            end_pending: false,
         });
+        // The parser may already have scrolled during launch. Never silently
+        // claim pre-attachment output was persisted as a continuous segment.
+        if let Some(capture) = &mut self.capture {
+            if capture
+                .store
+                .begin_history(target, history_cursor.epoch, history_cursor.ordinal != 0)
+                .is_err()
+            {
+                capture.failed = true;
+                capture.failure.store(true, Ordering::Relaxed);
+            }
+        }
+        if history_cursor.ordinal != 0 {
+            if let Some(capture) = &mut self.capture {
+                capture.history_cursor.ordinal = 0;
+            }
+        }
         self.capture_screen(true);
+        self.capture_history();
     }
 
     /// Whether a checkpoint write has failed since capture was installed.
@@ -117,6 +150,41 @@ impl PtyEffects {
     /// Save the latest visible screen on detach or orderly server shutdown.
     pub fn capture_now(&mut self) {
         self.capture_screen(true);
+        self.capture_history();
+    }
+
+    /// Record a confirmed child exit as the start of history's age window.
+    pub fn capture_exit(&mut self) -> bool {
+        self.capture_now();
+        let Some(capture) = &mut self.capture else {
+            return true;
+        };
+        capture.end_pending = true;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|time| u64::try_from(time.as_millis()).ok());
+        if now.is_none_or(|now| capture.store.mark_ended(capture.target, now).is_err()) {
+            capture.failed = true;
+            capture.failure.store(true, Ordering::Relaxed);
+            return false;
+        }
+        capture.end_pending = false;
+        true
+    }
+
+    fn mark_final_output_gap(&mut self) {
+        let Some(capture) = &mut self.capture else {
+            return;
+        };
+        if capture
+            .store
+            .mark_history(capture.target, capture.history_cursor.epoch, false)
+            .is_err()
+        {
+            capture.failed = true;
+            capture.failure.store(true, Ordering::Relaxed);
+        }
     }
 
     fn capture_screen(&mut self, force: bool) {
@@ -172,6 +240,81 @@ impl PtyEffects {
             capture.failed = true;
             capture.failure.store(true, Ordering::Relaxed);
         }
+    }
+
+    fn capture_history(&mut self) {
+        let Some(capture) = self.capture.as_mut() else {
+            return;
+        };
+        let screen = self.session.history_screen();
+        let latest = match screen.history_cursor() {
+            Ok(cursor) => cursor,
+            Err(_) => {
+                capture.failed = true;
+                capture.failure.store(true, Ordering::Relaxed);
+                let _ =
+                    capture
+                        .store
+                        .mark_history(capture.target, capture.history_cursor.epoch, true);
+                return;
+            }
+        };
+        let mut gap = false;
+        let rows = match screen.history_after(capture.history_cursor) {
+            Ok(rows) => rows.collect::<Vec<_>>(),
+            Err(vt100::HistoryError::Reset | vt100::HistoryError::Gap) => {
+                gap = true;
+                let start = vt100::HistoryCursor {
+                    epoch: latest.epoch,
+                    // At most 1,024 rows survive the bounded engine ring.
+                    // Starting here reads the retained suffix after a burst
+                    // instead of silently discarding it on `Gap`.
+                    ordinal: latest.ordinal.saturating_sub(1024),
+                };
+                match screen.history_after(start) {
+                    Ok(rows) => rows.collect::<Vec<_>>(),
+                    Err(_) => {
+                        capture.failed = true;
+                        capture.failure.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            }
+            Err(_) => return,
+        };
+        if rows.is_empty() {
+            if gap {
+                if capture
+                    .store
+                    .mark_history(capture.target, latest.epoch, false)
+                    .is_err()
+                {
+                    capture.failed = true;
+                    capture.failure.store(true, Ordering::Relaxed);
+                } else {
+                    capture.history_cursor = latest;
+                }
+            }
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|time| u64::try_from(time.as_millis()).ok())
+            .unwrap_or(0);
+        let records = rows
+            .iter()
+            .map(|row| history_rows::encode(capture.target, latest.epoch, *row, now))
+            .collect::<std::io::Result<Vec<_>>>();
+        let result =
+            records.and_then(|records| capture.store.append_rows(capture.target, &records, gap));
+        if result.is_err() {
+            capture.failed = true;
+            capture.failure.store(true, Ordering::Relaxed);
+            return;
+        }
+        capture.history_cursor = latest;
+        capture.failed = false;
     }
 
     fn is_live(&self) -> bool {
@@ -395,7 +538,19 @@ impl EffectSink for PtyEffects {
         match self.session.pump() {
             Ok(progress) => {
                 if self.observe_progress(progress) {
+                    self.capture_history();
                     self.capture_screen(progress.child_exited || progress.pty_eof);
+                    if progress.child_exited && progress.pty_eof && !self.exit_recorded {
+                        self.exit_recorded = self.capture_exit();
+                    }
+                    if self
+                        .capture
+                        .as_ref()
+                        .is_some_and(|capture| capture.end_pending)
+                        && !self.exit_recorded
+                    {
+                        self.exit_recorded = self.capture_exit();
+                    }
                     Ok(())
                 } else {
                     Err(Outcome::Unknown)
@@ -425,13 +580,25 @@ impl EffectSink for PtyEffects {
     /// closed; later reads report `Unknown` and input is rejected.
     fn stop(&mut self) -> StopOutcome {
         self.capture_screen(true);
+        self.capture_history();
         self.session.discard_pending_input();
         let already_exited = self.session.exit_status().is_some();
-        let result = self.session.shutdown();
+        let result = self.session.shutdown_with_final_output();
         // The PTY is closed: no further pump, input or resize. The retained
         // snapshot stays readable.
         self.stopped = true;
         self.last_child_exited = self.session.exit_status().is_some();
+        self.capture_screen(true);
+        self.capture_history();
+        if !matches!(result, Ok(true)) || self.session.final_output_bytes() != 0 {
+            // Rows may have entered and left the bounded engine ring during
+            // teardown before the owner could durably accept them. The
+            // terminal snapshot is saved, but completeness is unproved.
+            self.mark_final_output_gap();
+        }
+        if self.last_child_exited && !self.exit_recorded {
+            self.exit_recorded = self.capture_exit();
+        }
         if result.is_err() || self.session.exit_status().is_none() {
             return StopOutcome::Unknown;
         }
@@ -439,6 +606,44 @@ impl EffectSink for PtyEffects {
             StopOutcome::Escalated
         } else {
             StopOutcome::Exited
+        }
+    }
+}
+
+impl Drop for PtyEffects {
+    fn drop(&mut self) {
+        if self.capture.is_some() && !self.exit_recorded {
+            // The owner may retire a pane as soon as it reaps the child,
+            // before the PTY signals EOF. Drain only immediately available
+            // output within a fixed work budget; never wait for a live child.
+            if self.session.exit_status().is_some() && !self.session.pty_eof() && !self.stopped {
+                for _ in 0..64 {
+                    let Ok(progress) = self.session.pump() else {
+                        break;
+                    };
+                    if !self.observe_progress(progress) {
+                        break;
+                    }
+                    self.capture_history();
+                    self.capture_screen(progress.pty_eof);
+                    if progress.pty_eof || progress.bytes_read == 0 {
+                        break;
+                    }
+                }
+                if !self.session.pty_eof() {
+                    self.mark_final_output_gap();
+                }
+            }
+            self.capture_now();
+            // Orderly owner teardown stops this child even if it was still
+            // running when the client/server chose shutdown. Record the end
+            // time only after the core confirms that cleanup reaped it.
+            if self.session.exit_status().is_none() {
+                let _ = self.session.shutdown();
+            }
+            if self.session.exit_status().is_some() {
+                self.exit_recorded = self.capture_exit();
+            }
         }
     }
 }

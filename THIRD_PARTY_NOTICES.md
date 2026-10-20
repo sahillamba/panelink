@@ -4,7 +4,7 @@ Panelink's original application logic is independently written. The terminal cor
 
 Preserved upstream license/copyright/notice texts for the 17 selected third-party components (including local variants) are under `third_party/licenses/<crate>-<upstream-version>/`. VT100's MIT notice is also in `vendor/vt100/LICENSE`. MIT is the selected license option where offered; other offered license texts and copyright files are preserved as provenance. Carry these notices with distributed source/binaries and recheck them when dependencies change. No binary distribution/installer is produced by this checkpoint.
 
-The local VT100 variant is version `0.16.2-panelink.1`, derived from upstream 0.16.2 (MIT, copyright 2016 Jesse Luehrs). See [local corrections](vendor/vt100/PANELINK.md), [patch](vendor/vt100/panelink.patch) and [provenance](vendor/vt100/PROVENANCE.json). It is a selected third-party library with local corrections, not an upstream-approved release or independently authored Panelink engine.
+The local VT100 variant is version `0.16.2-panelink.2`, derived from upstream 0.16.2 (MIT, copyright 2016 Jesse Luehrs). See [local corrections](vendor/vt100/PANELINK.md), [patch](vendor/vt100/panelink.patch) and [provenance](vendor/vt100/PROVENANCE.json). It is a selected third-party library with local corrections, not an upstream-approved release or independently authored Panelink engine.
 
 Rust standard-library and Apple system-library/platform components remain part of the toolchain/operating-system boundary. Agent development skills and models are not shipped application dependencies. This notice inventory is not firm approval or a security audit.
 

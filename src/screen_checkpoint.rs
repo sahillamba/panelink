@@ -414,17 +414,55 @@ pub fn encode(
     encoded.extend_from_slice(&[0; HEADER_RESERVED_BYTES]);
 
     for cell in cells {
-        let text = cell.text().as_bytes();
-        encoded.push(u8::try_from(text.len()).map_err(|_| ScreenCheckpointError::InvalidInput)?);
-        encoded.push(snapshot_cell_flags(cell));
-        encoded.extend_from_slice(&encode_color(cell.foreground()));
-        encoded.extend_from_slice(&encode_color(cell.background()));
-        encoded.extend_from_slice(text);
-        encoded.resize(encoded.len() + CELL_TEXT_BYTES - text.len(), 0);
-        encoded.extend_from_slice(&[0; CELL_RESERVED_BYTES]);
+        append_cell(&mut encoded, cell)?;
     }
     debug_assert_eq!(encoded.len(), total_bytes);
     Ok(encoded)
+}
+
+/// Encode already-sanitized cells of one retained normal-history row. The
+/// source width and wide-cell topology are validated before any allocation.
+pub(crate) fn encode_history_cells(
+    cells: &[SnapshotCell],
+) -> Result<Vec<u8>, ScreenCheckpointError> {
+    let width = u16::try_from(cells.len()).map_err(|_| ScreenCheckpointError::InvalidInput)?;
+    if !(1..=240).contains(&width) {
+        return Err(ScreenCheckpointError::InvalidInput);
+    }
+    validate_snapshot_cells(cells, width)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(cells.len() * SCREEN_CHECKPOINT_CELL_BYTES)
+        .map_err(|_| ScreenCheckpointError::AllocationFailure)?;
+    for cell in cells {
+        append_cell(&mut bytes, cell)?;
+    }
+    Ok(bytes)
+}
+
+/// Validate a complete serialized row before lending its cells to recovery.
+pub(crate) fn validate_history_cells(
+    bytes: &[u8],
+    width: u16,
+) -> Result<(), ScreenCheckpointError> {
+    if !(1..=240).contains(&width)
+        || bytes.len() != usize::from(width) * SCREEN_CHECKPOINT_CELL_BYTES
+    {
+        return Err(ScreenCheckpointError::InvalidRecord);
+    }
+    validate_record_cells(bytes, 1, width)
+}
+
+fn append_cell(encoded: &mut Vec<u8>, cell: &SnapshotCell) -> Result<(), ScreenCheckpointError> {
+    let text = cell.text().as_bytes();
+    encoded.push(u8::try_from(text.len()).map_err(|_| ScreenCheckpointError::InvalidInput)?);
+    encoded.push(snapshot_cell_flags(cell));
+    encoded.extend_from_slice(&encode_color(cell.foreground()));
+    encoded.extend_from_slice(&encode_color(cell.background()));
+    encoded.extend_from_slice(text);
+    encoded.resize(encoded.len() + CELL_TEXT_BYTES - text.len(), 0);
+    encoded.extend_from_slice(&[0; CELL_RESERVED_BYTES]);
+    Ok(())
 }
 
 /// Decode a borrowed, read-only checkpoint after validating the complete record.

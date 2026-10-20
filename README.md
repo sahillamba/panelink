@@ -53,8 +53,15 @@ checkpoints per pane in the private `server/history/` directory (under
 `PANELINK_HOME`, if set). They are read-only recovery data, not live-process
 state or a complete transcript. An initial `serve` response reports whether
 capture started; a later write failure appears in `server.log` while shells
-continue running. Saved scrollback, history browsing, retention and recovery
-UI are still in progress.
+continue running. Normal scrollback rows are saved within a 1,024-row/8 MiB
+per-session limit. `panelink history list` lists saved target IDs;
+`panelink history show TARGET` reads retained rows and latest normal/alternate
+screens; `panelink history search TARGET TEXT` searches that saved content,
+labeled by source. `TARGET` is the five-number ID printed by `history list`.
+Stop the workspace before `panelink history clear TARGET`; this deletes only
+Panelink history, not provider conversations. Ended sessions expire after
+30 days at the next server startup. History cannot restore a live process or
+content overwritten before it was captured.
 
 **Implementation roadmap:** [ROADMAP.md](ROADMAP.md) tracks phases and
 verification evidence. Selected components retain their

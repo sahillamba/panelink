@@ -147,6 +147,19 @@ pub struct ServerStorage {
     generation: u64,
 }
 
+/// Held exclusive server identity lock for offline history maintenance.
+/// Unlike `ServerStorage::open`, acquiring it does not advance the generation.
+pub struct MaintenanceLock {
+    _directory: File,
+    _lock: File,
+}
+
+impl std::fmt::Debug for MaintenanceLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MaintenanceLock { .. }")
+    }
+}
+
 impl std::fmt::Debug for ServerStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ServerStorage { .. }")
@@ -154,6 +167,21 @@ impl std::fmt::Debug for ServerStorage {
 }
 
 impl ServerStorage {
+    /// Exclude both direct `serve` and zero-config startup while offline
+    /// history is cleared. Missing, corrupt or unsafe metadata fails closed;
+    /// this does not initialize storage or issue a new generation.
+    pub fn lock_for_maintenance(path: &Path) -> io::Result<MaintenanceLock> {
+        let directory = private_directory(path)?;
+        let lock = open_file(&directory, "server.lock")?;
+        drop(open_file(&directory, "generation")?);
+        drop(open_file(&directory, "launch.journal")?);
+        flock(&lock, FlockOperation::NonBlockingLockExclusive)?;
+        verify_named_lock(&directory, &lock)?;
+        Ok(MaintenanceLock {
+            _directory: directory,
+            _lock: lock,
+        })
+    }
     /// Explicitly initialize an empty private identity domain.
     ///
     /// A fresh OS-random seed avoids deterministic namespace reuse if an

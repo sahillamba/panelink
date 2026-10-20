@@ -13,6 +13,8 @@ pub struct Grid {
     scrollback: std::collections::VecDeque<crate::row::Row>,
     scrollback_len: usize,
     scrollback_offset: usize,
+    history_ordinal: u64,
+    history_exhausted: bool,
 }
 
 impl Grid {
@@ -29,6 +31,8 @@ impl Grid {
             scrollback: std::collections::VecDeque::new(),
             scrollback_len,
             scrollback_offset: 0,
+            history_ordinal: 0,
+            history_exhausted: false,
         }
     }
 
@@ -189,6 +193,22 @@ impl Grid {
 
     pub fn scrollback_len(&self) -> usize {
         self.scrollback_len
+    }
+
+    pub(crate) fn history_ordinal(&self) -> u64 {
+        self.history_ordinal
+    }
+
+    pub(crate) fn history_exhausted(&self) -> bool {
+        self.history_exhausted
+    }
+
+    pub(crate) fn history_rows(&self) -> &std::collections::VecDeque<crate::row::Row> {
+        &self.scrollback
+    }
+
+    pub(crate) fn disable_history_extraction(&mut self) {
+        self.history_exhausted = true;
     }
 
     pub fn scrollback(&self) -> usize {
@@ -563,8 +583,17 @@ impl Grid {
         for _ in 0..(count.min(self.size.rows - self.scroll_top)) {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
-            let removed = self.rows.remove(usize::from(self.scroll_top));
+            let mut removed = self.rows.remove(usize::from(self.scroll_top));
             if self.scrollback_len > 0 && !self.scroll_region_active() {
+                if !self.history_exhausted {
+                    match self.history_ordinal.checked_add(1) {
+                        Some(next) => {
+                            self.history_ordinal = next;
+                            removed.set_history_ordinal(next);
+                        }
+                        None => self.history_exhausted = true,
+                    }
+                }
                 self.scrollback.push_back(removed);
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
@@ -740,4 +769,30 @@ pub struct Size {
 pub struct Pos {
     pub row: u16,
     pub col: u16,
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::{Grid, Size};
+
+    #[test]
+    fn ordinal_exhaustion_disables_extraction_without_stopping_scrolling() {
+        let mut grid = Grid::new(Size { rows: 2, cols: 10 }, 2);
+        grid.allocate_rows();
+        grid.history_ordinal = u64::MAX - 1;
+        grid.scroll_up(1);
+        assert_eq!(grid.history_ordinal(), u64::MAX);
+        assert_eq!(grid.history_rows()[0].history_ordinal(), u64::MAX);
+        grid.scroll_up(1);
+        assert!(grid.history_exhausted());
+        assert_eq!(grid.history_ordinal(), u64::MAX);
+        assert_eq!(grid.history_rows().len(), 2);
+        assert_eq!(grid.history_rows()[1].history_ordinal(), 0);
+    }
+
+    #[test]
+    fn row_and_grid_metadata_stay_within_the_reviewed_allowance() {
+        assert_eq!(std::mem::size_of::<crate::row::Row>(), 40);
+        assert_eq!(std::mem::size_of::<Grid>(), 104);
+    }
 }

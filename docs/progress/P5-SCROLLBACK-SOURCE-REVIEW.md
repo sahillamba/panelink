@@ -153,3 +153,12 @@ The underlying review model is recorded in [P2 replacement selection](P2-REPLACE
 These tests would validate the source hook and recorder contract only. M5 still
 needs separate checkpoint, persistence/retention, restart, recovery, and
 workload evidence; no saved bytes may be replayed to a terminal or child.
+
+Update 2026-10-20: the exact normal-grid insertion hook, checked ordinals,
+read-only borrowed delta, RIS epoch/reset and eviction-gap checks are now
+implemented in local VT100 revision `.2`. See
+[P5-SCROLLBACK-CURSOR.md](P5-SCROLLBACK-CURSOR.md) for the revised allocation
+model and verified patch. The subsequent scoped writer, sanitized durable
+rows, retention, clear and read-only CLI recovery are described in
+[P5-SAVED-HISTORY.md](P5-SAVED-HISTORY.md). Full reboot/layout acceptance,
+interrupted-temporary repair and throughput evidence remain open.

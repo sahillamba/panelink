@@ -1420,6 +1420,13 @@ fn run_serve(request: ServerProbe) -> i32 {
     };
     if history_ready {
         if let Ok(store) = panelink::history_store::HistoryStore::open(&history_path) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|time| u64::try_from(time.as_millis()).ok());
+            if let Some(now) = now {
+                let _ = store.prune_expired(now);
+            }
             driver.enable_history(store);
         }
     }

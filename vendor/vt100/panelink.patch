@@ -5,43 +5,84 @@
  rust-version = "1.70"
  name = "vt100"
 -version = "0.16.2"
-+version = "0.16.2-panelink.1"
++version = "0.16.2-panelink.2"
  authors = ["Jesse Luehrs <doy@tozt.net>"]
  build = false
  include = [
 @@ -53,6 +53,7 @@
- 
+
  [dependencies.vte]
  version = "0.15.0"
 +default-features = false
- 
+
  [dev-dependencies.nix]
  version = "0.30.1"
 --- a/src/cell.rs
 +++ b/src/cell.rs
 @@ -2,6 +2,7 @@
- 
+
  // chosen to make the size of the cell struct 32 bytes
  const CONTENT_BYTES: usize = 22;
 +const MAX_EXTRA_SCALARS: usize = 8;
- 
+
  const IS_WIDE: u8 = 0b1000_0000;
  const IS_WIDE_CONTINUATION: u8 = 0b0100_0000;
-@@ -55,6 +56,11 @@
-     pub(crate) fn append(&mut self, c: char) {
-         let len = self.len();
+@@ -57,6 +58,11 @@
          if len >= CONTENT_BYTES - 4 {
-+            return;
-+        }
+             return;
+         }
 +        // The first scalar is the cell's base character (or the virtual
 +        // blank inserted below when a combining character arrives first).
 +        if self.contents().chars().count() >= MAX_EXTRA_SCALARS + 1 {
-             return;
-         }
++            return;
++        }
          if len == 0 {
+             self.contents[0] = b' ';
+             self.len += 1;
 --- a/src/grid.rs
 +++ b/src/grid.rs
-@@ -501,6 +501,7 @@
+@@ -13,6 +13,8 @@
+     scrollback: std::collections::VecDeque<crate::row::Row>,
+     scrollback_len: usize,
+     scrollback_offset: usize,
++    history_ordinal: u64,
++    history_exhausted: bool,
+ }
+
+ impl Grid {
+@@ -29,6 +31,8 @@
+             scrollback: std::collections::VecDeque::new(),
+             scrollback_len,
+             scrollback_offset: 0,
++            history_ordinal: 0,
++            history_exhausted: false,
+         }
+     }
+
+@@ -191,6 +195,22 @@
+         self.scrollback_len
+     }
+
++    pub(crate) fn history_ordinal(&self) -> u64 {
++        self.history_ordinal
++    }
++
++    pub(crate) fn history_exhausted(&self) -> bool {
++        self.history_exhausted
++    }
++
++    pub(crate) fn history_rows(&self) -> &std::collections::VecDeque<crate::row::Row> {
++        &self.scrollback
++    }
++
++    pub(crate) fn disable_history_extraction(&mut self) {
++        self.history_exhausted = true;
++    }
++
+     pub fn scrollback(&self) -> usize {
+         self.scrollback_offset
+     }
+@@ -501,6 +521,7 @@
      pub fn insert_cells(&mut self, count: u16) {
          let size = self.size;
          let pos = self.pos;
@@ -49,24 +90,320 @@
          let wide = pos.col < size.cols
              && self
                  .drawing_cell(pos)
-@@ -542,7 +543,7 @@
+@@ -542,7 +563,7 @@
      }
- 
+
      pub fn insert_lines(&mut self, count: u16) {
 -        for _ in 0..count {
 +        for _ in 0..count.min(self.size.rows - self.pos.row) {
              self.rows.remove(usize::from(self.scroll_bottom));
              self.rows.insert(usize::from(self.pos.row), self.new_row());
              // self.scroll_bottom is maintained to always be a valid row
-@@ -577,7 +578,7 @@
+@@ -562,8 +583,17 @@
+         for _ in 0..(count.min(self.size.rows - self.scroll_top)) {
+             self.rows
+                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
+-            let removed = self.rows.remove(usize::from(self.scroll_top));
++            let mut removed = self.rows.remove(usize::from(self.scroll_top));
+             if self.scrollback_len > 0 && !self.scroll_region_active() {
++                if !self.history_exhausted {
++                    match self.history_ordinal.checked_add(1) {
++                        Some(next) => {
++                            self.history_ordinal = next;
++                            removed.set_history_ordinal(next);
++                        }
++                        None => self.history_exhausted = true,
++                    }
++                }
+                 self.scrollback.push_back(removed);
+                 while self.scrollback.len() > self.scrollback_len {
+                     self.scrollback.pop_front();
+@@ -577,7 +607,7 @@
      }
- 
+
      pub fn scroll_down(&mut self, count: u16) {
 -        for _ in 0..count {
 +        for _ in 0..count.min(self.scroll_bottom - self.scroll_top + 1) {
              self.rows.remove(usize::from(self.scroll_bottom));
              self.rows
                  .insert(usize::from(self.scroll_top), self.new_row());
+@@ -740,3 +770,29 @@
+     pub row: u16,
+     pub col: u16,
+ }
++
++#[cfg(test)]
++mod history_tests {
++    use super::{Grid, Size};
++
++    #[test]
++    fn ordinal_exhaustion_disables_extraction_without_stopping_scrolling() {
++        let mut grid = Grid::new(Size { rows: 2, cols: 10 }, 2);
++        grid.allocate_rows();
++        grid.history_ordinal = u64::MAX - 1;
++        grid.scroll_up(1);
++        assert_eq!(grid.history_ordinal(), u64::MAX);
++        assert_eq!(grid.history_rows()[0].history_ordinal(), u64::MAX);
++        grid.scroll_up(1);
++        assert!(grid.history_exhausted());
++        assert_eq!(grid.history_ordinal(), u64::MAX);
++        assert_eq!(grid.history_rows().len(), 2);
++        assert_eq!(grid.history_rows()[1].history_ordinal(), 0);
++    }
++
++    #[test]
++    fn row_and_grid_metadata_stay_within_the_reviewed_allowance() {
++        assert_eq!(std::mem::size_of::<crate::row::Row>(), 40);
++        assert_eq!(std::mem::size_of::<Grid>(), 104);
++    }
++}
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -61,4 +61,6 @@
+ pub use callbacks::Callbacks;
+ pub use cell::Cell;
+ pub use parser::Parser;
+-pub use screen::{MouseProtocolEncoding, MouseProtocolMode, Screen};
++pub use screen::{
++    HistoryCursor, HistoryError, HistoryRow, MouseProtocolEncoding, MouseProtocolMode, Screen,
++};
+--- a/src/row.rs
++++ b/src/row.rs
+@@ -4,6 +4,9 @@
+ pub struct Row {
+     cells: Vec<crate::Cell>,
+     wrapped: bool,
++    // Assigned only when this row enters normal scrollback. Zero means it is
++    // still a drawing row (or extraction was disabled by ordinal exhaustion).
++    ordinal: u64,
+ }
+
+ impl Row {
+@@ -11,6 +14,7 @@
+         Self {
+             cells: vec![crate::Cell::new(); usize::from(cols)],
+             wrapped: false,
++            ordinal: 0,
+         }
+     }
+
+@@ -81,8 +85,20 @@
+
+     pub fn wrapped(&self) -> bool {
+         self.wrapped
++    }
++
++    pub(crate) fn history_ordinal(&self) -> u64 {
++        self.ordinal
++    }
++
++    pub(crate) fn set_history_ordinal(&mut self, ordinal: u64) {
++        self.ordinal = ordinal;
+     }
+
++    pub(crate) fn width(&self) -> u16 {
++        self.cols()
++    }
++
+     pub fn clear_wide(&mut self, col: u16) {
+         let cell = &self.cells[usize::from(col)];
+         let other = if cell.is_wide() {
+--- a/src/screen.rs
++++ b/src/screen.rs
+@@ -7,6 +7,60 @@
+ const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
+ const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
+
++/// Cursor after the last normal-history row accepted by a consumer. The
++/// epoch changes on RIS even when the new history is empty.
++#[derive(Clone, Copy, Eq, PartialEq)]
++pub struct HistoryCursor {
++    /// Nonzero engine epoch (initially one).
++    pub epoch: u64,
++    /// Last accepted normal-history ordinal; zero means none in this epoch.
++    pub ordinal: u64,
++}
++
++impl std::fmt::Debug for HistoryCursor {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("HistoryCursor { <redacted> }")
++    }
++}
++
++/// Why a history request cannot continue from the supplied cursor.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum HistoryError {
++    /// A RIS reset changed the epoch; the old cursor is not continuous.
++    Reset,
++    /// The oldest requested row was evicted from the bounded ring.
++    Gap,
++    /// The cursor is malformed or refers to a future row.
++    InvalidCursor,
++    /// Epoch or ordinal exhaustion disabled extraction without stopping parsing.
++    Exhausted,
++}
++
++/// One borrowed normal-history row, never a copy of terminal input or output.
++#[derive(Clone, Copy)]
++pub struct HistoryRow<'a> {
++    /// Ordinal within the current epoch.
++    pub ordinal: u64,
++    /// Source row width, which need not equal the current viewport width.
++    pub width: u16,
++    /// Whether this row auto-wrapped into the following row.
++    pub wrapped: bool,
++    row: &'a crate::row::Row,
++}
++
++impl std::fmt::Debug for HistoryRow<'_> {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("HistoryRow { <redacted> }")
++    }
++}
++
++impl HistoryRow<'_> {
++    /// Borrow a cell from this retained row, without changing the view offset.
++    pub fn cell(&self, column: u16) -> Option<&crate::Cell> {
++        self.row.get(column)
++    }
++}
++
+ /// The xterm mouse handling mode currently in use.
+ #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+ pub enum MouseProtocolMode {
+@@ -55,6 +109,7 @@
+ pub struct Screen {
+     grid: crate::grid::Grid,
+     alternate_grid: crate::grid::Grid,
++    history_epoch: u64,
+
+     attrs: crate::attrs::Attrs,
+     saved_attrs: crate::attrs::Attrs,
+@@ -74,6 +129,7 @@
+         Self {
+             grid,
+             alternate_grid: crate::grid::Grid::new(size, 0),
++            history_epoch: 1,
+
+             attrs: crate::attrs::Attrs::default(),
+             saved_attrs: crate::attrs::Attrs::default(),
+@@ -123,6 +179,56 @@
+         self.grid().scrollback()
+     }
+
++    /// The current normal-history cursor, including while alternate screen
++    /// is displayed. A cursor is scoped to this parser and its outer target.
++    pub fn history_cursor(&self) -> Result<HistoryCursor, HistoryError> {
++        if self.grid.history_exhausted() {
++            return Err(HistoryError::Exhausted);
++        }
++        Ok(HistoryCursor {
++            epoch: self.history_epoch,
++            ordinal: self.grid.history_ordinal(),
++        })
++    }
++
++    /// Borrow retained normal rows after `cursor` without modifying the
++    /// scrollback view. Returns `Gap` instead of silently skipping evictions,
++    /// and `Reset` even when RIS has not yet produced another history row.
++    pub fn history_after(
++        &self,
++        cursor: HistoryCursor,
++    ) -> Result<impl ExactSizeIterator<Item = HistoryRow<'_>>, HistoryError> {
++        let current = self.history_cursor()?;
++        if cursor.epoch == 0 {
++            return Err(HistoryError::InvalidCursor);
++        }
++        if cursor.epoch > current.epoch {
++            return Err(HistoryError::InvalidCursor);
++        }
++        if cursor.epoch < current.epoch {
++            return Err(HistoryError::Reset);
++        }
++        if cursor.ordinal > current.ordinal {
++            return Err(HistoryError::InvalidCursor);
++        }
++        let rows = self.grid.history_rows();
++        let first = rows
++            .front()
++            .map_or(current.ordinal.saturating_add(1), |row| row.history_ordinal());
++        if first == 0 || cursor.ordinal.saturating_add(1) < first {
++            return Err(HistoryError::Gap);
++        }
++        let skip = usize::try_from(cursor.ordinal.saturating_add(1).saturating_sub(first))
++            .unwrap_or(usize::MAX)
++            .min(rows.len());
++        Ok(rows.iter().skip(skip).map(|row| HistoryRow {
++            ordinal: row.history_ordinal(),
++            width: row.width(),
++            wrapped: row.wrapped(),
++            row,
++        }))
++    }
++
+     /// Returns the text contents of the terminal.
+     ///
+     /// This will not include any formatting information, and will be in plain
+@@ -996,7 +1102,20 @@
+
+     // ESC c
+     pub(crate) fn ris(&mut self) {
+-        *self = Self::new(self.grid.size(), self.grid.scrollback_len());
++        let next_epoch = self.history_epoch.checked_add(1);
++        let mut reset = Self::new(self.grid.size(), self.grid.scrollback_len());
++        match next_epoch {
++            Some(next) if !self.grid.history_exhausted() => reset.history_epoch = next,
++            None => {
++                reset.history_epoch = u64::MAX;
++                reset.grid.disable_history_extraction();
++            }
++            Some(next) => {
++                reset.history_epoch = next;
++                reset.grid.disable_history_extraction();
++            }
++        }
++        *self = reset;
+     }
+
+     // csi codes
+@@ -1343,7 +1462,37 @@
+         self.grid_mut().set_scroll_region(top - 1, bottom - 1);
+     }
+ }
++
++#[cfg(test)]
++mod history_tests {
++    use super::{HistoryError, Screen};
++    use crate::grid::Size;
+
++    #[test]
++    fn epoch_exhaustion_disables_extraction_but_ris_keeps_resetting_screen() {
++        let mut screen = Screen::new(Size { rows: 2, cols: 10 }, 4);
++        screen.history_epoch = u64::MAX;
++        screen.ris();
++        assert_eq!(screen.history_cursor(), Err(HistoryError::Exhausted));
++        screen.ris();
++        assert_eq!(screen.history_cursor(), Err(HistoryError::Exhausted));
++        assert_eq!(screen.size(), (2, 10));
++    }
++
++    #[test]
++    fn exhausted_normal_history_remains_disabled_across_ris() {
++        let mut screen = Screen::new(Size { rows: 2, cols: 10 }, 4);
++        screen.grid.disable_history_extraction();
++        screen.ris();
++        assert_eq!(screen.history_cursor(), Err(HistoryError::Exhausted));
++    }
++
++    #[test]
++    fn screen_metadata_stays_within_the_reviewed_allowance() {
++        assert!(std::mem::size_of::<Screen>() <= 256);
++    }
++}
++
+ fn u16_to_u8(i: u16) -> Option<u8> {
+     if i > u16::from(u8::MAX) {
+         None
 --- a/src/perform.rs
 +++ b/src/perform.rs
 @@ -88,9 +88,12 @@
