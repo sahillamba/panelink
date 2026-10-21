@@ -1,5 +1,16 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Recovery relaunch + links — 2026-10-21 (read this first)
+
+Two GPT-6-Luna (xhigh) workers in parallel against a parent-frozen link API
+(P5-RELAUNCH-LINKS-API.md). L7 link store: clean, 14 tests. L6 relaunch:
+5 real end-to-end tests (fresh workspace, saved orientation split with the
+default shell, links, refusal while running, --previous). Parent accepted the
+CLI-side link-writer limitation (lifecycle lock; single writer), added a
+secrets assertion and fixed an outdated usage test. Verifier 8/8, 983/0/15.
+All recovery decisions 1-7 are implemented as a prototype; manual Apple
+Terminal acceptance not done. Committed; no push.
+
 ## Recovery chooser + in-workspace menu — 2026-10-21 (read this first)
 
 Two GPT-6-Luna (xhigh) workers in parallel. L4 delivered the TTY-only

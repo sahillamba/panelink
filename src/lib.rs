@@ -73,6 +73,9 @@ pub mod layout_writer;
 pub mod recovery_reader;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod recovery_links;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod history_diagnostics;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

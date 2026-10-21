@@ -380,7 +380,9 @@ fn recovery_usage_errors_exit_two_without_touching_the_state_root() {
         &["recovery"][..],
         &["recovery", "view", "x"][..],
         &["recovery", "view", "--previous", "--previous"][..],
-        &["recovery", "relaunch"][..],
+        // `recovery relaunch` became a real command; extra args stay usage errors.
+        &["recovery", "relaunch", "x"][..],
+        &["recovery", "relaunch", "--previous", "--previous"][..],
     ] {
         let output = fixture.command(arguments);
         assert_eq!(output.status.code(), Some(2), "{arguments:?}");

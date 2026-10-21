@@ -96,8 +96,7 @@ where
     let mut arguments = arguments.into_iter().peekable();
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        // Offline recovery inspection must be selected before any live startup
-        // or attach path is considered.
+        // Recovery commands dispatch before any live startup or attach path.
         if arguments
             .peek()
             .is_some_and(|argument| argument == "recovery")
@@ -116,6 +115,14 @@ where
                     if action == "view" && flag == "--previous" =>
                 {
                     default_open::recovery_view(true)
+                }
+                (Some(action), None, None, None) if action == "relaunch" => {
+                    default_open::recovery_relaunch(false)
+                }
+                (Some(action), Some(flag), None, None)
+                    if action == "relaunch" && flag == "--previous" =>
+                {
+                    default_open::recovery_relaunch(true)
                 }
                 _ => report_cli_error(CliError::InvalidArguments),
             };
@@ -640,6 +647,7 @@ fn print_help() {
     println!("  panelink history cleanup   discard uncommitted history files (workspace stopped)");
     println!("  panelink layout show [--previous]   read-only restart topology");
     println!("  panelink recovery view [--previous]   offline read-only recovery viewer");
+    println!("  panelink recovery relaunch [--previous]   start fresh default shells from saved pane layout");
     println!("  panelink probe        disposable single-shell terminal probe");
     println!("  panelink --help");
     println!("  panelink -h");

@@ -1,11 +1,11 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: Recovery entry points DONE 2026-10-21: plain-`panelink` chooser (TTY only; Enter/Esc/timeout = fresh shell) and in-workspace 'View saved layout' (menu row + Ctrl-B v); relaunch + links pending
+current-phase: Recovery feature set DONE (prototype) 2026-10-21: view, chooser, in-workspace menu, explicit `panelink recovery relaunch [--previous]` (default shell, refused while running, saved orientation, no provider resume) and 30-day old-to-new links. Manual Apple Terminal acceptance and full reboot remain open
 last-updated: 2026-10-21
 checkpoint-commit: saved-layout slice committed by parent per phase-completion authorization; no push
-last-verified: 2026-10-21 — verifier 8/8 (964 passed/0 failed/15 ignored)
-next-action: Recovery stages 4/5: explicit relaunch (default shell, refuse while running, fresh client context, new-generation targets) + 30-day old-to-new links; P4 tui.session.select emission check. Manual Apple Terminal check of chooser/viewer still open.
+last-verified: 2026-10-21 — verifier 8/8 (983 passed/0 failed/15 ignored); known intermittent server_startup lock and history_writer timeout tests recorded
+next-action: User manual check in Apple Terminal (chooser, viewer, menu item, relaunch). Then P4 tui.session.select emission check, or Phase 6 measurements. Optional: server-owned link stream claim.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
@@ -267,7 +267,7 @@ open.
 - [x] Recovery viewer + explicit relaunch mapping design; user decisions recorded 2026-10-21; see P5-RECOVERY-VIEWER.md.
 - [x] Recovery stages 1-3: view model/scaled overview, read-only reader, offline TUI + `panelink recovery view [--previous]`; see P5-RECOVERY-STAGE12.md, P5-RECOVERY-STAGE3.md. Host /dev/tty acceptance not certified.
 - [x] Recovery chooser at plain startup and in-workspace 'View saved layout' item; see P5-RECOVERY-CHOOSER.md, P5-RECOVERY-MENU.md.
-- [ ] Explicit relaunch (default shell, refuse while running) and 30-day old-to-new links.
+- [x] Explicit relaunch (default shell, refuse while running) and 30-day old-to-new links; see P5-RECOVERY-RELAUNCH.md, P5-RECOVERY-LINKS.md.
 - [x] Scoped saved-layout/restart engineering design and exact codec task, with independent review; see P5-SAVED-LAYOUT.md. No saved-layout implementation or new command is delivered by that design.
 - [x] Implement saved-layout codec, bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection in the reviewed order; see P5-LAYOUT-SLICE.md. No restore/relaunch.
 - [ ] Full V-HISTORY reboot/layout recovery and representative workload/throughput acceptance; see P5-SAVED-HISTORY.md and docs/SPEC.md.
