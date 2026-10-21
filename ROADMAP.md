@@ -1,11 +1,11 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: Recovery feature set DONE (prototype) 2026-10-21: view, chooser, in-workspace menu, explicit `panelink recovery relaunch [--previous]` (default shell, refused while running, saved orientation, no provider resume) and 30-day old-to-new links. Manual Apple Terminal acceptance and full reboot remain open
+current-phase: Recovery feature set DONE (prototype) 2026-10-21: view, chooser, in-workspace menu, explicit `panelink recovery relaunch [--previous]` (default shell, refused while running, saved orientation, no provider resume) and 30-day old-to-new links. Operator manual check passed 2026-10-21 (user: all ok); full reboot remains open
 last-updated: 2026-10-21
 checkpoint-commit: saved-layout slice committed by parent per phase-completion authorization; no push
 last-verified: 2026-10-21 — verifier 8/8 (983 passed/0 failed/15 ignored); known intermittent server_startup lock and history_writer timeout tests recorded
-next-action: User manual check in Apple Terminal (chooser, viewer, menu item, relaunch). Then P4 tui.session.select emission check, or Phase 6 measurements. Optional: server-owned link stream claim.
+next-action: Parallel Luna tasks: (A) P4 tui.session.select emission check + PTY rerun; (B) Phase 6 resource/workload measurement + dependency/license inventory. Rebuild repo binary after every slice.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md

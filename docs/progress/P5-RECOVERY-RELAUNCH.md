@@ -142,3 +142,17 @@ Earlier verifier runs in this slice: one hit the known intermittent
 `recovery relaunch` usage-error case before the parent fix. Separately, the
 committed baseline reproduced an intermittent `history_writer` timeout test
 failure 1/10 runs; it is pre-existing and recorded, not hidden.
+
+## Operator acceptance — 2026-10-21
+
+User ran the four-step manual check in their own terminal after the parent
+rebuilt the repository binary (`target/debug/panelink`, which the
+`bin/panelink` launcher runs). Before that rebuild the launcher was still
+running a pre-recovery binary from 2026-10-21 00:49, which explained an
+initial `invalid command syntax` for `recovery relaunch` and an absent
+chooser; parent builds/tests had used a separate CARGO_TARGET_DIR. After the
+rebuild the user reported "all ok" for: split + stop; startup chooser with
+`v` viewer; in-workspace Ctrl-B `v`; stop + `panelink recovery relaunch`.
+This is operator confirmation without raw logs/timings; it does not certify
+every host or a physical reboot. Parent process change: rebuild the repo
+binary (`cargo build --locked`) at the end of every slice.
