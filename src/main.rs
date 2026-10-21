@@ -128,6 +128,9 @@ where
                 (Some(action), None, None, None) if action == "list" => {
                     default_open::history_list()
                 }
+                (Some(action), None, None, None) if action == "cleanup" => {
+                    default_open::history_cleanup()
+                }
                 (Some(action), Some(target), None, None) if action == "show" => {
                     default_open::history_show(&target)
                 }
@@ -596,6 +599,8 @@ fn print_help() {
     println!("Ctrl-X detaches (shells keep running).");
     println!();
     println!("Advanced:");
+    println!("  panelink history list|show <target>|search <target> <text>|clear <target>");
+    println!("  panelink history cleanup   discard uncommitted history files (workspace stopped)");
     println!("  panelink probe        disposable single-shell terminal probe");
     println!("  panelink --help");
     println!("  panelink -h");

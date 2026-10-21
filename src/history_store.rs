@@ -11,6 +11,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::Mutex;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 const MAX_ROWS: usize = 1024;
@@ -18,6 +20,19 @@ const MAX_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
 const SEGMENT_HEADER_BYTES: usize = 72;
 const SEGMENT_MAGIC: &[u8; 8] = b"PLHSEG02";
 const RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TestFaultPoint {
+    BeforeRename,
+    DirectorySync,
+}
+
+#[cfg(test)]
+struct TestFault {
+    point: TestFaultPoint,
+    failures_remaining: usize,
+}
 
 /// One validated read-only saved-history view. The caller may display/search
 /// its sanitized rows, never replay them to a terminal or child process.
@@ -89,11 +104,155 @@ fn history_name(target: TargetRef) -> io::Result<String> {
     Ok(format!("{}.rows", screen.trim_end_matches("-n.screen")))
 }
 
+fn canonical_target_fields(value: &str) -> Option<TargetRef> {
+    let mut parts = value.split('-');
+    let mut fields = [0_u64; 5];
+    for field in &mut fields {
+        let part = parts.next()?;
+        if part.len() != 16
+            || !part
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return None;
+        }
+        *field = u64::from_str_radix(part, 16).ok()?;
+        if *field == 0 {
+            return None;
+        }
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(TargetRef {
+        generation: fields[0],
+        workspace: fields[1],
+        pane: fields[2],
+        session: fields[3],
+        occupant_revision: fields[4],
+    })
+}
+
+fn canonical_nonzero_u32(value: &str) -> Option<u32> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let parsed = value.parse::<u32>().ok()?;
+    (parsed != 0 && parsed.to_string() == value).then_some(parsed)
+}
+
+fn canonical_nonzero_u64(value: &str) -> Option<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let parsed = value.parse::<u64>().ok()?;
+    (parsed != 0 && parsed.to_string() == value).then_some(parsed)
+}
+
+/// Return the exact committed target name and its bound if this is a
+/// writer-generated temporary name. Lookalikes are intentionally ignored.
+fn temporary_final_name(value: &str) -> Option<(String, u64)> {
+    let value = value.strip_suffix(".tmp")?;
+    let (value, counter) = value.rsplit_once('-')?;
+    canonical_nonzero_u64(counter)?;
+    let (dot_final_name, pid) = value.rsplit_once('-')?;
+    canonical_nonzero_u32(pid)?;
+    let final_name = dot_final_name.strip_prefix('.')?;
+
+    let (target_text, buffer, is_rows) = final_name
+        .strip_suffix(".rows")
+        .map(|target| (target, ScreenBuffer::Normal, true))
+        .or_else(|| {
+            final_name
+                .strip_suffix("-n.screen")
+                .map(|target| (target, ScreenBuffer::Normal, false))
+        })
+        .or_else(|| {
+            final_name
+                .strip_suffix("-a.screen")
+                .map(|target| (target, ScreenBuffer::Alternate, false))
+        })?;
+    let target = canonical_target_fields(target_text)?;
+    let reconstructed = if is_rows {
+        history_name(target).ok()?
+    } else {
+        name(target, buffer).ok()?
+    };
+    if reconstructed != final_name {
+        return None;
+    }
+    let bound = if is_rows {
+        MAX_SEGMENT_BYTES
+    } else {
+        screen_checkpoint::MAX_SCREEN_CHECKPOINT_BYTES
+    };
+    Some((reconstructed, bound as u64))
+}
+
+#[derive(Clone, Debug)]
+struct TemporaryCandidate {
+    name: String,
+    device: u64,
+    inode: u64,
+    uid: u32,
+    mode: u32,
+    links: u64,
+    length: u64,
+    bound: u64,
+}
+
+impl TemporaryCandidate {
+    fn from_file(name: String, bound: u64, file: &File) -> io::Result<Self> {
+        validate_file(file)?;
+        let metadata = file.metadata()?;
+        if metadata.len() > bound {
+            return Err(invalid());
+        }
+        Ok(Self {
+            name,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            uid: metadata.uid(),
+            mode: metadata.mode() & 0o7777,
+            links: metadata.nlink(),
+            length: metadata.len(),
+            bound,
+        })
+    }
+
+    fn revalidate(&self, file: &File) -> io::Result<()> {
+        validate_file(file)?;
+        let metadata = file.metadata()?;
+        if metadata.len() > self.bound
+            || (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.uid(),
+                metadata.mode() & 0o7777,
+                metadata.nlink(),
+                metadata.len(),
+            ) != (
+                self.device,
+                self.inode,
+                self.uid,
+                self.mode,
+                self.links,
+                self.length,
+            )
+        {
+            return Err(unsafe_storage());
+        }
+        Ok(())
+    }
+}
+
 /// A private directory owned by the current user, with one atomic slot for
 /// each target/buffer. The caller supplies a created 0700 history directory.
 pub struct HistoryStore {
     directory: File,
     path: PathBuf,
+    #[cfg(test)]
+    test_fault: Mutex<Option<TestFault>>,
 }
 
 impl std::fmt::Debug for HistoryStore {
@@ -103,6 +262,16 @@ impl std::fmt::Debug for HistoryStore {
 }
 
 impl HistoryStore {
+    /// Check that the held history directory belongs to the locked server
+    /// identity domain before transferring it to a background writer.
+    pub(crate) fn verify_server_directory(&self, server_directory: &Path) -> io::Result<()> {
+        self.verify_identity()?;
+        if self.path != server_directory.join("history") {
+            return Err(unsafe_storage());
+        }
+        Ok(())
+    }
+
     /// Open an existing private directory, refusing symlinks and unsafe parents.
     pub fn open(path: &Path) -> io::Result<Self> {
         if !path.is_absolute() || fs::canonicalize(path)? != path {
@@ -140,7 +309,45 @@ impl HistoryStore {
         Ok(Self {
             directory,
             path: path.to_owned(),
+            #[cfg(test)]
+            test_fault: Mutex::new(None),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_test_fault(&self, point: TestFaultPoint, failures: usize) {
+        *self.test_fault.lock().expect("test fault mutex") = (failures != 0).then_some(TestFault {
+            point,
+            failures_remaining: failures,
+        });
+    }
+
+    #[cfg(test)]
+    fn maybe_fail_for_test(&self, point: TestFaultPoint) -> io::Result<()> {
+        let mut configured = self.test_fault.lock().expect("test fault mutex");
+        let Some(fault) = configured
+            .as_mut()
+            .filter(|fault| fault.point == point && fault.failures_remaining != 0)
+        else {
+            return Ok(());
+        };
+        fault.failures_remaining -= 1;
+        if fault.failures_remaining == 0 {
+            *configured = None;
+        }
+        Err(io::Error::other("injected history durability failure"))
+    }
+
+    fn before_rename(&self) -> io::Result<()> {
+        #[cfg(test)]
+        self.maybe_fail_for_test(TestFaultPoint::BeforeRename)?;
+        Ok(())
+    }
+
+    fn sync_directory(&self) -> io::Result<()> {
+        #[cfg(test)]
+        self.maybe_fail_for_test(TestFaultPoint::DirectorySync)?;
+        self.directory.sync_all()
     }
 
     /// Refuse writes when the named directory was replaced, deleted or made
@@ -204,11 +411,11 @@ impl HistoryStore {
             return Err(invalid());
         }
         if let Some(existing) = self.load_rows(target)? {
-            return if existing.epoch == epoch && existing.ended_at_unix_ms == 0 {
-                Ok(())
-            } else {
-                Err(invalid())
-            };
+            if existing.epoch == epoch && existing.ended_at_unix_ms == 0 {
+                self.sync_directory()?;
+                return Ok(());
+            }
+            return Err(invalid());
         }
         let saved = SavedHistory {
             gap,
@@ -306,8 +513,9 @@ impl HistoryStore {
         Ok(removed)
     }
 
-    /// Commit a bounded batch of rows in one atomic replacement. No cursor
-    /// advances until the directory sync succeeds.
+    /// Commit a bounded retention result in one atomic replacement. No cursor
+    /// advances until the directory sync succeeds. A retry validates retained
+    /// overlap; an already evicted prefix cannot be recovered or compared.
     pub fn append_rows(&self, target: TargetRef, records: &[Vec<u8>], gap: bool) -> io::Result<()> {
         self.verify_identity()?;
         let Some(first) = records.first() else {
@@ -316,6 +524,16 @@ impl HistoryStore {
         let parsed = history_rows::decode(first)?;
         if parsed.target != target || records.len() > MAX_ROWS {
             return Err(invalid());
+        }
+        // Validate even the prefix that a previous attempt may have evicted.
+        let mut incoming_ordinal = 0;
+        for record in records {
+            let row = history_rows::decode(record)?;
+            if row.target != target || row.epoch != parsed.epoch || row.ordinal <= incoming_ordinal
+            {
+                return Err(invalid());
+            }
+            incoming_ordinal = row.ordinal;
         }
         let mut saved = self.load_rows(target)?.unwrap_or(SavedHistory {
             gap: false,
@@ -339,11 +557,15 @@ impl HistoryStore {
                 records: Vec::new(),
             };
         }
+        let prior_gap = saved.gap;
         saved.gap |= gap;
-        // The complete existing segment was validated by load_rows. Its
-        // records are in ordinal order; compare by offset instead of decoding
-        // every retained row again for every incoming ordinal.
+        // Merge the two ordered sequences. Gaps make ordinal offsets differ
+        // from vector indices; byte eviction may remove an incoming prefix.
+        // Each retained row is visited at most once, including sparse spans.
         let mut start = 0;
+        let mut existing_index = 0;
+        let mut skipped_prefix = false;
+        let mut matched_overlap = false;
         let first_ordinal = saved
             .records
             .first()
@@ -351,21 +573,45 @@ impl HistoryStore {
             .transpose()?;
         while start < records.len() {
             let row = history_rows::decode(&records[start])?;
-            let Some(existing) = first_ordinal.and_then(|first_ordinal| {
-                let offset = row.ordinal.checked_sub(first_ordinal)?;
-                saved.records.get(usize::try_from(offset).ok()?)
-            }) else {
+            if first_ordinal.is_some_and(|first| row.ordinal < first) {
+                skipped_prefix = true;
+                start += 1;
+                continue;
+            }
+            while let Some(existing) = saved.records.get(existing_index) {
+                if history_rows::decode(existing)?.ordinal >= row.ordinal {
+                    break;
+                }
+                existing_index += 1;
+            }
+            let Some(existing) = saved.records.get(existing_index) else {
                 break;
             };
+            // Never backfill an ordinal missing inside the retained span.
+            if history_rows::decode(existing)?.ordinal != row.ordinal {
+                return Err(invalid());
+            }
             if existing != &records[start]
                 && !history_rows::same_content(existing, &records[start])?
             {
                 return Err(invalid());
             }
+            matched_overlap = true;
+            existing_index += 1;
             start += 1;
         }
+        saved.gap |= skipped_prefix;
         if start == records.len() {
-            self.directory.sync_all()?;
+            // An entirely stale, evicted batch has no verifiable overlap and
+            // no new tail. It cannot receive a fresh durable acknowledgment.
+            if skipped_prefix && !matched_overlap {
+                return Err(invalid());
+            }
+            if saved.gap != prior_gap {
+                return self
+                    .replace_named(&history_name(target)?, &encode_segment(target, &saved)?);
+            }
+            self.sync_directory()?;
             return Ok(());
         }
         let mut previous = saved
@@ -436,9 +682,51 @@ impl HistoryStore {
             return Ok(());
         };
         if saved.ended_at_unix_ms != 0 {
+            self.sync_directory()?;
             return Ok(());
         }
         saved.ended_at_unix_ms = at_unix_ms;
+        self.replace_named(&history_name(target)?, &encode_segment(target, &saved)?)
+    }
+
+    /// Best-effort final metadata for accepted work canceled after a timeout.
+    ///
+    /// The caller owns writer exclusion and supplies a confirmed end time.
+    /// A live segment gets a conservative continuity gap and end in one atomic
+    /// replacement. Matching ended metadata remains immutable and is synced
+    /// again before acknowledgment. Screen checkpoints are never touched.
+    pub(crate) fn finalize_incomplete_end(
+        &self,
+        target: TargetRef,
+        epoch: u64,
+        end_at_unix_ms: u64,
+    ) -> io::Result<()> {
+        self.verify_identity()?;
+        if epoch == 0 || end_at_unix_ms == 0 {
+            return Err(invalid());
+        }
+        let mut saved = self.load_rows(target)?.unwrap_or(SavedHistory {
+            gap: true,
+            capture_disabled: false,
+            epoch,
+            ended_at_unix_ms: 0,
+            records: Vec::new(),
+        });
+        if saved.capture_disabled
+            || saved.epoch > epoch
+            || (saved.ended_at_unix_ms != 0 && saved.epoch != epoch)
+        {
+            return Err(invalid());
+        }
+        if saved.ended_at_unix_ms != 0 {
+            return self.sync_directory();
+        }
+        if saved.epoch != epoch {
+            saved.records.clear();
+            saved.epoch = epoch;
+        }
+        saved.gap = true;
+        saved.ended_at_unix_ms = end_at_unix_ms;
         self.replace_named(&history_name(target)?, &encode_segment(target, &saved)?)
     }
 
@@ -467,6 +755,80 @@ impl HistoryStore {
         self.directory.sync_all()
     }
 
+    /// Remove only exact writer-generated temporary files from this history
+    /// directory. The caller must exclude all active history writers, just
+    /// as it does for [`clear`](Self::clear). This never reads a temporary
+    /// body, promotes a temporary file, or repairs a committed history file.
+    pub fn cleanup_temporary_files(&self) -> io::Result<usize> {
+        self.verify_identity()?;
+        let mut total_entries = 0_usize;
+        let mut named_candidates = Vec::new();
+        for entry in fs::read_dir(&self.path)? {
+            let entry = entry?;
+            total_entries += 1;
+            if total_entries > MAX_HISTORY_TARGETS * 4 {
+                return Err(invalid());
+            }
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                continue;
+            };
+            if let Some((_, bound)) = temporary_final_name(file_name) {
+                if named_candidates.len() == MAX_HISTORY_TARGETS {
+                    return Err(invalid());
+                }
+                named_candidates.push((file_name.to_owned(), bound));
+            }
+        }
+
+        // The path-based directory listing is only for bounded name discovery;
+        // candidate opens and all mutations use the held directory descriptor.
+        self.verify_identity()?;
+        let mut candidates = Vec::new();
+        for (name, bound) in named_candidates {
+            let file = File::from(openat(
+                &self.directory,
+                name.as_str(),
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                Mode::empty(),
+            )?);
+            candidates.push(TemporaryCandidate::from_file(name, bound, &file)?);
+        }
+
+        // Complete preflight before the first unlink. A malformed or unsafe
+        // recognized name therefore cannot cause safe candidates to be lost.
+        for candidate in &candidates {
+            self.verify_identity()?;
+            let file = File::from(openat(
+                &self.directory,
+                candidate.name.as_str(),
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                Mode::empty(),
+            )?);
+            candidate.revalidate(&file)?;
+        }
+
+        let mut removed = 0;
+        for candidate in &candidates {
+            self.verify_identity()?;
+            let file = File::from(openat(
+                &self.directory,
+                candidate.name.as_str(),
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                Mode::empty(),
+            )?);
+            candidate.revalidate(&file)?;
+            drop(file);
+            unlinkat(&self.directory, candidate.name.as_str(), AtFlags::empty())?;
+            removed += 1;
+        }
+
+        // Even an empty pass settles an earlier uncertain directory sync.
+        self.verify_identity()?;
+        self.sync_directory()?;
+        Ok(removed)
+    }
+
     fn replace_named(&self, filename: &str, bytes: &[u8]) -> io::Result<()> {
         let temporary = format!(
             ".{filename}-{}-{}.tmp",
@@ -489,13 +851,14 @@ impl HistoryStore {
                 let target = segment_target(bytes)?;
                 decode_segment(target, &old)?;
             }
+            self.before_rename()?;
             renameat(
                 &self.directory,
                 temporary.as_str(),
                 &self.directory,
                 filename,
             )?;
-            self.directory.sync_all()
+            self.sync_directory()
         })();
         if result.is_err() {
             let _ = unlinkat(&self.directory, temporary.as_str(), AtFlags::empty());
@@ -527,7 +890,7 @@ impl HistoryStore {
             );
             if order >= proposed {
                 if order == proposed && previous == bytes {
-                    self.directory.sync_all()?;
+                    self.sync_directory()?;
                     return Ok(());
                 }
                 return Err(invalid());
@@ -587,7 +950,7 @@ impl HistoryStore {
                         // leave the new checkpoint visible. Only the exact
                         // same bytes are safe to acknowledge on retry.
                         if old == bytes {
-                            self.directory.sync_all()?;
+                            self.sync_directory()?;
                             unlinkat(&self.directory, temporary.as_str(), AtFlags::empty())?;
                             return Ok(());
                         }
@@ -597,13 +960,14 @@ impl HistoryStore {
                 Err(error) if error == rustix::io::Errno::NOENT => {}
                 Err(error) => return Err(io::Error::from(error)),
             }
+            self.before_rename()?;
             renameat(
                 &self.directory,
                 temporary.as_str(),
                 &self.directory,
                 final_name.as_str(),
             )?;
-            self.directory.sync_all()?;
+            self.sync_directory()?;
             Ok(())
         })();
         if result.is_err() {
@@ -752,4 +1116,466 @@ fn decode_segment(target: TargetRef, bytes: &[u8]) -> io::Result<SavedHistory> {
         return Err(invalid());
     }
     Ok(saved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::screen_checkpoint::CheckpointMetadata;
+    use crate::terminal::{ScreenSnapshot, TerminalSize};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    use std::time::SystemTime;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let stamp = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("test clock after Unix epoch")
+                .as_nanos();
+            for suffix in 0..32 {
+                let path = std::env::temp_dir().join(format!(
+                    "panelink-history-unit-{}-{}-{suffix}",
+                    std::process::id(),
+                    stamp
+                ));
+                match fs::DirBuilder::new().mode(0o700).create(&path) {
+                    Ok(()) => return Self(fs::canonicalize(path).unwrap()),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("create private history fixture: {error}"),
+                }
+            }
+            panic!("could not allocate a unique private history fixture")
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn target(session: u64) -> TargetRef {
+        TargetRef {
+            generation: 7,
+            workspace: 1,
+            pane: 2,
+            session,
+            occupant_revision: 1,
+        }
+    }
+
+    fn row_records(target: TargetRef, count: usize) -> Vec<Vec<u8>> {
+        row_records_at_width(target, count, 20)
+    }
+
+    fn row_records_at_width(target: TargetRef, count: usize, width: u16) -> Vec<Vec<u8>> {
+        let mut parser = vt100::Parser::new(2, width, 1024);
+        let initial = parser.screen().history_cursor().unwrap();
+        for index in 0..=count {
+            parser.process(format!("row-{index}\r\n").as_bytes());
+        }
+        let records = parser
+            .screen()
+            .history_after(initial)
+            .unwrap()
+            .map(|row| history_rows::encode(target, 1, row, 123).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), count);
+        records
+    }
+
+    #[test]
+    fn post_rename_retry_matches_retained_suffix_after_incoming_byte_eviction() {
+        let fixture = Fixture::new();
+        let target = target(3);
+        let store = HistoryStore::open(fixture.path()).unwrap();
+        let rows = row_records_at_width(target, 1024, 240);
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 2);
+        assert!(store.append_rows(target, &rows, false).is_err());
+        let saved = store.load_rows(target).unwrap().unwrap();
+        assert!(saved.gap);
+        assert!(saved.records.len() < rows.len());
+        let committed = fs::read(fixture.path().join(history_name(target).unwrap())).unwrap();
+        // A duplicate still has to reach the second injected sync failure.
+        assert_eq!(
+            store.append_rows(target, &rows, false).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        store.append_rows(target, &rows, false).unwrap();
+        assert_eq!(
+            fs::read(fixture.path().join(history_name(target).unwrap())).unwrap(),
+            committed
+        );
+        let mut conflict = rows.clone();
+        conflict.last_mut().unwrap()[history_rows::HEADER_BYTES + 10] = b'X';
+        assert!(store.append_rows(target, &conflict, false).is_err());
+        // Even discarded ordinals must be fully validated, never blindly skipped.
+        let mut malformed = rows.clone();
+        malformed[0][history_rows::HEADER_BYTES + 10] = 0x1b;
+        assert!(store.append_rows(target, &malformed, false).is_err());
+        let mut wrong_target = rows.clone();
+        wrong_target[0][32..40].copy_from_slice(&99_u64.to_be_bytes());
+        assert!(store.append_rows(target, &wrong_target, false).is_err());
+        assert!(store.append_rows(target, &rows[..1], false).is_err());
+        let mut out_of_order = rows.clone();
+        out_of_order.swap(0, 1);
+        assert!(store.append_rows(target, &out_of_order, false).is_err());
+    }
+
+    #[test]
+    fn post_rename_retry_matches_sparse_ordinals_without_allowing_backfill() {
+        let fixture = Fixture::new();
+        let target = target(3);
+        let store = HistoryStore::open(fixture.path()).unwrap();
+        let rows = row_records(target, 6);
+        store.append_rows(target, &rows[..2], false).unwrap();
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 2);
+        assert!(store.append_rows(target, &rows[4..], true).is_err());
+        assert_eq!(
+            store
+                .append_rows(target, &rows[4..], true)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Other
+        );
+        store.append_rows(target, &rows[4..], true).unwrap();
+        let expected = [rows[..2].to_vec(), rows[4..].to_vec()].concat();
+        assert_eq!(store.load_rows(target).unwrap().unwrap().records, expected);
+        assert!(store.append_rows(target, &rows[2..3], true).is_err());
+        let mut conflict = rows[4..].to_vec();
+        conflict[0][history_rows::HEADER_BYTES + 10] = b'X';
+        assert!(store.append_rows(target, &conflict, true).is_err());
+        assert_eq!(store.load_rows(target).unwrap().unwrap().records, expected);
+    }
+
+    #[test]
+    fn duplicate_row_batch_persists_a_new_gap_before_acknowledgment() {
+        let fixture = Fixture::new();
+        let target = target(3);
+        let store = HistoryStore::open(fixture.path()).unwrap();
+        let rows = row_records(target, 2);
+        store.append_rows(target, &rows, false).unwrap();
+        assert!(!store.load_rows(target).unwrap().unwrap().gap);
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 2);
+        assert!(store.append_rows(target, &rows, true).is_err());
+        assert!(store.load_rows(target).unwrap().unwrap().gap);
+        assert!(store.append_rows(target, &rows, true).is_err());
+        store.append_rows(target, &rows, true).unwrap();
+        let saved = store.load_rows(target).unwrap().unwrap();
+        assert!(saved.gap);
+        assert_eq!(saved.records, rows);
+    }
+
+    fn checkpoint(target: TargetRef, sequence: u64, captured_at: u64) -> Vec<u8> {
+        let screen = ScreenSnapshot::try_new(TerminalSize::new(8, 20).unwrap()).unwrap();
+        let metadata =
+            CheckpointMetadata::new(target, sequence, captured_at, sequence + 1).unwrap();
+        screen_checkpoint::encode(&screen, &metadata).unwrap()
+    }
+
+    #[test]
+    fn canceled_end_preserves_rows_screens_and_first_time_across_sync_retry() {
+        let fixture = Fixture::new();
+        let target = target(3);
+        let store = HistoryStore::open(fixture.path()).unwrap();
+        let rows = row_records(target, 3);
+        store.append_rows(target, &rows, false).unwrap();
+        let normal = checkpoint(target, 1, 11);
+        let mut alternate = checkpoint(target, 2, 22);
+        alternate[80] = 1;
+        store.save(target, ScreenBuffer::Normal, &normal).unwrap();
+        store
+            .save(target, ScreenBuffer::Alternate, &alternate)
+            .unwrap();
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 2);
+        assert!(store.finalize_incomplete_end(target, 1, 333).is_err());
+        let saved = store.load_rows(target).unwrap().unwrap();
+        assert_eq!(saved.records, rows);
+        assert!(saved.gap);
+        assert_eq!(saved.ended_at_unix_ms, 333);
+        let committed = fs::read(fixture.path().join(history_name(target).unwrap())).unwrap();
+        // A visible renamed record must not bypass the remaining sync failure.
+        assert!(store.finalize_incomplete_end(target, 1, 999).is_err());
+        store.finalize_incomplete_end(target, 1, 999).unwrap();
+        assert_eq!(
+            fs::read(fixture.path().join(history_name(target).unwrap())).unwrap(),
+            committed
+        );
+        assert_eq!(
+            store.load_rows(target).unwrap().unwrap().ended_at_unix_ms,
+            333
+        );
+        assert_eq!(
+            store.load(target, ScreenBuffer::Normal).unwrap().unwrap(),
+            normal
+        );
+        assert_eq!(
+            store
+                .load(target, ScreenBuffer::Alternate)
+                .unwrap()
+                .unwrap(),
+            alternate
+        );
+    }
+
+    #[test]
+    fn canceled_end_initializes_or_resets_live_epochs_but_refuses_invalid_state() {
+        let fixture = Fixture::new();
+        let store = HistoryStore::open(fixture.path()).unwrap();
+        let missing = target(3);
+        assert!(store.finalize_incomplete_end(missing, 0, 11).is_err());
+        assert!(store.finalize_incomplete_end(missing, 1, 0).is_err());
+        assert!(store.load_rows(missing).unwrap().is_none());
+        store.finalize_incomplete_end(missing, 2, 11).unwrap();
+        let saved = store.load_rows(missing).unwrap().unwrap();
+        assert_eq!((saved.epoch, saved.ended_at_unix_ms), (2, 11));
+        assert!(saved.gap && saved.records.is_empty());
+
+        let live = target(4);
+        store
+            .append_rows(live, &row_records(live, 2), false)
+            .unwrap();
+        store.finalize_incomplete_end(live, 2, 22).unwrap();
+        let saved = store.load_rows(live).unwrap().unwrap();
+        assert_eq!((saved.epoch, saved.ended_at_unix_ms), (2, 22));
+        assert!(saved.gap && saved.records.is_empty());
+        let bytes = fs::read(fixture.path().join(history_name(live).unwrap())).unwrap();
+        assert!(store.finalize_incomplete_end(live, 1, 33).is_err());
+        assert!(store.finalize_incomplete_end(live, 3, 33).is_err());
+        assert_eq!(
+            fs::read(fixture.path().join(history_name(live).unwrap())).unwrap(),
+            bytes
+        );
+
+        let disabled = target(5);
+        store.mark_history(disabled, 1, true).unwrap();
+        let bytes = fs::read(fixture.path().join(history_name(disabled).unwrap())).unwrap();
+        assert!(store.finalize_incomplete_end(disabled, 1, 44).is_err());
+        assert_eq!(
+            fs::read(fixture.path().join(history_name(disabled).unwrap())).unwrap(),
+            bytes
+        );
+        let newer = target(6);
+        store.begin_history(newer, 3, false).unwrap();
+        assert!(store.finalize_incomplete_end(newer, 2, 44).is_err());
+        assert_eq!(store.load_rows(newer).unwrap().unwrap().ended_at_unix_ms, 0);
+
+        let complete = target(7);
+        store.begin_history(complete, 1, false).unwrap();
+        store.mark_ended(complete, 55).unwrap();
+        store.finalize_incomplete_end(complete, 1, 66).unwrap();
+        let saved = store.load_rows(complete).unwrap().unwrap();
+        assert_eq!(saved.ended_at_unix_ms, 55);
+        assert!(!saved.gap, "already-ended continuity must remain unchanged");
+    }
+
+    #[test]
+    fn canceled_end_pre_rename_failure_and_unsafe_records_never_replace_data() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let store = HistoryStore::open(fixture.path()).unwrap();
+        let live = target(3);
+        store
+            .append_rows(live, &row_records(live, 2), false)
+            .unwrap();
+        let path = fixture.path().join(history_name(live).unwrap());
+        let original = fs::read(&path).unwrap();
+        store.inject_test_fault(TestFaultPoint::BeforeRename, 1);
+        assert!(store.finalize_incomplete_end(live, 1, 77).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::write(&path, b"corrupt-private-row").unwrap();
+        assert!(store.finalize_incomplete_end(live, 1, 77).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"corrupt-private-row");
+        fs::write(&path, &original).unwrap();
+        let mismatch = target(4);
+        let mismatch_path = fixture.path().join(history_name(mismatch).unwrap());
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&mismatch_path)
+            .unwrap()
+            .write_all(&original)
+            .unwrap();
+        assert!(store.finalize_incomplete_end(mismatch, 1, 77).is_err());
+        assert_eq!(fs::read(&mismatch_path).unwrap(), original);
+        let linked = target(5);
+        let linked_path = fixture.path().join(history_name(linked).unwrap());
+        symlink(&path, &linked_path).unwrap();
+        assert!(store.finalize_incomplete_end(linked, 1, 77).is_err());
+        assert!(fs::symlink_metadata(linked_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn failures_before_rename_preserve_committed_rows_and_checkpoints() {
+        let fixture = Fixture::new();
+        let target = target(3);
+        let store = HistoryStore::open(fixture.path()).unwrap();
+        let rows = row_records(target, 2);
+        store.append_rows(target, &rows[..1], false).unwrap();
+        store.inject_test_fault(TestFaultPoint::BeforeRename, 1);
+        assert!(store.append_rows(target, &rows[1..], false).is_err());
+        assert_eq!(
+            store.load_rows(target).unwrap().unwrap().records,
+            vec![rows[0].clone()]
+        );
+
+        let first = checkpoint(target, 1, 11);
+        let second = checkpoint(target, 2, 22);
+        store.save(target, ScreenBuffer::Normal, &first).unwrap();
+        store.inject_test_fault(TestFaultPoint::BeforeRename, 1);
+        assert!(store.save(target, ScreenBuffer::Normal, &second).is_err());
+        assert_eq!(
+            store.load(target, ScreenBuffer::Normal).unwrap(),
+            Some(first.clone())
+        );
+
+        drop(store);
+        let reopened = HistoryStore::open(fixture.path()).unwrap();
+        assert_eq!(
+            reopened.load_rows(target).unwrap().unwrap().records,
+            vec![rows[0].clone()]
+        );
+        assert_eq!(
+            reopened.load(target, ScreenBuffer::Normal).unwrap(),
+            Some(first)
+        );
+        assert!(fs::read_dir(fixture.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with('.')
+        }));
+    }
+
+    #[test]
+    fn post_rename_row_and_checkpoint_retries_sync_before_ack_and_reject_conflicts() {
+        let fixture = Fixture::new();
+        let target = target(3);
+        let store = HistoryStore::open(fixture.path()).unwrap();
+        let rows = row_records(target, 3);
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 2);
+        assert!(store.append_rows(target, &rows, false).is_err());
+
+        let observed = HistoryStore::open(fixture.path()).unwrap();
+        assert_eq!(observed.load_rows(target).unwrap().unwrap().records, rows);
+        let mut changed_rows = row_records(target, 3);
+        changed_rows[1][history_rows::HEADER_BYTES + 10] = b'X';
+        assert!(store.append_rows(target, &changed_rows, false).is_err());
+        let mut recaptured_rows = rows.clone();
+        for row in &mut recaptured_rows {
+            row[64..72].copy_from_slice(&456_u64.to_be_bytes());
+        }
+        assert!(store.append_rows(target, &recaptured_rows, false).is_err());
+        assert!(store.append_rows(target, &recaptured_rows, false).is_ok());
+        drop(observed);
+        drop(store);
+        let reopened = HistoryStore::open(fixture.path()).unwrap();
+        assert_eq!(reopened.load_rows(target).unwrap().unwrap().records, rows);
+        drop(reopened);
+
+        let store = HistoryStore::open(fixture.path()).unwrap();
+        let second = checkpoint(target, 2, 22);
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 2);
+        assert!(store.save(target, ScreenBuffer::Normal, &second).is_err());
+        let observed = HistoryStore::open(fixture.path()).unwrap();
+        assert_eq!(
+            observed.load(target, ScreenBuffer::Normal).unwrap(),
+            Some(second.clone())
+        );
+
+        let changed_same_order = checkpoint(target, 2, 99);
+        assert!(store
+            .save(target, ScreenBuffer::Normal, &changed_same_order)
+            .is_err());
+        assert!(store.save(target, ScreenBuffer::Normal, &second).is_err());
+        assert!(store.save(target, ScreenBuffer::Normal, &second).is_ok());
+        drop(observed);
+        drop(store);
+        let reopened = HistoryStore::open(fixture.path()).unwrap();
+        assert_eq!(
+            reopened.load(target, ScreenBuffer::Normal).unwrap(),
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn repeated_begin_and_end_acknowledgments_sync_and_keep_first_end_time() {
+        let fixture = Fixture::new();
+        let store = HistoryStore::open(fixture.path()).unwrap();
+        let ended = target(3);
+        let live = target(4);
+        let recently_ended = target(5);
+        store.begin_history(ended, 1, false).unwrap();
+        store.begin_history(live, 1, false).unwrap();
+        store.begin_history(recently_ended, 1, false).unwrap();
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 1);
+        assert!(store.begin_history(live, 1, false).is_err());
+        store.begin_history(live, 1, false).unwrap();
+
+        store.mark_ended(recently_ended, 1001).unwrap();
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 2);
+        assert!(store.mark_ended(ended, 1000).is_err());
+        let observed = HistoryStore::open(fixture.path()).unwrap();
+        assert_eq!(
+            observed.load_rows(ended).unwrap().unwrap().ended_at_unix_ms,
+            1000
+        );
+        assert!(store.mark_ended(ended, 2000).is_err());
+        assert_eq!(
+            observed.load_rows(ended).unwrap().unwrap().ended_at_unix_ms,
+            1000
+        );
+        store.mark_ended(ended, 9000).unwrap();
+        drop(observed);
+        drop(store);
+
+        let reopened = HistoryStore::open(fixture.path()).unwrap();
+        assert_eq!(
+            reopened.load_rows(ended).unwrap().unwrap().ended_at_unix_ms,
+            1000
+        );
+        assert_eq!(reopened.prune_expired(1000 + RETENTION_MS).unwrap(), 1);
+        assert!(reopened.load_rows(ended).unwrap().is_none());
+        assert!(reopened.load_rows(live).unwrap().is_some());
+        assert!(reopened.load_rows(recently_ended).unwrap().is_some());
+    }
+
+    #[test]
+    fn temporary_cleanup_retries_directory_sync_even_after_visible_deletion() {
+        let fixture = Fixture::new();
+        let store = HistoryStore::open(fixture.path()).unwrap();
+        let temporary = format!(
+            ".{}-{}-1.tmp",
+            history_name(target(3)).unwrap(),
+            std::process::id()
+        );
+        let path = fixture.path().join(&temporary);
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"partial; never read or promoted").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 2);
+        assert!(store.cleanup_temporary_files().is_err());
+        assert!(!path.exists(), "the unlink is visible before sync failure");
+        assert!(store.cleanup_temporary_files().is_err());
+        assert_eq!(store.cleanup_temporary_files().unwrap(), 0);
+    }
 }

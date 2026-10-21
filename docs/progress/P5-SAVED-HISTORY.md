@@ -1,8 +1,39 @@
 # P5 bounded saved history — 2026-10-20
 
+Recovery follow-up (2026-10-21): deterministic software-injected pre/post-rename
+sync faults and successful first-end-time retry/expiry are now covered in
+[P5-RECOVERY-FAULTS.md](P5-RECOVERY-FAULTS.md), including the real PTY capture
+caller. Unchanged screen retries preserve their original capture metadata.
+[P5-RESTART-ACCEPTANCE.md](P5-RESTART-ACCEPTANCE.md) adds a real private-PTY
+scenario read by fresh history CLI processes: retained rows and latest
+checkpoints survive, overwritten unrecorded A is unavailable, and reads cause
+no storage changes or workspace launch. These supersede the corresponding
+unproved-test notes below. The subsequent
+[temporary-file cleanup](P5-TEMP-CLEANUP.md) discards only recognized
+uncommitted files under writer exclusion, via startup and a stopped-workspace
+CLI. The [synthetic throughput baseline](P5-HISTORY-THROUGHPUT.md) records
+actual release measurements, including owner-thread storage-call stalls.
+The [bounded writer component](P5-HISTORY-WRITER.md) now provides owned
+batches, durable receipts, capacity limits and retained-lock shutdown. The
+[live integration](P5-LIVE-WRITER-RESULT.md) adopts it for initial and split-created
+sessions, with separate submitted/durable state and bounded terminal metadata
+that survives pane retirement.
+The subsequent [live workload observations](P5-LIVE-HISTORY-BENCH.md) cover
+two bounded actual-store release runs and preserve burst failure flags and
+preliminary missing end metadata. Full machine reboot/layout recovery,
+committed-record repair and representative workload acceptance remain open. Current integrated results and sandbox
+blockers are in [SESSION.md](SESSION.md).
+
+Committed-file follow-up: [P5-COMMITTED-CORRUPTION.md](P5-COMMITTED-CORRUPTION.md)
+defines whole-file refusal for malformed or truncated committed records, with
+byte-preserving reopen/CLI acceptance. No prefix salvage or automatic repair is
+implemented; structure-valid altered text remains undetectable without a
+checksum. Temporary cleanup is separate and never promotes an orphan.
+
 The two-pane server now consumes the VT100 `.2` normal-history cursor after
 each bounded PTY pump. It sanitizes borrowed row cells with the checkpoint
-cell policy and writes one versioned, complete-target segment per pump. Only
+cell policy and submits versioned, complete-target batches to the worker.
+Pending ordinary batches coalesce screens and resample rows on later pumps. Only
 rows that enter normal scrollback are retained; alternate-screen contents are
 the latest separate checkpoints, not fabricated transcript rows. A row record
 has immutable target, engine epoch, ordinal, capture time, original width,
@@ -26,25 +57,23 @@ The read-only commands never spawn a child or replay saved terminal effects.
 Review follow-up: explicit close now parses bounded available output during
 the existing HUP/KILL cleanup window and takes a final sanitized capture before
 closing the PTY. If cleanup output was read or EOF was not confirmed, the
-segment is marked with a gap rather than claiming complete history. Failed
-end-time recording remains retryable while the effect handle is retained;
+segment is marked with a gap rather than claiming complete history. The current async coordinator retains final metadata after effect retirement;
 unresolved storage failure remains visible and can prevent automatic expiry.
-The row writer compares retained ordinals by ordered offset (not repeated
-linear scans), and accepts a post-rename retry when cells/identity match even
+The row writer compares retained ordinals by an ordered merge (including gaps
+and an already evicted prefix), and accepts a post-rename retry when retained cells/identity match even
 if the new observation timestamp differs. `history clear` holds the validated
 server-storage lock throughout deletion, excluding direct `serve` startup.
 Focused follow-up tests cover cleanup output or an explicit incomplete result,
 full-segment duplicate retry, a timestamp-only retry with conflicting-content
 rejection, maintenance lock exclusion, and live-server clear denial. The
 independent review's original required issues were addressed within this
-scoped slice. A deterministic injected failure *after* directory rename and
-successful later expiry after an actual failed end-time sync have not been
-demonstrated; those remain separate recovery evidence, not counted passes.
+scoped slice. Subsequent deterministic post-rename sync and end-time retry/expiry checks
+are recorded in [P5-RECOVERY-FAULTS.md](P5-RECOVERY-FAULTS.md).
 The final full verifier reran 8/8 after these changes: history store 10/10,
 screen checkpoint 3/3 and close/history runtime 5/5; 15 Rust tests remain
 ignored. Strict rustdoc and diff checks are recorded separately.
 
-## Verified scope and remaining limits
+## Original slice verification and remaining limits
 
 Focused integration checks demonstrate persisted normal rows surviving pane
 close and server shutdown; a fresh `history show`/`search` reads them after
@@ -75,9 +104,9 @@ the writer reports a gap and keeps only its surviving suffix. On rapid
 natural exit, teardown also tries at most 64 immediately available PTY reads
 before retaining the final snapshot, and flags a gap if EOF was not observed.
 Data that never entered the ring cannot be reconstructed. Interrupted
-dot-prefixed temporary files are not treated as committed rows; they require
-an explicit safe repair/cleanup policy before the full reboot acceptance is
-closed. The 8 MiB limit applies to the normal-history segment, not the two
-separate screen checkpoint files. Each owner-thread batch syncs the whole
-bounded segment; representative high-output throughput and disk latency have
-not been measured.
+dot-prefixed temporary files are not treated as committed rows; the current
+policy discards only recognized safe orphan files as linked above, without
+repairing committed records. The 8 MiB limit applies to the normal-history segment, not the two
+separate screen checkpoint files. The current worker syncs the whole bounded
+segment; the earlier synthetic storage timings do not establish representative
+high-output workload or UI latency acceptance.

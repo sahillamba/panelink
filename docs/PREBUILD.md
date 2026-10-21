@@ -2,11 +2,11 @@
 
 Updated: 2026-10-18. This is a readiness note, not a replacement for `SPEC.md`.
 
-Pause handoff (2026-10-21): the original readiness narrative below predates
+Resume handoff (2026-10-21): the original readiness narrative below predates
 the completed two-pane, scoped stop and saved-history slices. For current
 setup use [SETUP.md](SETUP.md); for status, commits, verification and open gates
 use [ROADMAP.md](../ROADMAP.md) and [SESSION.md](progress/SESSION.md).
-Work resumes only on a new user instruction.
+The user resumed work on 2026-10-21; follow the current roadmap/handoff.
 
 ## Current state
 

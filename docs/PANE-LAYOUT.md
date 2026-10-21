@@ -221,3 +221,14 @@ References: [working specification](SPEC.md), [agent-control proposal](AGENT-CON
 ## Parent design review
 
 Parent clarified duplicate admission before layout preconditions, tentative-ID reservation before committed watermarks, bounded five-row menu status presentation, and actual-versus-desired geometry while a PTY resize is pending. These are proposed implementation contracts, not executed tests. This document is now linked as the detailed R-16 plan; exact shortcut/launcher/hierarchy/live-memory choices remain open and must be settled in the relevant bounded implementation task. No host or runtime compatibility claim follows from document review.
+
+
+## Scoped persistence design follow-up — 2026-10-21
+
+[ADR-P5-LAYOUT-01](progress/P5-SAVED-LAYOUT.md) reviews a fixed-size historical
+snapshot for the implemented two-pane equal geometry. It leaves generalized
+workspace/tab trees, arbitrary ratios and launcher persistence unresolved.
+Historical full targets are links to read-only history, never live identity
+allocation or dispatch authority. This is a design contract; codec/store/runtime
+and recovery presentation require the staged implementation/acceptance listed
+there. No new command or automatic restart behavior is implemented.

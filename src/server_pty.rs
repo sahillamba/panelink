@@ -9,6 +9,10 @@ use crate::control_protocol::TargetRef;
 use crate::control_protocol::{
     Command, ReadSource, MAX_INPUT_TEXT_BYTES, MAX_READ_BYTES, MAX_READ_LINES,
 };
+use crate::history_capture::{
+    lock_capture, CaptureObservation, CheckpointRecord, SharedHistoryCapture,
+};
+use crate::history_diagnostics::{HistoryDiagnostics, HistoryReason};
 use crate::history_rows;
 use crate::history_store::HistoryStore;
 use crate::protocol::Outcome;
@@ -24,15 +28,37 @@ use std::time::{Duration, Instant};
 const CAPTURE_INTERVAL: Duration = Duration::from_secs(5);
 
 struct Capture {
-    store: Arc<HistoryStore>,
+    store: Option<Arc<HistoryStore>>,
+    coordinator: Option<SharedHistoryCapture>,
     failure: Arc<AtomicBool>,
+    diagnostics: HistoryDiagnostics,
     target: TargetRef,
+    // In async mode these are the latest encoded/observed candidate, not the
+    // durable checkpoint; coordinator receipt state owns durability.
     last_revision: Option<u64>,
     last_buffer: Option<ScreenBuffer>,
+    checkpoint_metadata: Option<(ScreenBuffer, CheckpointMetadata)>,
+    #[cfg(test)]
+    checkpoint_time_override: Option<u64>,
     last_attempt: Option<Instant>,
     failed: bool,
     history_cursor: vt100::HistoryCursor,
     end_pending: bool,
+    end_reserved: bool,
+    ordering_exhausted: bool,
+    async_closed: bool,
+}
+
+impl Capture {
+    fn record_failure(&self, reason: HistoryReason) {
+        self.diagnostics.record(reason);
+        self.failure.store(true, Ordering::Release);
+    }
+
+    fn fail(&mut self, reason: HistoryReason) {
+        self.failed = true;
+        self.record_failure(reason);
+    }
 }
 
 /// Maximum display text returned by a schema-1 read after its 90-byte response
@@ -111,26 +137,35 @@ impl PtyEffects {
                     ordinal: 0,
                 });
         self.capture = Some(Capture {
-            store,
+            store: Some(store),
+            coordinator: None,
             failure,
+            diagnostics: HistoryDiagnostics::new(),
             target,
             last_revision: None,
             last_buffer: None,
+            checkpoint_metadata: None,
+            #[cfg(test)]
+            checkpoint_time_override: None,
             last_attempt: None,
             failed: false,
             history_cursor,
             end_pending: false,
+            end_reserved: false,
+            ordering_exhausted: false,
+            async_closed: false,
         });
         // The parser may already have scrolled during launch. Never silently
         // claim pre-attachment output was persisted as a continuous segment.
         if let Some(capture) = &mut self.capture {
             if capture
                 .store
+                .as_ref()
+                .expect("synchronous capture store")
                 .begin_history(target, history_cursor.epoch, history_cursor.ordinal != 0)
                 .is_err()
             {
-                capture.failed = true;
-                capture.failure.store(true, Ordering::Relaxed);
+                capture.fail(HistoryReason::CaptureSetupFailed);
             }
         }
         if history_cursor.ordinal != 0 {
@@ -138,35 +173,132 @@ impl PtyEffects {
                 capture.history_cursor.ordinal = 0;
             }
         }
-        self.capture_screen(true);
-        self.capture_history();
+        self.capture_observation(true, false);
     }
 
-    /// Whether a checkpoint write has failed since capture was installed.
+    /// Install the asynchronous coordinator used by every live runtime path.
+    /// Registration failure disables only capture; the PTY remains usable.
+    pub(crate) fn enable_async_capture(
+        &mut self,
+        coordinator: SharedHistoryCapture,
+        failure: Arc<AtomicBool>,
+        target: TargetRef,
+    ) {
+        // Live runtime capture must never fall back to a retained synchronous
+        // store if registration or cursor sampling fails.
+        self.capture = None;
+        let diagnostics = lock_capture(&coordinator).diagnostics();
+        let initial = self.session.history_screen().history_cursor();
+        let Some(initial) = initial.ok() else {
+            diagnostics.record(HistoryReason::CaptureInvalid);
+            failure.store(true, Ordering::Release);
+            return;
+        };
+        let registered = lock_capture(&coordinator).register_target(target, initial);
+        if !registered {
+            failure.store(true, Ordering::Release);
+            return;
+        }
+        self.capture = Some(Capture {
+            store: None,
+            coordinator: Some(coordinator),
+            failure,
+            diagnostics,
+            target,
+            last_revision: None,
+            last_buffer: None,
+            checkpoint_metadata: None,
+            #[cfg(test)]
+            checkpoint_time_override: None,
+            last_attempt: None,
+            failed: false,
+            history_cursor: vt100::HistoryCursor {
+                epoch: initial.epoch,
+                ordinal: 0,
+            },
+            end_pending: false,
+            end_reserved: false,
+            ordering_exhausted: false,
+            async_closed: false,
+        });
+        self.capture_observation(true, false);
+    }
+
+    /// Whether this target or the shared asynchronous writer has failed.
     pub fn capture_failed(&self) -> bool {
-        self.capture.as_ref().is_some_and(|capture| capture.failed)
+        self.capture.as_ref().is_some_and(|capture| {
+            capture.failed
+                || (capture.coordinator.is_some() && capture.failure.load(Ordering::Acquire))
+        })
     }
 
     /// Save the latest visible screen on detach or orderly server shutdown.
     pub fn capture_now(&mut self) {
-        self.capture_screen(true);
-        self.capture_history();
+        self.capture_observation(true, false);
     }
 
-    /// Record a confirmed child exit as the start of history's age window.
+    /// Reserve terminal history work. Async success means the final batch was
+    /// reserved/submitted; only its matching writer receipt proves durability.
     pub fn capture_exit(&mut self) -> bool {
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|capture| capture.end_reserved || capture.async_closed)
+        {
+            return true;
+        }
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|capture| capture.coordinator.is_some())
+        {
+            let Some(observation) = self.capture_observation_value(true, true) else {
+                if let Some(capture) = &self.capture {
+                    capture.record_failure(HistoryReason::CaptureInvalid);
+                }
+                return false;
+            };
+            let now = self.session.exit_status().and_then(|_| unix_time_ms());
+            let Some(capture) = &self.capture else {
+                return true;
+            };
+            if capture.async_closed {
+                return true;
+            }
+            let target = capture.target;
+            let coordinator =
+                Arc::clone(capture.coordinator.as_ref().expect("async capture present"));
+            let accepted = lock_capture(&coordinator).finish_target(target, observation, now);
+            if !accepted {
+                if let Some(capture) = &mut self.capture {
+                    capture.fail(HistoryReason::CaptureInvalid);
+                }
+                return false;
+            }
+            if let Some(capture) = &mut self.capture {
+                capture.end_reserved = true;
+                capture.end_pending = false;
+                if now.is_none() {
+                    capture.failed = true;
+                }
+            }
+            return true;
+        }
         self.capture_now();
         let Some(capture) = &mut self.capture else {
             return true;
         };
         capture.end_pending = true;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|time| u64::try_from(time.as_millis()).ok());
-        if now.is_none_or(|now| capture.store.mark_ended(capture.target, now).is_err()) {
-            capture.failed = true;
-            capture.failure.store(true, Ordering::Relaxed);
+        let Some(now) = unix_time_ms() else {
+            capture.fail(HistoryReason::UnknownEndTime);
+            return false;
+        };
+        if capture
+            .store
+            .as_ref()
+            .is_none_or(|store| store.mark_ended(capture.target, now).is_err())
+        {
+            capture.fail(HistoryReason::StorageError);
             return false;
         }
         capture.end_pending = false;
@@ -177,17 +309,232 @@ impl PtyEffects {
         let Some(capture) = &mut self.capture else {
             return;
         };
-        if capture
-            .store
-            .mark_history(capture.target, capture.history_cursor.epoch, false)
-            .is_err()
-        {
-            capture.failed = true;
-            capture.failure.store(true, Ordering::Relaxed);
+        if capture.async_closed {
+            return;
+        }
+        if let Some(coordinator) = &capture.coordinator {
+            let epoch = self
+                .session
+                .history_screen()
+                .history_cursor()
+                .map_or(capture.history_cursor.epoch, |cursor| cursor.epoch);
+            let through = self
+                .session
+                .history_screen()
+                .history_cursor()
+                .map_or(capture.history_cursor.ordinal, |cursor| cursor.ordinal);
+            lock_capture(coordinator).mark_gap(capture.target, epoch, through);
+            return;
+        }
+        if capture.store.as_ref().is_none_or(|store| {
+            store
+                .mark_history(capture.target, capture.history_cursor.epoch, false)
+                .is_err()
+        }) {
+            capture.fail(HistoryReason::StorageError);
         }
     }
 
+    fn capture_observation(&mut self, force: bool, final_capture: bool) {
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|capture| capture.end_reserved || capture.async_closed)
+        {
+            return;
+        }
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|capture| capture.coordinator.is_some())
+        {
+            let Some(observation) = self.capture_observation_value(force, final_capture) else {
+                return;
+            };
+            if let Some(capture) = &self.capture {
+                if !capture.async_closed {
+                    if let Some(coordinator) = &capture.coordinator {
+                        lock_capture(coordinator).observe(capture.target, observation);
+                    }
+                }
+            }
+        } else {
+            self.capture_screen_sync(force);
+            self.capture_history_sync();
+        }
+    }
+
+    fn capture_observation_value(
+        &mut self,
+        force: bool,
+        final_capture: bool,
+    ) -> Option<CaptureObservation> {
+        let (target, submitted_cursor, regular_pending, can_capture) = {
+            let capture = self.capture.as_ref()?;
+            let coordinator = capture.coordinator.as_ref()?.clone();
+            if capture.async_closed {
+                return None;
+            }
+            let guard = lock_capture(&coordinator);
+            let submitted = guard.submitted_cursor(capture.target)?;
+            let pending = guard.has_regular_pending(capture.target);
+            let can_capture = guard.can_capture(capture.target);
+            drop(guard);
+            (capture.target, submitted, pending, can_capture)
+        };
+
+        if !can_capture {
+            if !final_capture {
+                return None;
+            }
+            let cursor = self
+                .session
+                .history_screen()
+                .history_cursor()
+                .unwrap_or(submitted_cursor);
+            return Some(CaptureObservation {
+                cursor,
+                gap: true,
+                rows: Vec::new(),
+                screens: Vec::new(),
+            });
+        }
+
+        let screen = self.session.history_screen();
+        let latest = match screen.history_cursor() {
+            Ok(cursor) => cursor,
+            Err(_) => {
+                if let Some(capture) = &self.capture {
+                    capture.record_failure(HistoryReason::CaptureInvalid);
+                }
+                return Some(CaptureObservation {
+                    cursor: submitted_cursor,
+                    gap: true,
+                    rows: Vec::new(),
+                    screens: Vec::new(),
+                });
+            }
+        };
+        let mut gap = false;
+        let mut rows = Vec::new();
+        if final_capture || !regular_pending {
+            let after = match screen.history_after(submitted_cursor) {
+                Ok(rows) => rows.collect::<Vec<_>>(),
+                Err(vt100::HistoryError::Reset | vt100::HistoryError::Gap) => {
+                    gap = true;
+                    let start = vt100::HistoryCursor {
+                        epoch: latest.epoch,
+                        ordinal: latest.ordinal.saturating_sub(1024),
+                    };
+                    match screen.history_after(start) {
+                        Ok(rows) => rows.collect::<Vec<_>>(),
+                        Err(_) => {
+                            if let Some(capture) = &self.capture {
+                                capture.record_failure(HistoryReason::CaptureInvalid);
+                            }
+                            Vec::new()
+                        }
+                    }
+                }
+                Err(_) => {
+                    if let Some(capture) = &self.capture {
+                        capture.record_failure(HistoryReason::CaptureInvalid);
+                    }
+                    gap = true;
+                    Vec::new()
+                }
+            };
+            let timestamp = unix_time_ms();
+            if let Some(timestamp) = timestamp {
+                rows = after
+                    .iter()
+                    .map(|row| history_rows::encode(target, latest.epoch, *row, timestamp))
+                    .collect::<std::io::Result<Vec<_>>>()
+                    .unwrap_or_else(|_| {
+                        gap = true;
+                        if let Some(capture) = &self.capture {
+                            capture.record_failure(HistoryReason::CaptureInvalid);
+                        }
+                        Vec::new()
+                    });
+            } else if !after.is_empty() {
+                gap = true;
+                if let Some(capture) = &self.capture {
+                    capture.record_failure(HistoryReason::CaptureInvalid);
+                }
+            }
+        }
+
+        let buffer = if self.session.snapshot().alternate_screen() {
+            ScreenBuffer::Alternate
+        } else {
+            ScreenBuffer::Normal
+        };
+        let should_capture_screen = {
+            let capture = self.capture.as_ref()?;
+            let changed = !capture.ordering_exhausted
+                && (capture.last_revision != Some(self.revision)
+                    || capture.last_buffer != Some(buffer));
+            let elapsed = capture
+                .last_attempt
+                .is_none_or(|at| at.elapsed() >= CAPTURE_INTERVAL);
+            changed && (force || buffer != capture.last_buffer.unwrap_or(buffer) || elapsed)
+        };
+        let mut screens = Vec::new();
+        if should_capture_screen {
+            let capture = self.capture.as_mut()?;
+            capture.last_attempt = Some(Instant::now());
+            let metadata = capture
+                .checkpoint_metadata
+                .filter(|(saved_buffer, metadata)| {
+                    *saved_buffer == buffer
+                        && metadata.target() == target
+                        && metadata.output_sequence() == self.output_sequence
+                        && metadata.screen_revision() == self.revision
+                })
+                .map(|(_, metadata)| metadata)
+                .or_else(|| {
+                    let now = unix_time_ms()?;
+                    CheckpointMetadata::new(target, self.output_sequence, now, self.revision).ok()
+                });
+            if let Some(metadata) = metadata {
+                capture.checkpoint_metadata = Some((buffer, metadata));
+                let encoded = screen_checkpoint::encode(self.session.snapshot(), &metadata);
+                let record = encoded
+                    .ok()
+                    .and_then(|bytes| CheckpointRecord::new(target, buffer, metadata, bytes).ok());
+                if let Some(record) = record {
+                    screens.push(record);
+                    capture.last_revision = Some(self.revision);
+                    capture.last_buffer = Some(buffer);
+                } else {
+                    capture.fail(HistoryReason::CaptureInvalid);
+                }
+            } else {
+                capture.fail(HistoryReason::CaptureInvalid);
+            }
+        }
+        Some(CaptureObservation {
+            cursor: latest,
+            gap,
+            rows,
+            screens,
+        })
+    }
+
     fn capture_screen(&mut self, force: bool) {
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|capture| capture.coordinator.is_some())
+        {
+            self.capture_observation(force, false);
+        } else {
+            self.capture_screen_sync(force);
+        }
+    }
+
+    fn capture_screen_sync(&mut self, force: bool) {
         let Some(capture) = self.capture.as_mut() else {
             return;
         };
@@ -213,36 +560,71 @@ impl PtyEffects {
             return;
         }
         capture.last_attempt = Some(Instant::now());
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|time| u64::try_from(time.as_millis()).ok());
-        let result = (|| {
-            let metadata = CheckpointMetadata::new(
-                capture.target,
-                self.output_sequence,
-                now.ok_or(())?,
-                self.revision,
-            )
-            .map_err(|_| ())?;
-            let screen = self.session.snapshot();
-            let bytes = screen_checkpoint::encode(screen, &metadata).map_err(|_| ())?;
-            capture
-                .store
-                .save(capture.target, buffer, &bytes)
-                .map_err(|_| ())
-        })();
-        if result.is_ok() {
+        // Keep retries byte-identical while this observation is unchanged;
+        // a new buffer, output sequence, or screen revision gets fresh metadata.
+        #[cfg(test)]
+        let time_override = capture.checkpoint_time_override;
+        #[cfg(not(test))]
+        let time_override = None;
+        let metadata = capture
+            .checkpoint_metadata
+            .filter(|(saved_buffer, metadata)| {
+                *saved_buffer == buffer
+                    && metadata.target() == capture.target
+                    && metadata.output_sequence() == self.output_sequence
+                    && metadata.screen_revision() == self.revision
+            })
+            .map(|(_, metadata)| metadata)
+            .or_else(|| {
+                let now = time_override.or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .and_then(|time| u64::try_from(time.as_millis()).ok())
+                })?;
+                CheckpointMetadata::new(capture.target, self.output_sequence, now, self.revision)
+                    .ok()
+            });
+        let Some(metadata) = metadata else {
+            capture.fail(HistoryReason::CaptureInvalid);
+            return;
+        };
+        capture.checkpoint_metadata = Some((buffer, metadata));
+        let screen = self.session.snapshot();
+        let bytes = match screen_checkpoint::encode(screen, &metadata) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                capture.fail(HistoryReason::CaptureInvalid);
+                return;
+            }
+        };
+        let Some(store) = capture.store.as_ref() else {
+            capture.fail(HistoryReason::CaptureInvalid);
+            return;
+        };
+        if store.save(capture.target, buffer, &bytes).is_err() {
+            capture.fail(HistoryReason::StorageError);
+        } else {
             capture.last_revision = Some(self.revision);
             capture.last_buffer = Some(buffer);
             capture.failed = false;
-        } else {
-            capture.failed = true;
-            capture.failure.store(true, Ordering::Relaxed);
         }
     }
 
+    #[cfg(test)]
     fn capture_history(&mut self) {
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|capture| capture.coordinator.is_some())
+        {
+            self.capture_observation(false, false);
+        } else {
+            self.capture_history_sync();
+        }
+    }
+
+    fn capture_history_sync(&mut self) {
         let Some(capture) = self.capture.as_mut() else {
             return;
         };
@@ -250,12 +632,10 @@ impl PtyEffects {
         let latest = match screen.history_cursor() {
             Ok(cursor) => cursor,
             Err(_) => {
-                capture.failed = true;
-                capture.failure.store(true, Ordering::Relaxed);
-                let _ =
-                    capture
-                        .store
-                        .mark_history(capture.target, capture.history_cursor.epoch, true);
+                capture.fail(HistoryReason::CaptureInvalid);
+                if let Some(store) = &capture.store {
+                    let _ = store.mark_history(capture.target, capture.history_cursor.epoch, true);
+                }
                 return;
             }
         };
@@ -274,8 +654,7 @@ impl PtyEffects {
                 match screen.history_after(start) {
                     Ok(rows) => rows.collect::<Vec<_>>(),
                     Err(_) => {
-                        capture.failed = true;
-                        capture.failure.store(true, Ordering::Relaxed);
+                        capture.fail(HistoryReason::CaptureInvalid);
                         return;
                     }
                 }
@@ -284,33 +663,43 @@ impl PtyEffects {
         };
         if rows.is_empty() {
             if gap {
-                if capture
-                    .store
-                    .mark_history(capture.target, latest.epoch, false)
-                    .is_err()
-                {
-                    capture.failed = true;
-                    capture.failure.store(true, Ordering::Relaxed);
+                if capture.store.as_ref().is_none_or(|store| {
+                    store
+                        .mark_history(capture.target, latest.epoch, false)
+                        .is_err()
+                }) {
+                    capture.fail(HistoryReason::StorageError);
                 } else {
                     capture.history_cursor = latest;
                 }
             }
             return;
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|time| u64::try_from(time.as_millis()).ok())
-            .unwrap_or(0);
+        let Some(now) = unix_time_ms() else {
+            capture.fail(HistoryReason::CaptureInvalid);
+            let _ = capture
+                .store
+                .as_ref()
+                .map(|store| store.mark_history(capture.target, latest.epoch, true));
+            return;
+        };
         let records = rows
             .iter()
             .map(|row| history_rows::encode(capture.target, latest.epoch, *row, now))
             .collect::<std::io::Result<Vec<_>>>();
-        let result =
-            records.and_then(|records| capture.store.append_rows(capture.target, &records, gap));
-        if result.is_err() {
-            capture.failed = true;
-            capture.failure.store(true, Ordering::Relaxed);
+        let records = match records {
+            Ok(records) => records,
+            Err(_) => {
+                capture.fail(HistoryReason::CaptureInvalid);
+                return;
+            }
+        };
+        let Some(store) = capture.store.as_ref() else {
+            capture.fail(HistoryReason::CaptureInvalid);
+            return;
+        };
+        if store.append_rows(capture.target, &records, gap).is_err() {
+            capture.fail(HistoryReason::StorageError);
             return;
         }
         capture.history_cursor = latest;
@@ -322,17 +711,26 @@ impl PtyEffects {
     }
 
     fn observe_progress(&mut self, progress: PumpOutcome) -> bool {
+        let mut ordering_exhausted = false;
         if progress.bytes_read != 0 {
             match self.output_sequence.checked_add(progress.bytes_read as u64) {
                 Some(next) => self.output_sequence = next,
                 None => {
                     // Terminal IO continues even when capture ordering is exhausted.
-                    if let Some(capture) = &self.capture {
-                        capture.failure.store(true, Ordering::Relaxed);
+                    if let Some(capture) = &mut self.capture {
+                        capture.fail(HistoryReason::CaptureInvalid);
+                        if capture.coordinator.is_some() {
+                            capture.ordering_exhausted = true;
+                            ordering_exhausted = true;
+                        } else {
+                            self.capture = None;
+                        }
                     }
-                    self.capture = None;
                 }
             }
+        }
+        if ordering_exhausted {
+            self.mark_final_output_gap();
         }
         let lifecycle_changed = progress.pty_eof != self.last_pty_eof
             || progress.child_exited != self.last_child_exited;
@@ -347,6 +745,11 @@ impl PtyEffects {
                 true
             }
             None => {
+                if let Some(capture) = &mut self.capture {
+                    capture.fail(HistoryReason::CaptureInvalid);
+                    capture.ordering_exhausted = true;
+                }
+                self.mark_final_output_gap();
                 self.fail_closed();
                 false
             }
@@ -356,6 +759,65 @@ impl PtyEffects {
     fn fail_closed(&mut self) {
         self.failed = true;
         self.session.discard_pending_input();
+    }
+
+    /// Stop this child while history admission remains open, then prevent any
+    /// later automatic effect drop from submitting to a closed writer.
+    pub(crate) fn prepare_driver_shutdown(&mut self) {
+        let _ = <Self as EffectSink>::stop(self);
+        if self.capture.is_some() && !self.exit_recorded {
+            self.exit_recorded = self.capture_exit();
+        }
+        if let Some(capture) = &mut self.capture {
+            capture.async_closed = true;
+        }
+    }
+
+    fn observe_shutdown_output(
+        &mut self,
+        prior_bytes: usize,
+        prior_eof: bool,
+        prior_child_exited: bool,
+    ) -> usize {
+        let total_bytes = self.session.final_output_bytes();
+        let newly_parsed = total_bytes.saturating_sub(prior_bytes);
+        let child_exited = self.session.exit_status().is_some();
+        let pty_eof = self.session.pty_eof();
+        let lifecycle_changed = child_exited != prior_child_exited || pty_eof != prior_eof;
+        let mut ordering_exhausted = false;
+        if newly_parsed != 0 {
+            match u64::try_from(newly_parsed)
+                .ok()
+                .and_then(|count| self.output_sequence.checked_add(count))
+            {
+                Some(next) => self.output_sequence = next,
+                None => {
+                    if let Some(capture) = &mut self.capture {
+                        capture.fail(HistoryReason::CaptureInvalid);
+                        capture.ordering_exhausted = true;
+                        ordering_exhausted = true;
+                    }
+                }
+            }
+        }
+        if newly_parsed != 0 || lifecycle_changed {
+            match self.revision.checked_add(1) {
+                Some(next) => self.revision = next,
+                None => {
+                    if let Some(capture) = &mut self.capture {
+                        capture.fail(HistoryReason::CaptureInvalid);
+                        capture.ordering_exhausted = true;
+                        ordering_exhausted = true;
+                    }
+                }
+            }
+        }
+        if ordering_exhausted {
+            self.mark_final_output_gap();
+        }
+        self.last_child_exited = child_exited;
+        self.last_pty_eof = pty_eof;
+        newly_parsed
     }
 
     fn read_screen(&self, max_text_bytes: usize, max_lines: u16) -> Result<ReadResult, Outcome> {
@@ -538,8 +1000,7 @@ impl EffectSink for PtyEffects {
         match self.session.pump() {
             Ok(progress) => {
                 if self.observe_progress(progress) {
-                    self.capture_history();
-                    self.capture_screen(progress.child_exited || progress.pty_eof);
+                    self.capture_observation(progress.child_exited || progress.pty_eof, false);
                     if progress.child_exited && progress.pty_eof && !self.exit_recorded {
                         self.exit_recorded = self.capture_exit();
                     }
@@ -579,18 +1040,19 @@ impl EffectSink for PtyEffects {
     /// is discarded first and is never replayed. After this call the PTY is
     /// closed; later reads report `Unknown` and input is rejected.
     fn stop(&mut self) -> StopOutcome {
-        self.capture_screen(true);
-        self.capture_history();
+        self.capture_observation(true, false);
         self.session.discard_pending_input();
         let already_exited = self.session.exit_status().is_some();
+        let prior_final_bytes = self.session.final_output_bytes();
+        let prior_eof = self.session.pty_eof();
+        let prior_child_exited = already_exited;
         let result = self.session.shutdown_with_final_output();
         // The PTY is closed: no further pump, input or resize. The retained
         // snapshot stays readable.
         self.stopped = true;
-        self.last_child_exited = self.session.exit_status().is_some();
-        self.capture_screen(true);
-        self.capture_history();
-        if !matches!(result, Ok(true)) || self.session.final_output_bytes() != 0 {
+        let newly_parsed =
+            self.observe_shutdown_output(prior_final_bytes, prior_eof, prior_child_exited);
+        if !matches!(result, Ok(true)) || newly_parsed != 0 {
             // Rows may have entered and left the bounded engine ring during
             // teardown before the owner could durably accept them. The
             // terminal snapshot is saved, but completeness is unproved.
@@ -598,6 +1060,8 @@ impl EffectSink for PtyEffects {
         }
         if self.last_child_exited && !self.exit_recorded {
             self.exit_recorded = self.capture_exit();
+        } else {
+            self.capture_observation(true, false);
         }
         if result.is_err() || self.session.exit_status().is_none() {
             return StopOutcome::Unknown;
@@ -608,6 +1072,15 @@ impl EffectSink for PtyEffects {
             StopOutcome::Exited
         }
     }
+}
+
+fn unix_time_ms() -> Option<u64> {
+    let milliseconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let timestamp = u64::try_from(milliseconds).ok()?;
+    (timestamp != 0).then_some(timestamp)
 }
 
 impl Drop for PtyEffects {
@@ -624,8 +1097,7 @@ impl Drop for PtyEffects {
                     if !self.observe_progress(progress) {
                         break;
                     }
-                    self.capture_history();
-                    self.capture_screen(progress.pty_eof);
+                    self.capture_observation(progress.pty_eof, false);
                     if progress.pty_eof || progress.bytes_read == 0 {
                         break;
                     }
@@ -639,7 +1111,7 @@ impl Drop for PtyEffects {
             // running when the client/server chose shutdown. Record the end
             // time only after the core confirms that cleanup reaped it.
             if self.session.exit_status().is_none() {
-                let _ = self.session.shutdown();
+                let _ = <Self as EffectSink>::stop(self);
             }
             if self.session.exit_status().is_some() {
                 self.exit_recorded = self.capture_exit();
@@ -789,4 +1261,244 @@ fn push_char(text: &mut String, scalar: char, budget: usize) -> bool {
     }
     text.push(scalar);
     true
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::history_store::TestFaultPoint;
+    use crate::launch::{Environment, ResolvedLaunch};
+    use crate::terminal::TerminalSession;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::DirBuilderExt;
+    use std::path::{Path, PathBuf};
+    use std::time::SystemTime;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let stamp = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("test clock after Unix epoch")
+                .as_nanos();
+            for suffix in 0..32 {
+                let requested = std::env::temp_dir().join(format!(
+                    "panelink-pty-history-unit-{}-{}-{suffix}",
+                    std::process::id(),
+                    stamp
+                ));
+                match fs::DirBuilder::new().mode(0o700).create(&requested) {
+                    Ok(()) => return Self(fs::canonicalize(requested).unwrap()),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("create private PTY fixture: {error}"),
+                }
+            }
+            panic!("could not allocate a unique private PTY fixture")
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn target(session: u64) -> TargetRef {
+        TargetRef {
+            generation: 73,
+            workspace: 11,
+            pane: 13,
+            session,
+            occupant_revision: 19,
+        }
+    }
+
+    fn shell(script: &str, cwd: &Path) -> TerminalSession {
+        let launch = ResolvedLaunch {
+            requested_path: PathBuf::from("/bin/sh"),
+            executable_path: PathBuf::from("/bin/sh"),
+            working_directory: cwd.to_path_buf(),
+        };
+        let environment: Environment = [(OsString::from("TERM"), OsString::from("panelink-probe"))]
+            .into_iter()
+            .collect();
+        TerminalSession::spawn(
+            &launch,
+            &[OsString::from("-c"), OsString::from(script)],
+            &environment,
+            TerminalSize::new(8, 80).unwrap(),
+        )
+        .expect("spawn a real fixture PTY")
+    }
+
+    fn pump_until_exit(effects: &mut PtyEffects) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let progress = effects.session.pump().expect("pump fixture PTY");
+            assert!(effects.observe_progress(progress));
+            effects.capture_history();
+            effects.capture_screen(progress.child_exited || progress.pty_eof);
+            if progress.child_exited && progress.pty_eof {
+                return;
+            }
+            assert!(Instant::now() < deadline, "fixture child did not exit");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn visible_text(effects: &PtyEffects) -> String {
+        let snapshot = effects.session.snapshot();
+        let mut text = String::new();
+        for row in 0..snapshot.rows() {
+            for column in 0..snapshot.columns() {
+                if let Some(cell) = snapshot.cell(row, column) {
+                    if !cell.is_wide_continuation() {
+                        text.push_str(cell.text());
+                    }
+                }
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    fn pump_until_screen_text(effects: &mut PtyEffects, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let progress = effects.session.pump().expect("pump fixture PTY");
+            assert!(effects.observe_progress(progress));
+            if visible_text(effects).contains(needle) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "fixture output did not arrive");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn capture_exit_retries_end_sync_and_prunes_from_first_end_time() {
+        let fixture = Fixture::new();
+        let history_path = fixture.path().join("history");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&history_path)
+            .unwrap();
+        let store = Arc::new(HistoryStore::open(&history_path).unwrap());
+        let ended = target(17);
+        let live = target(18);
+        let recently_ended = target(19);
+        store.begin_history(live, 1, false).unwrap();
+        store.begin_history(recently_ended, 1, false).unwrap();
+
+        let mut effects = PtyEffects::new(shell("printf 'done\\n'; exit 0", fixture.path()));
+        let capture_failure = Arc::new(AtomicBool::new(false));
+        effects.enable_capture(Arc::clone(&store), Arc::clone(&capture_failure), ended);
+        pump_until_exit(&mut effects);
+        effects.capture_now();
+        assert!(!effects.capture_failed());
+
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 1);
+        assert!(!effects.capture_exit());
+        assert!(effects.capture.as_ref().unwrap().end_pending);
+        assert!(effects.capture_failed());
+        assert!(capture_failure.load(Ordering::Relaxed));
+        let first_end = store.load_rows(ended).unwrap().unwrap().ended_at_unix_ms;
+        assert_ne!(first_end, 0);
+
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 1);
+        assert!(store.mark_ended(ended, first_end + 1).is_err());
+        assert!(effects.capture.as_ref().unwrap().end_pending);
+        assert_eq!(
+            store.load_rows(ended).unwrap().unwrap().ended_at_unix_ms,
+            first_end
+        );
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 0);
+        assert!(effects.capture_exit());
+        assert!(!effects.capture.as_ref().unwrap().end_pending);
+        assert!(!effects.capture_failed());
+        assert_eq!(
+            store.load_rows(ended).unwrap().unwrap().ended_at_unix_ms,
+            first_end
+        );
+        effects.exit_recorded = true;
+        drop(effects);
+
+        store.mark_ended(recently_ended, first_end + 1).unwrap();
+        assert_eq!(
+            store
+                .prune_expired(first_end + 30 * 24 * 60 * 60 * 1000)
+                .unwrap(),
+            1
+        );
+        assert!(store.load_rows(ended).unwrap().is_none());
+        assert!(store.load_rows(live).unwrap().is_some());
+        assert!(store.load_rows(recently_ended).unwrap().is_some());
+    }
+
+    #[test]
+    fn checkpoint_retry_reuses_metadata_until_directory_sync_succeeds() {
+        let fixture = Fixture::new();
+        let history_path = fixture.path().join("history");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&history_path)
+            .unwrap();
+        let store = Arc::new(HistoryStore::open(&history_path).unwrap());
+        let target = target(21);
+        let mut effects = PtyEffects::new(shell(
+            "printf 'CHECKPOINT-READY\\n'; exec /bin/sleep 30",
+            fixture.path(),
+        ));
+        let capture_failure = Arc::new(AtomicBool::new(false));
+        effects.enable_capture(Arc::clone(&store), Arc::clone(&capture_failure), target);
+        pump_until_screen_text(&mut effects, "CHECKPOINT-READY");
+        effects.capture.as_mut().unwrap().checkpoint_time_override = Some(111);
+
+        let before = store
+            .load(target, ScreenBuffer::Normal)
+            .unwrap()
+            .expect("initial checkpoint was saved");
+        store.inject_test_fault(TestFaultPoint::DirectorySync, 2);
+        effects.capture_screen(true);
+        assert!(effects.capture_failed());
+        assert!(capture_failure.load(Ordering::Relaxed));
+        let post_rename = store
+            .load(target, ScreenBuffer::Normal)
+            .unwrap()
+            .expect("renamed checkpoint remains visible after sync failure");
+        assert_ne!(post_rename, before);
+        let checkpoint_text = screen_checkpoint::decode(&post_rename)
+            .unwrap()
+            .cells()
+            .map(|cell| cell.text().to_owned())
+            .collect::<String>();
+        assert!(checkpoint_text.contains("CHECKPOINT-READY"));
+        assert_eq!(
+            screen_checkpoint::decode(&post_rename)
+                .unwrap()
+                .metadata()
+                .captured_at_unix_ms(),
+            111
+        );
+
+        effects.capture.as_mut().unwrap().checkpoint_time_override = Some(222);
+        effects.capture_screen(true);
+        assert!(effects.capture_failed());
+        assert_eq!(
+            store.load(target, ScreenBuffer::Normal).unwrap(),
+            Some(post_rename.clone())
+        );
+        effects.capture_screen(true);
+        assert!(!effects.capture_failed());
+        assert_eq!(
+            store.load(target, ScreenBuffer::Normal).unwrap(),
+            Some(post_rename)
+        );
+    }
 }

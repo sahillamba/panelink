@@ -1,5 +1,510 @@
 # Phase 1 integration evidence — 2026-10-17
 
+## Current saved-layout/restart design — 2026-10-21
+
+Completed the queued design phase with parent architecture review and one
+independent Luna xhigh reviewer. See [ADR-P5-LAYOUT-01](P5-SAVED-LAYOUT.md),
+[review](P5-SAVED-LAYOUT-REVIEW.md) and
+[exact next codec task](P5-SAVED-LAYOUT-CODEC-TASK.md). SPEC0.13 and the existing
+layout proposal now distinguish this scoped engineering contract from enabled
+runtime behavior. No saved-layout code, file or new CLI command is implemented.
+
+Resolved review edges: normal fresh startup must preserve the previous saved
+generation via two-slot ordered rotation; retained last exited leaf needs a
+positive all-pane terminal-empty predicate distinct from driver stop; disjoint
+writers need separate exclusive claims under one singleton; incoming snapshot
+generation/directory must bind to held storage; read-only inspection precedes
+live startup; rejected final deferred publication is explicitly unsubmitted;
+and equal-revision higher-sequence saves are limited to final canonical empty.
+Historical targets stay historical and no stored launch/input/provider effects
+are replayed. Product hierarchy/provider choices remain unresolved.
+
+| Actual check this turn | Result |
+| --- | --- |
+| Existing pane_layout filter | 17passed/0failed/0ignored, including2 UI geometry cases. |
+| Existing server::multi_session filter | 50passed/0failed/0ignored. |
+| Component fingerprints | Both match. |
+| Final Markdown /diff whitespace | 174files/0findings;passed. |
+| Baseline Rust/test/manifest files /prior raw reports | 96 /13, all hashes unchanged. |
+
+The67 passing tests establish the existing geometry/lifecycle behavior used by
+the design; they are not saved-layout persistence or reboot acceptance. The
+reviewer ran source/design review only. The initial reviewer-note docs check
+found one trailing-whitespace line; fixed before final174/0. Full verifier and
+integration were not rerun for docs-only changes: previous7/8 and31-target
+86passed/17failed/11ignored remain historical evidence with known host/socket
+limits. Proposed codec/store/writer/runtime/CLI scenarios have not executed.
+
+Logs: `/private/tmp/panelink-layout-design-layout-tests.log` and
+`/private/tmp/panelink-layout-design-owner-tests.log`. Durable design/review/task
+notes record the evidence boundaries. Graph discovery available; no source
+refresh needed for unchanged source. No dependency/vendor/manifest/commit/push
+change. All ownership released; parent phases3/5/6 stay open. Next: pure codec
+under its exact task, followed by staged persistence and read-only inspection.
+
+## Previous committed-record corruption/partial-tail policy — 2026-10-21
+
+Adopted strict whole-file refusal/preservation, matching the existing atomic
+replacement codec and mutation preflights. No production algorithm/format change
+was needed. One Luna xhigh supplied bounded store tests; parent reviewed them,
+added independent fresh-process CLI acceptance and updated canonical SPEC0.12.
+See [P5-COMMITTED-CORRUPTION.md](P5-COMMITTED-CORRUPTION.md) and
+[owner output](P5-COMMITTED-CORRUPTION-TESTS.md).
+
+Every proper prefix of a small three-row segment is rejected, including a valid
+row boundary missing declared rows. Malformed framing/identity/order/cells,
+checkpoint cut offsets and mutation refusal are covered. Healthy targets/buffers
+stay accessible. CLI show/search refuses damaged requested components with
+empty stdout/fixed stderr; byte/mode/mtime/path snapshots remain identical.
+A valid orphan is never promoted over an invalid destination; locked cleanup
+only discards the temporary. A format-valid cell alteration remains readable,
+demonstrating the checksum-free codec's integrity limitation.
+
+| Check | Actual result |
+| --- | --- |
+| Parent focused public-store /fresh-process CLI | 6 /2 passed,0failed/ignored; repeated in full integration sweep. |
+| Root library /default binary | 551passed/4ignored;94passed/1failed on pathname socket PermissionDenied/code1. |
+| Full non-UI verifier | 7/8,exit1; no new failing check. |
+| All31 integration targets, separate and serial within each | 86passed/17failed/11ignored; none incomplete. |
+| Strict all-target Clippy /fmt /offline build | Passed in verifier. |
+| Python /report tests /decoder | 45 /14 /39 passed. |
+| Strict library rustdoc /doctest command | Passed;0 doctests. |
+| Component fingerprints /final docs /diff whitespace | Match;171 Markdown files/0findings;passed. |
+
+The failing integration target set is unchanged: p3a_attach_host5,
+p3a_default_open6, p3a_serve_pathname1 and p3b_close_runtime5. Five failures
+directly report listener_permission_denied; eleven exit before raw mode because
+the server cannot start; one is the known stderr assertion. These remain
+failed/blocked acceptance, not passes. The earlier lock-probe uncertainty and
+host/provider/reboot gates remain open. No source behavior was changed to bypass
+a gate. Parent fixture dimension/initialization corrections and worker fixture
+compile/dimension corrections are recorded in the respective result notes.
+
+Supplementary logs: `/private/tmp/panelink-corruption-focused.log`,
+`/private/tmp/panelink-corruption-verifier.log`,
+`/private/tmp/panelink-corruption-integrations/summary.json`,
+`/private/tmp/panelink-corruption-rustdoc.log` and
+`/private/tmp/panelink-corruption-doctest.log`. All65 baseline application-source
+and manifest files and13 prior raw/provenance JSON artifacts have unchanged
+SHA256 hashes. No benchmark was rerun for this tests/policy-only slice.
+Graph refreshed fast/nonpersistent; owners released files. No commit/push;
+phases3/5/6 remain open. Next: bounded saved-layout/restart contract design,
+keeping pending hierarchy/provider choices and no effect replay. Corrupt-file
+salvage/export and checksum migration remain separate future work.
+
+## Previous canceled end-metadata finalization — 2026-10-21
+
+One Luna xhigh implemented the bounded worker/coordinator change; parent
+reviewed it, supplied the atomic store helper, fixed diagnostics/validator and
+independent actual-store checks, then measured twice and ran permitted checks.
+See [P5-DRAIN-METADATA.md](P5-DRAIN-METADATA.md). Only explicit timeout permits
+late metadata-only finalization of accepted known ends. Canceled receipts and
+durable payload cursors stay canceled/unchanged; drain stays TimedOut. Plain
+Drop remains strict. No canceled row/screen stages start. The existing lock
+excludes maintenance/startup through late IO, receipts, diagnostics and teardown.
+
+| Check | Actual result |
+| --- | --- |
+| Root library / default binary | 551passed/4ignored;94passed/1failed (socket EPERM). |
+| Full non-UI verifier | 7/8, exit1. |
+| All29 integration targets, separately/serial within each | 78passed/17failed/11ignored; none incomplete. |
+| Owner writer filter / coordinator | 25 /6 passed, included in parent full run. |
+| Parent store-helper fault/refusal / actual-store timeout and strict Drop | 3 /2 passed, included in full run. |
+| Sequential release workloads / strict report validator | 2 exited0 and validate; every target has settled end metadata, capture failures retained. |
+| Strict all-target Clippy /fmt /offline build | Passed in verifier. |
+| Strict library rustdoc /doctests | Passed;0 doctests. |
+| Python /report tests /decoder | 45 /14 /39 passed. |
+| Component fingerprints /final docs | Match;168 Markdown files,0 findings. |
+
+Run1 active shutdown and run2 burst still time out and report canceled work,
+pending receipts and actual late metadata success. All12 target observations
+have end markers after singleton settlement; both bursts retain byte-pressure
+payload-loss diagnostics. All96 probes overlap output. This evidence establishes
+the bounded accepted-end behavior, not payload completeness, durability at Drop
+return, comparative performance, representative workload or full reboot recovery.
+
+The unchanged four failing integration targets are p3a_attach_host5,
+p3a_default_open6, p3a_serve_pathname1 and p3b_close_runtime5. Sixteen fail on
+server startup/socket permission; one is the known host stderr assertion.
+The binary endpoint-state test also reports PermissionDenied/code1. Ignored,
+failed and blocked host/provider checks are not passes. No new production
+correction was needed during parent full verification. The original store-test
+compile needed a test-only fs::OpenOptions qualification; worker development
+fixture corrections are recorded in its result note.
+
+Supplementary logs: `/private/tmp/panelink-drain-verifier.log`,
+`/private/tmp/panelink-drain-integrations/summary.json`,
+`/private/tmp/panelink-drain-rustdoc.log` and
+`/private/tmp/panelink-drain-doctest.log`. Raw workload reports are linked from
+the result note. All11 prior raw/provenance JSON artifacts retain identical
+hashes. Of65 baseline source/manifest files, only writer, capture (test-only),
+store, diagnostics and parent history_tail_tests changed. Manifests/vendor are
+unchanged. Graph refreshed fast/nonpersistent after freeze; all ownership
+released. No commit/push; phases3/5/6 remain open. Next: bounded committed-record
+corruption/partial-tail policy with restart/fault acceptance, preserving explicit
+refusal, unknown/unsubmitted end uncertainty and the current quotas/budget.
+
+## Previous bounded final-tail admission — 2026-10-21
+
+Luna xhigh implemented a single nonblocking suffix retry after actual final
+byte rejection; parent reviewed the policy/source, added independent real-store
+acceptance, ran two shipping-policy workloads and a matched fallback control,
+and completed verification. See [P5-FINAL-TAIL.md](P5-FINAL-TAIL.md).
+All final screen candidates and the first end time are retained alongside the
+newest rows that fit. Dropped prefixes remain a visible gap/failure. Accepted
+quota16/32MiB, single250ms drain, storage format and stage retries are unchanged.
+
+| Check | Actual result |
+| --- | --- |
+| Owner writer filter / coordinator | 20 /5 passed; writer filter includes2 runtime cases. |
+| Parent actual-store acceptance | 1 passed before and after plan refactor; exact685-row newest suffix, both maximum screens, epoch/first end/receipt checks. |
+| Final root library / binary | 540 passed/4ignored; 94 passed/1failed. |
+| Final non-UI verifier | 7/8, exit1; binary pathname socket EPERM remains. |
+| All29 integration targets, separately and serial within each | 78 passed/17failed/11ignored; none incomplete. |
+| Release workload reports | 2 shipping-policy reports and1 matched fallback control exited0 and validate; workload failures remain recorded. |
+| Strict all-target Clippy/fmt/offline build | Passed in final verifier. |
+| Strict library rustdoc / doctest command | Passed; doctests0. |
+| Python / report tests / decoder | 44 /13 /39 passed. |
+| Component fingerprints / final docs | Match;166 Markdown files,0findings. |
+
+The first default verifier attempt failed one existing FIFO/epoch fixture at
+its initial nonblocking admission:539passed/1failed/4ignored; binary tests were
+not reached. Parent changed only that test setup to retry bounded Contended
+rejections with the same owned batch/token. Other rejection causes still fail.
+The isolated FIFO test and final default library suite pass. No production
+admission waits were added or failure assertions weakened.
+
+Shipping run1 timed out in burst/shutdown; run2 timed out in all three cases,
+including paced with no admission loss. Every timeout recorded canceled work
+and pending accepted receipts, and one end marker remained missing after lock
+settlement. The control disables only the suffix conditional in an isolated
+copy of the same runtime/harness. Both wide control cases also timed out and
+missed one end marker; paced control drained. Thus suffix retry is not required
+to reproduce the wide deadline failure. This small comparison cannot exclude
+added write cost or establish a regression/performance budget. All144 probes
+overlapped producer output. No general final-history reliability claim.
+
+The unchanged four failing integration targets are `p3a_attach_host`5,
+`p3a_default_open`6, `p3a_serve_pathname`1 and `p3b_close_runtime`5: sixteen
+server-startup failures and the previously recorded host stderr assertion.
+Binary endpoint-state testing still reports PermissionDenied/code1. Ignored
+and failed checks remain uncompleted acceptance; host/provider/reboot gates
+are not waived.
+
+Supplementary logs: `/private/tmp/panelink-final-tail-verifier.log` (initial),
+`/private/tmp/panelink-final-tail-verifier-final.log` and
+`/private/tmp/panelink-final-tail-integrations/summary.json`. Durable raw
+reports, control provenance, methodology and limitations are linked from the
+result note. All7 prior raw artifacts retain identical hashes; manifests and
+vendor sources are unchanged. Production changes are confined to writer and
+coordinator; the library-root change and new parent test module are test-only.
+Graph indexing recovered and refreshed fast/nonpersistent after edits. All
+ownership released; no dependency/format/commit/push change. Phases3/5/6 remain
+open. Next: reviewed bounded drain/final-metadata policy.
+
+## Previous history failure/drain diagnostics — 2026-10-21
+
+Delivered bounded fixed reason bits and actual writer drain outcomes through
+the public driver/writer API, CLI and schema2 benchmark reports. One Luna
+xhigh owner froze production changes before its usage limit; parent finished
+tests, integration, review and measurements. See
+[P5-HISTORY-DIAGNOSTICS.md](P5-HISTORY-DIAGNOSTICS.md). No dependency, format,
+quota, retry, scheduling, loss-policy or250ms budget change was selected.
+
+| Check | Actual result |
+| --- | --- |
+| Sequential actual-store release runs | 2 exited0; both schema2 artifacts pass strict validation. |
+| Current root library / default binary | 535 passed/4 ignored; 94 passed/1 failed. |
+| Full non-UI verifier | 7/8, exit1; known binary pathname socket EPERM. |
+| All29 integration targets, serial within each | 78 passed/17 failed/11 ignored; none incomplete. |
+| Public pre-enable diagnostic observer tests | 2 passed, clean shutdown and rejected store domain. |
+| Focused writer filter / coordinator / diagnostic module | 17 /4 /2 passed; writer filter also includes2 runtime tests. |
+| CLI fixed-label formatter | 1 passed, also included in binary suite. |
+| Strict all-target Clippy, fmt and offline build | Passed in full verifier. |
+| Strict library rustdoc / doctest command | Passed; doctests0. |
+| Python / report validator tests / decoder | 44 /13 /39 passed. |
+| Component fingerprints / final documentation | Match; 164 Markdown files,0 findings. |
+
+Run2 burst raised exactly `admission_bytes_full` and
+`final_payload_dropped_bytes`, while its writer reported `drained`. Run1 burst
+was clean. Both active-output shutdown cases were clean; all six cases had
+settled end markers. All96 probes overlapped producer output. The reproduced
+failure is final-payload byte admission loss, without a storage error or drain
+timeout in that run. These reasons cannot retrospectively explain the older
+missing end markers. No workload/performance or full host/reboot gate passes.
+
+The same four integration targets fail: `p3a_attach_host`5,
+`p3a_default_open`6, `p3a_serve_pathname`1 and `p3b_close_runtime`5. Sixteen
+fail before feature assertions during server startup, with pathname permission
+denial directly visible in explicit serve logs. The remaining host stderr
+assertion matches the previously recorded unchanged-HEAD failure. Binary
+endpoint-state testing reports PermissionDenied/code1. The historical parallel
+lock-probe assertion did not recur in this default binary run; its cause
+remains unconfirmed. None is relabeled as a pass or silently skipped.
+
+The parent ran `python3 scripts/verify_non_ui.py`, then every Cargo metadata
+test target with `cargo test --locked --offline --test NAME -- --test-threads=1`
+because the binary failure stops the main Cargo test before integrations.
+Supplementary logs are `/private/tmp/panelink-history-diagnostics-verifier.log`
+and `/private/tmp/panelink-history-diagnostics-integrations/summary.json`;
+durable results and exact raw workload reports are linked above. Focused
+coordinator setup initially exposed legitimate first-admission contention and
+was fixed without production retries. Review corrected worker/storage reason
+classification and reason-before-flag publication. All owners are released;
+graph transport remains closed, phases3/5/6 remain open, no commit/push.
+
+## Previous live sustained-output observations — 2026-10-21
+
+The measurement-only slice adds a standalone release harness with actual
+`MultiServerDriver`/`HistoryStore`, authenticated socketpair split/probes,
+two real PTYs per case, and independent actual screen-size/content checks.
+Luna xhigh owns the implementation and first final raw report; parent supplied
+a strict report validator, nine integrity tests, source review and a second
+final release run. See [P5-LIVE-HISTORY-BENCH.md](P5-LIVE-HISTORY-BENCH.md).
+All 63 application/manifest fingerprints stayed unchanged; no runtime behavior,
+dependency or vendor change was made.
+
+| Check | Actual result |
+| --- | --- |
+| Final release workload runs | 2 exited 0; 3 cases each; both exact stdout artifacts validate. |
+| Load-overlapping probes | All 96 began and were child-acknowledged before observed producer completion. |
+| Preliminary parent report | Preserved and structurally validated; predates final geometry/content validation. |
+| Full non-UI verifier | 7/8, exit1. |
+| Root library / default binary | 531 passed/4 ignored; 92 passed/2 failed. |
+| Isolated lock probe / serialized binary rerun | 1 passed; 93 passed/1 failed respectively. |
+| Focused real-store live integration | 3 passed across `p5_live_history` and `p5_live_history_driver`. |
+| New validator tests / total Python | 9 / 40 passed. |
+| Decoder / source fingerprints | 39 passed; fingerprints match. |
+| Strict all-target Clippy, fmt and offline build | Passed in the full verifier. |
+| Documentation | 162 Markdown files, 0 findings; final docs rechecked separately. |
+
+Final per-case tick p95 is 164–331 us; child-ack p95 is4,138–15,470 us.
+There are only 16 probes per case, so nearest-rank p95 equals the maximum
+probe sample. Both final paced cases saved without gap/failure. Both final
+burst cases raised a sticky failure; all final end markers were present.
+The preliminary parent run had missing end markers in both wide cases after
+writer settlement. Saved tails and end-marker availability varied across runs;
+no queue-saturation cause or numeric performance budget is inferred. Drop
+includes child cleanup and saved reads occur after lock settlement. Full
+methodology and raw-derived tables are in the linked result.
+
+The default binary run retained the known socket EPERM failure and also failed
+`lock_probe_detects_a_held_storage_lock` after Drop. The lock probe passed
+alone and in the serialized binary suite, which retains only the socket
+failure; the parallel failure's cause remains unconfirmed. The previous full
+28-target sweep 76 passed/17 failed/11 ignored belongs to the preceding source
+slice and was not repeated here. No skipped/failed check counts as acceptance.
+
+Review fixed initial harness ownership/unused items, layout frame kind,
+fixture initialization order, volatile marker fsync, blocking stop admission,
+clock/elapsed boundaries and setup/content validation. A targeted parent
+Clippy run then found four style errors; they were fixed before its passing
+rerun and the full verifier. No unrecorded runtime fix or successful machine
+reboot is claimed. All ownership is released; phases 3/5/6 remain open, no
+commit/push, and graph Transport closed continues to require source fallback.
+
+
+## Previous live-writer integration — 2026-10-21
+
+Live history capture now uses the bounded writer for initial and split-created
+PTYs. Parent-owned exports/CLI diagnostics and actual-store public-driver tests
+complement Luna xhigh runtime/coordinator implementation and an independent
+read-only Luna review. Final receipt identities govern durable state; eight
+bounded target slots preserve final gap/end metadata after pane retirement.
+Storage pressure or failure leaves shell input/control running. Child cleanup
+precedes one total250ms history drain, with no coordinator lock spanning waits.
+See [P5-LIVE-WRITER-RESULT.md](P5-LIVE-WRITER-RESULT.md).
+
+| Check | Actual result |
+| --- | --- |
+| New slice cases | 9 passed: coordinator3/runtime3/live actual-store3. |
+| `python3 scripts/verify_non_ui.py` | 7/8, exit1; known binary pathname bind EPERM. |
+| Root library / binary | 531 passed/4 ignored; 93 passed/1 failed. |
+| All 28 integration targets, independently and serial within each | 76 passed/17 failed/11 ignored; none incomplete. |
+| Strict all-target Clippy, formatting, offline build | Passed. |
+| Strict library rustdoc / doctest command | Passed; doctests0. |
+| Decoder / Python / source fingerprints | 39 / 31 passed; fingerprints match. |
+| Verifier documentation | 160 Markdown files, 0 findings; final docs checked again separately. |
+
+The four failing integration targets remain `p3a_attach_host`5,
+`p3a_default_open`6, `p3a_serve_pathname`1 and `p3b_close_runtime`5. Sixteen
+fail during startup before their feature assertions; the explicit serve
+case reports `listener_permission_denied`. The remaining host stderr
+assertion was reproduced at unchanged HEAD in earlier evidence and fails
+again. The binary test reports PermissionDenied/code1. None is a pass or
+new host/runtime acceptance.
+
+Parent public-driver tests pass2/2 with actual store reopen/read, both screen
+buffers, natural end and orderly driver Drop/lock release. The owner actual
+store case passes1/1. Mock backend tests independently prove queue pressure,
+first timestamp retention, epoch/receipt ordering, shell progress after writer
+failure, split progress under blocked storage and launch success at registry
+capacity. The mocks do not prove disk durability; no fresh machine reboot or
+representative throughput is claimed.
+
+The two existing sync retry tests initially failed because the shared sticky
+flag leaked into sync-local status; restoring the async/sync distinction fixes
+both without weakening assertions. Review corrected final ordering/cursor and
+retirement handling, a lock held through shutdown waits, and the sticky-error
+receipt race. The independent reviewer confirmed the lock/error fixes and
+found no remaining lifecycle blocker. All owners released files; no dependency,
+vendor, commit or push change. Prior uncommitted work remains. Graph transport
+is closed; source/tests remain authoritative. Parent phases3/5 stay OPEN.
+
+
+## Previous background-writer component integration — 2026-10-21
+
+The [bounded writer component](P5-HISTORY-WRITER.md) is delivered with one
+Luna xhigh implementation owner, read-only lifecycle review and parent-owned
+lock/domain support, independent tests and final source review. It is exported
+on Apple Silicon macOS but is **not yet used by live capture**. The next slice
+must adopt it with durable cursor receipts and reserved gap/end state before
+claiming owner-thread persistence is removed. Phase 3/5 remain open.
+
+| Check | Actual result |
+| --- | --- |
+| New cases | 25 passed: writer units14, writer integration6, store retry3, retained-lock units2. |
+| `python3 scripts/verify_non_ui.py` | 7/8, exit1; binary socket bind EPERM remains. |
+| Root library / binary | 525 passed/4 ignored; 93 passed/1 failed respectively. |
+| All 26 integration targets, separately and serial within each target | 73 passed/17 failed/11 ignored; no unreported/incomplete target. |
+| Formatting, strict all-target Clippy, offline build | Passed in the integrated verifier. |
+| Strict library rustdoc / doctest command | Passed; doctests ran0 cases. |
+| Decoder / Python / source fingerprints | 39 / 31 passed; components match. |
+| Documentation | 158 Markdown files, 0 findings. |
+
+Commands: `cargo test --locked --offline --lib history_store::tests -- --test-threads=1`
+(7/7); `cargo test --locked --offline --lib server_storage` (13/13 before the
+final claim addition; the final root run includes the claim rollback assertion);
+`cargo test --locked --offline --test p5_history_writer` (6/6); full verifier;
+each Cargo metadata test target via `cargo test --locked --offline --test NAME -- --test-threads=1`;
+`RUSTDOCFLAGS='-D warnings' cargo doc --locked --offline --lib --no-deps`;
+and `cargo test --locked --offline --doc`.
+The final root verifier independently includes all14 writer units reported
+passing by the owner. No ignored case was counted as a pass.
+
+The unchanged failure set is `p3a_attach_host`5, `p3a_default_open`6,
+`p3a_serve_pathname`1 and `p3b_close_runtime`5. Sixteen fail during server
+startup before feature assertions; the serve log reports
+`listener_permission_denied`. The seventeenth is the same host diagnostic
+assertion previously reproduced at unmodified HEAD. The binary test reports
+OS code1/PermissionDenied. These do not constitute runtime/host acceptance.
+
+Three store regressions close retry gaps found while testing the writer:
+incoming byte eviction, noncontiguous retained ordinals and a new gap on
+otherwise duplicate rows. The first two failed before the fix and pass after
+an ordered merge that validates all incoming data and compares retained overlap.
+Worker review additionally corrected quota release after payload destruction,
+terminal receipts on panicked channel teardown, workspace binding, token reuse,
+and an exclusive per-server writer claim retained through timeout/teardown.
+Initial compile/lint errors and a parent below-minimum snapshot fixture were
+fixed before final checks. Prior uncommitted changes were preserved; no
+new dependency, component source change, commit or push. All ownership is
+released. The parent's graph connector remains closed; the reviewer's final
+fast/nonpersistent refresh also returned `Transport closed`, without a current
+index claim.
+
+## Previous cleanup/throughput integration — 2026-10-21
+
+The next requested task is delivered with two bounded Luna xhigh owners and
+parent-owned CLI/runtime integration. `HistoryStore::cleanup_temporary_files`
+preflights exact writer-format temporaries, excludes unsafe files, and syncs
+their relative unlink operations. The stopped-workspace CLI holds lifecycle
+and validated storage maintenance locks. Startup holds the driver storage lock
+and cleans up before enabling any capture writer; a setup failure leaves
+history capture unavailable while preserving the shell path. No committed
+history is promoted, removed or repaired by cleanup. See
+[P5-TEMP-CLEANUP.md](P5-TEMP-CLEANUP.md).
+
+Parent verification on the final source:
+
+| Check | Actual result |
+| --- | --- |
+| Focused store/cleanup/CLI/startup/recovery/checkpoint cases | 28 passed, 0 failed. |
+| `python3 scripts/verify_non_ui.py` | 7/8, exit 1; existing binary socket bind fails with EPERM. |
+| Root library / binary | Library 506 passed/4 ignored; binary 93 passed/1 failed. |
+| All 25 integration targets, independently of the early Cargo failure | 67 passed/17 failed/11 ignored. Five focused targets contributed 23 passes; remaining 20 contributed 44 passes/17 failures/11 ignored. |
+| Decoder / Python / components | 39 decoder and 31 Python tests passed; source fingerprints match. |
+| Formatting, strict all-target Clippy, offline build and strict library rustdoc | Passed; doctest command passed with 0 tests. |
+| Verifier docs check | 157 Markdown files, 0 findings. |
+| Release benchmark and artifact validation | Owner and independent parent runs exited 0; four cases/24 samples per run, percentiles/ordinals/quotas validated. |
+
+The same runtime targets fail as in the previous task: `p3a_attach_host` (5),
+`p3a_default_open` (6), `p3a_serve_pathname` (1), `p3b_close_runtime` (5).
+Sixteen cannot start their socket server, and the host stderr diagnostic
+assertion was already reproduced at unmodified HEAD in the previous task.
+No failing or ignored test was changed to pass or used as host acceptance.
+An actual non-UTF8 cleanup fixture was blocked by APFS EILSEQ and is explicitly
+unexercised. The initial cleanup parser tuple defect caused owner tests and
+two parent CLI checks to fail; it was corrected before the passing reruns.
+Owner Clippy failures from concurrent parser/benchmark edits were resolved;
+final integrated strict Clippy passes.
+
+The actual release measurements and both raw reports are in
+[P5-HISTORY-THROUGHPUT.md](P5-HISTORY-THROUGHPUT.md). Median append storage-call
+durations ranged about 22–49 ms across cases/runs; the byte-bound wide case
+retained 722 rows at 8,378,160 bytes. These are synthetic, uncontrolled-cache
+observations, not ten-agent throughput or UI latency acceptance. They motivate
+designing bounded persistence off the owner thread before performance claims.
+No dependency, vendored code or durability sync was removed.
+
+Both owners released their files; parent review preserved the prior
+uncommitted retry/read work. No commit or push was made. The graph connection
+closed and the final refresh attempt also returned `Transport closed`; source
+and test results are the authority, with index refresh pending availability.
+Phase 3, Phase 5, full reboot/layout and provider/host gates remain open.
+
+## Previous history-recovery integration — 2026-10-21
+
+The user resumed work with parent orchestration and bounded GPT-6-Luna xhigh
+tasks. Two owners delivered store/capture retry fixes and a fresh-process
+history acceptance fixture; the parent reviewed all changes and independently
+verified them. Existing history starts and end records now sync before a retry
+is acknowledged, preserving the first end time. The PTY capture caller retains
+metadata for an unchanged screen observation, so a post-rename sync failure
+can retry identical bytes without fabricating a later capture time. Store
+conflict rejection remains strict. No dependency or vendored source changed.
+
+New executable coverage comprises three store-fault unit tests, two real-PTY
+caller tests and one fresh history CLI scenario. The parent focused run passed
+19/19 including the ten existing store and three checkpoint tests. See
+[fault evidence](P5-RECOVERY-FAULTS.md) and
+[restart-read acceptance](P5-RESTART-ACCEPTANCE.md) for boundaries and actual
+commands. These are software fault and stopped-process/store read proofs,
+not physical power-loss, complete reboot/layout or provider recovery.
+
+| Parent check | Actual result |
+| --- | --- |
+| `python3 scripts/verify_non_ui.py` | Final 7/8, exit 1; only Cargo test failed. |
+| Root library | 505 passed, 0 failed, 4 ignored. |
+| Root binary | 92 passed, 1 failed at `default_open::tests::endpoint_state_classifies_files_and_sockets`: pathname bind `EPERM`. |
+| All 23 integration targets, run independently of the binary failure | 58 passed, 17 failed, 11 ignored. The focused recovery/store/checkpoint targets account for 14 passes; the other 20 targets account for 44 passes/17 failures/11 ignored. |
+| Decoder, Python and component fingerprints | 39 decoder tests and 31 Python tests passed; fingerprints match. |
+| Formatting, strict all-target Clippy and offline build | Passed. |
+| Strict offline library rustdoc | Passed (`RUSTDOCFLAGS=-D warnings`). |
+| Final verifier documentation check | 155 Markdown files, 0 findings. |
+
+The integration failures are in `p3a_attach_host` (5), `p3a_default_open` (6),
+`p3a_serve_pathname` (1) and `p3b_close_runtime` (5). Sixteen fail before their
+runtime assertions because a socket server cannot start; an independent
+AF_UNIX bind fails with errno 1 and direct `serve` returns
+`listener_permission_denied`. The remaining
+`a_full_stderr_pipe_never_blocks_errors_or_exit` assertion does not observe
+its expected terminal diagnostic. It also fails at unmodified `0fec6a4` in a
+disposable archive checkout; its cause is not resolved or counted as passed.
+An absent-path socket connect separately returned `ENOENT`, so bind denial
+alone is not asserted to explain that diagnostic failure.
+
+The first verifier run was 6/8: besides the same binary bind failure, docs
+temporarily linked the not-yet-created fault evidence note. After the owner
+created it, the final verifier was 7/8 with docs passing. No tests were changed
+to skip permission failures. Ignored tests remain uncompleted acceptance.
+The graph was refreshed (fast/nonpersistent); both owners released their files.
+Phase 3 and Phase 5 remain open, with no completion commit or push. The next
+history tasks are interrupted-temporary-file repair/cleanup and representative
+write-throughput evidence; reboot/layout and provider/host gates remain open.
+
+## Historical foundation evidence
+
 Status: COMPLETE for the dependency-free foundation. This is not completion of the spec's M1 terminal/OpenCode gate.
 
 ## Model assignments and delivered code
@@ -307,12 +812,12 @@ CARGO_HOME=/private/tmp/panelink-p2-cargo-home cargo test --locked --offline --t
 ```
 
 With this explicitly ignored scenario included, the final standard suite
-exited0: **248passed/13ignored**. Strict all-target Clippy also exited0. The
+exited 0: **248passed/13ignored**. Strict all-target Clippy also exited 0. The
 additional ignore is the pending actual CLI/pathname scenario; the internal
 context-lock helper distinction above still applies. See
 [P3-PATHNAME.md](P3-PATHNAME.md) for the fixture scope and external handoff.
 
-Final formatting and diff checks exited0. The parent checked39 current
+Final formatting and diff checks exited 0. The parent checked39 current
 documents and122 local Markdown links: no missing destinations, trailing
 whitespace or conflict markers. Worker file ownership is released; the parent
 took back the three canonical planning documents for final link corrections.
@@ -465,7 +970,7 @@ before JSON output and preserve the stored context's sequence and uncertainty.
 An independent read-only Luna CLI review found no concrete protocol/security
 bug; normal timeout exit1 is intentional and documented, not task failure.
 
-Parent full locked/offline suite exited0: **302passed/13ignored**;
+Parent full locked/offline suite exited 0: **302passed/13ignored**;
 244library,36binary,4host preflight,11core PTY,3logical PTY,
 1notification integration,1pathname-parser regression and2socketpair/private-PTY
 tests. Strict all-target Clippy, build, formatting and diff checks passed.
@@ -816,7 +1321,7 @@ reran all33owner tests successfully. No runtime/schema/authority was expanded.
 The verifier now runs the parser-only vendored decoder's separate locked/offline
 suite automatically after root Cargo tests. Parent reviewed its exact command
 list and injected-runner failure tests. All seven checks then passed: root
-Rust412passed/14ignored, separate decoder39passed, Python20passed, fmt, strict
+Rust412passed/14ignored, separate decoder 39passed, Python20passed, fmt, strict
 all-target Clippy, build and124Markdown/0findings. The combined executed Rust
 count is451; it includes the separate decoder suite. No vendor source/lock or
 dependency changed. A direct root `cargo test -p vt100 --lib` attempt was
@@ -851,7 +1356,7 @@ exact Capacity classification, and checks both PIDs reaped after owner drop.
 This is in-process core evidence, not pathname/runtime adoption.
 
 Parent then ran all seven verifier checks successfully: **root Rust420passed,
-14ignored; separate decoder39passed; Python20passed; fmt, strict all-target
+14ignored; separate decoder 39passed; Python20passed; fmt, strict all-target
 Clippy, build and128Markdown/0findings**. Combined executed Rust count459.
 The next bounded Luna medium task routes the seven existing session requests,
 including public Claim before Input on both targets. No schema, endpoint,
@@ -894,7 +1399,7 @@ records; it is not upstream authenticity or a security audit. No vendor source,
 manifest, dependency, socket runtime or CLI behavior changed.
 
 Final parent `python3 scripts/verify_non_ui.py` returned0 with all eight checks
-passed: **root Rust431passed/14ignored, separate decoder39passed, Python31passed,
+passed: **root Rust431passed/14ignored, separate decoder 39passed, Python31passed,
 both component fingerprint sets match, package fmt, strict all-target Clippy,
 build and133Markdown/0findings**. Combined executed Rust count470. Separate
 warnings-denied rustdoc passed. All worker files are released and the launcher

@@ -1,5 +1,11 @@
 # P5 live screen-checkpoint capture — 2026-10-20
 
+Historical screen-only checkpoint. The subsequent
+[saved-row/CLI slice](P5-SAVED-HISTORY.md) and
+[live background-writer integration](P5-LIVE-WRITER-RESULT.md) supersede the
+inline storage scheduling and missing history-viewer notes below. Current
+limits and verification are in [SESSION.md](SESSION.md).
+
 The two-pane `serve` runtime now opens an existing-or-new private `history/`
 directory beneath its private server directory. Each server-owned `PtyEffects`
 gets the exact immutable target and a shared, owner-thread-only checkpoint

@@ -52,8 +52,9 @@ The server now saves its latest sanitized visible normal and alternate screen
 checkpoints per pane in the private `server/history/` directory (under
 `PANELINK_HOME`, if set). They are read-only recovery data, not live-process
 state or a complete transcript. An initial `serve` response reports whether
-capture started; a later write failure appears in `server.log` while shells
-continue running. Normal scrollback rows are saved within a 1,024-row/8 MiB
+capture started; writes run in a bounded background worker, so saved content
+can lag the live screen. A later write or shutdown failure appears in
+`server.log` while shells continue running. Normal scrollback rows are saved within a 1,024-row/8 MiB
 per-session limit. `panelink history list` lists saved target IDs;
 `panelink history show TARGET` reads retained rows and latest normal/alternate
 screens; `panelink history search TARGET TEXT` searches that saved content,
@@ -62,6 +63,20 @@ Stop the workspace before `panelink history clear TARGET`; this deletes only
 Panelink history, not provider conversations. Ended sessions expire after
 30 days at the next server startup. History cannot restore a live process or
 content overwritten before it was captured.
+
+After an interrupted history write, the next server startup discards recognized
+uncommitted temporary files before capture starts. You can also run
+`panelink history cleanup` while the workspace is stopped. This preserves saved
+rows and checkpoints; it does not recover unfinished writes. Unsafe leftovers
+cause cleanup to fail, and a startup cleanup failure leaves shells running with
+history capture unavailable.
+
+Malformed or truncated saved rows/checkpoints are refused as whole files.
+`history show` and `search` return an error without partial content if any saved
+component for that target is invalid. The files are preserved; cleanup and clear
+do not repair them. Healthy targets can still be read by their explicit IDs.
+The current format validates structure and safe text, but has no checksum to
+detect every content change. See the [recovery policy](docs/progress/P5-COMMITTED-CORRUPTION.md).
 
 **Implementation roadmap:** [ROADMAP.md](ROADMAP.md) tracks phases and
 verification evidence. Selected components retain their
@@ -80,6 +95,11 @@ component source fingerprints, and documentation checks. It uses offline
 Cargo commands and reports failures automatically. Ignored host/pathname tests
 and live provider acceptance remain separate, uncompleted gates; a successful
 component run does not certify the five non-UI milestones.
+
+Run `cargo run --locked --offline --release --example live_history_bench` for
+the bounded synthetic two-pane history workload. It writes only private
+temporary fixtures and emits a JSON report. See
+[measured results and limits](docs/progress/P5-LIVE-HISTORY-BENCH.md).
 
 ## Advanced commands
 

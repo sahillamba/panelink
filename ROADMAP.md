@@ -1,19 +1,27 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: PAUSED (2026-10-21); scoped Phase 3B stop and P5 saved-history slices DONE; parent Phase 3 and Phase 5 milestones remain OPEN
+current-phase: P5 saved-layout/restart engineering design delivered (2026-10-21); parent plus independent Luna xhigh review; codec/store/runtime/recovery remain unimplemented
 last-updated: 2026-10-21
-last-verified: 2026-10-20 — final verifier 8/8 after reviewer fixes; Rust 500 library + 93 binary, scrollback cursor 6/6, saved-row codec 1/1, history store 10/10, screen-checkpoint 3/3 and real close/history runtime 5/5; full suite 15 ignored; VT100 focused history tests 5/5; strict Clippy/fmt/rustdoc and component fingerprints pass
-next-action: On explicit resume, inspect git status and this handoff, then address full V-HISTORY reboot/layout and post-rename/failed-end-sync acceptance; Phase 3 runtime/host and Phase 4 live OpenCode identity remain open. Do not start new work while paused.
+checkpoint-commit: explicitly authorized 2026-10-21; staging blocked by .git/index.lock Operation not permitted; no commit or push. Resume commit when Git metadata is writable without re-requesting authorization. See SESSION.md.
+last-verified: 2026-10-21 — design reviewed and7 boundary issues reconciled; existing geometry filter17 and owner filter50 pass, docs174/0, component fingerprints and96 source/test/manifest +13 prior-report hashes unchanged. No new saved-layout runtime acceptance. Prior full verifier7/8 and31 integration targets86passed/17failed/11ignored remain historical known-gate evidence. See P5-SAVED-LAYOUT.md.
+next-action: Implement only pure fixed160-byte saved-layout codec/model under docs/progress/P5-SAVED-LAYOUT-CODEC-TASK.md, using Luna xhigh with parent export/review/verification. Then store+two-slot rotation, async guarded writer, lifecycle integration/shared metadata deadline and read-only CLI. No historical identity/process/effect replay, pending hierarchy/provider choices remain open.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
-history-saved-rows: scoped P5 saved-history slice DONE at f82d968; 1,024 normal rows/8 MiB segment, 30-day ended retention, stopped-workspace clear and read-only history CLI; unrecorded output, incomplete-temp recovery and V-HISTORY reboot/layout acceptance remain open — see docs/progress/P5-SAVED-HISTORY.md
-blocked-on: Phase 2 clipboard sentinel/full Apple Terminal acceptance and Phase 4 live OpenCode identity remain unproved; Phase 3 expanded pathname watch/host acceptance remains separate. OpenCode 1.19.0 was installed on the new Mac, but live identity/switch proof was not run. Ignored test cases are not passes.
-setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust/Cargo 1.99.1 last verified, verifier 8/8 at f82d968, launcher available. Older new-machine evidence is in INTEGRATION.md.
+history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
+blocked-on: Current sandbox denies pathname socket bind (EPERM/listener_permission_denied); historical parallel lock-probe failure passed isolated/serial and did not recur in current default run, but cause remains unconfirmed; host stderr diagnostic failure was previously reproduced at unchanged HEAD. Phase 2 clipboard/full Apple Terminal and Phase 4 live identity remain unproved; Phase 3 expanded pathname/host acceptance remains separate. OpenCode 1.19.0 installation was recorded earlier; this run did not recheck it. Ignored/blocked cases are not passes.
+setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1 rechecked, offline builds pass, current verifier 7/8 with socket restriction; previous full 8/8 at f82d968 remains historical evidence.
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 phase-3a: DONE — 2026-10-19 — see docs/progress/P3A-DEFAULT-OPEN.md and INTEGRATION.md
 phase-3b-stop: DONE as scoped two-pane stop slice — 2026-10-20 — checkpoint c3e207e; broader Phase 3 remains open
 phase-p5-saved-history: DONE as scoped saved-row/checkpoint/CLI slice — 2026-10-20 — checkpoint f82d968; full V-HISTORY and Phase 5 remain open
+phase-p5-history-writer: DONE as component and scoped live adoption — 2026-10-21 — see docs/progress/P5-HISTORY-WRITER.md and P5-LIVE-WRITER-RESULT.md; full Phase5 remains OPEN
+phase-p5-live-history-bench: DONE as bounded synthetic observations — 2026-10-21 — see docs/progress/P5-LIVE-HISTORY-BENCH.md; no representative workload budget or full phase completion
+phase-p5-history-diagnostics: DONE as fixed bounded observations — 2026-10-21 — see docs/progress/P5-HISTORY-DIAGNOSTICS.md; run2 burst final payload rejected by byte limit with drained writer queue; no full phase completion
+phase-p5-final-tail: DONE as bounded suffix admission — 2026-10-21 — see docs/progress/P5-FINAL-TAIL.md; subsequent timeout-only metadata slice below preserves canceled receipts
+phase-p5-drain-metadata: DONE as timeout-only accepted-end finalization — 2026-10-21 — see docs/progress/P5-DRAIN-METADATA.md; payload loss and full Phase5 remain OPEN
+phase-p5-committed-corruption: DONE as whole-file refusal/preservation policy and acceptance — 2026-10-21 — see docs/progress/P5-COMMITTED-CORRUPTION.md; no salvage, checksum or full reboot claim
+phase-p5-saved-layout-design: DONE as reviewed engineering contract — 2026-10-21 — see docs/progress/P5-SAVED-LAYOUT.md and P5-SAVED-LAYOUT-REVIEW.md; no saved-layout implementation or phase completion
 ```
 
 ## Control commands
@@ -32,16 +40,17 @@ phase-p5-saved-history: DONE as scoped saved-row/checkpoint/CLI slice — 2026-1
 | Architecture, ambiguity, security review, integration | Parent orchestrator | inherited |
 | Escalation after two failed attempts at same defect | Parent orchestrator | inherited |
 
-The table above is historical routing, not a current delegation instruction.
-The user's later direct-work instruction in AGENTS.md applies on resume;
-delegate only when newly requested. No token-cost telemetry is available.
+The user renewed this routing on 2026-10-21, explicitly requesting parent
+orchestration with GPT-6-Luna where suitable. Use exclusive file ownership and
+parent review/verification. No token-cost telemetry is available.
 
 Historical non-UI work authorization (2026-10-18): finish the five milestones
 in [NON-UI-EXECUTION.md](docs/progress/NON-UI-EXECUTION.md) with automated tests.
 Do not hand the user manual verification tasks or mark environment-blocked
 checks as passed. Continue independent implementation/testing while a specific
 acceptance gate is blocked; do not bypass that gate in enabled behavior.
-The user's 2026-10-21 pause now takes precedence until a new instruction.
+The user's new 2026-10-21 instruction ended the pause; the automated-test and
+no-manual-handoff requirements remain in force.
 
 ## Architecture and constraints
 
@@ -53,11 +62,19 @@ Prototype assumptions, not confirmed product choices: local only, persistent ser
 
 Gotchas: Rust was initially absent, then became available during implementation; Rust/Cargo 1.99.1 now tested and recorded. Cargo registry access now works; restricted home-cache writes require a writable CARGO_HOME (review used /private/tmp/panelink-p2-cargo-home). Sources in /private/tmp are disposable; durable candidate lock/tree/inventory are in docs/progress/p2-review/. Alacritty/vte's selected std path has uncapped combining and OSC storage; small feed chunks do not bound retained state. See docs/progress/P2-SOURCE-GATE.md. Host input is a separate allocation boundary: incomplete paste buffering, UTF-8 conversion, filtered queues and bounded EOF/error return must all be reviewed before enabling a UI. Explicit core shutdown closes the PTY and forbids further IO; natural child exit still drains final output. HUP tests must handshake after trap installation before claiming KILL escalation. The requested ms-rust skill is absent; no guideline compliance stamp. Graph index project: Users-sahillamba-panelink; refresh after source changes. Status observations never authorize dispatch. Path::components normalizes trailing separators; reject slash bytes before basename resolution. Global lease/operation/payload limits and expiry reclamation are now implemented; a real server must schedule maintenance and preserve non-reusable tombstones.
 
+Graph update2026-10-21: connector recovered during final-tail work; parent
+rebuilt and refreshed a fast/nonpersistent index after source edits. Earlier
+Transport closed observations below are historical. Verify freshness again on
+resume rather than assuming it persists.
+
 Graph freshness gotcha: before checkpoint b6ee66b, application sources were
 untracked relative to the initial documentation commit, so Git-diff-based
 detect_changes missed application edits. The checkpoint now tracks the sources.
 Refresh after changes and verify the indexed revision; use direct source/tests
 as authority and a full refresh when index freshness is uncertain.
+Earlier continuations saw Transport closed. During the current metadata slice
+the connector is available and the parent refreshed a fast/nonpersistent index
+after source freeze. Verify freshness on resume; source/tests remain authoritative.
 
 ## Phase 1 — offline foundation
 
@@ -234,7 +251,21 @@ open.
 - [ ] Resolve hierarchy; implement keyboard layout operations.
 - [ ] Mouse routing, selection copying and context menus on Apple Terminal.
 - [x] Scoped two-pane saved normal scrollback and visible-screen checkpoints, bounded read-only CLI show/search, 30-day ended-session pruning and stopped-workspace clear; see P5-SAVED-HISTORY.md. Does not imply workspace or provider recovery.
-- [ ] Full V-HISTORY reboot/layout recovery, partial-tail repair, deterministic post-rename/failed-end-sync fault evidence and representative throughput; see P5-SAVED-HISTORY.md and docs/SPEC.md.
+- [x] Deterministic software-injected pre/post-rename sync faults, retry acknowledgments and first-end-time retention, including real-PTY capture retries; see P5-RECOVERY-FAULTS.md.
+- [x] Fresh-process read-only CLI acceptance for retained rows, latest normal/alternate checkpoints and unavailable overwritten content; see P5-RESTART-ACCEPTANCE.md. This does not prove a machine reboot or saved layout restoration.
+- [x] Bounded orphan-temporary discard, stopped-workspace `history cleanup` CLI and startup-before-capture helper; see P5-TEMP-CLEANUP.md. Full pathname startup acceptance remains blocked.
+- [x] Single-machine synthetic release throughput baseline, two recorded runs, fixed 24-operation cases and quota validation; see P5-HISTORY-THROUGHPUT.md. This is not a ten-agent or UI latency acceptance pass.
+- [x] Bounded history writer component and lock retention; see [P5-HISTORY-WRITER.md](docs/progress/P5-HISTORY-WRITER.md). Scoped live adoption is also delivered; see P5-LIVE-WRITER-RESULT.md.
+- [x] Scoped bounded live history scheduling off the owner thread, retaining durable acknowledgment/gap/close contracts; blocked-writer input/control/split and quota/cap tests pass. See P5-LIVE-WRITER-RESULT.md.
+- [x] Bounded actual-store live two-pane workload observations: two final release runs, raw timing/probe/history reports and validator; see P5-LIVE-HISTORY-BENCH.md. Burst failure flags and preliminary missing ends remain recorded, without a performance-budget pass.
+- [x] Fixed history failure/drain diagnostics and two schema2 observations; see P5-HISTORY-DIAGNOSTICS.md.
+- [x] Preserve a newest bounded final suffix with all candidate screens under byte pressure; see P5-FINAL-TAIL.md. Prefix loss remains explicit; no quota/budget increase.
+- [x] Scoped explicit-timeout finalization of accepted known-end metadata; canceled payloads/receipts remain canceled. See P5-DRAIN-METADATA.md. Unknown/unsubmitted end intent and payload loss remain separate.
+- [x] Committed-record corruption/partial-tail refusal policy with byte-preserving store and fresh-process CLI acceptance; see P5-COMMITTED-CORRUPTION.md. No salvage, repair or arbitrary bit-rot detection is claimed.
+- [ ] Resolve remaining unknown/unsubmitted end intent and final-payload loss within reviewed bounded scheduling; no complete-capture or performance-budget claim.
+- [x] Scoped saved-layout/restart engineering design and exact codec task, with independent review; see P5-SAVED-LAYOUT.md. No saved-layout implementation or new command is delivered by that design.
+- [ ] Implement saved-layout codec, bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection in the reviewed order.
+- [ ] Full V-HISTORY reboot/layout recovery and representative workload/throughput acceptance; see P5-SAVED-HISTORY.md and docs/SPEC.md.
 
 ## Phase 6 — alpha measurements and review evidence (not started)
 
@@ -247,7 +278,7 @@ On an explicit resume request, read this file, AGENTS.md and the current
 handoff in docs/progress/SESSION.md, then inspect git status and history.
 Read the evidence for the chosen first incomplete gate. Probe toolchain/provider
 availability without printing secrets; run permitted verification and record
-blocked acceptance separately. Follow the user's direct-work instruction in
+blocked acceptance separately. Follow the current delegation instruction in
 AGENTS.md. Never discard uncommitted changes. The older checkpoint paragraphs
 below are historical evidence, not live task or delegation assignments.
 

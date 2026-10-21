@@ -1,0 +1,11 @@
+{
+  "purpose": "Same-runtime comparison, not shipping behavior or an untouched historical baseline",
+  "change": "src/history_capture.rs: replace exactly one if capacity_reason == Some(CapacityReason::Bytes) { with if false && capacity_reason == Some(CapacityReason::Bytes) {",
+  "snapshot_path": "/private/tmp/panelink-final-tail-control-43524",
+  "snapshot_history_capture_sha256": "c6a5171f7aac975948eeabc8c00c6855f8b2d25a18b00f9a65a850287da2f253",
+  "shipping_history_capture_sha256": "cec74b3c49e808d206177dad4de0cede25fa0d3569e45e93a200a03e54018211",
+  "benchmark_sha256": "cac78f1e2e835691af117950aafecafd61c75cb4f8615d6cc06bc8ad25f4a36c",
+  "cargo_toml_sha256": "d8626a3176b51ef5fbeb4b4d2a2945487d2cb9c80064941dc999e82494672da5",
+  "cargo_lock_sha256": "7d281bb10eec384b2632f0d8118288051093d25be9f958b64aa05a33a9975b16",
+  "note": "Snapshot has current CommitPlan refactor and same harness; suffix admission alone disabled. One sequential comparison run cannot establish causality or a performance budget."
+}

@@ -1,6 +1,6 @@
 # Panelink: working implementation specification
 
-Revision: 0.4, 2026-10-18. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoint below records current code without converting prototype assumptions into product requirements. This revision preserves the reviewed contracts for command retries, agent identity, history semantics, child environments, and terminal clipboard requests.
+Revision: 0.13, 2026-10-21. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoint below records current code without converting prototype assumptions into product requirements. This revision preserves the reviewed contracts for command retries, agent identity, history semantics, child environments, and terminal clipboard requests, and scopes the reviewed saved-layout/restart design without enabling recovery.
 
 ## Purpose and requirement authority
 
@@ -293,8 +293,44 @@ scrollback, separate latest normal/alternate visible-screen checkpoints,
 gap/reset indicators, read-only CLI show/search, 30-day ended-session pruning
 and explicit stopped-workspace clear. These are prototype defaults, not a
 claim that the full retention/recovery contract works. Complete layout
-restoration, provider conversation resume and V-HISTORY reboot/partial-tail
-acceptance remain unproved; no stored bytes are replayed.
+restoration, provider conversation resume and V-HISTORY reboot acceptance
+remain unproved; committed partial-tail refusal is specified below. No stored
+bytes are replayed.
+
+### Scoped saved-layout/restart design (not implemented)
+
+[ADR-P5-LAYOUT-01](progress/P5-SAVED-LAYOUT.md) scopes a dependency-free
+historical snapshot for the current two-pane equal layout, with current and
+immediately preceding-generation slots. It stores only
+root dimensions, spatial historical targets, orientation and explicit snapshot
+metadata. Client-local focus, launch data, environment values, titles, PID and
+provider identities are excluded. An independent snapshot sequence handles
+last-pane exit without assuming a layout revision changes. Ordinary pane
+removal may publish an empty snapshot; driver/workspace teardown preserves the
+pre-stop topology and must distinguish shutdown-caused exits.
+
+The planned first implementation is a pure fixed160-byte codec with strict
+identity, geometry, reserved/unused-field and whole-record validation. Separate
+store/async writer/guard/runtime and read-only CLI slices follow. The future
+workers must share one total250ms metadata-drain wait, retain singleton exclusion
+through late IO and expose last confirmed rather than assumed current-at-crash
+state. Layout/history files are not an atomic snapshot. Missing/corrupt history
+sources remain separate from valid historical layout metadata.
+
+Before the first current-slot save from a higher generation, the future store
+must preserve the exact previous current bytes into the previous slot and
+finish that directory sync before replacing current. Normal fresh-shell
+startup therefore keeps the preceding saved generation available for explicit
+read-only inspection. This is bounded two-slot retention and ordered durability,
+not a multi-file transaction; interrupted rotation may expose duplicate old
+snapshots. Corrupt/unsafe/unsupported slots are preserved and refuse mutation;
+readers never silently substitute previous for invalid current.
+
+This design does not implement file persistence, restored views, a new CLI
+command, automatic recovery or a relaunch. Existing plain-panelink fresh-shell
+startup remains unchanged. Historical targets never become live dispatch
+identities; explicit future relaunch requires fresh context and new targets.
+Pending hierarchy/provider choices and full V-HISTORY acceptance remain open.
 
 ### Meaning of saved history
 
@@ -315,7 +351,215 @@ After reboot, history search covers retained normal scrollback plus text in thos
 
 History records contain normalized text and explicitly supported rendition/cell data, not executable terminal escape sequences or raw input logs. Render recovery views through Panelink's cell renderer; no stored OSC clipboard commands, query replies, or process inputs may be executed during search, copy, or restore. Expose retention/truncation and capture-disabled indicators. Clearing a session's saved history removes its retained rows and checkpoints under the retention/deletion policy, without changing OpenCode's own conversation store.
 
-Use one metadata writer, atomic replacement with a documented sync/recovery protocol, generation IDs connecting metadata to history, and handling for partial final history records. Storage failures must preserve running PTYs and display a visible persistence error. Disable or reduce history recording per session through settings; clearing Panelink history must not delete provider conversation databases.
+Use exactly one exclusive writer per independently owned metadata stream, atomic replacement with a documented sync/recovery protocol, generation IDs connecting metadata to history, and handling for partial final history records. The saved-layout design separates layout files from history files; its writer and the existing history writer retain duplicate handles to the same server singleton, with distinct exclusive stream claims. Generation counters and launch journal retain their existing owner. This refines the earlier single-writer wording without allowing concurrent writers to any one stream or claiming cross-stream atomicity. Storage failures must preserve running PTYs and display a visible persistence error. Disable or reduce history recording per session through settings; clearing Panelink history must not delete provider conversation databases.
+
+The prototype's recovery retry checks (2026-10-21) exercise software-injected
+failures before rename and at the subsequent directory sync. A renamed record
+can be visible while its write still reports failure; an identical retry must
+complete the directory sync before acknowledging success. Repeated session
+initialization and end recording obey this boundary too. End retries retain
+the first stored end time, and screen retries retain their original capture
+metadata while target, buffer, output sequence and screen revision are
+unchanged. Conflicting content remains rejected. See
+[fault evidence](progress/P5-RECOVERY-FAULTS.md) and
+[fresh-process history reads](progress/P5-RESTART-ACCEPTANCE.md). These checks
+do not establish physical power-loss durability or full reboot/layout recovery.
+
+Prototype committed-record corruption policy (2026-10-21): row segments and
+screen checkpoints use whole-file atomic replacement, not an append journal.
+Only a fully validated bounded committed file is readable. Truncated headers,
+lengths or bodies, complete-row prefixes missing declared rows, extra trailing
+bytes, malformed metadata/ordering/cells, mismatched identities and unsafe
+entries fail closed. Do not salvage a valid-looking prefix, infer an end time,
+or silently truncate, repair, rename, delete or replace the invalid committed
+file. Mutation preflights also refuse it; clearing is not an override for
+corruption. Retain the bytes for a separate explicitly designed recovery tool.
+
+The current codecs contain no checksum or authentication. A format-valid text
+or metadata alteration may remain readable: structural validation cannot prove
+originality, detect all bit rot or distinguish a torn tail from corruption.
+A future integrity-format migration or forensic export/repair requires its own
+review; no such tool or format change is included here. The selected policy
+favors preserving uncertain evidence over presenting uncertain rows as saved.
+
+Read-only CLI show/search validates the requested rows and both existing screen
+components before output. Any invalid component fails that entire target
+request with status1, fixed content-free diagnostics and no partial stdout.
+Missing components are absence, not malformed files. Valid other targets remain
+readable by explicit ID; individual store buffer reads remain independent.
+Target listing is not a certificate that every component is valid. Readers
+never clean up or promote temporary files, launch processes or replay effects.
+Existing locked maintenance discards only recognized uncommitted temporaries,
+even when a committed destination is invalid; it never substitutes the temporary.
+Maintenance across multiple files/targets is not atomic and may have completed
+permitted earlier effects before a later failure. See
+[policy and automated acceptance](progress/P5-COMMITTED-CORRUPTION.md).
+
+Prototype interrupted-write policy (2026-10-21): a dot-prefixed file is never
+a committed history record. Before enabling capture, the server holds its
+storage lock and discards only files whose names exactly match its generated
+row/screen temporary format. `panelink history cleanup` performs the same
+operation while holding lifecycle and server-storage maintenance locks; it
+requires the workspace to be stopped. `HistoryStore::open` and read-only
+history list/show/search never clean up.
+Complete orphan temporaries are discarded too, even if no committed slot
+exists. Committed rows/checkpoints, including corrupt ones, are never replaced,
+truncated or repaired by cleanup.
+
+Cleanup scans at most 16,384 directory entries and preflights at most 4,096
+recognized temporaries before deleting any. Each must be a private, single-link
+regular file within its row/screen size limit. Candidate opens and unlinks use
+the held directory descriptor, with no symlink following or temporary-body
+reads; inode/mode/size and named-directory identity are rechecked. Unknown
+names are preserved. Unsafe recognized entries or exceeded bounds fail closed.
+The directory sync must succeed before cleanup reports success, including an
+empty retry after an uncertain deletion. A later failure can leave partial
+cleanup; rollback is not claimed. The caller must exclude other writers; this
+does not isolate against malicious same-user filesystem races.
+
+If startup cleanup fails, shells continue with history capture unavailable and
+a fixed diagnostic. This safe discard policy handles interrupted temporary
+writes; it is not salvage of corrupt committed records or a complete
+power-loss/reboot acceptance claim. See the scoped
+[cleanup evidence](progress/P5-TEMP-CLEANUP.md).
+
+The [synthetic throughput baseline](progress/P5-HISTORY-THROUGHPUT.md) records
+two actual release-mode runs with full durability syncs. Median full-segment
+append storage calls took approximately 22–49 ms across the measured cases
+and runs. These measurements precede the live writer integration; they do not
+set a release budget or prove UI/ten-agent throughput. Encoding sanitized rows
+and screens still runs on the owner thread; history filesystem operations
+after startup preparation run on the worker.
+
+The accepted [background-writer component contract](progress/P5-HISTORY-WRITER.md)
+uses one worker with at most 16 accepted batches and 32 MiB of encoded payload,
+including in-flight work. A held per-server claim excludes a second worker
+until the first exits, including after shutdown timeout. Submission returns a receipt, not a durable cursor
+acknowledgment; only completion of every ordered storage stage commits it.
+Failed stages retry identical data at most three times before failing closed.
+Accepted batches own sanitized records independently of pane lifetime. They
+are ordered sequences of individually durable writes, not atomic multi-file
+transactions. Rejected submissions return ownership to their caller.
+
+An explicit drain waits at most 250 ms; a stuck storage syscall cannot be
+canceled. An outstanding worker must retain a duplicate singleton lock until
+it can no longer write, excluding startup and maintenance after the original
+owner drops. Timeout/cancellation never counts as a durable receipt. These
+component limits exclude bounded storage scratch and metadata; they are not
+a total-memory or crash-loss budget.
+
+After an explicit shutdown timeout only, canceled accepted batches with a
+validated known nonzero end time may receive metadata-only finalization on the
+same guarded worker, in FIFO order across at most sixteen accepted items.
+No further row-append or screen-save stage starts for canceled work. Plain
+`Drop`, disconnect and prior fail-closed/panic paths retain strict cancellation.
+An already executing final stage that succeeds may still commit normally.
+Metadata-only success leaves receipts canceled, durable payload cursors
+unchanged and the drain outcome timed out. It is not durability at caller
+return. The worker retains exclusion through finalizers, receipt/diagnostic
+publication and backend teardown. Filesystem calls have no total wall-time
+bound; the 250 ms limit bounds the caller's drain wait.
+
+The existing codec atomically stores a conservative gap and first end time,
+preserving compatible rows and both screen files. Missing history becomes an
+empty ended gap; an older live epoch resets incompatible rows. A matching
+already-ended epoch preserves its first timestamp and existing gap and retries
+directory sync. Corrupt, unsafe, mismatched, capture-disabled or newer records
+are refused. The gap means continuity is uncertified, not proof of missing
+rows. Each helper gets at most three attempts with fixed 10 ms worker delays;
+a terminal failure closes the writer and prevents later finalizers. Unsupported
+backends fail immediately without a storage-error/retry-exhaustion label.
+Fixed `canceled_end_metadata_finalized` and
+`canceled_end_metadata_finalize_failed` reasons distinguish actual helper
+results; neither clears timeout/failure. Unknown or unsubmitted end intent is
+not recovered. This changes cancellation scheduling without changing payload
+quotas, storage format or caller budget. See the
+[finalization evidence](progress/P5-DRAIN-METADATA.md).
+
+The live two-pane driver adopts this worker for both existing and split-created
+sessions. Its bounded coordinator keeps submitted and durable cursors/checkpoint
+identities separate; only a matching committed receipt advances durable state.
+At most eight full-target capture slots retain work across pane retirement.
+Each permits one ordinary and one final accepted batch, reserving eight of the
+writer's sixteen count slots for terminal work. Slot exhaustion disables
+capture with a sticky failure while the otherwise valid shell/split continues.
+While ordinary work is pending, rows are resampled later from the emulator's
+bounded ring; overflow or reset marks a gap and retains only the surviving
+suffix. Each slot coalesces at most one latest normal and one latest alternate
+checkpoint, each within `MAX_SCREEN_CHECKPOINT_BYTES`, outside the accepted
+payload quota. This adds at most sixteen deferred checkpoint records, about
+14.1 MiB of encoded bytes, excluding metadata and transient encoding scratch.
+
+The coordinator retains the first end time, epoch and gap independently of
+payload admission. An actual final encoded-byte rejection permits one additional
+nonblocking attempt using the newest complete-row suffix that fits currently
+available capacity, while retaining all candidate screen checkpoints and the
+first end time. The complete original batch is validated before discarding any
+prefix. The accounting snapshot releases its lock before row scanning or
+destruction, and another ordinary submission cannot intervene. Worker activity
+can only release accepted capacity during this one-producer sequence.
+
+If the original full batch now fits, retry it unchanged without reporting
+loss merely from the earlier rejection. Any discarded prefix retains a gap
+and sticky failure; `final_payload_dropped_bytes` means partial or complete
+final-payload loss. A suffix retains the newest row boundary, and only its
+matching committed receipt advances durable state. A screen-only retry does
+not invent a new row cursor. If capacity cannot be sampled, no complete row
+fits alongside all screens, or the retry fails, preserve the existing visible
+failure and metadata-only gap/end fallback. Initial count or accounting-lock
+contention rejection retains that fallback directly. Snapshot contention alone
+is not an admission event. This policy adds no retained row queue outside the
+accepted quota, wait for capacity, public API or storage-format change. See
+the [bounded contract](progress/P5-FINAL-TAIL-TASK.md) for scope and evidence
+requirements.
+
+Unconfirmed exit time remains unknown. Detach
+does not end capture. Driver teardown stops/captures children before closing
+admission, then uses one total history drain budget of 250 ms with no shared
+coordinator lock held across waits. A shutdown timeout sets the same sticky
+failure diagnostic, including after the driver has dropped. The existing
+explicit synchronous component API remains for compatibility; live driver
+capture does not use it. See [live integration evidence](progress/P5-LIVE-WRITER-RESULT.md).
+This scope does not establish representative workload performance, physical
+power-loss durability or full reboot/layout recovery.
+
+The [live workload observations](progress/P5-LIVE-HISTORY-BENCH.md) add two
+release runs through the real driver/store: paced 80-column output, burst
+240-column output and active-output shutdown, each with two 24-row panes.
+All 96 final input probes were child-acknowledged before observed producer
+completion. Both final burst cases raised sticky capture failures; final end
+markers were present, while a preserved preliminary run had missing end
+markers after writer settlement. These observations motivate distinguishing
+admission, storage and drain failure reasons before changing scheduling. No
+numeric release budget or queue-occupancy claim is selected by this evidence.
+
+The [diagnostic contract](progress/P5-HISTORY-DIAGNOSTICS-TASK.md) adds a
+fixed set of twenty-one sticky reason bits and an actual writer shutdown result
+(`not_requested`, `drained`, `failed`, `timed_out`). A cloned observer obtained
+before enabling capture remains valid after driver teardown and detached worker
+settlement. Recording uses fixed-width atomics; labels contain no terminal data,
+target IDs, paths, input, environment values or storage error text. Concurrent
+snapshots are nontransactional. A timed-out shutdown stays timed out if work
+finishes later.
+
+Ordinary admission contention/count/byte rejection is an observation and need
+not set the existing capture-failure flag. Final-payload loss records its own
+paired rejection cause. Storage errors, retry exhaustion, receipt/worker
+failure, actual canceled work, pending accepted receipts at the deadline and
+unsubmitted final intent are distinct observations. A drained writer queue can
+coexist with lost final payload or unsubmitted metadata; it does not establish
+complete capture. The CLI emits bounded fixed labels at the first observed
+failure and a final shutdown summary. The diagnostic layer itself adds no storage format, scheduling,
+queue-limit, retry, cancellation or shutdown-budget change.
+
+Row retry acknowledgment applies to the durable bounded retention result;
+it does not promise every submitted row remains saved. Every incoming row is
+validated, including an evicted prefix. Retained ordinal overlap must match,
+including across gaps; missing interior ordinals cannot be backfilled. An
+evicted prefix is accepted only with a verifiable retained overlap or a new
+tail, with a gap preserved. Entirely stale, evicted batches with no overlap
+are rejected. A new gap must be durably recorded even on a duplicate-only
+batch. No discarded cells are reconstructed or treated as verified content.
 
 Live reattachment rebuilds the screen from server state and continues existing processes. Reboot/server-loss recovery opens retained history read-only and restores the layout, with explicit resume/relaunch actions. Historical bytes are never blindly replayed to a host terminal or shell as active control instructions. Store a safe history representation; terminal escape sequences may carry side effects such as clipboard operations.
 

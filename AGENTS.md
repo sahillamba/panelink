@@ -4,16 +4,16 @@
 
 Read `README.md`, `docs/SPEC.md`, `docs/PANELINK-DISCOVERY.md`, and `docs/PREBUILD.md` before changing the application. The current product runs inside existing terminal applications on Apple Silicon Macs. The archived desktop GUI proposal is superseded.
 
-Implementation is paused after scoped stop and saved-history checkpoints. Read `ROADMAP.md` and the current handoff at `docs/progress/SESSION.md` before resuming; the roadmap is the durable status entrypoint. Follow phase order and preserve unresolved product decisions; use documented prototype assumptions only within their scope.
+Implementation resumed on 2026-10-21 after scoped stop and saved-history checkpoints. Read `ROADMAP.md` and the current handoff at `docs/progress/SESSION.md` before resuming; the roadmap is the durable status entrypoint. Follow phase order and preserve unresolved product decisions; use documented prototype assumptions only within their scope.
 
-Delegation update: the user subsequently instructed "stop putting agents on
-anything do yourself"; do the next implementation directly unless the user
-explicitly requests an agent (as they did for the independent reviewer).
-Historical Luna assignments in older progress notes are completed work, not
-an instruction to delegate on resume.
+Delegation update (2026-10-21): the user explicitly resumed work and requested
+parent orchestration with GPT-6-Luna for suitable cheaper tasks. This supersedes
+the earlier direct-work instruction for this resumed work. Use bounded tasks,
+exclusive file ownership and parent review/verification. Historical assignments
+are completed work, not evidence of currently active agents.
 
-The user paused work on 2026-10-21. Resume only on a new instruction. On
-resumption, retain the earlier automated-test/no-manual-handoff requirements:
+The user's new instruction on 2026-10-21 ended the earlier pause. Retain the
+automated-test/no-manual-handoff requirements:
 run permitted checks and record blocked acceptance honestly rather than
 counting skipped tests as passes.
 

@@ -11,6 +11,8 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 const COUNTER_MAGIC: &[u8; 8] = b"PLGEN001";
 const RECORD_MAGIC: &[u8; 8] = b"PLJNL001";
@@ -145,6 +147,20 @@ pub struct ServerStorage {
     directory_path: PathBuf,
     _lock: File,
     generation: u64,
+    history_writer_claimed: Arc<AtomicBool>,
+}
+
+/// Exclusively claims the one history worker and retains its singleton lock.
+/// Kept by the worker, including after its caller's bounded shutdown times out.
+pub(crate) struct HistoryWriterGuard {
+    _lock: File,
+    claimed: Arc<AtomicBool>,
+}
+
+impl Drop for HistoryWriterGuard {
+    fn drop(&mut self) {
+        self.claimed.store(false, Ordering::Release);
+    }
 }
 
 /// Held exclusive server identity lock for offline history maintenance.
@@ -226,6 +242,7 @@ impl ServerStorage {
             directory_path: path.to_path_buf(),
             _lock: lock,
             generation,
+            history_writer_claimed: Arc::new(AtomicBool::new(false)),
         };
         storage.verify_identity()?;
         Ok(storage)
@@ -261,6 +278,7 @@ impl ServerStorage {
             directory_path: path.to_path_buf(),
             _lock: lock,
             generation,
+            history_writer_claimed: Arc::new(AtomicBool::new(false)),
         };
         storage.verify_identity()?;
         Ok(storage)
@@ -275,6 +293,52 @@ impl ServerStorage {
             return Err(denied());
         }
         verify_named_lock(&self.directory, &self._lock)
+    }
+
+    /// Retain the same kernel singleton lock for an outstanding history worker.
+    ///
+    /// Duplicating the held descriptor preserves the flock's open-file
+    /// description; opening the pathname again would instead compete with it.
+    /// CLOEXEC is set atomically so a concurrent child exec cannot retain this
+    /// copy. The worker must hold it until no further storage writes are possible.
+    pub(crate) fn retain_history_lock(&self) -> io::Result<File> {
+        self.verify_identity()?;
+        let lock = File::from(rustix::io::fcntl_dupfd_cloexec(&self._lock, 0)?);
+        self.verify_identity()?;
+        Ok(lock)
+    }
+
+    /// Exclude a second writer even though both could duplicate our flock.
+    pub(crate) fn claim_history_writer(&self) -> io::Result<HistoryWriterGuard> {
+        if self
+            .history_writer_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "history writer is already active",
+            ));
+        }
+        match self.retain_history_lock() {
+            Ok(lock) => Ok(HistoryWriterGuard {
+                _lock: lock,
+                claimed: Arc::clone(&self.history_writer_claimed),
+            }),
+            Err(error) => {
+                self.history_writer_claimed.store(false, Ordering::Release);
+                Err(error)
+            }
+        }
+    }
+
+    /// Bind a history writer to the server identity whose lock it retains.
+    pub(crate) fn verify_history_store(
+        &self,
+        store: &crate::history_store::HistoryStore,
+    ) -> io::Result<()> {
+        self.verify_identity()?;
+        store.verify_server_directory(&self.directory_path)
     }
 
     /// Nonzero, monotonically advanced generation for this storage domain.
@@ -577,6 +641,46 @@ mod tests {
             fs::metadata(fixture.0.join("generation")).unwrap().mode() & 0o7777,
             0o600
         );
+    }
+
+    #[test]
+    fn retained_history_lock_excludes_startup_and_maintenance_after_owner_drop() {
+        let fixture = Fixture::new();
+        let storage = ServerStorage::initialize_for_test(&fixture.0).unwrap();
+        let retained = storage.retain_history_lock().unwrap();
+        assert!(rustix::io::fcntl_getfd(&retained)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC));
+        drop(storage);
+        assert_eq!(
+            ServerStorage::open(&fixture.0).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            ServerStorage::lock_for_maintenance(&fixture.0)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(retained);
+        assert_eq!(reopen_after_drop(&fixture.0).unwrap().generation(), 2);
+    }
+
+    #[test]
+    fn history_lock_retention_rejects_a_replaced_named_lock() {
+        let fixture = Fixture::new();
+        let storage = ServerStorage::initialize_for_test(&fixture.0).unwrap();
+        fs::rename(
+            fixture.0.join("server.lock"),
+            fixture.0.join("server.lock.old"),
+        )
+        .unwrap();
+        assert!(storage.retain_history_lock().is_err());
+        // Failed duplication must release the writer claim for a later retry.
+        for _ in 0..2 {
+            let error = storage.claim_history_writer().err().unwrap();
+            assert_ne!(error.kind(), io::ErrorKind::WouldBlock);
+        }
     }
 
     #[test]

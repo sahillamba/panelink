@@ -61,6 +61,18 @@ pub mod peer_identity;
 pub mod server_storage;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod history_diagnostics;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod history_writer;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) mod history_capture;
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+mod history_tail_tests;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod managed_launch;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

@@ -7,6 +7,40 @@ xhigh/medium as appropriate, reviews source and independently verifies results.
 This is an execution queue, not completion evidence or a change to pending UI
 decisions. [ROADMAP.md](../../ROADMAP.md) remains the status entrypoint.
 
+Current resume (2026-10-21): the user ended the pause and renewed parent
+orchestration with GPT-6-Luna for suitable bounded work. The selected P5
+storage-fault/read-only restart task and bounded temporary-file cleanup are
+delivered, with two actual synthetic throughput observations. The bounded
+[writer component](P5-HISTORY-WRITER.md) and its
+[live adoption](P5-LIVE-WRITER-RESULT.md) are implemented/tested, including
+submitted/durable receipts, reserved gap/end state, blocked-writer PTY/control
+progress and split-created capture. The bounded
+[live workload observations](P5-LIVE-HISTORY-BENCH.md) are also delivered, with
+two final actual-store release runs. The bounded
+[diagnostics slice](P5-HISTORY-DIAGNOSTICS.md) reproduced final-payload byte
+pressure with a drained writer queue in one of two new release runs. Older
+missing end records remain unexplained. The subsequent
+[final-tail slice](P5-FINAL-TAIL.md) preserves a newest row suffix with all
+screens in deterministic real-store pressure acceptance. Live wide cases still
+hit the250ms drain deadline with canceled work/missing ends, including a
+matched suffix-disabled control. The subsequent
+[timeout-only metadata slice](P5-DRAIN-METADATA.md) finalizes accepted known-end
+canceled work without committing its payload or changing timeout status. Both
+new release reports have settled ends for all targets, while two cases retain
+timeouts and both bursts retain final-payload loss. The
+[committed-record policy](P5-COMMITTED-CORRUPTION.md) now adopts whole-file
+refusal/preservation and tests truncation, mutation denial, independent healthy
+data and fresh-process read-only behavior. This is not prefix salvage or
+arbitrary corruption detection: the format has no checksum. Unknown/unsubmitted
+end intent and lost payload remain open. The bounded
+[saved-layout/restart design](P5-SAVED-LAYOUT.md) scopes historical two-pane
+metadata and staged implementation while retaining hierarchy/provider choices.
+It does not implement saved-layout persistence/recovery; the pure codec is the
+next component slice. Quotas and caller budget are unchanged.
+Representative workload, full reboot/layout and host/provider gates remain open. Current results
+and environment blockers are in [SESSION.md](SESSION.md); the older pause
+and direct-work paragraphs below are historical.
+
 Priority amendment2026-10-18: the user's newer instruction inserts
 [Phase3A right-click splits](P3A-RIGHT-CLICK-SPLITS.md) before the previously
 queued lifecycle/stop and history work. A split must open a fresh terminal

@@ -145,13 +145,24 @@ OpenCode conversation. Full usage is in [README.md](../README.md).
 
 ## Continue implementation
 
-The project is paused. On an explicit resume request, start with
+The user resumed implementation on 2026-10-21. Start with
 [ROADMAP.md](../ROADMAP.md), [SESSION.md](progress/SESSION.md), and the
 current Git status/history. The scoped Phase 3B stop slice and P5 saved-history
 slice are done at checkpoint commits `c3e207e` and `f82d968`; their parent
 Phase 3 and Phase 5 milestones are still open. The next history gates are
-the full V-HISTORY reboot/layout and partial-tail acceptance, a deterministic
-post-rename/failed-end-sync test, and disk-throughput review. Do the next
-implementation directly unless the user explicitly requests an agent. The
+the full V-HISTORY reboot/layout and committed-record partial-tail policy and
+representative workload acceptance. Storage-fault and fresh-process history
+reads, bounded uncommitted-file cleanup and a synthetic throughput baseline
+are delivered. The bounded background writer is now integrated into live
+capture; see [the result](progress/P5-LIVE-WRITER-RESULT.md). Two bounded
+[live output measurements](progress/P5-LIVE-HISTORY-BENCH.md) are delivered.
+Next is diagnosing observed burst capture flags and variable final metadata. Run
+`panelink history cleanup` only while the workspace is stopped; it discards
+recognized unfinished writes while preserving committed history.
+
+The current verifier is 7/8. Pathname-socket permission and an additional
+parallel lock-probe failure are recorded in the handoff; the lock probe passed
+its isolated and serialized reruns without establishing the parallel cause. The user
+renewed parent orchestration with GPT-6-Luna for suitable bounded tasks. The
 user subsequently requested publication on 2026-10-21; check the remote
 tracking state rather than assuming a different clone has these commits.

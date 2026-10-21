@@ -815,6 +815,48 @@ pub(crate) fn history_clear(value: &std::ffi::OsStr) -> i32 {
     }
 }
 
+/// Discard only recognized uncommitted history files while excluding writers.
+pub(crate) fn history_cleanup() -> i32 {
+    let state = match resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME")) {
+        Ok(state) => state,
+        Err(_) => {
+            eprintln!("panelink: history directory unavailable");
+            return 1;
+        }
+    };
+    let _lifecycle = match lifecycle_lock(&state, STOP_TIMEOUT) {
+        Ok(lock) => lock,
+        Err(_) => {
+            eprintln!("panelink: history cleanup failed");
+            return 1;
+        }
+    };
+    // This excludes direct serve as well as zero-config startup for the
+    // entire cleanup. Missing metadata is never evidence of a stopped server.
+    let _server = match panelink::server_storage::ServerStorage::lock_for_maintenance(&state.server)
+    {
+        Ok(lock) => lock,
+        Err(_) => {
+            eprintln!("panelink: stop the workspace before cleaning up saved history");
+            return 1;
+        }
+    };
+    match saved_store().and_then(|store| {
+        store.cleanup_temporary_files().map_err(|_| {
+            "history cleanup failed; uncommitted files may have been partially removed"
+        })
+    }) {
+        Ok(removed) => {
+            println!("panelink: uncommitted history files removed: {removed}");
+            0
+        }
+        Err(error) => {
+            eprintln!("panelink: {error}");
+            1
+        }
+    }
+}
+
 /// Search normalized retained rows and latest committed checkpoints of one
 /// exact target. Query is plain Unicode text; no terminal bytes are executed.
 pub(crate) fn history_search(target_value: &std::ffi::OsStr, query_value: &std::ffi::OsStr) -> i32 {

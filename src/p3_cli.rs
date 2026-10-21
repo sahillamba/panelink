@@ -1351,6 +1351,49 @@ fn run_server_probe(request: ServerProbe) -> i32 {
     }
 }
 
+/// Called with the server storage lock held, before any capture writer exists.
+fn prepare_history_store(
+    history_path: &Path,
+    now_unix_ms: Option<u64>,
+) -> io::Result<panelink::history_store::HistoryStore> {
+    let store = panelink::history_store::HistoryStore::open(history_path)?;
+    store.cleanup_temporary_files()?;
+    if let Some(now) = now_unix_ms {
+        let _ = store.prune_expired(now);
+    }
+    Ok(store)
+}
+
+/// Only fixed diagnostic labels are rendered; no storage error text or data.
+fn history_diagnostic_line(
+    snapshot: panelink::history_diagnostics::HistoryDiagnosticSnapshot,
+    shutdown: bool,
+) -> String {
+    let prefix = if shutdown {
+        "panelink: history capture incomplete during shutdown"
+    } else {
+        "panelink: screen history capture failed; shells remain running"
+    };
+    let mut line = format!("{prefix}; reasons=");
+    let mut any = false;
+    for reason in snapshot.reasons() {
+        if any {
+            line.push(',');
+        }
+        line.push_str(reason.as_str());
+        any = true;
+    }
+    if !any {
+        line.push_str("none");
+    }
+    let _ = write!(
+        line,
+        "; writer_drain={}",
+        snapshot.writer_drain_outcome().as_str()
+    );
+    line
+}
+
 /// Foreground multi-session server: same storage/endpoint semantics as
 /// `server-probe`, but the first child is a managed schema-6 launch and the
 /// runtime routes schemas 1, 2, 5, 6 (status), 7 (split) and 8 (pane UI).
@@ -1419,15 +1462,15 @@ fn run_serve(request: ServerProbe) -> i32 {
         Err(_) => false,
     };
     if history_ready {
-        if let Ok(store) = panelink::history_store::HistoryStore::open(&history_path) {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .and_then(|time| u64::try_from(time.as_millis()).ok());
-            if let Some(now) = now {
-                let _ = store.prune_expired(now);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|time| u64::try_from(time.as_millis()).ok());
+        match prepare_history_store(&history_path, now) {
+            Ok(store) => driver.enable_history(store),
+            Err(_) => {
+                eprintln!("panelink: history setup failed; history capture unavailable");
             }
-            driver.enable_history(store);
         }
     }
     let generation = driver.generation();
@@ -1446,10 +1489,18 @@ fn run_serve(request: ServerProbe) -> i32 {
         if driver.history_available() && !driver.history_capture_failed() { "enabled" } else { "unavailable" }
     );
     let clock = monotonic_clock(Instant::now());
+    let history_failure = driver.history_failure_signal();
+    let history_diagnostics = driver.history_diagnostics();
     if !write_json(&line) {
         driver.stop_connections(&clock);
         drop(driver);
         drop(listener);
+        if history_failure.load(Ordering::Relaxed) {
+            eprintln!(
+                "{}",
+                history_diagnostic_line(history_diagnostics.snapshot(), true)
+            );
+        }
         return 1;
     }
     let mut failed = false;
@@ -1463,7 +1514,10 @@ fn run_serve(request: ServerProbe) -> i32 {
         // stop the server or its sibling session.
         let _ = driver.tick(&clock);
         if driver.history_capture_failed() && !reported_capture_failure {
-            eprintln!("panelink: screen history capture failed; shells remain running (see history storage)");
+            eprintln!(
+                "{}",
+                history_diagnostic_line(history_diagnostics.snapshot(), false)
+            );
             reported_capture_failure = true;
         } else if !driver.history_capture_failed() {
             reported_capture_failure = false;
@@ -1498,6 +1552,13 @@ fn run_serve(request: ServerProbe) -> i32 {
     driver.stop_connections(&clock);
     drop(driver);
     drop(listener);
+    if history_failure.load(Ordering::Relaxed) {
+        // A final summary includes reasons/outcome raised after the first log.
+        eprintln!(
+            "{}",
+            history_diagnostic_line(history_diagnostics.snapshot(), true)
+        );
+    }
     if failed {
         emit_failure("server_runtime_failed")
     } else {
@@ -2635,6 +2696,70 @@ mod tests {
     use std::io::Read;
     use std::os::unix::net::UnixStream;
     use std::thread;
+
+    #[test]
+    fn history_diagnostic_lines_keep_serving_context_and_fixed_labels() {
+        let snapshot = panelink::history_diagnostics::HistoryDiagnostics::default().snapshot();
+        assert_eq!(
+            history_diagnostic_line(snapshot, false),
+            "panelink: screen history capture failed; shells remain running; reasons=none; writer_drain=not_requested"
+        );
+        assert_eq!(
+            history_diagnostic_line(snapshot, true),
+            "panelink: history capture incomplete during shutdown; reasons=none; writer_drain=not_requested"
+        );
+    }
+
+    #[test]
+    fn history_setup_discards_orphans_before_capture_and_refuses_unsafe_temps() {
+        struct PrivateDirectory(PathBuf);
+        impl Drop for PrivateDirectory {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = PrivateDirectory(std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "pl-history-startup-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        )));
+        fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
+        // The runtime holds this lock before preparing history, too.
+        let _storage = ServerStorage::initialize(&root.0).unwrap();
+        let history = root.0.join("history");
+        fs::DirBuilder::new().mode(0o700).create(&history).unwrap();
+        let store = panelink::history_store::HistoryStore::open(&history).unwrap();
+        let target = test_target();
+        store.begin_history(target, 1, false).unwrap();
+        let final_path = fs::read_dir(&history)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let final_bytes = fs::read(&final_path).unwrap();
+        let final_name = final_path.file_name().unwrap().to_str().unwrap();
+        let temporary = history.join(format!(".{final_name}-123-1.tmp"));
+        fs::write(&temporary, b"partial").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+        drop(store);
+
+        let ready = prepare_history_store(&history, None).unwrap();
+        assert!(!temporary.exists());
+        assert_eq!(fs::read(&final_path).unwrap(), final_bytes);
+        assert!(ready.load_rows(target).unwrap().is_some());
+        drop(ready);
+
+        let sentinel = root.0.join("sentinel");
+        fs::write(&sentinel, b"keep").unwrap();
+        let unsafe_temp = history.join(format!(".{final_name}-123-2.tmp"));
+        std::os::unix::fs::symlink(&sentinel, &unsafe_temp).unwrap();
+        assert!(prepare_history_store(&history, None).is_err());
+        assert_eq!(fs::read(&final_path).unwrap(), final_bytes);
+        assert_eq!(fs::read(sentinel).unwrap(), b"keep");
+    }
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()

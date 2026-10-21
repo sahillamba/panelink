@@ -22,7 +22,10 @@ use crate::event_protocol::{encode_event, Event};
 use crate::handshake_protocol::{
     encode_welcome, validate_welcome, Welcome, CAPABILITY_EVENTS, CAPABILITY_READ,
 };
+use crate::history_capture::{lock_capture, HistoryCaptureCoordinator, SharedHistoryCapture};
+use crate::history_diagnostics::{HistoryDiagnostics, HistoryReason};
 use crate::history_store::HistoryStore;
+use crate::history_writer::{HistoryWriter, MAX_SHUTDOWN_WAIT};
 use crate::managed_launch_prepare::prepare_launch;
 use crate::managed_launch_protocol::{decode_launch_result, decode_status_query};
 use crate::pane_layout::Rect;
@@ -57,7 +60,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -299,12 +302,13 @@ pub struct MultiServerDriver {
     owner: MultiSessionOwner<PtyEffects>,
     storage: ServerStorage,
     terminfo: PathBuf,
-    history: Option<Arc<HistoryStore>>,
+    history_capture: Option<SharedHistoryCapture>,
     history_failure: Arc<AtomicBool>,
+    history_diagnostics: HistoryDiagnostics,
 }
 
 struct HistoryCapture<'a> {
-    store: Option<&'a Arc<HistoryStore>>,
+    coordinator: Option<&'a SharedHistoryCapture>,
     failure: &'a Arc<AtomicBool>,
 }
 
@@ -321,7 +325,40 @@ impl Drop for MultiServerDriver {
     fn drop(&mut self) {
         self.hub.shutdown();
         self.settle_pending_watches();
-        self.capture_now();
+        self.owner
+            .for_each_effects_mut(|_, effects| effects.prepare_driver_shutdown());
+        if let Some(coordinator) = self.history_capture.take() {
+            let deadline = Instant::now() + MAX_SHUTDOWN_WAIT;
+            lock_capture(&coordinator).begin_shutdown();
+            let reached_deadline = loop {
+                let settled = {
+                    let mut capture = lock_capture(&coordinator);
+                    capture.drive();
+                    capture.all_targets_settled()
+                };
+                let now = Instant::now();
+                if settled || now >= deadline {
+                    break !settled && now >= deadline;
+                }
+                thread::sleep(
+                    Duration::from_millis(1)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            };
+            let writer = {
+                let mut capture = lock_capture(&coordinator);
+                if reached_deadline {
+                    capture.note_drain_deadline();
+                }
+                capture.take_writer_for_shutdown()
+            };
+            if let Some(writer) = writer {
+                let outcome = writer
+                    .shutdown(deadline.saturating_duration_since(Instant::now()))
+                    .outcome;
+                lock_capture(&coordinator).note_shutdown_outcome(outcome);
+            }
+        }
     }
 }
 
@@ -341,29 +378,82 @@ impl MultiServerDriver {
             owner,
             storage,
             terminfo,
-            history: None,
+            history_capture: None,
             history_failure: Arc::new(AtomicBool::new(false)),
+            history_diagnostics: HistoryDiagnostics::new(),
         }
     }
 
     /// Opt in to private checkpoint capture for this server generation.
     /// Existing and subsequently split sessions share one owner-thread writer.
     pub fn enable_history(&mut self, store: HistoryStore) {
-        let store = Arc::new(store);
+        if self.history_capture.is_some() {
+            self.history_diagnostics
+                .record(HistoryReason::CaptureInvalid);
+            self.history_failure.store(true, Ordering::Release);
+            return;
+        }
+        let writer = match HistoryWriter::start_with_diagnostics(
+            store,
+            &self.storage,
+            self.history_diagnostics.clone(),
+        ) {
+            Ok(writer) => writer,
+            Err(_) => {
+                self.history_failure.store(true, Ordering::Release);
+                return;
+            }
+        };
+        self.install_history_writer(writer);
+    }
+
+    fn install_history_writer(&mut self, writer: HistoryWriter) {
+        if self.history_capture.is_some() {
+            self.history_diagnostics
+                .record(HistoryReason::CaptureInvalid);
+            self.history_failure.store(true, Ordering::Release);
+            return;
+        }
+        let coordinator = Arc::new(Mutex::new(HistoryCaptureCoordinator::new(
+            writer,
+            Arc::clone(&self.history_failure),
+        )));
         self.owner.for_each_effects_mut(|target, effects| {
-            effects.enable_capture(
-                Arc::clone(&store),
+            effects.enable_async_capture(
+                Arc::clone(&coordinator),
                 Arc::clone(&self.history_failure),
                 target,
             );
         });
-        self.history = Some(store);
+        self.history_capture = Some(coordinator);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_history_backend_for_test(
+        &mut self,
+        backend: Box<dyn crate::history_writer::HistoryBackend>,
+    ) {
+        if self.history_capture.is_some() {
+            self.history_diagnostics
+                .record(HistoryReason::CaptureInvalid);
+            self.history_failure.store(true, Ordering::Release);
+            return;
+        }
+        match HistoryWriter::start_with_backend_and_diagnostics(
+            backend,
+            &self.storage,
+            self.history_diagnostics.clone(),
+        ) {
+            Ok(writer) => self.install_history_writer(writer),
+            Err(_) => self.history_failure.store(true, Ordering::Release),
+        }
     }
 
     /// Force a capture without interrupting any PTY if storage fails.
     pub fn capture_now(&mut self) {
         self.owner
             .for_each_effects_mut(|_, effects| effects.capture_now());
+        self.drive_history();
     }
 
     /// Sticky failure indicator, including panes retired after a failed write.
@@ -376,9 +466,14 @@ impl MultiServerDriver {
         Arc::clone(&self.history_failure)
     }
 
+    /// Return a stable diagnostic handle, including before history is enabled.
+    pub fn history_diagnostics(&self) -> HistoryDiagnostics {
+        self.history_diagnostics.clone()
+    }
+
     /// Whether a private checkpoint writer was opened for this server.
     pub fn history_available(&self) -> bool {
-        self.history.is_some()
+        self.history_capture.is_some()
     }
 
     /// Admit one kernel-authenticated connection within the worker cap.
@@ -391,10 +486,12 @@ impl MultiServerDriver {
     ///
     /// A per-session poll error is returned after the queue was still served.
     pub fn tick(&mut self, clock: impl Fn() -> u64) -> Result<(), ServerError> {
+        self.drive_history();
         let progress = self.owner.poll(clock());
         self.process_pending(&clock);
         self.process_pending_watches(&clock);
         self.hub.reap_finished();
+        self.drive_history();
         progress
     }
 
@@ -441,7 +538,7 @@ impl MultiServerDriver {
                 &mut self.storage,
                 &self.terminfo,
                 HistoryCapture {
-                    store: self.history.as_ref(),
+                    coordinator: self.history_capture.as_ref(),
                     failure: &self.history_failure,
                 },
                 &envelope.request,
@@ -488,6 +585,12 @@ impl MultiServerDriver {
             let _ = pending
                 .envelope
                 .try_reply(MultiReply::Error("server_stopping"));
+        }
+    }
+
+    fn drive_history(&mut self) {
+        if let Some(coordinator) = &self.history_capture {
+            lock_capture(coordinator).drive();
         }
     }
 }
@@ -934,9 +1037,9 @@ fn dispatch_split(
                 .spawn()
                 .map(|session| {
                     let mut effects = PtyEffects::new(session);
-                    if let Some(store) = history.store {
-                        effects.enable_capture(
-                            Arc::clone(store),
+                    if let Some(coordinator) = history.coordinator {
+                        effects.enable_async_capture(
+                            Arc::clone(coordinator),
                             Arc::clone(history.failure),
                             target,
                         );
@@ -965,7 +1068,7 @@ fn dispatch_split(
                         "invalid_split_request"
                     }
                     _ => "split_failed",
-                }))
+                }));
             }
         },
     };
@@ -1772,6 +1875,20 @@ mod tests {
     use super::*;
     use crate::event_journal::EventCursor;
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    static NEXT_BLOCKED_CAPTURE_FIXTURE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    struct RemoveFixture(PathBuf);
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    impl Drop for RemoveFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     const TARGET: TargetRef = TargetRef {
         generation: 3,
         workspace: 1,
@@ -2038,5 +2155,969 @@ mod tests {
         truncated.pop();
         assert!(decode_legacy_watch(&truncated).is_none());
         assert!(classify(&truncated).is_none());
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    struct BlockingHistoryBackend {
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: Option<std::sync::mpsc::Receiver<()>>,
+        observed_targets: std::sync::Arc<std::sync::Mutex<Vec<TargetRef>>>,
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    impl crate::history_writer::HistoryBackend for BlockingHistoryBackend {
+        fn load_rows(
+            &mut self,
+            _target: TargetRef,
+        ) -> io::Result<Option<crate::history_store::SavedHistory>> {
+            Ok(None)
+        }
+
+        fn begin_history(&mut self, target: TargetRef, _epoch: u64, _gap: bool) -> io::Result<()> {
+            self.observed_targets.lock().unwrap().push(target);
+            if let Some(release) = self.release.take() {
+                let _ = self.entered.send(());
+                let _ = release.recv();
+            }
+            Ok(())
+        }
+
+        fn mark_history(
+            &mut self,
+            _target: TargetRef,
+            _epoch: u64,
+            _disabled: bool,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn append_rows(
+            &mut self,
+            _target: TargetRef,
+            _rows: &[Vec<u8>],
+            _gap: bool,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn save_screen(
+            &mut self,
+            _target: TargetRef,
+            _buffer: crate::screen_checkpoint::ScreenBuffer,
+            _screen: &[u8],
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn mark_ended(&mut self, _target: TargetRef, _at_unix_ms: u64) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    struct AlwaysFailHistoryBackend;
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    impl crate::history_writer::HistoryBackend for AlwaysFailHistoryBackend {
+        fn load_rows(
+            &mut self,
+            _target: TargetRef,
+        ) -> io::Result<Option<crate::history_store::SavedHistory>> {
+            Ok(None)
+        }
+
+        fn begin_history(&mut self, _target: TargetRef, _epoch: u64, _gap: bool) -> io::Result<()> {
+            Err(io::Error::other("injected history backend failure"))
+        }
+
+        fn mark_history(
+            &mut self,
+            _target: TargetRef,
+            _epoch: u64,
+            _disabled: bool,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn append_rows(
+            &mut self,
+            _target: TargetRef,
+            _rows: &[Vec<u8>],
+            _gap: bool,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn save_screen(
+            &mut self,
+            _target: TargetRef,
+            _buffer: crate::screen_checkpoint::ScreenBuffer,
+            _screen: &[u8],
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn mark_ended(&mut self, _target: TargetRef, _at_unix_ms: u64) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn blocked_history_writer_does_not_block_pty_input_or_socket_control() {
+        use crate::handshake_protocol::{decode_welcome, Hello, CAPABILITY_INPUT, CAPABILITY_READ};
+        use crate::launch::LaunchContext;
+        use crate::managed_launch_protocol::{EnvironmentEntry, LaunchRequest};
+        use crate::multi_startup::{StartedMultiServer, StartupLaunch};
+        use crate::pane_layout::SplitDirection;
+        use crate::protocol::{OperationKey, OperationStatus, Outcome};
+        use crate::protocol_wire::{Frame, MessageKind};
+        use crate::response_protocol::{decode_response_payload, ResponseBody};
+        use crate::screen_checkpoint::decode as decode_checkpoint;
+        use crate::session_protocol::{
+            decode_session_info, encode_session_hello, encode_session_request, SessionHello,
+            SessionRequest,
+        };
+        use crate::split_protocol::{decode_split_result, encode_split_request, SplitRequest};
+        use crate::terminal::Key;
+        use crate::transport::AuthenticatedStream;
+        use crate::ui_protocol::{
+            decode_layout_reply, decode_screen_reply, encode_attach_target, encode_key_input,
+            encode_layout_query, encode_screen_query, planned_split_size, KeyInput,
+        };
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::net::UnixStream;
+        use std::path::PathBuf;
+        use std::sync::mpsc::sync_channel;
+        use std::time::{Duration, Instant};
+
+        let root = PathBuf::from("/private/tmp").join(format!(
+            "panelink-live-capture-blocked-{}-{}",
+            std::process::id(),
+            NEXT_BLOCKED_CAPTURE_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let _cleanup = RemoveFixture(root.clone());
+        let server_dir = root.join("server");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&server_dir)
+            .unwrap();
+        let terminfo = root.join("terminfo");
+        fs::DirBuilder::new().mode(0o700).create(&terminfo).unwrap();
+
+        let storage = ServerStorage::initialize(&server_dir).unwrap();
+        let context = LaunchContext {
+            working_directory: root.clone(),
+            environment: [
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                (OsString::from("HOME"), root.as_os_str().to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let arguments = vec![
+            OsString::from("-c"),
+            OsString::from(
+                "printf 'PTY-READY\\r\\n'; IFS= read -r line; printf 'INPUT:%s\\r\\n' \"$line\"; while :; do /bin/sleep 1; done",
+            ),
+        ];
+        let executable = OsString::from("/bin/sh");
+        let started = StartedMultiServer::start(
+            storage,
+            &terminfo,
+            &StartupLaunch {
+                executable: &executable,
+                arguments: &arguments,
+                context: &context,
+                rows: 8,
+                columns: 60,
+            },
+            true,
+        )
+        .unwrap();
+        let target = started.startup().target.unwrap();
+        let mut driver = started.into_driver();
+
+        let (entered_send, entered_recv) = sync_channel(1);
+        let (release_send, release_recv) = sync_channel(1);
+        let observed_targets = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        driver.enable_history_backend_for_test(Box::new(BlockingHistoryBackend {
+            entered: entered_send,
+            release: Some(release_recv),
+            observed_targets: std::sync::Arc::clone(&observed_targets),
+        }));
+        entered_recv
+            .recv_timeout(Duration::from_secs(3))
+            .expect("writer should reach the deterministic blocking backend");
+
+        let (server_socket, client_socket) = UnixStream::pair().unwrap();
+        driver
+            .attach(AuthenticatedStream::new(server_socket).unwrap())
+            .unwrap();
+        let failure = driver.history_failure_signal();
+        let client_cwd = root.clone();
+        let client = std::thread::scope(|scope| {
+            let task = scope.spawn(move || {
+                let deadline = || Instant::now() + Duration::from_secs(3);
+                let mut stream = AuthenticatedStream::new(client_socket).unwrap();
+                let hello = encode_session_hello(&SessionHello {
+                    hello: Hello {
+                        nonce: 17,
+                        required_capabilities: CAPABILITY_READ | CAPABILITY_INPUT,
+                        optional_capabilities: 0,
+                    },
+                    resume: None,
+                })
+                .unwrap();
+                stream
+                    .write_frame(
+                        &Frame::new(MessageKind::Hello, 0, &hello).unwrap(),
+                        deadline(),
+                    )
+                    .unwrap();
+                let welcome = stream.read_frame(deadline()).unwrap();
+                assert_eq!(welcome.kind(), MessageKind::Welcome);
+                let welcome = decode_welcome(welcome.payload()).unwrap();
+                stream.enable_snapshot_reads().unwrap();
+
+                let mut request_id = 0_u64;
+                let send =
+                    |stream: &mut AuthenticatedStream, request_id: &mut u64, payload: &[u8]| {
+                        *request_id += 1;
+                        stream
+                            .write_frame(
+                                &Frame::new(MessageKind::Request, *request_id, payload).unwrap(),
+                                deadline(),
+                            )
+                            .unwrap();
+                        stream.read_frame(deadline()).unwrap()
+                    };
+                let describe = encode_session_request(&SessionRequest::Describe).unwrap();
+                let info =
+                    decode_session_info(send(&mut stream, &mut request_id, &describe).payload())
+                        .unwrap();
+                let key = OperationKey {
+                    generation: welcome.generation,
+                    lease: welcome.lease,
+                    sequence: 1,
+                };
+                let claim = encode_session_request(&SessionRequest::Claim {
+                    key,
+                    target,
+                    expected_owner_revision: info.owner_revision,
+                    ttl_seconds: 30,
+                })
+                .unwrap();
+                let claim_reply = send(&mut stream, &mut request_id, &claim);
+                assert_eq!(claim_reply.kind(), MessageKind::Response);
+                assert!(matches!(
+                    decode_response_payload(claim_reply.payload()).unwrap().body,
+                    ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+                ));
+                let info =
+                    decode_session_info(send(&mut stream, &mut request_id, &describe).payload())
+                        .unwrap();
+                let keys = [
+                    Key::Char('B'),
+                    Key::Char('L'),
+                    Key::Char('O'),
+                    Key::Char('C'),
+                    Key::Char('K'),
+                    Key::Char('E'),
+                    Key::Char('D'),
+                    Key::Enter,
+                ];
+                let key = OperationKey { sequence: 2, ..key };
+                let input = encode_key_input(&KeyInput {
+                    key,
+                    target,
+                    expected_owner_revision: info.owner_revision,
+                    keys: &keys,
+                })
+                .unwrap();
+                let input_reply = send(&mut stream, &mut request_id, &input);
+                assert_eq!(input_reply.kind(), MessageKind::Response);
+                assert!(matches!(
+                    decode_response_payload(input_reply.payload()).unwrap().body,
+                    ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+                ));
+
+                let deadline_at = Instant::now() + Duration::from_secs(3);
+                let input_screen = loop {
+                    let screen = encode_screen_query(target).unwrap();
+                    let reply = send(&mut stream, &mut request_id, &screen);
+                    assert_eq!(reply.kind(), MessageKind::Snapshot);
+                    let snapshot =
+                        crate::ui_protocol::decode_screen_reply(reply.payload()).unwrap();
+                    let checkpoint = decode_checkpoint(snapshot.checkpoint()).unwrap();
+                    let text = (0..checkpoint.rows())
+                        .map(|row| {
+                            (0..checkpoint.columns())
+                                .map(|column| checkpoint.cell(row, column).unwrap().text())
+                                .collect::<String>()
+                        })
+                        .collect::<String>();
+                    if text.contains("INPUT:BLOCKED") {
+                        break text;
+                    }
+                    assert!(
+                        Instant::now() < deadline_at,
+                        "PTY did not process socket input"
+                    );
+                    std::thread::sleep(Duration::from_millis(2));
+                };
+                let layout_request = encode_layout_query();
+                let layout = decode_layout_reply(
+                    send(&mut stream, &mut request_id, &layout_request).payload(),
+                )
+                .unwrap();
+                let (rows, columns) =
+                    planned_split_size(&layout, target, SplitDirection::Right).unwrap();
+                let split_key = OperationKey { sequence: 3, ..key };
+                let arguments: [&[u8]; 2] = [
+                    b"-c",
+                    b"printf 'ASYNC-SPLIT-READY\\r\\n'; while :; do /bin/sleep 1; done",
+                ];
+                let environment = [
+                    EnvironmentEntry {
+                        name: b"PATH",
+                        value: b"/usr/bin:/bin",
+                    },
+                    EnvironmentEntry {
+                        name: b"HOME",
+                        value: client_cwd.as_os_str().as_bytes(),
+                    },
+                ];
+                let launch = LaunchRequest {
+                    key: split_key,
+                    rows,
+                    columns,
+                    requested_executable: b"/bin/sh",
+                    requested_working_directory: client_cwd.as_os_str().as_bytes(),
+                    client_working_directory: client_cwd.as_os_str().as_bytes(),
+                    arguments: &arguments,
+                    environment: &environment,
+                };
+                let mut split_payload = Vec::new();
+                encode_split_request(
+                    &SplitRequest {
+                        key: split_key,
+                        target,
+                        expected_layout_revision: layout.revision,
+                        direction: SplitDirection::Right,
+                        launch: &launch,
+                    },
+                    &mut split_payload,
+                )
+                .unwrap();
+                let split_reply = send(&mut stream, &mut request_id, &split_payload);
+                assert_eq!(split_reply.kind(), MessageKind::Response);
+                let split = decode_split_result(split_reply.payload()).unwrap();
+                assert_eq!(split.outcome, Outcome::Applied);
+                let split_target = split.new_target.expect("applied split target");
+                (input_screen, split_target)
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(6);
+            while !task.is_finished() {
+                let tick_started = Instant::now();
+                driver.tick(|| 100).unwrap();
+                assert!(
+                    tick_started.elapsed() < Duration::from_millis(250),
+                    "owner tick waited for blocked history storage"
+                );
+                assert!(Instant::now() < deadline, "socket control did not progress");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            task.join().unwrap()
+        });
+        let (client, split_target) = client;
+        assert!(client.contains("PTY-READY"));
+        assert!(client.contains("INPUT:BLOCKED"));
+        release_send.send(()).unwrap();
+
+        let (server_socket, client_socket) = UnixStream::pair().unwrap();
+        driver
+            .attach(AuthenticatedStream::new(server_socket).unwrap())
+            .unwrap();
+        let screen = std::thread::scope(|scope| {
+            let task = scope.spawn(move || {
+                let mut stream = AuthenticatedStream::new(client_socket).unwrap();
+                let mut hello = encode_session_hello(&SessionHello {
+                    hello: Hello {
+                        nonce: 18,
+                        required_capabilities: CAPABILITY_READ,
+                        optional_capabilities: 0,
+                    },
+                    resume: None,
+                })
+                .unwrap();
+                hello.extend_from_slice(&encode_attach_target(split_target).unwrap());
+                stream
+                    .write_frame(
+                        &Frame::new(MessageKind::Hello, 0, &hello).unwrap(),
+                        Instant::now() + Duration::from_secs(3),
+                    )
+                    .unwrap();
+                let welcome = stream
+                    .read_frame(Instant::now() + Duration::from_secs(3))
+                    .unwrap();
+                assert_eq!(welcome.kind(), MessageKind::Welcome);
+                let _welcome = decode_welcome(welcome.payload()).unwrap();
+                stream.enable_snapshot_reads().unwrap();
+                let query = encode_screen_query(split_target).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    stream
+                        .write_frame(
+                            &Frame::new(MessageKind::Request, 1, &query).unwrap(),
+                            Instant::now() + Duration::from_secs(3),
+                        )
+                        .unwrap();
+                    let reply = stream
+                        .read_frame(Instant::now() + Duration::from_secs(3))
+                        .unwrap();
+                    if reply.kind() == MessageKind::Snapshot {
+                        let snapshot = decode_screen_reply(reply.payload()).unwrap();
+                        let checkpoint = decode_checkpoint(snapshot.checkpoint()).unwrap();
+                        let text = (0..checkpoint.rows())
+                            .map(|row| {
+                                (0..checkpoint.columns())
+                                    .map(|column| checkpoint.cell(row, column).unwrap().text())
+                                    .collect::<String>()
+                            })
+                            .collect::<String>();
+                        if text.contains("ASYNC-SPLIT-READY") {
+                            return text;
+                        }
+                    }
+                    assert!(Instant::now() < deadline, "split PTY did not start");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !task.is_finished() {
+                driver.tick(|| 100).unwrap();
+                assert!(Instant::now() < deadline, "split screen query timed out");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            task.join().unwrap()
+        });
+        assert!(screen.contains("ASYNC-SPLIT-READY"));
+        let capture_deadline = Instant::now() + Duration::from_secs(3);
+        while !observed_targets.lock().unwrap().contains(&split_target) {
+            driver.tick(|| 100).unwrap();
+            assert!(
+                Instant::now() < capture_deadline,
+                "split target was not captured"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!failure.load(Ordering::Acquire));
+        drop(driver);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn full_capture_registry_does_not_reject_socket_split_or_child_launch() {
+        use crate::handshake_protocol::{decode_welcome, Hello, CAPABILITY_INPUT, CAPABILITY_READ};
+        use crate::history_capture::MAX_CAPTURE_TARGETS;
+        use crate::launch::LaunchContext;
+        use crate::managed_launch_protocol::{EnvironmentEntry, LaunchRequest};
+        use crate::multi_startup::{StartedMultiServer, StartupLaunch};
+        use crate::pane_layout::SplitDirection;
+        use crate::protocol::{OperationKey, Outcome};
+        use crate::protocol_wire::{Frame, MessageKind};
+        use crate::screen_checkpoint::decode as decode_checkpoint;
+        use crate::session_protocol::{
+            decode_session_info, encode_session_hello, encode_session_request, SessionHello,
+            SessionRequest,
+        };
+        use crate::split_protocol::{decode_split_result, encode_split_request, SplitRequest};
+        use crate::transport::AuthenticatedStream;
+        use crate::ui_protocol::{
+            decode_layout_reply, decode_screen_reply, encode_attach_target, encode_layout_query,
+            encode_screen_query, planned_split_size,
+        };
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::net::UnixStream;
+        use std::path::PathBuf;
+        use std::sync::mpsc::sync_channel;
+
+        let root = PathBuf::from("/private/tmp").join(format!(
+            "panelink-capture-capacity-{}-{}",
+            std::process::id(),
+            NEXT_BLOCKED_CAPTURE_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let _cleanup = RemoveFixture(root.clone());
+        let server_dir = root.join("server");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&server_dir)
+            .unwrap();
+        let terminfo = root.join("terminfo");
+        fs::DirBuilder::new().mode(0o700).create(&terminfo).unwrap();
+        let storage = ServerStorage::initialize(&server_dir).unwrap();
+        let context = LaunchContext {
+            working_directory: root.clone(),
+            environment: [
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                (OsString::from("HOME"), root.as_os_str().to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let arguments = vec![
+            OsString::from("-c"),
+            OsString::from("printf 'CAPACITY-ROOT-READY\\r\\n'; while :; do /bin/sleep 1; done"),
+        ];
+        let executable = OsString::from("/bin/sh");
+        let started = StartedMultiServer::start(
+            storage,
+            &terminfo,
+            &StartupLaunch {
+                executable: &executable,
+                arguments: &arguments,
+                context: &context,
+                rows: 8,
+                columns: 60,
+            },
+            true,
+        )
+        .unwrap();
+        let target = started.startup().target.unwrap();
+        let mut driver = started.into_driver();
+
+        let (entered_send, entered_recv) = sync_channel(1);
+        let (release_send, release_recv) = sync_channel(1);
+        release_send.send(()).unwrap();
+        driver.enable_history_backend_for_test(Box::new(BlockingHistoryBackend {
+            entered: entered_send,
+            release: Some(release_recv),
+            observed_targets: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }));
+        entered_recv
+            .recv_timeout(Duration::from_secs(3))
+            .expect("initial capture reaches the writer");
+        {
+            let shared = driver.history_capture.as_ref().unwrap();
+            let mut capture = lock_capture(shared);
+            for slot in 1..MAX_CAPTURE_TARGETS {
+                assert!(capture.register_target(
+                    TargetRef {
+                        generation: target.generation,
+                        workspace: target.workspace,
+                        pane: 100 + slot as u64,
+                        session: 100 + slot as u64,
+                        occupant_revision: 1,
+                    },
+                    vt100::HistoryCursor {
+                        epoch: 1,
+                        ordinal: 0,
+                    }
+                ));
+            }
+        }
+
+        let (server_socket, client_socket) = UnixStream::pair().unwrap();
+        driver
+            .attach(AuthenticatedStream::new(server_socket).unwrap())
+            .unwrap();
+        let client_cwd = root.clone();
+        let split_target = std::thread::scope(|scope| {
+            let task = scope.spawn(move || {
+                let deadline = || Instant::now() + Duration::from_secs(3);
+                let mut stream = AuthenticatedStream::new(client_socket).unwrap();
+                let hello = encode_session_hello(&SessionHello {
+                    hello: Hello {
+                        nonce: 29,
+                        required_capabilities: CAPABILITY_READ | CAPABILITY_INPUT,
+                        optional_capabilities: 0,
+                    },
+                    resume: None,
+                })
+                .unwrap();
+                stream
+                    .write_frame(
+                        &Frame::new(MessageKind::Hello, 0, &hello).unwrap(),
+                        deadline(),
+                    )
+                    .unwrap();
+                let welcome = stream.read_frame(deadline()).unwrap();
+                assert_eq!(welcome.kind(), MessageKind::Welcome);
+                let welcome = decode_welcome(welcome.payload()).unwrap();
+                stream.enable_snapshot_reads().unwrap();
+                let mut request_id = 0_u64;
+                let mut send = |payload: &[u8]| {
+                    request_id += 1;
+                    stream
+                        .write_frame(
+                            &Frame::new(MessageKind::Request, request_id, payload).unwrap(),
+                            deadline(),
+                        )
+                        .unwrap();
+                    stream.read_frame(deadline()).unwrap()
+                };
+                let describe = encode_session_request(&SessionRequest::Describe).unwrap();
+                let info = decode_session_info(send(&describe).payload()).unwrap();
+                let key = OperationKey {
+                    generation: welcome.generation,
+                    lease: welcome.lease,
+                    sequence: 1,
+                };
+                let claim = encode_session_request(&SessionRequest::Claim {
+                    key,
+                    target,
+                    expected_owner_revision: info.owner_revision,
+                    ttl_seconds: 30,
+                })
+                .unwrap();
+                assert_eq!(send(&claim).kind(), MessageKind::Response);
+                let layout_request = encode_layout_query();
+                let layout = decode_layout_reply(send(&layout_request).payload()).unwrap();
+                let (rows, columns) =
+                    planned_split_size(&layout, target, SplitDirection::Right).unwrap();
+                let split_key = OperationKey { sequence: 2, ..key };
+                let arguments: [&[u8]; 2] = [
+                    b"-c",
+                    b"printf 'CAPACITY-SPLIT-READY\\r\\n'; while :; do /bin/sleep 1; done",
+                ];
+                let environment = [
+                    EnvironmentEntry {
+                        name: b"PATH",
+                        value: b"/usr/bin:/bin",
+                    },
+                    EnvironmentEntry {
+                        name: b"HOME",
+                        value: client_cwd.as_os_str().as_bytes(),
+                    },
+                ];
+                let launch = LaunchRequest {
+                    key: split_key,
+                    rows,
+                    columns,
+                    requested_executable: b"/bin/sh",
+                    requested_working_directory: client_cwd.as_os_str().as_bytes(),
+                    client_working_directory: client_cwd.as_os_str().as_bytes(),
+                    arguments: &arguments,
+                    environment: &environment,
+                };
+                let mut split_payload = Vec::new();
+                encode_split_request(
+                    &SplitRequest {
+                        key: split_key,
+                        target,
+                        expected_layout_revision: layout.revision,
+                        direction: SplitDirection::Right,
+                        launch: &launch,
+                    },
+                    &mut split_payload,
+                )
+                .unwrap();
+                let reply = send(&split_payload);
+                assert_eq!(reply.kind(), MessageKind::Response);
+                let result = decode_split_result(reply.payload()).unwrap();
+                assert_eq!(result.outcome, Outcome::Applied);
+                result.new_target.expect("child target").to_owned()
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !task.is_finished() {
+                driver.tick(|| 100).unwrap();
+                assert!(Instant::now() < deadline, "split control did not finish");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            task.join().unwrap()
+        });
+        assert!(driver.history_capture_failed());
+
+        let (server_socket, client_socket) = UnixStream::pair().unwrap();
+        driver
+            .attach(AuthenticatedStream::new(server_socket).unwrap())
+            .unwrap();
+        let screen = std::thread::scope(|scope| {
+            let task = scope.spawn(move || {
+                let mut stream = AuthenticatedStream::new(client_socket).unwrap();
+                let mut hello = encode_session_hello(&SessionHello {
+                    hello: Hello {
+                        nonce: 30,
+                        required_capabilities: CAPABILITY_READ,
+                        optional_capabilities: 0,
+                    },
+                    resume: None,
+                })
+                .unwrap();
+                hello.extend_from_slice(&encode_attach_target(split_target).unwrap());
+                stream
+                    .write_frame(
+                        &Frame::new(MessageKind::Hello, 0, &hello).unwrap(),
+                        Instant::now() + Duration::from_secs(3),
+                    )
+                    .unwrap();
+                let welcome = stream
+                    .read_frame(Instant::now() + Duration::from_secs(3))
+                    .unwrap();
+                assert_eq!(welcome.kind(), MessageKind::Welcome);
+                stream.enable_snapshot_reads().unwrap();
+                let query = encode_screen_query(split_target).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let mut request_id = 0_u64;
+                loop {
+                    request_id += 1;
+                    stream
+                        .write_frame(
+                            &Frame::new(MessageKind::Request, request_id, &query).unwrap(),
+                            Instant::now() + Duration::from_secs(3),
+                        )
+                        .unwrap();
+                    let reply = stream
+                        .read_frame(Instant::now() + Duration::from_secs(3))
+                        .unwrap();
+                    if reply.kind() == MessageKind::Snapshot {
+                        let snapshot = decode_screen_reply(reply.payload()).unwrap();
+                        let checkpoint = decode_checkpoint(snapshot.checkpoint()).unwrap();
+                        let text = (0..checkpoint.rows())
+                            .map(|row| {
+                                (0..checkpoint.columns())
+                                    .map(|column| checkpoint.cell(row, column).unwrap().text())
+                                    .collect::<String>()
+                            })
+                            .collect::<String>();
+                        if text.contains("CAPACITY-SPLIT-READY") {
+                            return text;
+                        }
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "uncaptured split child did not start"
+                    );
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !task.is_finished() {
+                driver.tick(|| 100).unwrap();
+                assert!(Instant::now() < deadline, "child screen query timed out");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            task.join().unwrap()
+        });
+        assert!(screen.contains("CAPACITY-SPLIT-READY"));
+        drop(driver);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn persistent_history_writer_failure_does_not_stop_live_shell_input() {
+        use crate::handshake_protocol::{decode_welcome, Hello, CAPABILITY_INPUT, CAPABILITY_READ};
+        use crate::launch::LaunchContext;
+        use crate::multi_startup::{StartedMultiServer, StartupLaunch};
+        use crate::protocol::{OperationKey, OperationStatus, Outcome};
+        use crate::protocol_wire::{Frame, MessageKind};
+        use crate::response_protocol::{decode_response_payload, ResponseBody};
+        use crate::screen_checkpoint::decode as decode_checkpoint;
+        use crate::session_protocol::{
+            decode_session_info, encode_session_hello, encode_session_request, SessionHello,
+            SessionRequest,
+        };
+        use crate::terminal::Key;
+        use crate::transport::AuthenticatedStream;
+        use crate::ui_protocol::{
+            decode_screen_reply, encode_key_input, encode_screen_query, KeyInput,
+        };
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::net::UnixStream;
+        use std::path::PathBuf;
+
+        let root = PathBuf::from("/private/tmp").join(format!(
+            "panelink-live-history-failure-{}-{}",
+            std::process::id(),
+            NEXT_BLOCKED_CAPTURE_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let _cleanup = RemoveFixture(root.clone());
+        let server_dir = root.join("server");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&server_dir)
+            .unwrap();
+        let terminfo = root.join("terminfo");
+        fs::DirBuilder::new().mode(0o700).create(&terminfo).unwrap();
+        let storage = ServerStorage::initialize(&server_dir).unwrap();
+        let context = LaunchContext {
+            working_directory: root.clone(),
+            environment: [
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                (OsString::from("HOME"), root.as_os_str().to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let arguments = vec![
+            OsString::from("-c"),
+            OsString::from(
+                "printf 'FAILURE-READY\\r\\n'; IFS= read -r line; printf 'AFTER-FAILURE:%s\\r\\n' \"$line\"; while :; do /bin/sleep 1; done",
+            ),
+        ];
+        let executable = OsString::from("/bin/sh");
+        let started = StartedMultiServer::start(
+            storage,
+            &terminfo,
+            &StartupLaunch {
+                executable: &executable,
+                arguments: &arguments,
+                context: &context,
+                rows: 8,
+                columns: 60,
+            },
+            true,
+        )
+        .unwrap();
+        let target = started.startup().target.unwrap();
+        let mut driver = started.into_driver();
+        driver.enable_history_backend_for_test(Box::new(AlwaysFailHistoryBackend));
+        assert!(driver.history_available());
+
+        let failure_deadline = Instant::now() + Duration::from_secs(3);
+        while !driver.history_capture_failed() {
+            let tick_started = Instant::now();
+            driver.tick(|| 100).unwrap();
+            assert!(tick_started.elapsed() < Duration::from_millis(250));
+            assert!(
+                Instant::now() < failure_deadline,
+                "backend failure was not reported"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let (server_socket, client_socket) = UnixStream::pair().unwrap();
+        driver
+            .attach(AuthenticatedStream::new(server_socket).unwrap())
+            .unwrap();
+        let client = std::thread::scope(|scope| {
+            let task = scope.spawn(move || {
+                let deadline = || Instant::now() + Duration::from_secs(3);
+                let mut stream = AuthenticatedStream::new(client_socket).unwrap();
+                let hello = encode_session_hello(&SessionHello {
+                    hello: Hello {
+                        nonce: 41,
+                        required_capabilities: CAPABILITY_READ | CAPABILITY_INPUT,
+                        optional_capabilities: 0,
+                    },
+                    resume: None,
+                })
+                .unwrap();
+                stream
+                    .write_frame(
+                        &Frame::new(MessageKind::Hello, 0, &hello).unwrap(),
+                        deadline(),
+                    )
+                    .unwrap();
+                let welcome = stream.read_frame(deadline()).unwrap();
+                assert_eq!(welcome.kind(), MessageKind::Welcome);
+                let welcome = decode_welcome(welcome.payload()).unwrap();
+                stream.enable_snapshot_reads().unwrap();
+                let mut request_id = 0_u64;
+                let mut send = |payload: &[u8]| {
+                    request_id += 1;
+                    stream
+                        .write_frame(
+                            &Frame::new(MessageKind::Request, request_id, payload).unwrap(),
+                            deadline(),
+                        )
+                        .unwrap();
+                    stream.read_frame(deadline()).unwrap()
+                };
+                let describe = encode_session_request(&SessionRequest::Describe).unwrap();
+                let info = decode_session_info(send(&describe).payload()).unwrap();
+                let claim_key = OperationKey {
+                    generation: welcome.generation,
+                    lease: welcome.lease,
+                    sequence: 1,
+                };
+                let claim = encode_session_request(&SessionRequest::Claim {
+                    key: claim_key,
+                    target,
+                    expected_owner_revision: info.owner_revision,
+                    ttl_seconds: 30,
+                })
+                .unwrap();
+                let claim_reply = send(&claim);
+                assert!(matches!(
+                    decode_response_payload(claim_reply.payload()).unwrap().body,
+                    ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+                ));
+                let current_info = decode_session_info(send(&describe).payload()).unwrap();
+                let keys: Vec<Key> = "SURVIVES"
+                    .chars()
+                    .map(Key::Char)
+                    .chain([Key::Enter])
+                    .collect();
+                let input_key = OperationKey {
+                    sequence: 2,
+                    ..claim_key
+                };
+                let input = encode_key_input(&KeyInput {
+                    key: input_key,
+                    target,
+                    expected_owner_revision: current_info.owner_revision,
+                    keys: &keys,
+                })
+                .unwrap();
+                let input_reply = send(&input);
+                assert!(matches!(
+                    decode_response_payload(input_reply.payload()).unwrap().body,
+                    ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+                ));
+                let query = encode_screen_query(target).unwrap();
+                let deadline_at = Instant::now() + Duration::from_secs(3);
+                loop {
+                    let reply = send(&query);
+                    if reply.kind() == MessageKind::Snapshot {
+                        let screen = decode_screen_reply(reply.payload()).unwrap();
+                        let checkpoint = decode_checkpoint(screen.checkpoint()).unwrap();
+                        let text = (0..checkpoint.rows())
+                            .map(|row| {
+                                (0..checkpoint.columns())
+                                    .map(|column| checkpoint.cell(row, column).unwrap().text())
+                                    .collect::<String>()
+                            })
+                            .collect::<String>();
+                        if text.contains("AFTER-FAILURE:SURVIVES") {
+                            return text;
+                        }
+                    }
+                    assert!(
+                        Instant::now() < deadline_at,
+                        "shell did not process input after storage failure"
+                    );
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !task.is_finished() {
+                let tick_started = Instant::now();
+                driver.tick(|| 100).unwrap();
+                assert!(tick_started.elapsed() < Duration::from_millis(250));
+                assert!(
+                    Instant::now() < deadline,
+                    "socket control stalled after history failure"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            task.join().unwrap()
+        });
+        assert!(client.contains("AFTER-FAILURE:SURVIVES"));
+        assert!(driver.history_capture_failed());
+        drop(driver);
     }
 }
