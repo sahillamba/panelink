@@ -13,8 +13,8 @@ use panelink::control_protocol::TargetRef;
 use panelink::pane_layout::{PaneLayout, Rect, SplitDirection};
 use panelink::screen_checkpoint::ScreenCheckpoint;
 use panelink::split_menu::{
-    CloseConfirm, CloseIntent, ConfirmResponse, MenuResponse, MenuState, OverlayStyle as MenuStyle,
-    SplitIntent,
+    Availability, CloseConfirm, CloseIntent, ConfirmResponse, MenuResponse, MenuState,
+    OverlayStyle as MenuStyle, SplitIntent,
 };
 use panelink::terminal::compose::{
     ComposeFrame, Compositor, OverlayLine, OverlayStyle, OverlayView, PaneContent, PaneView,
@@ -35,7 +35,7 @@ const STATUS_TTL: Duration = Duration::from_secs(3);
 const NAV_TIMEOUT: Duration = Duration::from_secs(4);
 /// Bottom banner shown while navigation mode (after Ctrl-B) is active.
 pub(crate) const NAV_BANNER: &str =
-    " NAV  s menu | l r u d split | arrows/o focus | x close | ^X detach | Esc ";
+    " NAV  s menu | v saved layout | l r u d split | arrows/o focus | x close | ^X detach | Esc ";
 const TOO_SMALL: &str = "Panelink: terminal too small for the pane layout; enlarge it";
 
 /// One fully planned split built from a captured menu intent.
@@ -89,6 +89,7 @@ enum FocusMove {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Flow {
     Continue,
+    ViewRecovery,
     Quit,
 }
 
@@ -158,6 +159,20 @@ impl App {
     #[cfg(test)]
     pub(crate) fn menu_open(&self) -> bool {
         self.menu.is_open()
+    }
+
+    pub(crate) fn needs_recovery_availability(&self, event: &Event) -> bool {
+        if self.confirm.is_open() || self.menu.is_open() {
+            return false;
+        }
+        match event {
+            Event::Mouse(mouse) => matches!(mouse_button(mouse), Some((true, true))),
+            Event::Key(key) if self.prefix.is_some() && (key.is_press() || key.is_repeat()) => {
+                (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                    && matches!(key.code, KeyCode::Char('s' | 'S' | 'v' | 'V'))
+            }
+            _ => false,
+        }
     }
 
     #[cfg(test)]
@@ -311,6 +326,7 @@ impl App {
         &mut self,
         event: &Event,
         now: Instant,
+        recovery_availability: Availability,
         effects: &mut impl Effects,
     ) -> Flow {
         if self.confirm.is_open() {
@@ -334,10 +350,19 @@ impl App {
                     expected_layout_revision: self.menu_revision,
                     ..intent
                 }),
+                MenuResponse::RecoveryRequested => return Flow::ViewRecovery,
+                MenuResponse::RecoveryUnavailable => {
+                    self.set_status("No previous layout saved", now)
+                }
                 MenuResponse::NotOpen | MenuResponse::Consumed | MenuResponse::Closed => {}
             }
             return Flow::Continue;
         }
+        let recovery_availability = if self.needs_recovery_availability(event) {
+            recovery_availability
+        } else {
+            Availability::Disabled(panelink::split_menu::DisabledReason::NoPreviousLayoutSaved)
+        };
         match event {
             Event::Key(key) => {
                 let action = map_key(*key);
@@ -345,7 +370,13 @@ impl App {
                     if !key.is_press() && !key.is_repeat() {
                         return Flow::Continue;
                     }
-                    return self.navigate(key.code, key.modifiers, now, effects);
+                    return self.navigate(
+                        key.code,
+                        key.modifiers,
+                        now,
+                        recovery_availability,
+                        effects,
+                    );
                 }
                 match action {
                     KeyAction::Forward(key) => self.push_key(key, now, effects),
@@ -381,7 +412,7 @@ impl App {
                 }
                 Some((true, true)) => {
                     self.flush(now, effects);
-                    self.open_at_pointer(mouse.column, mouse.row, now);
+                    self.open_at_pointer(mouse.column, mouse.row, now, recovery_availability);
                 }
                 // Mouse events never reach children in this phase.
                 _ => {}
@@ -399,6 +430,7 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
         now: Instant,
+        recovery_availability: Availability,
         effects: &mut impl Effects,
     ) -> Flow {
         self.dirty = true;
@@ -430,7 +462,13 @@ impl App {
             return Flow::Continue;
         }
         match code {
-            KeyCode::Char('s' | 'S') if plain => self.open_for_focused(now),
+            KeyCode::Char('s' | 'S') if plain => self.open_for_focused(now, recovery_availability),
+            KeyCode::Char('v' | 'V') if plain => {
+                if recovery_availability == Availability::Enabled {
+                    return Flow::ViewRecovery;
+                }
+                self.set_status("No previous layout saved", now);
+            }
             KeyCode::Char('x' | 'X') if plain => self.confirm_close_focused(now),
             // Ctrl-X detaches, also from navigation mode.
             KeyCode::Char('x' | 'X') if modifiers == KeyModifiers::CONTROL => {
@@ -619,7 +657,13 @@ impl App {
             .map(|pane| pane.target)
     }
 
-    fn open_at_pointer(&mut self, x: u16, y: u16, now: Instant) {
+    fn open_at_pointer(
+        &mut self,
+        x: u16,
+        y: u16,
+        now: Instant,
+        recovery_availability: Availability,
+    ) {
         let (Some(local), Some(layout), true) = (self.local.as_ref(), self.layout, self.fits())
         else {
             self.set_status("menu unavailable: terminal too small", now);
@@ -628,7 +672,7 @@ impl App {
         let (rows, columns) = self.viewport();
         if self
             .menu
-            .open_at_pointer(local, x, y, rows, columns)
+            .open_at_pointer_with_recovery(local, x, y, rows, columns, recovery_availability)
             .is_ok()
         {
             self.menu_revision = layout.revision;
@@ -636,7 +680,7 @@ impl App {
         }
     }
 
-    fn open_for_focused(&mut self, now: Instant) {
+    fn open_for_focused(&mut self, now: Instant, recovery_availability: Availability) {
         let (Some(local), Some(layout), Some(focus), true) =
             (self.local.as_ref(), self.layout, self.focus, self.fits())
         else {
@@ -646,7 +690,7 @@ impl App {
         let (rows, columns) = self.viewport();
         if self
             .menu
-            .open_for_focused(local, focus, rows, columns)
+            .open_for_focused_with_recovery(local, focus, rows, columns, recovery_availability)
             .is_ok()
         {
             self.menu_revision = layout.revision;

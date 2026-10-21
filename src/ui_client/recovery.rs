@@ -89,10 +89,42 @@ pub(crate) fn run(view: RecoveryView) -> Result<(), &'static str> {
 
 fn run_inner(view: &RecoveryView) -> Result<(), &'static str> {
     let mut host = HostGuard::open().map_err(host_error_message)?;
+    let stop = register_stop_flag()?;
+    run_frames(view, &mut host, &stop, true)
+}
+
+/// Run the recovery viewer over an already-owned host terminal without
+/// entering or restoring terminal modes. The caller retains its guard and
+/// resumes its own event loop after this returns.
+pub(crate) fn run_in_workspace(
+    view: &RecoveryView,
+    host: &mut HostGuard,
+    stop: &AtomicBool,
+) -> Result<(), &'static str> {
+    // Reuse the attach loop's process-lifetime stop flag: signal-hook
+    // registrations are never unregistered, so registering per open would
+    // accumulate handlers for every viewer visit.
+    let result = catch_unwind(AssertUnwindSafe(|| run_frames(view, host, stop, false)));
+    match result {
+        Ok(result) => result,
+        Err(_) => Err("recovery viewer failed"),
+    }
+}
+
+fn register_stop_flag() -> Result<Arc<AtomicBool>, &'static str> {
     let stop = Arc::new(AtomicBool::new(false));
     for signal in [SIGINT, SIGTERM, SIGHUP] {
         flag::register(signal, Arc::clone(&stop)).map_err(|_| "could not register stop signals")?;
     }
+    Ok(stop)
+}
+
+fn run_frames(
+    view: &RecoveryView,
+    host: &mut HostGuard,
+    stop: &AtomicBool,
+    enter_terminal: bool,
+) -> Result<(), &'static str> {
     let (rows, columns) = host.size().map_err(host_error_message)?;
     let mut compositor = Compositor::try_new().map_err(|_| "could not compose recovery view")?;
     let mut snapshots = [
@@ -115,7 +147,9 @@ fn run_inner(view: &RecoveryView) -> Result<(), &'static str> {
     let mut last_render = Instant::now() - RENDER_INTERVAL;
     let mut last_input = None;
 
-    host.enter().map_err(host_error_message)?;
+    if enter_terminal {
+        host.enter().map_err(host_error_message)?;
+    }
     let result = loop {
         if stop.load(Ordering::Relaxed) {
             break Ok(());
@@ -212,7 +246,11 @@ fn run_inner(view: &RecoveryView) -> Result<(), &'static str> {
         compositor.commit();
         thread::sleep(Duration::from_millis(5));
     };
-    result.and(host.restore().map_err(host_error_message))
+    if enter_terminal {
+        result.and(host.restore().map_err(host_error_message))
+    } else {
+        result
+    }
 }
 
 fn host_error_message(error: HostError) -> &'static str {
@@ -680,6 +718,21 @@ mod tests {
             map_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
             ViewerKey::Ignore
         );
+    }
+
+    #[test]
+    fn in_workspace_viewer_loop_does_not_restore_the_callers_terminal() {
+        let viewer = view();
+        let run_frames_fn: fn(
+            &RecoveryView,
+            &mut HostGuard,
+            &AtomicBool,
+            bool,
+        ) -> Result<(), &'static str> = run_frames;
+        let _ = run_frames_fn;
+        // The borrowed-host entry point cannot own terminal restoration; only
+        // the standalone path passes `enter_terminal = true`.
+        assert!(viewer.panes.is_empty());
     }
 
     #[test]

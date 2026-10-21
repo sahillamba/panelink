@@ -53,6 +53,11 @@ impl Net {
     /// `context_dir` (so reattaching never creates a new lease). Only if none
     /// resumes does it open a fresh, trailer-less Hello; that lease is then
     /// adopted as the first pane's new context, never leaked.
+    /// Private server directory this client attached to (read-only use).
+    pub(crate) fn server_directory(&self) -> &std::path::Path {
+        &self.directory
+    }
+
     pub(crate) fn connect(
         directory: PathBuf,
         context_dir: PathBuf,

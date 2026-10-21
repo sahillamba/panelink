@@ -1,5 +1,16 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Recovery chooser + in-workspace menu — 2026-10-21 (read this first)
+
+Two GPT-6-Luna (xhigh) workers in parallel. L4 delivered the TTY-only
+startup chooser (pure model + bounded raw-key read); L5 looped on failed
+patches for ~50 min and left a non-compiling tree, so the parent stopped it
+and finished integration (dedupe, Net::server_directory, shared stop flag,
+lone-Esc guard, test path updates). Existing attach PTY suite now exercises
+the real chooser. Verifier 8/8, 964 passed/0 failed/15 ignored. Manual Apple
+Terminal check of the chooser/viewer not done. Next: explicit relaunch +
+links. Committed; no push.
+
 ## Recovery viewer + P4 PTY experiment — 2026-10-21 (read this first)
 
 User answered the seven recovery questions (recorded in P5-RECOVERY-VIEWER.md

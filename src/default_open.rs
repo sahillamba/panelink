@@ -26,14 +26,18 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use panelink::control_protocol::TargetRef;
 use panelink::history_rows;
 use panelink::history_store::HistoryStore;
 use panelink::layout_store::{LayoutSlot, LayoutStore};
+use panelink::recovery_chooser::{self, ChooserChoice, ChooserPlan, LayoutSummary};
+use panelink::recovery_view::RecoverySlot;
 use panelink::saved_layout::{LayoutAxis, SavedLayout};
 use panelink::transport::AuthenticatedStream;
+use rustix::fs::{Mode, OFlags};
+use rustix::termios::{isatty, tcgetattr, tcsetattr, OptionalActions, Termios};
 
 /// Terminfo source embedded at build time so the binary is self-contained.
 const TERMINFO_SOURCE: &str = include_str!("../docs/terminfo/panelink-probe.terminfo");
@@ -551,11 +555,41 @@ fn prepare() -> Result<StateRoot, OpenError> {
 
 /// `panelink` with no arguments.
 pub(crate) fn open() -> i32 {
-    let result = prepare().and_then(|state| {
+    let state = match resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME")) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("panelink: {}", error.message());
+            return 1;
+        }
+    };
+
+    // Preserve direct attachment when the server is already reachable. On a
+    // stopped root, inspect historical metadata before creating or initializing
+    // any runtime paths.
+    let live_server = observe_live_server(&state).unwrap_or(false);
+    let (current, previous) = if live_server {
+        (None, None)
+    } else {
+        inspect_saved_layouts(&state)
+    };
+    let interactive = isatty(io::stdin()) && isatty(io::stdout());
+    match recovery_chooser::plan(live_server, interactive, current, previous) {
+        ChooserPlan::AttachExisting | ChooserPlan::FreshShell => open_workspace(state),
+        ChooserPlan::Prompt { .. } => {
+            run_startup_chooser(state, current.expect("prompt has current layout"), previous)
+        }
+    }
+}
+
+/// Resume the existing plain-open path after a user selected a fresh shell or
+/// when the chooser does not apply.
+fn open_workspace(state: StateRoot) -> i32 {
+    let result: Result<StateRoot, OpenError> = (|| {
+        prepare_root(&state)?;
         ensure_terminfo(&state)?;
         ensure_server(&state)?;
         Ok(state)
-    });
+    })();
     match result {
         Ok(state) => crate::ui_client::run(state.server, state.contexts),
         Err(error) => {
@@ -563,6 +597,165 @@ pub(crate) fn open() -> i32 {
             1
         }
     }
+}
+
+/// Validate existing directories without creating them before probing an
+/// endpoint. A missing root/server is an ordinary first startup.
+fn observe_live_server(state: &StateRoot) -> Result<bool, OpenError> {
+    let uid = current_uid();
+    if ancestors_ok(&state.root, uid).is_err() {
+        return Ok(false);
+    }
+    if !existing_private_directory(&state.root, uid)?
+        || !existing_private_directory(&state.server, uid)?
+    {
+        return Ok(false);
+    }
+    Ok(server_ready(state))
+}
+
+fn existing_private_directory(path: &Path, uid: u32) -> Result<bool, OpenError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            private_dir_ok(&metadata, uid)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(OpenError::StateRootUnavailable),
+    }
+}
+
+/// Read both saved slots without creating the layout directory or printing
+/// storage errors. A missing current slot is not a chooser condition.
+fn inspect_saved_layouts(state: &StateRoot) -> (Option<LayoutSummary>, Option<LayoutSummary>) {
+    let Ok(store) = LayoutStore::open(&state.server.join("layout")) else {
+        return (None, None);
+    };
+    let Ok(Some(current)) = store.load(LayoutSlot::Current) else {
+        return (None, None);
+    };
+    let previous = store.load(LayoutSlot::Previous).ok().flatten();
+    let summary = |layout: SavedLayout| LayoutSummary {
+        pane_count: layout.pane_count(),
+        observed_at_unix_ms: layout.metadata().observed_at_unix_ms(),
+    };
+    (Some(summary(current)), previous.map(summary))
+}
+
+fn run_startup_chooser(
+    state: StateRoot,
+    current: LayoutSummary,
+    previous: Option<LayoutSummary>,
+) -> i32 {
+    loop {
+        let prompt = chooser_prompt(current, previous);
+        match read_startup_choice(prompt.as_bytes()) {
+            ChooserChoice::Fresh => return open_workspace(state),
+            ChooserChoice::Quit => return 0,
+            ChooserChoice::ViewCurrent => {
+                view_saved_layout(&state, RecoverySlot::Current);
+            }
+            ChooserChoice::ViewPrevious if previous.is_some() => {
+                view_saved_layout(&state, RecoverySlot::Previous);
+            }
+            ChooserChoice::ViewPrevious => return open_workspace(state),
+        }
+    }
+}
+
+fn chooser_prompt(current: LayoutSummary, previous: Option<LayoutSummary>) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let age = recovery_chooser::relative_age(current, now);
+    let previous_option = if previous.is_some() {
+        "  [p] view previous"
+    } else {
+        ""
+    };
+    format!(
+        "panelink: a saved layout from {age} ({} panes) exists. [Enter] fresh shell  [v] view saved layout{previous_option}  [q] quit\r\n",
+        current.pane_count
+    )
+}
+
+fn view_saved_layout(state: &StateRoot, slot: RecoverySlot) {
+    if let Ok(view) = panelink::recovery_reader::read_recovery(&state.server, slot) {
+        let _ = crate::ui_client::recovery::run(view);
+    }
+}
+
+struct ChooserTerminal {
+    tty: File,
+    original: Termios,
+    restore_needed: bool,
+}
+
+impl ChooserTerminal {
+    fn open() -> Option<Self> {
+        let fd = rustix::fs::open(
+            "/dev/tty",
+            OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?;
+        let tty = File::from(fd);
+        let original = tcgetattr(&tty).ok()?;
+        Some(Self {
+            tty,
+            original,
+            restore_needed: true,
+        })
+    }
+
+    fn read_choice(&mut self, prompt: &[u8]) -> ChooserChoice {
+        let mut raw = self.original.clone();
+        raw.make_raw();
+        // A failed tcsetattr may have changed some terminal flags, so always
+        // restore the exact captured attributes after this point.
+        if tcsetattr(&self.tty, OptionalActions::Now, &raw).is_err() {
+            return ChooserChoice::Fresh;
+        }
+        if self.tty.write_all(prompt).is_err() {
+            return ChooserChoice::Fresh;
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut byte = [0_u8; 1];
+        loop {
+            if Instant::now() >= deadline {
+                return ChooserChoice::Fresh;
+            }
+            match self.tty.read(&mut byte) {
+                Ok(1) => return recovery_chooser::choice(byte[0]),
+                Ok(_) => return ChooserChoice::Fresh,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return ChooserChoice::Fresh,
+            }
+        }
+    }
+}
+
+impl Drop for ChooserTerminal {
+    fn drop(&mut self) {
+        if self.restore_needed {
+            let _ = tcsetattr(&self.tty, OptionalActions::Now, &self.original);
+        }
+    }
+}
+
+fn read_startup_choice(prompt: &[u8]) -> ChooserChoice {
+    ChooserTerminal::open()
+        .map(|mut terminal| terminal.read_choice(prompt))
+        .unwrap_or(ChooserChoice::Fresh)
 }
 
 /// Parse `PID START` from the private identity record.

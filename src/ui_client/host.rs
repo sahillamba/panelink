@@ -13,6 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm_input::Decoder;
+use panelink::layout_store::{LayoutSlot, LayoutStore};
+use panelink::split_menu::{Availability, DisabledReason};
 use panelink::terminal::compose::Compositor;
 use rustix::fs::{open, Mode, OFlags};
 use rustix::termios::{
@@ -22,6 +24,7 @@ use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 
 use super::net::Net;
 use super::state::{App, Flow};
+use panelink::recovery_view::RecoverySlot;
 
 /// Enter: alternate screen, hide cursor, bracketed paste, button mouse
 /// reporting (1000) with SGR coordinates (1006).
@@ -141,6 +144,10 @@ impl HostGuard {
             Ok(())
         }
     }
+
+    fn discard_pending_input(&self) -> Result<(), HostError> {
+        tcflush(&self.tty, QueueSelector::IFlush).map_err(|_| HostError::InputRead)
+    }
 }
 
 impl Drop for HostGuard {
@@ -199,6 +206,11 @@ impl Output {
 
     pub(crate) fn pending(&self) -> bool {
         self.cursor < self.len
+    }
+
+    fn discard(&mut self) {
+        self.cursor = 0;
+        self.len = 0;
     }
 
     /// Write once; returns `true` when the frame completed on this call.
@@ -366,6 +378,15 @@ fn report(message: &str, tty: &mut File) {
     let _ = write_control(tty, &line[..length]);
 }
 
+fn previous_layout_availability(server_dir: &std::path::Path) -> Availability {
+    match LayoutStore::open(&server_dir.join("layout"))
+        .and_then(|store| store.load_bytes(LayoutSlot::Previous))
+    {
+        Ok(Some(_)) => Availability::Enabled,
+        Ok(None) | Err(_) => Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+    }
+}
+
 fn event_loop(
     host: &mut HostGuard,
     app: &mut App,
@@ -378,6 +399,8 @@ fn event_loop(
     let Some(net) = net_slot.as_mut() else {
         return Err(HostError::Setup);
     };
+    let server_dir_owned = net.server_directory().to_path_buf();
+    let server_dir = server_dir_owned.as_path();
     let mut chunk = [0_u8; INPUT_CHUNK_BYTES];
     let (mut start, mut end) = (0_usize, 0_usize);
     let mut last_input_at: Option<Instant> = None;
@@ -409,6 +432,7 @@ fn event_loop(
         }
         let work_started = Instant::now();
         let mut quit = false;
+        let mut view_recovery = false;
         while start < end {
             let byte = chunk[start];
             start += 1;
@@ -418,9 +442,22 @@ fn event_loop(
             };
             if let Some(event) = event {
                 last_key_at = Some(Instant::now());
-                if app.handle_event(&event, Instant::now(), net) == Flow::Quit {
-                    quit = true;
-                    break;
+                let needs_check = app.needs_recovery_availability(&event);
+                let availability = if needs_check {
+                    previous_layout_availability(server_dir)
+                } else {
+                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved)
+                };
+                match app.handle_event(&event, Instant::now(), availability, net) {
+                    Flow::Quit => {
+                        quit = true;
+                        break;
+                    }
+                    Flow::ViewRecovery => {
+                        view_recovery = true;
+                        break;
+                    }
+                    Flow::Continue => {}
                 }
             }
             if decoder.pending_bytes() > 0 {
@@ -430,6 +467,44 @@ fn event_loop(
                 break;
             }
         }
+        if view_recovery {
+            app.flush(Instant::now(), net);
+            output.discard();
+            compositor.invalidate();
+            *decoder = Decoder::new();
+            start = 0;
+            end = 0;
+            host.discard_pending_input()?;
+            match panelink::recovery_reader::read_recovery(server_dir, RecoverySlot::Previous) {
+                Ok(view) => {
+                    if let Err(label) = super::recovery::run_in_workspace(&view, host, stop) {
+                        app.set_status(label, Instant::now());
+                    }
+                }
+                Err(error) => app.set_status(
+                    match error {
+                        panelink::recovery_reader::RecoveryReadError::Storage => {
+                            "recovery storage is unavailable or unsafe"
+                        }
+                        panelink::recovery_reader::RecoveryReadError::MissingLayout => {
+                            "No previous layout saved"
+                        }
+                        panelink::recovery_reader::RecoveryReadError::InvalidLayout => {
+                            "saved layout invalid"
+                        }
+                    },
+                    Instant::now(),
+                ),
+            }
+            host.discard_pending_input()?;
+            *decoder = Decoder::new();
+            compositor.invalidate();
+            app.mark_dirty();
+            last_render = None;
+            last_input_at = None;
+            last_key_at = None;
+            continue;
+        }
         if quit {
             break Ok(0);
         }
@@ -438,8 +513,16 @@ fn event_loop(
                 if decoder.pending_bytes() == 1 && last.elapsed() >= ESCAPE_TIMEOUT {
                     match decoder.finish_escape() {
                         Ok(Some(event)) => {
-                            if app.handle_event(&event, Instant::now(), net) == Flow::Quit {
-                                break Ok(0);
+                            let needs_check = app.needs_recovery_availability(&event);
+                            let availability = if needs_check {
+                                previous_layout_availability(server_dir)
+                            } else {
+                                Availability::Disabled(DisabledReason::NoPreviousLayoutSaved)
+                            };
+                            match app.handle_event(&event, Instant::now(), availability, net) {
+                                Flow::Quit => break Ok(0),
+                                // A lone Esc never opens the viewer; ignore.
+                                Flow::Continue | Flow::ViewRecovery => {}
                             }
                         }
                         Ok(None) => {}

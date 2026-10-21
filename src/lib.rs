@@ -18,6 +18,7 @@ pub mod protocol;
 pub mod protocol_wire;
 pub mod provider_binding;
 pub mod provider_binding_codec;
+pub mod recovery_chooser;
 pub mod recovery_view;
 pub mod response_protocol;
 pub mod saved_layout;
