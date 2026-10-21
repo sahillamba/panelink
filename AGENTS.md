@@ -12,6 +12,14 @@ the earlier direct-work instruction for this resumed work. Use bounded tasks,
 exclusive file ownership and parent review/verification. Historical assignments
 are completed work, not evidence of currently active agents.
 
+Launcher fallback (user instruction 2026-10-21): when launching subagents or
+probing OpenCode, resolve `opencode` on PATH, then `~/.opencode/bin/opencode`,
+then fall back to `tescode` (Tesco wrapper). Through the wrapper, pass raw
+opencode arguments with `tescode workflow custom <args...>`; its own
+subcommands differ (`tescode version`, `tescode sessions`). Never run its
+auth/sso/update/factory-reset/uninstall commands from automation. Record which
+launcher was used in evidence.
+
 The user's new instruction on 2026-10-21 ended the earlier pause. Retain the
 automated-test/no-manual-handoff requirements:
 run permitted checks and record blocked acceptance honestly rather than

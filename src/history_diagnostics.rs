@@ -41,6 +41,8 @@ pub enum HistoryReason {
     UnknownEndTime = 18,
     CanceledEndMetadataFinalized = 19,
     CanceledEndMetadataFinalizeFailed = 20,
+    ReservedEndMetadataFinalized = 21,
+    ReservedEndMetadataFailed = 22,
 }
 
 impl HistoryReason {
@@ -71,6 +73,8 @@ impl HistoryReason {
             18 => Self::UnknownEndTime,
             19 => Self::CanceledEndMetadataFinalized,
             20 => Self::CanceledEndMetadataFinalizeFailed,
+            21 => Self::ReservedEndMetadataFinalized,
+            22 => Self::ReservedEndMetadataFailed,
             _ => return None,
         })
     }
@@ -99,6 +103,8 @@ impl HistoryReason {
             Self::UnknownEndTime => "unknown_end_time",
             Self::CanceledEndMetadataFinalized => "canceled_end_metadata_finalized",
             Self::CanceledEndMetadataFinalizeFailed => "canceled_end_metadata_finalize_failed",
+            Self::ReservedEndMetadataFinalized => "reserved_end_metadata_finalized",
+            Self::ReservedEndMetadataFailed => "reserved_end_metadata_failed",
         }
     }
 }

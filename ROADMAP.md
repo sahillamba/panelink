@@ -1,11 +1,11 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: P5 saved-layout implementation slice DONE (2026-10-21): codec, two-slot store, guarded writer, driver observation, read-only `layout show`; full Phase5 OPEN
+current-phase: Three parallel GPT-6-sol gates delivered 2026-10-21: recovery-viewer/relaunch DESIGN (pending user choices), bounded history end-intent/final-payload slice, live OpenCode 1.19.0 identity probe (selection/switch NOT proven). Full Phase4/5 OPEN
 last-updated: 2026-10-21
 checkpoint-commit: saved-layout slice committed by parent per phase-completion authorization; no push
-last-verified: 2026-10-21 — verifier 8/8; lib 626/0/4 ignored; bin 95/0; 35 integration targets 162 passed/0 failed/11 ignored (pathname sockets permitted in this environment); see P5-LAYOUT-SLICE.md
-next-action: Choose next Phase5 gate with the user: recovery viewer/explicit relaunch mapping design, unknown/unsubmitted history end intent and final-payload loss, or Phase4 OpenCode identity gate. Do not restore/relaunch from saved layouts without a reviewed design.
+last-verified: 2026-10-21 — verifier 8/8 (927 passed/0 failed/15 ignored); a later run hit the known unconfirmed parallel lock-probe flake once (binary then 25/25). See P5-HISTORY-END-INTENT.md
+next-action: User decisions: answer P5-RECOVERY-VIEWER.md pending questions before viewer/relaunch implementation; approve the P4 private-PTY TUI-plugin identity experiment (P4-OPENCODE-IDENTITY-PROBE.md). Durable unknown-ended label and power-loss remain open.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
@@ -243,7 +243,7 @@ open.
 
 ## Phase 4 — early OpenCode identity gate (not started)
 
-- [ ] Pin installed OpenCode version; prove selected top-level identity and session changes with two agents in same project.
+- [ ] Pin installed OpenCode version; prove selected top-level identity and session changes with two agents in same project. (2026-10-21: version 1.19.0 pinned and two-session creation/server/SSE observed in an isolated probe; selected identity and switch NOT proven; see P4-OPENCODE-IDENTITY-PROBE.md.)
 - [ ] Persist and acknowledge binding revisions; demonstrate or explicitly reject current-at-crash claims.
 - [ ] Implement last-confirmed/manual fallback without latest-session heuristics.
 
@@ -263,7 +263,8 @@ open.
 - [x] Preserve a newest bounded final suffix with all candidate screens under byte pressure; see P5-FINAL-TAIL.md. Prefix loss remains explicit; no quota/budget increase.
 - [x] Scoped explicit-timeout finalization of accepted known-end metadata; canceled payloads/receipts remain canceled. See P5-DRAIN-METADATA.md. Unknown/unsubmitted end intent and payload loss remain separate.
 - [x] Committed-record corruption/partial-tail refusal policy with byte-preserving store and fresh-process CLI acceptance; see P5-COMMITTED-CORRUPTION.md. No salvage, repair or arbitrary bit-rot detection is claimed.
-- [ ] Resolve remaining unknown/unsubmitted end intent and final-payload loss within reviewed bounded scheduling; no complete-capture or performance-budget claim.
+- [x] Bounded metadata-only end reservations for unsubmitted end intent; explicit unknown end time; rows salvaged before screens under final byte pressure; see P5-HISTORY-END-INTENT.md. No durable unknown-ended label, complete-capture or performance-budget claim.
+- [x] Recovery viewer + explicit relaunch mapping DESIGN only (pending user choices); see P5-RECOVERY-VIEWER.md.
 - [x] Scoped saved-layout/restart engineering design and exact codec task, with independent review; see P5-SAVED-LAYOUT.md. No saved-layout implementation or new command is delivered by that design.
 - [x] Implement saved-layout codec, bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection in the reviewed order; see P5-LAYOUT-SLICE.md. No restore/relaunch.
 - [ ] Full V-HISTORY reboot/layout recovery and representative workload/throughput acceptance; see P5-SAVED-HISTORY.md and docs/SPEC.md.

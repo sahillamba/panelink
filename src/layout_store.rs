@@ -275,18 +275,29 @@ impl LayoutStore {
 
     /// Read verified bytes for a slot, if present.
     fn read_slot(&self, slot: LayoutSlot) -> io::Result<Option<[u8; SAVED_LAYOUT_BYTES]>> {
-        let file = match openat(
-            &self.directory,
-            slot_file_name(slot),
-            // NONBLOCK: a FIFO planted at a slot name must fail validation,
-            // not hang a read-only inspection.
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        ) {
-            Ok(file) => File::from(file),
-            Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
-            Err(error) => return Err(io::Error::from(error)),
-        };
+        // A concurrent atomic rename can leave a just-opened descriptor on the
+        // replaced, unlinked inode (nlink 0); reopen boundedly rather than
+        // misreport tampering.
+        let mut opened = None;
+        for _ in 0..4 {
+            let file = match openat(
+                &self.directory,
+                slot_file_name(slot),
+                // NONBLOCK: a FIFO planted at a slot name must fail
+                // validation, not hang a read-only inspection.
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                Mode::empty(),
+            ) {
+                Ok(file) => File::from(file),
+                Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
+                Err(error) => return Err(io::Error::from(error)),
+            };
+            if file.metadata()?.nlink() != 0 {
+                opened = Some(file);
+                break;
+            }
+        }
+        let file = opened.ok_or_else(unsafe_storage)?;
         validate_file(&file)?;
         if file.metadata()?.len() != SAVED_LAYOUT_BYTES as u64 {
             return Err(invalid());

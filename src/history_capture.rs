@@ -352,6 +352,14 @@ impl HistoryCaptureCoordinator {
             self.fail_with(HistoryReason::CaptureRegistrationFull);
             return false;
         }
+        if !self
+            .writer
+            .as_ref()
+            .is_some_and(|writer| writer.reserve_end(target, initial.epoch))
+        {
+            self.fail_with(HistoryReason::CaptureRegistrationFull);
+            return false;
+        }
         self.targets.push(TargetCapture::new(target, initial));
         true
     }
@@ -554,6 +562,18 @@ impl HistoryCaptureCoordinator {
             gap,
             pending_metadata: true,
         });
+        if let Some(writer) = self.writer.as_ref() {
+            writer.record_end(
+                target,
+                self.targets[index]
+                    .ending
+                    .as_ref()
+                    .expect("end intent present")
+                    .epoch,
+                end_at_unix_ms.filter(|at| *at != 0),
+                true,
+            );
+        }
         if observation.cursor.epoch == 0
             || observation.cursor.epoch < self.targets[index].submitted_cursor.epoch
         {
@@ -754,9 +774,15 @@ impl HistoryCaptureCoordinator {
                         self.submit_final_metadata(index);
                         return;
                     };
-                    let Some((candidate, removed_rows, retained_rows)) =
+                    let screens_too_large = rejected.screen_bytes() > available;
+                    let candidate = if screens_too_large {
+                        rejected
+                            .retain_rows_without_screens_within(available)
+                            .map(|(batch, removed)| (batch, removed, true))
+                    } else {
                         rejected.retain_newest_suffix_within(available)
-                    else {
+                    };
+                    let Some((candidate, removed_rows, retained_rows)) = candidate else {
                         self.final_payload_lost(
                             index,
                             epoch,
@@ -767,7 +793,13 @@ impl HistoryCaptureCoordinator {
                         return;
                     };
 
-                    if removed_rows > 0 {
+                    if screens_too_large {
+                        self.targets[index].deferred_screens = [None, None];
+                        self.final_prefix_lost(index, epoch, cursor.ordinal);
+                        if let Some(writer) = self.writer.as_ref() {
+                            writer.record_end(target, epoch, end_at, true);
+                        }
+                    } else if removed_rows > 0 {
                         self.final_prefix_lost(index, epoch, cursor.ordinal);
                     }
                     let mut retry_plan = plan;
@@ -778,8 +810,11 @@ impl HistoryCaptureCoordinator {
                     } else {
                         HistoryCursor { epoch, ordinal: 0 }
                     };
-                    retry_plan.gap |= removed_rows > 0;
+                    retry_plan.gap |= removed_rows > 0 || screens_too_large;
                     retry_plan.loss_revision = self.targets[index].loss_revision;
+                    if screens_too_large {
+                        retry_plan.screens.clear();
+                    }
                     let retry_result = self
                         .writer
                         .as_mut()
@@ -840,6 +875,16 @@ impl HistoryCaptureCoordinator {
             0
         };
         state.note_loss(epoch, from, through);
+        if let Some(writer) = self.writer.as_ref() {
+            if state.ending.is_some() {
+                writer.record_end(
+                    state.target,
+                    epoch,
+                    state.ending.as_ref().and_then(|end| end.at_unix_ms),
+                    true,
+                );
+            }
+        }
         if let Some(end) = state.ending.as_mut() {
             end.epoch = epoch;
             end.gap = true;
@@ -857,6 +902,14 @@ impl HistoryCaptureCoordinator {
         let state = &mut self.targets[index];
         let from = state.submitted_cursor.ordinal;
         state.note_loss(epoch, from, through);
+        if let Some(writer) = self.writer.as_ref() {
+            writer.record_end(
+                state.target,
+                epoch,
+                state.ending.as_ref().and_then(|end| end.at_unix_ms),
+                true,
+            );
+        }
         state.deferred_screens = [None, None];
         if let Some(end) = state.ending.as_mut() {
             end.epoch = epoch;
@@ -1263,6 +1316,198 @@ mod tests {
             assert!(Instant::now() < deadline, "{message}");
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn full_count_queue_retains_unsubmitted_end_and_finalizes_after_timeout() {
+        let fixture = Fixture::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (entered_send, entered_recv) = mpsc::sync_channel(1);
+        let (release_send, release_recv) = mpsc::sync_channel(1);
+        let writer = HistoryWriter::start_with_backend(
+            Box::new(GatedBackend {
+                entered: entered_send,
+                release: release_recv,
+                events: Arc::clone(&events),
+            }),
+            fixture.storage.as_ref().unwrap(),
+        )
+        .unwrap();
+        let mut capture = HistoryCaptureCoordinator::new(writer, Arc::new(AtomicBool::new(false)));
+        assert!(capture.register_target(
+            TARGET,
+            HistoryCursor {
+                epoch: 1,
+                ordinal: 0
+            }
+        ));
+        capture.observe(TARGET, observation(1, 1));
+        entered_recv.recv_timeout(Duration::from_secs(3)).unwrap();
+        for token in 2..=crate::history_writer::MAX_QUEUED_BATCHES as u64 {
+            capture
+                .writer
+                .as_mut()
+                .unwrap()
+                .try_submit(
+                    HistoryBatch::new(TARGET, 1, token, false, vec![], vec![], None).unwrap(),
+                )
+                .unwrap();
+        }
+        capture.next_token = crate::history_writer::MAX_QUEUED_BATCHES as u64;
+        assert!(capture.finish_target(TARGET, observation(1, 1), Some(777)));
+        assert!(capture.targets[0].ending.as_ref().unwrap().pending_metadata);
+        capture.begin_shutdown();
+        capture.note_drain_deadline();
+        assert!(capture
+            .diagnostics
+            .snapshot()
+            .contains(HistoryReason::FinalMetadataUnsubmitted));
+        let writer = capture.take_writer_for_shutdown().unwrap();
+        assert_eq!(
+            writer.shutdown(Duration::ZERO).outcome,
+            ShutdownOutcome::TimedOut
+        );
+        release_send.send(()).unwrap();
+        wait_for(
+            Instant::now() + Duration::from_secs(3),
+            || events.lock().unwrap().contains(&Event::Ended(TARGET, 777)),
+            "reserved end did not settle",
+        );
+        assert!(capture
+            .diagnostics
+            .snapshot()
+            .contains(HistoryReason::ReservedEndMetadataFinalized));
+    }
+
+    #[test]
+    fn unknown_end_time_records_a_gap_without_inventing_an_end() {
+        let fixture = Fixture::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let writer = HistoryWriter::start_with_backend(
+            Box::new(RecordingBackend(Arc::clone(&events))),
+            fixture.storage.as_ref().unwrap(),
+        )
+        .unwrap();
+        let mut capture = HistoryCaptureCoordinator::new(writer, Arc::new(AtomicBool::new(false)));
+        assert!(capture.register_target(
+            TARGET,
+            HistoryCursor {
+                epoch: 1,
+                ordinal: 0
+            }
+        ));
+        assert!(capture.finish_target(TARGET, observation(1, 0), None));
+        assert!(capture
+            .diagnostics
+            .snapshot()
+            .contains(HistoryReason::UnknownEndTime));
+        let writer = capture.take_writer_for_shutdown().unwrap();
+        assert_eq!(
+            writer.shutdown(Duration::from_millis(250)).outcome,
+            ShutdownOutcome::Drained
+        );
+        assert!(events
+            .lock()
+            .unwrap()
+            .contains(&Event::Began(TARGET, 1, true)));
+        assert!(!events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, Event::Ended(..))));
+    }
+
+    #[test]
+    fn final_rows_survive_byte_pressure_when_screens_cannot_fit() {
+        let fixture = Fixture::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (entered_send, entered_recv) = mpsc::sync_channel(1);
+        let (release_send, release_recv) = mpsc::sync_channel(1);
+        let writer = HistoryWriter::start_with_backend(
+            Box::new(GatedBackend {
+                entered: entered_send,
+                release: release_recv,
+                events,
+            }),
+            fixture.storage.as_ref().unwrap(),
+        )
+        .unwrap();
+        let mut capture = HistoryCaptureCoordinator::new(writer, Arc::new(AtomicBool::new(false)));
+        assert!(capture.register_target(
+            TARGET,
+            HistoryCursor {
+                epoch: 1,
+                ordinal: 0
+            }
+        ));
+        let blocker = TargetRef {
+            pane: 2,
+            session: 2,
+            ..TARGET
+        };
+        let rows = maximum_rows(blocker, 1, MAX_BATCH_ROWS);
+        let row_bytes = rows.iter().map(Vec::len).sum::<usize>();
+        let maximum = vec![
+            maximum_screen(blocker, ScreenBuffer::Normal).clone_bytes(),
+            maximum_screen(blocker, ScreenBuffer::Alternate).clone_bytes(),
+        ];
+        let first =
+            HistoryBatch::new(blocker, 1, 1, false, rows.clone(), maximum.clone(), None).unwrap();
+        let second = HistoryBatch::new(blocker, 1, 2, false, rows, maximum, None).unwrap();
+        let remaining = MAX_QUEUED_PAYLOAD_BYTES - first.payload_bytes() - second.payload_bytes();
+        let remaining_rows = remaining / history_rows::MAX_ROW_BYTES;
+        let third = HistoryBatch::new(
+            blocker,
+            1,
+            3,
+            false,
+            maximum_rows(blocker, 1, remaining_rows.saturating_sub(8)),
+            vec![],
+            None,
+        )
+        .unwrap();
+        assert!(third.payload_bytes() < remaining);
+        capture.writer.as_mut().unwrap().try_submit(first).unwrap();
+        entered_recv.recv_timeout(Duration::from_secs(3)).unwrap();
+        capture.writer.as_mut().unwrap().try_submit(second).unwrap();
+        capture.writer.as_mut().unwrap().try_submit(third).unwrap();
+        capture.next_token = 3;
+        assert!(capture.finish_target(
+            TARGET,
+            CaptureObservation {
+                cursor: HistoryCursor {
+                    epoch: 1,
+                    ordinal: 4
+                },
+                gap: false,
+                rows: maximum_rows(TARGET, 1, 4),
+                screens: vec![
+                    maximum_screen(TARGET, ScreenBuffer::Normal),
+                    maximum_screen(TARGET, ScreenBuffer::Alternate)
+                ],
+            },
+            Some(888)
+        ));
+        assert!(capture
+            .diagnostics
+            .snapshot()
+            .contains(HistoryReason::FinalPayloadDroppedBytes));
+        let final_batch = capture.targets[0].final_batch.as_ref().unwrap();
+        assert_eq!(final_batch.plan.cursor.ordinal, 4);
+        assert!(final_batch.plan.gap);
+        assert!(final_batch.plan.screens.is_empty());
+        release_send.send(()).unwrap();
+        for _ in 0..3 {
+            entered_recv.recv_timeout(Duration::from_secs(3)).unwrap();
+            release_send.send(()).unwrap();
+        }
+        capture.begin_shutdown();
+        let writer = capture.take_writer_for_shutdown().unwrap();
+        assert_eq!(
+            writer.shutdown(Duration::from_millis(250)).outcome,
+            ShutdownOutcome::Drained
+        );
+        assert!(row_bytes > 0);
     }
 
     #[test]

@@ -1,5 +1,19 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Three parallel GPT-6-sol gates — 2026-10-21 (read this first)
+
+User asked for three GPT-6-sol (medium) workers, one per gate, closely
+monitored. S1 delivered the recovery-viewer/explicit-relaunch ADR and staged
+tasks (design only; product choices left pending). S2 delivered bounded
+end-intent reservations and byte-pressure row salvage; parent fixed slot
+reuse and a pre-existing nlink-0 reader race. S3 ran an isolated live probe
+on OpenCode 1.19.0: version pinned, two sessions created via local server,
+SSE present, selected-session identity and switch NOT proven; next step is a
+private-PTY TUI plugin experiment. User also asked that launchers fall back
+to `tescode workflow custom` when opencode is not on PATH (AGENTS.md); S3 had
+not hit missing_executable in this run, but its probe now resolves
+opencode -> ~/.opencode/bin/opencode -> tescode. Committed; no push.
+
 ## Saved-layout implementation slice — 2026-10-21 (read this first)
 
 User requested parent orchestration with Kimi K2.6 subagents, two parallel at

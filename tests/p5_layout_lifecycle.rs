@@ -117,7 +117,19 @@ impl Fixture {
     }
 
     fn open_restart(&self) -> MultiServerDriver {
-        let storage = ServerStorage::open(&self.server).unwrap();
+        // Detached history/layout workers may retain the singleton briefly
+        // after Drop by design; wait boundedly instead of racing them.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let storage = loop {
+            match ServerStorage::open(&self.server) {
+                Ok(storage) => break storage,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "singleton lock not released");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("reopen storage: {error}"),
+            }
+        };
         let context = LaunchContext {
             working_directory: self.root.clone(),
             environment: [

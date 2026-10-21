@@ -78,6 +78,31 @@ fn validate_file(file: &File) -> io::Result<()> {
     Ok(())
 }
 
+/// Open a committed file for reading. An atomic rename by a concurrent
+/// writer can leave our descriptor on the replaced, now-unlinked inode
+/// (`nlink == 0`); that is not tampering, so reopen the current name a
+/// bounded number of times instead of reporting unsafe storage.
+fn open_committed(directory: &File, filename: &str) -> io::Result<Option<File>> {
+    for _ in 0..4 {
+        let file = match openat(
+            directory,
+            filename,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => File::from(file),
+            Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
+            Err(error) => return Err(io::Error::from(error)),
+        };
+        if file.metadata()?.nlink() == 0 {
+            continue;
+        }
+        validate_file(&file)?;
+        return Ok(Some(file));
+    }
+    Err(unsafe_storage())
+}
+
 fn name(target: TargetRef, buffer: ScreenBuffer) -> io::Result<String> {
     let fields = [
         target.generation,
@@ -363,17 +388,9 @@ impl HistoryStore {
     }
 
     fn read_named(&self, filename: &str, max: usize) -> io::Result<Option<Vec<u8>>> {
-        let file = match openat(
-            &self.directory,
-            filename,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            Ok(file) => File::from(file),
-            Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
-            Err(error) => return Err(io::Error::from(error)),
+        let Some(file) = open_committed(&self.directory, filename)? else {
+            return Ok(None);
         };
-        validate_file(&file)?;
         if file.metadata()?.len() > max as u64 {
             return Err(invalid());
         }
@@ -980,17 +997,9 @@ impl HistoryStore {
     /// `None` means the buffer has not been captured.
     pub fn load(&self, target: TargetRef, buffer: ScreenBuffer) -> io::Result<Option<Vec<u8>>> {
         let filename = name(target, buffer)?;
-        let file = match openat(
-            &self.directory,
-            filename.as_str(),
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            Ok(file) => File::from(file),
-            Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
-            Err(error) => return Err(io::Error::from(error)),
+        let Some(file) = open_committed(&self.directory, filename.as_str())? else {
+            return Ok(None);
         };
-        validate_file(&file)?;
         if file.metadata()?.len() > screen_checkpoint::MAX_SCREEN_CHECKPOINT_BYTES as u64 {
             return Err(invalid());
         }
