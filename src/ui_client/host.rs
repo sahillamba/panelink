@@ -46,7 +46,7 @@ const FRAME_BYTES: usize = 4 * 1024 * 1024 + 64 * 1024;
 const MAX_OUTPUT_WRITE: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HostError {
+pub(crate) enum HostError {
     NotTty,
     Open,
     Query,
@@ -64,7 +64,7 @@ enum HostError {
 }
 
 impl HostError {
-    fn message(self) -> &'static str {
+    pub(crate) fn message(self) -> &'static str {
         match self {
             Self::NotTty => "attach needs an interactive terminal",
             Self::Open => "could not open the controlling terminal",
@@ -84,15 +84,15 @@ impl HostError {
     }
 }
 
-struct HostGuard {
-    tty: File,
+pub(crate) struct HostGuard {
+    pub(crate) tty: File,
     original: Termios,
     restore_needed: bool,
     restored: bool,
 }
 
 impl HostGuard {
-    fn open() -> Result<Self, HostError> {
+    pub(crate) fn open() -> Result<Self, HostError> {
         if !isatty(io::stdin()) || !isatty(io::stdout()) {
             return Err(HostError::NotTty);
         }
@@ -112,12 +112,12 @@ impl HostGuard {
         })
     }
 
-    fn size(&self) -> Result<(u16, u16), HostError> {
+    pub(crate) fn size(&self) -> Result<(u16, u16), HostError> {
         let size = tcgetwinsize(&self.tty).map_err(|_| HostError::Query)?;
         Ok((size.ws_row, size.ws_col))
     }
 
-    fn enter(&mut self) -> Result<(), HostError> {
+    pub(crate) fn enter(&mut self) -> Result<(), HostError> {
         let mut raw = self.original.clone();
         raw.make_raw();
         self.restore_needed = true;
@@ -125,7 +125,7 @@ impl HostGuard {
         write_control(&mut self.tty, ENTER_SEQUENCE).map_err(|_| HostError::Setup)
     }
 
-    fn restore(&mut self) -> Result<(), HostError> {
+    pub(crate) fn restore(&mut self) -> Result<(), HostError> {
         if self.restored || !self.restore_needed {
             self.restored = true;
             return Ok(());
@@ -149,7 +149,7 @@ impl Drop for HostGuard {
     }
 }
 
-fn write_control(tty: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_control(tty: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     let deadline = Instant::now() + CONTROL_WRITE_TIMEOUT;
     let mut cursor = 0;
     while cursor < bytes.len() {
@@ -175,7 +175,7 @@ fn write_control(tty: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
 
 /// Preallocated output buffer; the compositor commits only after the whole
 /// frame was accepted by the host.
-struct Output {
+pub(crate) struct Output {
     bytes: Box<[u8]>,
     cursor: usize,
     len: usize,
@@ -183,7 +183,7 @@ struct Output {
 }
 
 impl Output {
-    fn new() -> Result<Self, HostError> {
+    pub(crate) fn new() -> Result<Self, HostError> {
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(FRAME_BYTES)
@@ -197,12 +197,12 @@ impl Output {
         })
     }
 
-    fn pending(&self) -> bool {
+    pub(crate) fn pending(&self) -> bool {
         self.cursor < self.len
     }
 
     /// Write once; returns `true` when the frame completed on this call.
-    fn write_once(&mut self, tty: &mut File) -> Result<bool, HostError> {
+    pub(crate) fn write_once(&mut self, tty: &mut File) -> Result<bool, HostError> {
         if !self.pending() {
             return Ok(false);
         }

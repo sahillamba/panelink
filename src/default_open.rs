@@ -1131,6 +1131,100 @@ pub(crate) fn layout_show(previous: bool) -> i32 {
     }
 }
 
+/// Read-only `panelink recovery view [--previous]` entry point.
+pub(crate) fn recovery_view(previous: bool) -> i32 {
+    use panelink::recovery_reader::{read_recovery, RecoveryReadError};
+    use panelink::recovery_view::RecoverySlot;
+    use std::io::IsTerminal;
+
+    let state = match resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME")) {
+        Ok(state) => state,
+        Err(_) => {
+            eprintln!("panelink: recovery storage unavailable");
+            return 1;
+        }
+    };
+    let slot = if previous {
+        RecoverySlot::Previous
+    } else {
+        RecoverySlot::Current
+    };
+    let view = match read_recovery(&state.server, slot) {
+        Ok(view) => view,
+        Err(RecoveryReadError::MissingLayout) => {
+            eprintln!("panelink: no saved layout");
+            return 1;
+        }
+        Err(RecoveryReadError::InvalidLayout) => {
+            eprintln!("panelink: saved layout invalid");
+            return 1;
+        }
+        Err(RecoveryReadError::Storage) => {
+            eprintln!("panelink: recovery storage unavailable");
+            return 1;
+        }
+    };
+
+    if !std::io::stdout().is_terminal() {
+        println!(
+            "slot: {}\ngeneration: {}\nsequence: {}\nsize: {}x{}\norientation: {:?}",
+            view.slot,
+            view.metadata.generation(),
+            view.metadata.snapshot_sequence(),
+            view.saved_rows,
+            view.saved_columns,
+            view.axis
+        );
+        if view.panes.is_empty() {
+            println!("workspace: empty");
+        }
+        for (index, pane) in view.panes.iter().enumerate() {
+            let target = pane.historical_target;
+            println!(
+                "pane {}: target {}:{}:{}:{}:{}; rows {}; normal {}; alternate {}",
+                index + 1,
+                target.generation,
+                target.workspace,
+                target.pane,
+                target.session,
+                target.occupant_revision,
+                availability_history(&pane.rows),
+                availability_checkpoint(&pane.normal),
+                availability_checkpoint(&pane.alternate)
+            );
+        }
+        return 0;
+    }
+
+    match crate::ui_client::recovery::run(view) {
+        Ok(()) => 0,
+        Err(message) => {
+            eprintln!("panelink: {message}");
+            1
+        }
+    }
+}
+
+fn availability_history(source: &panelink::recovery_view::HistoryAvailability) -> &'static str {
+    use panelink::recovery_view::HistoryAvailability;
+    match source {
+        HistoryAvailability::Available { .. } => "available",
+        HistoryAvailability::Missing => "missing",
+        HistoryAvailability::Invalid => "invalid",
+    }
+}
+
+fn availability_checkpoint(
+    source: &panelink::recovery_view::CheckpointAvailability,
+) -> &'static str {
+    use panelink::recovery_view::CheckpointAvailability;
+    match source {
+        CheckpointAvailability::Available { .. } => "available",
+        CheckpointAvailability::Missing => "missing",
+        CheckpointAvailability::Invalid => "invalid",
+    }
+}
+
 fn layout_show_result(previous: bool) -> Result<String, &'static str> {
     let state = resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME"))
         .map_err(|_| "layout directory unavailable")?;

@@ -167,7 +167,28 @@ retry or duplicate child. Storage errors never terminate otherwise running PTYs.
 Diagnostic messages and persisted links contain no secrets, sensitive paths,
 environment values, launch arguments or stored history content.
 
-## Options and pending user questions
+## User decisions — 2026-10-21
+
+Answered by the user (these are now confirmed product choices for this
+prototype; they supersede the matching "pending" rows below):
+
+| # | Question | Decision |
+| --- | --- | --- |
+| 1 | Viewer entry points | Startup chooser + `panelink recovery view [--previous]` + a "Recovery" item in the right-click / Ctrl-B menu inside a live workspace |
+| 2 | Plain `panelink` when a saved layout exists | Ask a chooser (fresh shell vs view/relaunch previous); with no saved layout, behave as today |
+| 3 | Terminal too small for the saved layout | Scaled overview: compact topology outline, no content |
+| 4 | What relaunch starts in each pane | The user's default shell in every pane, with fresh cwd/env from the invoking client |
+| 5 | Relaunch while a workspace is running | Refuse; ask the user to stop it first; never touch the live workspace |
+| 6 | Old-to-new link retention | Match history: pruned with ended-session history (30 days) |
+| 7 | OpenCode panes on relaunch | Manual pick only: start fresh; the user selects any conversation themselves |
+
+Implementation notes from these decisions: the chooser must never block
+non-interactive use (no TTY or a non-interactive invocation keeps today's
+fresh-shell behavior) and must default to fresh shell on timeout/Escape. The
+in-app Recovery item opens the read-only viewer only; relaunch from inside a
+live workspace is refused per decision 5. Hierarchy remains pending.
+
+## Options and pending user questions (historical; see decisions above)
 
 | Choice (all pending) | Benefit | Trade-off / question for user |
 | --- | --- | --- |

@@ -1,5 +1,18 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Recovery viewer + P4 PTY experiment — 2026-10-21 (read this first)
+
+User answered the seven recovery questions (recorded in P5-RECOVERY-VIEWER.md
+and SPEC 0.14) and approved the P4 private-PTY experiment. Luna (xhigh)
+workers: L1 P4 TUI identity (timeboxed by parent after ~50 min; plugin loads
+from project-local `.opencode/tui.json` + `.opencode/plugins`, initial route
+captured 3/3, one of two controlled switches missed each run -> NOT proven);
+L2 recovery stages 1-2 (parent fix: absent layout dir = missing, not unsafe);
+L3 stage 3 viewer/CLI (parent exposed the attach HostGuard/Output as
+pub(crate) so the viewer reuses one terminal-restore path). Verifier 8/8,
+949 passed/0 failed/15 ignored. Host /dev/tty viewer acceptance not run.
+Next: chooser + menu item, then explicit relaunch + links. Committed; no push.
+
 ## Three parallel GPT-6-sol gates — 2026-10-21 (read this first)
 
 User asked for three GPT-6-sol (medium) workers, one per gate, closely

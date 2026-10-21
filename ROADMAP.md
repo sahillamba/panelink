@@ -1,11 +1,11 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: Three parallel GPT-6-sol gates delivered 2026-10-21: recovery-viewer/relaunch DESIGN (pending user choices), bounded history end-intent/final-payload slice, live OpenCode 1.19.0 identity probe (selection/switch NOT proven). Full Phase4/5 OPEN
+current-phase: Recovery viewer stages 1-3 DONE (read-only `panelink recovery view [--previous]`, offline TUI, scaled overview) per user decisions 2026-10-21; P4 private-PTY identity experiment: plugin loads + initial route captured, ordered A-B-A switch NOT proven. Chooser/menu/relaunch stages pending
 last-updated: 2026-10-21
 checkpoint-commit: saved-layout slice committed by parent per phase-completion authorization; no push
-last-verified: 2026-10-21 — verifier 8/8 (927 passed/0 failed/15 ignored); a later run hit the known unconfirmed parallel lock-probe flake once (binary then 25/25). See P5-HISTORY-END-INTENT.md
-next-action: User decisions: answer P5-RECOVERY-VIEWER.md pending questions before viewer/relaunch implementation; approve the P4 private-PTY TUI-plugin identity experiment (P4-OPENCODE-IDENTITY-PROBE.md). Durable unknown-ended label and power-loss remain open.
+last-verified: 2026-10-21 — verifier 8/8 (949 passed/0 failed/15 ignored)
+next-action: Recovery stage 6a: startup chooser + in-workspace Recovery menu item (viewer only); then stages 4/5 explicit relaunch (default shell, refuse when running) + 30-day links. P4: inspect 1.19.0 TUI host for tui.session.select emission on keyboard selection, rerun PTY correlation.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
@@ -243,7 +243,7 @@ open.
 
 ## Phase 4 — early OpenCode identity gate (not started)
 
-- [ ] Pin installed OpenCode version; prove selected top-level identity and session changes with two agents in same project. (2026-10-21: version 1.19.0 pinned and two-session creation/server/SSE observed in an isolated probe; selected identity and switch NOT proven; see P4-OPENCODE-IDENTITY-PROBE.md.)
+- [ ] Pin installed OpenCode version; prove selected top-level identity and session changes with two agents in same project. (2026-10-21: version 1.19.0 pinned and two-session creation/server/SSE observed in an isolated probe; selected identity and switch NOT proven; see P4-OPENCODE-IDENTITY-PROBE.md. Private-PTY run: local TUI plugin loads and captures the initial route 3/3; ordered A-B-A switch not proven; see P4-OPENCODE-TUI-IDENTITY.md.)
 - [ ] Persist and acknowledge binding revisions; demonstrate or explicitly reject current-at-crash claims.
 - [ ] Implement last-confirmed/manual fallback without latest-session heuristics.
 
@@ -264,7 +264,9 @@ open.
 - [x] Scoped explicit-timeout finalization of accepted known-end metadata; canceled payloads/receipts remain canceled. See P5-DRAIN-METADATA.md. Unknown/unsubmitted end intent and payload loss remain separate.
 - [x] Committed-record corruption/partial-tail refusal policy with byte-preserving store and fresh-process CLI acceptance; see P5-COMMITTED-CORRUPTION.md. No salvage, repair or arbitrary bit-rot detection is claimed.
 - [x] Bounded metadata-only end reservations for unsubmitted end intent; explicit unknown end time; rows salvaged before screens under final byte pressure; see P5-HISTORY-END-INTENT.md. No durable unknown-ended label, complete-capture or performance-budget claim.
-- [x] Recovery viewer + explicit relaunch mapping DESIGN only (pending user choices); see P5-RECOVERY-VIEWER.md.
+- [x] Recovery viewer + explicit relaunch mapping design; user decisions recorded 2026-10-21; see P5-RECOVERY-VIEWER.md.
+- [x] Recovery stages 1-3: view model/scaled overview, read-only reader, offline TUI + `panelink recovery view [--previous]`; see P5-RECOVERY-STAGE12.md, P5-RECOVERY-STAGE3.md. Host /dev/tty acceptance not certified.
+- [ ] Recovery chooser at plain startup, in-workspace Recovery menu item, explicit relaunch (default shell, refuse while running) and 30-day old-to-new links.
 - [x] Scoped saved-layout/restart engineering design and exact codec task, with independent review; see P5-SAVED-LAYOUT.md. No saved-layout implementation or new command is delivered by that design.
 - [x] Implement saved-layout codec, bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection in the reviewed order; see P5-LAYOUT-SLICE.md. No restore/relaunch.
 - [ ] Full V-HISTORY reboot/layout recovery and representative workload/throughput acceptance; see P5-SAVED-HISTORY.md and docs/SPEC.md.

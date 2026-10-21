@@ -299,6 +299,16 @@ bytes are replayed.
 
 ### Scoped saved-layout/restart design (implemented as bounded snapshot + read-only view)
 
+Recovery viewer/relaunch user decisions (2026-10-21, prototype scope): plain
+`panelink` offers a chooser when a saved layout exists (non-interactive or
+Escape/timeout keeps today's fresh shell); the read-only viewer is reachable
+from that chooser, `panelink recovery view [--previous]` and an in-workspace
+Recovery menu item; a too-small terminal shows a scaled topology outline;
+explicit relaunch starts the user's default shell in every pane with fresh
+invoking-client context, is refused while a workspace runs, keeps old-to-new
+links for the 30-day history retention, and never resumes provider
+conversations (manual pick only). See [P5-RECOVERY-VIEWER.md](progress/P5-RECOVERY-VIEWER.md).
+
 Implementation status (2026-10-21): the codec, two-slot store, guarded async
 writer, owner/driver observation with freeze-before-stop and one shared
 250 ms metadata deadline, `serve` wiring and read-only

@@ -9,6 +9,7 @@ mod conn;
 mod host;
 mod keys;
 mod net;
+pub(crate) mod recovery;
 mod state;
 
 use std::path::PathBuf;
