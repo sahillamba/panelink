@@ -148,6 +148,7 @@ pub struct ServerStorage {
     _lock: File,
     generation: u64,
     history_writer_claimed: Arc<AtomicBool>,
+    layout_writer_claimed: Arc<AtomicBool>,
 }
 
 /// Exclusively claims the one history worker and retains its singleton lock.
@@ -158,6 +159,22 @@ pub(crate) struct HistoryWriterGuard {
 }
 
 impl Drop for HistoryWriterGuard {
+    fn drop(&mut self) {
+        self.claimed.store(false, Ordering::Release);
+    }
+}
+
+/// Exclusively claims the one saved-layout worker and retains its own
+/// duplicate of the singleton lock. Independent of the history claim: the
+/// two streams own disjoint directories and may coexist, but two layout
+/// workers may not. Never released merely because a driver or history
+/// worker ended.
+pub(crate) struct LayoutWriterGuard {
+    _lock: File,
+    claimed: Arc<AtomicBool>,
+}
+
+impl Drop for LayoutWriterGuard {
     fn drop(&mut self) {
         self.claimed.store(false, Ordering::Release);
     }
@@ -243,6 +260,7 @@ impl ServerStorage {
             _lock: lock,
             generation,
             history_writer_claimed: Arc::new(AtomicBool::new(false)),
+            layout_writer_claimed: Arc::new(AtomicBool::new(false)),
         };
         storage.verify_identity()?;
         Ok(storage)
@@ -279,6 +297,7 @@ impl ServerStorage {
             _lock: lock,
             generation,
             history_writer_claimed: Arc::new(AtomicBool::new(false)),
+            layout_writer_claimed: Arc::new(AtomicBool::new(false)),
         };
         storage.verify_identity()?;
         Ok(storage)
@@ -330,6 +349,36 @@ impl ServerStorage {
                 Err(error)
             }
         }
+    }
+
+    /// Exclude a second saved-layout writer; independent of the history claim.
+    pub(crate) fn claim_layout_writer(&self) -> io::Result<LayoutWriterGuard> {
+        if self
+            .layout_writer_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "layout writer is already active",
+            ));
+        }
+        match self.retain_history_lock() {
+            Ok(lock) => Ok(LayoutWriterGuard {
+                _lock: lock,
+                claimed: Arc::clone(&self.layout_writer_claimed),
+            }),
+            Err(error) => {
+                self.layout_writer_claimed.store(false, Ordering::Release);
+                Err(error)
+            }
+        }
+    }
+
+    /// Exact private directory of this storage domain, for binding a
+    /// stream store (history or layout) to its held server identity.
+    pub(crate) fn directory_path(&self) -> &Path {
+        &self.directory_path
     }
 
     /// Bind a history writer to the server identity whose lock it retains.
@@ -679,6 +728,48 @@ mod tests {
         // Failed duplication must release the writer claim for a later retry.
         for _ in 0..2 {
             let error = storage.claim_history_writer().err().unwrap();
+            assert_ne!(error.kind(), io::ErrorKind::WouldBlock);
+        }
+    }
+
+    #[test]
+    fn layout_writer_claim_is_exclusive_independent_and_retains_lock() {
+        let fixture = Fixture::new();
+        let storage = ServerStorage::initialize_for_test(&fixture.0).unwrap();
+        let history = storage.claim_history_writer().unwrap();
+        let layout = storage.claim_layout_writer().unwrap();
+        assert_eq!(
+            storage.claim_layout_writer().err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(history);
+        // Ending the history worker never releases the layout claim.
+        assert_eq!(
+            storage.claim_layout_writer().err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(storage.directory_path(), fixture.0.as_path());
+        drop(storage);
+        // A detached layout worker keeps the singleton lock after its driver.
+        assert_eq!(
+            ServerStorage::open(&fixture.0).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(layout);
+        assert_eq!(reopen_after_drop(&fixture.0).unwrap().generation(), 2);
+    }
+
+    #[test]
+    fn layout_writer_claim_released_after_failed_lock_duplication() {
+        let fixture = Fixture::new();
+        let storage = ServerStorage::initialize_for_test(&fixture.0).unwrap();
+        fs::rename(
+            fixture.0.join("server.lock"),
+            fixture.0.join("server.lock.old"),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let error = storage.claim_layout_writer().err().unwrap();
             assert_ne!(error.kind(), io::ErrorKind::WouldBlock);
         }
     }

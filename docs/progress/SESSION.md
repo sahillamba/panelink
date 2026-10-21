@@ -1,5 +1,18 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Saved-layout implementation slice — 2026-10-21 (read this first)
+
+User requested parent orchestration with Kimi K2.6 subagents, two parallel at
+a time, next worker launched as soon as one finished. Six Kimi tasks ran
+(codec, store, writer, CLI, lifecycle acceptance, independent review); one
+store run was interrupted by shell exit and one lifecycle run aborted on a
+provider content-filter error; both were relaunched detached. Parent owned
+exports, the layout writer claim, driver integration and all review fixes.
+Read [P5-LAYOUT-SLICE.md](P5-LAYOUT-SLICE.md). Verifier 8/8, lib 626/0/4,
+bin 95/0, all 35 integration targets 162/0/11 ignored. Committed by the
+parent under the phase-completion authorization; no push. All worker
+ownership released. Phases 3/5/6 remain open; next gate needs user choice.
+
 ## Authorized checkpoint commit blocked — 2026-10-21
 
 The user explicitly requested “commit it” after the saved-layout design slice.

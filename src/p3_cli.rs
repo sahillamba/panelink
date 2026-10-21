@@ -1473,6 +1473,16 @@ fn run_serve(request: ServerProbe) -> i32 {
             }
         }
     }
+    // Saved-layout snapshots are best-effort historical metadata in their own
+    // layout/ stream; failure never prevents shells or history. Startup may
+    // create/validate the directory and clean only recognized layout temps
+    // under the held singleton before the writer starts.
+    let layout_ready = panelink::layout_store::LayoutStore::prepare(&request.directory)
+        .and_then(|store| store.cleanup_temporary_files().map(|_| store))
+        .and_then(|store| driver.enable_layout(store));
+    if layout_ready.is_err() {
+        eprintln!("panelink: saved layout unavailable; shells remain running");
+    }
     let generation = driver.generation();
     let mut line =
         String::from("{\"ok\":true,\"action\":\"serve\",\"state\":\"running\",\"generation\":");

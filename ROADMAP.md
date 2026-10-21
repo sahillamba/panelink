@@ -1,15 +1,15 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: P5 saved-layout/restart engineering design delivered (2026-10-21); parent plus independent Luna xhigh review; codec/store/runtime/recovery remain unimplemented
+current-phase: P5 saved-layout implementation slice DONE (2026-10-21): codec, two-slot store, guarded writer, driver observation, read-only `layout show`; full Phase5 OPEN
 last-updated: 2026-10-21
-checkpoint-commit: explicitly authorized 2026-10-21; staging blocked by .git/index.lock Operation not permitted; no commit or push. Resume commit when Git metadata is writable without re-requesting authorization. See SESSION.md.
-last-verified: 2026-10-21 — design reviewed and7 boundary issues reconciled; existing geometry filter17 and owner filter50 pass, docs174/0, component fingerprints and96 source/test/manifest +13 prior-report hashes unchanged. No new saved-layout runtime acceptance. Prior full verifier7/8 and31 integration targets86passed/17failed/11ignored remain historical known-gate evidence. See P5-SAVED-LAYOUT.md.
-next-action: Implement only pure fixed160-byte saved-layout codec/model under docs/progress/P5-SAVED-LAYOUT-CODEC-TASK.md, using Luna xhigh with parent export/review/verification. Then store+two-slot rotation, async guarded writer, lifecycle integration/shared metadata deadline and read-only CLI. No historical identity/process/effect replay, pending hierarchy/provider choices remain open.
+checkpoint-commit: saved-layout slice committed by parent per phase-completion authorization; no push
+last-verified: 2026-10-21 — verifier 8/8; lib 626/0/4 ignored; bin 95/0; 35 integration targets 162 passed/0 failed/11 ignored (pathname sockets permitted in this environment); see P5-LAYOUT-SLICE.md
+next-action: Choose next Phase5 gate with the user: recovery viewer/explicit relaunch mapping design, unknown/unsubmitted history end intent and final-payload loss, or Phase4 OpenCode identity gate. Do not restore/relaunch from saved layouts without a reviewed design.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
-blocked-on: Current sandbox denies pathname socket bind (EPERM/listener_permission_denied); historical parallel lock-probe failure passed isolated/serial and did not recur in current default run, but cause remains unconfirmed; host stderr diagnostic failure was previously reproduced at unchanged HEAD. Phase 2 clipboard/full Apple Terminal and Phase 4 live identity remain unproved; Phase 3 expanded pathname/host acceptance remains separate. OpenCode 1.19.0 installation was recorded earlier; this run did not recheck it. Ignored/blocked cases are not passes.
+blocked-on: Earlier sandboxes denied pathname socket bind (EPERM); the 2026-10-21 saved-layout run permitted it and all socket targets passed there; historical parallel lock-probe failure passed isolated/serial and did not recur in current default run, but cause remains unconfirmed; host stderr diagnostic failure was previously reproduced at unchanged HEAD. Phase 2 clipboard/full Apple Terminal and Phase 4 live identity remain unproved; Phase 3 expanded pathname/host acceptance remains separate. OpenCode 1.19.0 installation was recorded earlier; this run did not recheck it. Ignored/blocked cases are not passes.
 setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1 rechecked, offline builds pass, current verifier 7/8 with socket restriction; previous full 8/8 at f82d968 remains historical evidence.
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 phase-3a: DONE — 2026-10-19 — see docs/progress/P3A-DEFAULT-OPEN.md and INTEGRATION.md
@@ -21,7 +21,8 @@ phase-p5-history-diagnostics: DONE as fixed bounded observations — 2026-10-21 
 phase-p5-final-tail: DONE as bounded suffix admission — 2026-10-21 — see docs/progress/P5-FINAL-TAIL.md; subsequent timeout-only metadata slice below preserves canceled receipts
 phase-p5-drain-metadata: DONE as timeout-only accepted-end finalization — 2026-10-21 — see docs/progress/P5-DRAIN-METADATA.md; payload loss and full Phase5 remain OPEN
 phase-p5-committed-corruption: DONE as whole-file refusal/preservation policy and acceptance — 2026-10-21 — see docs/progress/P5-COMMITTED-CORRUPTION.md; no salvage, checksum or full reboot claim
-phase-p5-saved-layout-design: DONE as reviewed engineering contract — 2026-10-21 — see docs/progress/P5-SAVED-LAYOUT.md and P5-SAVED-LAYOUT-REVIEW.md; no saved-layout implementation or phase completion
+phase-p5-saved-layout-design: DONE as reviewed engineering contract — 2026-10-21 — see docs/progress/P5-SAVED-LAYOUT.md and P5-SAVED-LAYOUT-REVIEW.md
+phase-p5-saved-layout-impl: DONE as bounded snapshot + read-only view — 2026-10-21 — see docs/progress/P5-LAYOUT-SLICE.md; no restore/relaunch/reboot claim; full Phase5 OPEN
 ```
 
 ## Control commands
@@ -35,7 +36,7 @@ phase-p5-saved-layout-design: DONE as reviewed engineering contract — 2026-10-
 
 | Work | Model | Effort |
 | --- | --- | --- |
-| Precise bounded implementation and targeted tests | gpt-6-luna | xhigh |
+| Precise bounded implementation and targeted tests | gpt-6-luna (kimi-k2.6 per user request 2026-10-21) | xhigh |
 | Small documentation, tooling and bounded maintenance tasks | gpt-6-luna | medium |
 | Architecture, ambiguity, security review, integration | Parent orchestrator | inherited |
 | Escalation after two failed attempts at same defect | Parent orchestrator | inherited |
@@ -264,7 +265,7 @@ open.
 - [x] Committed-record corruption/partial-tail refusal policy with byte-preserving store and fresh-process CLI acceptance; see P5-COMMITTED-CORRUPTION.md. No salvage, repair or arbitrary bit-rot detection is claimed.
 - [ ] Resolve remaining unknown/unsubmitted end intent and final-payload loss within reviewed bounded scheduling; no complete-capture or performance-budget claim.
 - [x] Scoped saved-layout/restart engineering design and exact codec task, with independent review; see P5-SAVED-LAYOUT.md. No saved-layout implementation or new command is delivered by that design.
-- [ ] Implement saved-layout codec, bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection in the reviewed order.
+- [x] Implement saved-layout codec, bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection in the reviewed order; see P5-LAYOUT-SLICE.md. No restore/relaunch.
 - [ ] Full V-HISTORY reboot/layout recovery and representative workload/throughput acceptance; see P5-SAVED-HISTORY.md and docs/SPEC.md.
 
 ## Phase 6 — alpha measurements and review evidence (not started)

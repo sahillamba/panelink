@@ -1,6 +1,6 @@
 # Panelink: working implementation specification
 
-Revision: 0.13, 2026-10-21. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoint below records current code without converting prototype assumptions into product requirements. This revision preserves the reviewed contracts for command retries, agent identity, history semantics, child environments, and terminal clipboard requests, and scopes the reviewed saved-layout/restart design without enabling recovery.
+Revision: 0.14, 2026-10-21. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoint below records current code without converting prototype assumptions into product requirements. This revision preserves the reviewed contracts for command retries, agent identity, history semantics, child environments, and terminal clipboard requests, and records the implemented bounded saved-layout snapshot and read-only inspection without enabling recovery or relaunch.
 
 ## Purpose and requirement authority
 
@@ -297,7 +297,15 @@ restoration, provider conversation resume and V-HISTORY reboot acceptance
 remain unproved; committed partial-tail refusal is specified below. No stored
 bytes are replayed.
 
-### Scoped saved-layout/restart design (not implemented)
+### Scoped saved-layout/restart design (implemented as bounded snapshot + read-only view)
+
+Implementation status (2026-10-21): the codec, two-slot store, guarded async
+writer, owner/driver observation with freeze-before-stop and one shared
+250 ms metadata deadline, `serve` wiring and read-only
+`panelink layout show [--previous]` are implemented and tested; see
+[P5-LAYOUT-SLICE.md](progress/P5-LAYOUT-SLICE.md). No layout is restored into
+live control, no process/provider is relaunched, and machine-reboot acceptance
+remains open.
 
 [ADR-P5-LAYOUT-01](progress/P5-SAVED-LAYOUT.md) scopes a dependency-free
 historical snapshot for the current two-pane equal layout, with current and

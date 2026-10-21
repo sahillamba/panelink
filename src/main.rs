@@ -143,6 +143,19 @@ where
                 _ => report_cli_error(CliError::InvalidArguments),
             };
         }
+        if arguments
+            .peek()
+            .is_some_and(|argument| argument == "layout")
+        {
+            arguments.next();
+            return match (arguments.next(), arguments.next(), arguments.next()) {
+                (Some(action), None, None) if action == "show" => default_open::layout_show(false),
+                (Some(action), Some(flag), None) if action == "show" && flag == "--previous" => {
+                    default_open::layout_show(true)
+                }
+                _ => report_cli_error(CliError::InvalidArguments),
+            };
+        }
         if arguments.peek().is_some_and(|argument| argument == "close") {
             arguments.next();
             let index = arguments
@@ -601,6 +614,7 @@ fn print_help() {
     println!("Advanced:");
     println!("  panelink history list|show <target>|search <target> <text>|clear <target>");
     println!("  panelink history cleanup   discard uncommitted history files (workspace stopped)");
+    println!("  panelink layout show [--previous]   read-only restart topology");
     println!("  panelink probe        disposable single-shell terminal probe");
     println!("  panelink --help");
     println!("  panelink -h");

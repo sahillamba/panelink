@@ -31,6 +31,8 @@ use std::time::{Duration, Instant};
 use panelink::control_protocol::TargetRef;
 use panelink::history_rows;
 use panelink::history_store::HistoryStore;
+use panelink::layout_store::{LayoutSlot, LayoutStore};
+use panelink::saved_layout::{LayoutAxis, SavedLayout};
 use panelink::transport::AuthenticatedStream;
 
 /// Terminfo source embedded at build time so the binary is self-contained.
@@ -1111,6 +1113,89 @@ pub(crate) fn close(index: usize) -> i32 {
 #[cfg(test)]
 fn storage_openable(server_dir: &Path) -> bool {
     panelink::server_storage::ServerStorage::open(server_dir).is_ok()
+}
+
+/// Read-only `panelink layout show [--previous]`: display the saved layout for
+/// the requested slot, or exit with a fixed sanitized error.
+pub(crate) fn layout_show(previous: bool) -> i32 {
+    let result = layout_show_result(previous);
+    match result {
+        Ok(text) => {
+            print!("{text}");
+            0
+        }
+        Err(error) => {
+            eprintln!("panelink: {error}");
+            1
+        }
+    }
+}
+
+fn layout_show_result(previous: bool) -> Result<String, &'static str> {
+    let state = resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME"))
+        .map_err(|_| "layout directory unavailable")?;
+    // Absence is "no saved layout"; an unsafe/unreadable directory is not.
+    let store = match LayoutStore::open(&state.server.join("layout")) {
+        Ok(store) => store,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Err("no saved layout"),
+        Err(_) => return Err("saved layout invalid"),
+    };
+    let slot = if previous {
+        LayoutSlot::Previous
+    } else {
+        LayoutSlot::Current
+    };
+    let layout = store.load(slot).map_err(|_| "saved layout invalid")?;
+    let layout = layout.ok_or("no saved layout")?;
+    let mut output = format_layout_output(&layout, previous);
+    output.push_str("history: rows/screens are separate read-only sources; use `panelink history show TARGET`\n");
+    Ok(output)
+}
+
+fn format_layout_output(layout: &SavedLayout, previous: bool) -> String {
+    let mut text = String::new();
+    let slot_label = if previous { "previous" } else { "current" };
+    text.push_str(&format!("saved layout: {slot_label}\n"));
+    let meta = layout.metadata();
+    text.push_str(&format!("generation: {}\n", meta.generation()));
+    text.push_str(&format!("workspace: {}\n", meta.workspace()));
+    text.push_str(&format!(
+        "snapshot sequence: {}\n",
+        meta.snapshot_sequence()
+    ));
+    text.push_str(&format!("layout revision: {}\n", meta.layout_revision()));
+    text.push_str(&format!(
+        "observed at unix ms: {}\n",
+        meta.observed_at_unix_ms()
+    ));
+    match layout.pane_count() {
+        0 => {
+            text.push_str("panes: none (empty workspace snapshot)\n");
+        }
+        _ => {
+            text.push_str(&format!("size: {}x{}\n", layout.rows(), layout.columns()));
+            let axis_label = match layout.axis() {
+                LayoutAxis::Single => "single",
+                LayoutAxis::SideBySide => "side-by-side",
+                LayoutAxis::Stacked => "stacked",
+            };
+            text.push_str(&format!("orientation: {axis_label}\n"));
+            for (index, maybe_pane) in layout.panes().iter().enumerate() {
+                if let Some(target) = maybe_pane {
+                    text.push_str(&format!(
+                        "pane {}: {}:{}:{}:{}:{}\n",
+                        index + 1,
+                        target.generation,
+                        target.workspace,
+                        target.pane,
+                        target.session,
+                        target.occupant_revision
+                    ));
+                }
+            }
+        }
+    }
+    text
 }
 
 #[cfg(test)]

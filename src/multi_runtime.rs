@@ -26,12 +26,16 @@ use crate::history_capture::{lock_capture, HistoryCaptureCoordinator, SharedHist
 use crate::history_diagnostics::{HistoryDiagnostics, HistoryReason};
 use crate::history_store::HistoryStore;
 use crate::history_writer::{HistoryWriter, MAX_SHUTDOWN_WAIT};
+use crate::layout_store::LayoutStore;
+use crate::layout_writer::{LayoutShutdownOutcome, LayoutStatusHandle, LayoutWriter};
 use crate::managed_launch_prepare::prepare_launch;
 use crate::managed_launch_protocol::{decode_launch_result, decode_status_query};
+use crate::pane_layout::LayoutSnapshot;
 use crate::pane_layout::Rect;
 use crate::protocol::OperationKey;
 use crate::protocol_wire::{Frame, MessageKind};
 use crate::response_protocol::decode_response_payload;
+use crate::saved_layout::{LayoutMetadata, SavedLayout};
 use crate::scoped_watch_protocol::{
     decode_reconciliation, decode_watch_request, encode_watch_end, WatchEnd, WatchRequest,
 };
@@ -305,6 +309,87 @@ pub struct MultiServerDriver {
     history_capture: Option<SharedHistoryCapture>,
     history_failure: Arc<AtomicBool>,
     history_diagnostics: HistoryDiagnostics,
+    layout: Option<LayoutObserver>,
+}
+
+/// The prototype's single default workspace identity.
+const DEFAULT_WORKSPACE: u64 = 1;
+
+/// Canonical saved-topology key: `LayoutSnapshot` value equality (revision,
+/// root size, spatial targets/rects, divider) DEFINES a canonical change.
+/// Desired geometry and targets only. Focus,
+/// pending PTY resize and repeated identical results never form a change.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LayoutCandidateKey {
+    Live(LayoutSnapshot),
+    Empty,
+}
+
+/// Owner-thread saved-layout observation (P5-SAVED-LAYOUT.md). Emits only on
+/// a changed canonical topology/geometry or the terminal-empty transition,
+/// with a checked per-generation snapshot sequence. Failures disable saving
+/// only; shells and history are unaffected.
+struct LayoutObserver {
+    writer: Option<LayoutWriter>,
+    status: LayoutStatusHandle,
+    generation: u64,
+    last: Option<LayoutCandidateKey>,
+    sequence: u64,
+    disabled: bool,
+    /// Set before any driver-shutdown stop effect; later exits are not empty.
+    frozen: bool,
+}
+
+impl LayoutObserver {
+    fn observe(&mut self, owner: &MultiSessionOwner<PtyEffects>, now_unix_ms: u64) {
+        let Some(writer) = self.writer.as_mut() else {
+            return;
+        };
+        if self.disabled || self.frozen {
+            let _ = writer.flush();
+            return;
+        }
+        let Some(snapshot) = owner.layout_snapshot() else {
+            let _ = writer.flush();
+            return;
+        };
+        let key = if owner.layout_terminal_empty() {
+            LayoutCandidateKey::Empty
+        } else {
+            LayoutCandidateKey::Live(snapshot)
+        };
+        if self.last == Some(key) || self.last == Some(LayoutCandidateKey::Empty) {
+            // Unchanged, or terminal empty already published for this generation.
+            let _ = writer.flush();
+            return;
+        }
+        // Checked sequence exhaustion is a terminal disable for the rest of
+        // this generation (never wraps or reuses a key); shells continue.
+        let Some(sequence) = self.sequence.checked_add(1) else {
+            self.disabled = true;
+            return;
+        };
+        let candidate = LayoutMetadata::new(
+            self.generation,
+            DEFAULT_WORKSPACE,
+            sequence,
+            snapshot.revision,
+            now_unix_ms,
+        )
+        .and_then(|metadata| match key {
+            LayoutCandidateKey::Empty => Ok(SavedLayout::empty(metadata)),
+            LayoutCandidateKey::Live(snapshot) => SavedLayout::from_snapshot(metadata, &snapshot),
+        });
+        let Ok(candidate) = candidate else {
+            // Missing clock or a snapshot outside the saved format: keep the
+            // last good record, stop publishing for this generation.
+            self.disabled = true;
+            return;
+        };
+        self.sequence = sequence;
+        self.last = Some(key);
+        let _ = writer.observe(candidate);
+    }
 }
 
 struct HistoryCapture<'a> {
@@ -325,10 +410,23 @@ impl Drop for MultiServerDriver {
     fn drop(&mut self) {
         self.hub.shutdown();
         self.settle_pending_watches();
+        // Record the last pre-stop topology, then freeze: shutdown-caused
+        // exits must never replace it with an empty tombstone.
+        self.observe_layout();
+        if let Some(observer) = self.layout.as_mut() {
+            observer.frozen = true;
+        }
         self.owner
             .for_each_effects_mut(|_, effects| effects.prepare_driver_shutdown());
+        // History and layout share ONE metadata-drain budget, started at the
+        // existing boundary after the child stop above.
+        let deadline = Instant::now() + MAX_SHUTDOWN_WAIT;
+        let layout_writer = self
+            .layout
+            .as_mut()
+            .and_then(|observer| observer.writer.take());
+        let layout_outcome = layout_writer.map(|writer| writer.begin_shutdown());
         if let Some(coordinator) = self.history_capture.take() {
-            let deadline = Instant::now() + MAX_SHUTDOWN_WAIT;
             lock_capture(&coordinator).begin_shutdown();
             let reached_deadline = loop {
                 let settled = {
@@ -359,6 +457,9 @@ impl Drop for MultiServerDriver {
                 lock_capture(&coordinator).note_shutdown_outcome(outcome);
             }
         }
+        if let Some(pending) = layout_outcome {
+            let _: LayoutShutdownOutcome = pending.wait_until(deadline);
+        }
     }
 }
 
@@ -381,6 +482,44 @@ impl MultiServerDriver {
             history_capture: None,
             history_failure: Arc::new(AtomicBool::new(false)),
             history_diagnostics: HistoryDiagnostics::new(),
+            layout: None,
+        }
+    }
+
+    /// Opt in to bounded saved-layout snapshots for this server generation.
+    ///
+    /// `store` must be this storage domain's `layout/` directory. Failure
+    /// leaves shells and history running. Read-only inspection never needs
+    /// this; it never restores or relaunches anything.
+    pub fn enable_layout(&mut self, store: LayoutStore) -> io::Result<()> {
+        if self.layout.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "layout capture already enabled",
+            ));
+        }
+        let writer = LayoutWriter::start(store, &self.storage, DEFAULT_WORKSPACE)?;
+        self.layout = Some(LayoutObserver {
+            status: writer.status_handle(),
+            writer: Some(writer),
+            generation: self.storage.generation(),
+            last: None,
+            sequence: 0,
+            disabled: false,
+            frozen: false,
+        });
+        self.observe_layout();
+        Ok(())
+    }
+
+    /// Status handle readable after the driver drops; `None` if not enabled.
+    pub fn layout_status(&self) -> Option<LayoutStatusHandle> {
+        self.layout.as_ref().map(|observer| observer.status.clone())
+    }
+
+    fn observe_layout(&mut self) {
+        if let Some(observer) = self.layout.as_mut() {
+            observer.observe(&self.owner, unix_millis());
         }
     }
 
@@ -492,6 +631,7 @@ impl MultiServerDriver {
         self.process_pending_watches(&clock);
         self.hub.reap_finished();
         self.drive_history();
+        self.observe_layout();
         progress
     }
 
