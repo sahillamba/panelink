@@ -16,6 +16,7 @@ import pty
 import re
 import selectors
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -49,7 +50,7 @@ except ModuleNotFoundError:
     )
 
 
-REPETITIONS = 3
+REPETITIONS = 5
 EXPERIMENT_DEADLINE = 60.0
 SERVER_DEADLINE = 18.0
 PTY_SIZE = (24, 100)
@@ -177,9 +178,9 @@ def correlate_switches(
     for observed_hash in route_changes:
         if expected_index < len(expected) and observed_hash == expected[expected_index]:
             expected_index += 1
-        elif observed_hash not in expected or expected_index >= len(expected):
+        else:
             extra_transition_count += 1
-    missed_transition_count = max(0, len(expected) - expected_index - (0 if initial else 1))
+    missed_transition_count = max(0, len(expected) - expected_index)
     switch_order_observed = (initial is not None and expected_index == len(expected)
                              and callback_sequence_ok)
     latency_ok = all(transition["within_latency_bound"] for transition in transitions)
@@ -195,6 +196,16 @@ def correlate_switches(
         "extra_transition_count": extra_transition_count,
         "transitions": transitions,
     }
+
+
+def session_list_visible(text: str, labels: tuple[str, str]) -> bool:
+    """Require the picker heading and both known session rows before typing."""
+    return "Sessions" in text and all(label in text for label in labels)
+
+
+def filtered_session_row_visible(text: str, target: str, other: str) -> bool:
+    """Wait for a fresh filtered frame with the target row and no other row."""
+    return "Sessions" in text and target in text and other not in text
 
 
 def classify_repetition(
@@ -277,6 +288,88 @@ class PrivatePty:
     def recent_text(self, payload: bytes) -> str:
         return ANSI_ESCAPE.sub(b"", payload).decode("utf-8", "replace")
 
+    def screen_text(self) -> str:
+        """Render the bounded PTY transcript into a small cursor-addressed screen."""
+        text = bytes(self.output).decode("utf-8", "replace")
+        rows, columns = PTY_SIZE
+        screen = [[" "] * columns for _ in range(rows)]
+        row = column = 0
+        saved = (0, 0)
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if char == "\x1b":
+                index += 1
+                if index >= len(text):
+                    break
+                if text[index] == "[":
+                    index += 1
+                    start = index
+                    while index < len(text) and not ("@" <= text[index] <= "~"):
+                        index += 1
+                    if index >= len(text):
+                        break
+                    params = text[start:index]
+                    final = text[index]
+                    index += 1
+                    numbers = [int(value) if value.isdigit() else 0
+                               for value in re.findall(r"\d*", params) if value != ""]
+                    first = numbers[0] if numbers and numbers[0] else 1
+                    if final in ("H", "f"):
+                        row = max(0, min(rows - 1, (numbers[0] if numbers and numbers[0] else 1) - 1))
+                        column = max(0, min(columns - 1, (numbers[1] if len(numbers) > 1 and numbers[1] else 1) - 1))
+                    elif final == "A":
+                        row = max(0, row - first)
+                    elif final == "B":
+                        row = min(rows - 1, row + first)
+                    elif final == "C":
+                        column = min(columns - 1, column + first)
+                    elif final == "D":
+                        column = max(0, column - first)
+                    elif final == "G":
+                        column = max(0, min(columns - 1, first - 1))
+                    elif final == "d":
+                        row = max(0, min(rows - 1, first - 1))
+                    elif final == "K":
+                        mode = numbers[0] if numbers else 0
+                        if mode in (0, 2):
+                            begin = column if mode == 0 else 0
+                            screen[row][begin:] = [" "] * (columns - begin)
+                        if mode == 1:
+                            screen[row][:column + 1] = [" "] * (column + 1)
+                    elif final == "J" and numbers and numbers[0] in (2, 3):
+                        screen = [[" "] * columns for _ in range(rows)]
+                    elif final == "s":
+                        saved = (row, column)
+                    elif final == "u":
+                        row, column = saved
+                    continue
+                if text[index] == "]":
+                    index += 1
+                    while index < len(text) and text[index] not in ("\x07", "\x1b"):
+                        index += 1
+                    if index < len(text) and text[index] == "\x1b" and index + 1 < len(text) and text[index + 1] == "\\":
+                        index += 2
+                    elif index < len(text):
+                        index += 1
+                    continue
+                index += 1
+                continue
+            index += 1
+            if char == "\r":
+                column = 0
+            elif char == "\n":
+                row = min(rows - 1, row + 1)
+            elif char == "\b":
+                column = max(0, column - 1)
+            elif char == "\t":
+                column = min(columns - 1, (column // 8 + 1) * 8)
+            elif char >= " " and char != "\x7f":
+                screen[row][column] = char
+                if column < columns - 1:
+                    column += 1
+        return "\n".join("".join(line) for line in screen)
+
     def alive(self) -> bool:
         return self.child is not None and self.child.poll() is None
 
@@ -307,14 +400,20 @@ def plugin_source() -> Path:
 
 def prepare_fixture(root: Path, records_path: Path) -> Path:
     project = root / "project"
-    config_dir = project / ".opencode" / "plugins"
-    config_dir.mkdir(mode=0o700, parents=True)
+    fixture_path = project / ".opencode" / "plugins" / "panelink-tui-probe.js"
     config_path = project / ".opencode" / "tui.json"
-    fixture_path = config_dir / "panelink-tui-probe.js"
-    shutil.copyfile(plugin_source(), fixture_path)
+    return prepare_configured_fixture(fixture_path, config_path, records_path)
+
+
+def prepare_configured_fixture(fixture_path: Path, config_path: Path,
+                               records_path: Path) -> Path:
+    """Write the project-local TUI config and plugin at the configured paths."""
+    fixture_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not fixture_path.exists():
+        shutil.copyfile(plugin_source(), fixture_path)
     fixture_path.chmod(0o600)
-    config = {"plugin": [str(fixture_path)]}
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config_path.write_text(json.dumps({"plugin": [str(fixture_path)]}), encoding="utf-8")
     config_path.chmod(0o600)
     records_path.touch(mode=0o600)
     records_path.chmod(0o600)
@@ -323,6 +422,39 @@ def prepare_fixture(root: Path, records_path: Path) -> Path:
 
 def safe_deadline(deadline: float) -> bool:
     return time.monotonic() < deadline
+
+
+def server_log_markers(path: Path) -> dict[str, bool | str]:
+    """Summarize only known startup-failure classes; never expose log content."""
+    try:
+        payload = path.read_bytes()[-64 * 1024:].lower()
+    except OSError:
+        return {"log_readable": False}
+    return {
+        "log_readable": True,
+        "log_size_bucket": ("empty" if not payload else
+                            "small" if len(payload) < 4096 else
+                            "medium" if len(payload) < 32768 else "large"),
+        "address_in_use": b"address already in use" in payload or b"eaddrinuse" in payload,
+        "permission_denied": any(token in payload for token in
+                                  (b"permission denied", b"operation not permitted", b"eacces", b"eperm")),
+        "listener_word_seen": b"listen" in payload or b"bind" in payload,
+        "ready_word_seen": any(token in payload for token in (b"listening", b"ready", b"started")),
+        "startup_error_marker": b"error" in payload or b"failed" in payload,
+    }
+
+
+def open_loopback_listener() -> tuple[socket.socket | None, int | None]:
+    """Reserve a private loopback port until the server process is launched."""
+    listener: socket.socket | None = None
+    try:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        return listener, listener.getsockname()[1]
+    except OSError:
+        if listener is not None:
+            listener.close()
+        return None, None
 
 
 def wait_until(
@@ -357,7 +489,7 @@ def rep_result(executable: str, launcher: str, repetition: int) -> dict[str, Any
         "latency_bounds_passed": False,
         "missed_transition_count": 0,
         "extra_transition_count": 0,
-        "route_change_callback_api": "candidate_tui.session.select_listener",
+        "route_change_callback_api": "tui.session.select_event_with_route_poll_fallback",
         "route_change_callback_observed_count": 0,
         "new_session": "not_attempted",
         "sessions_created_count": 0,
@@ -374,12 +506,15 @@ def rep_result(executable: str, launcher: str, repetition: int) -> dict[str, Any
         project = root / "project"
         project.mkdir(mode=0o700)
         records_path = root / "route-records.jsonl"
-        prepare_fixture(root, records_path)
-        port = free_loopback_port()
-        if port is None:
+        listener, port = open_loopback_listener()
+        if listener is None or port is None:
             summary["reason"] = "loopback_bind_unavailable"
             return finish_rep(summary, started)
+        # Use the same numeric IPv4 loopback authority the child binds. Avoid
+        # localhost resolver ordering (which can prefer ::1 on macOS).
         base = f"http://127.0.0.1:{port}"
+        fixture_path = project / ".opencode" / "plugins" / "panelink-tui-probe.js"
+        config_path = project / ".opencode" / "tui.json"
         try:
             server_log = (root / "server.log").open("wb")
         except OSError:
@@ -390,18 +525,27 @@ def rep_result(executable: str, launcher: str, repetition: int) -> dict[str, Any
                 executable, launcher,
                 ["serve", "--hostname", "127.0.0.1", "--port", str(port)],
             )
+            # Release immediately before spawning the listener-owning server.
+            listener.close()
             child_server = subprocess.Popen(
                 server_argv, cwd=project, env=env, stdin=subprocess.DEVNULL,
                 stdout=server_log, stderr=server_log,
                 close_fds=True, shell=False, start_new_session=True,
             )
         except OSError:
+            listener.close()
             summary["reason"] = "server_launch_failed"
             return finish_rep(summary, started)
+        # The listener is released just after the spawn is issued; the readiness
+        # wait below still has a hard per-server cap and outer experiment deadline.
         try:
             server_status: list[int | None] = [None]
+            readiness_started = time.monotonic()
+            readiness_attempts = 0
 
             def server_ready() -> bool:
+                nonlocal readiness_attempts
+                readiness_attempts += 1
                 server_status[0] = request(base, "GET", "/session", timeout=0.35)[0]
                 return server_status[0] == 200
 
@@ -411,7 +555,14 @@ def rep_result(executable: str, launcher: str, repetition: int) -> dict[str, Any
             )
             if not ready:
                 summary["reason"] = "local_server_readiness_timeout"
+                summary["readiness_last_http_status"] = server_status[0]
+                summary["readiness_attempt_count"] = readiness_attempts
+                summary["readiness_elapsed_ms"] = round((time.monotonic() - readiness_started) * 1000, 3)
+                summary["server_process_exit_code"] = child_server.poll()
+                summary["server_log_markers"] = server_log_markers(root / "server.log")
                 return finish_rep(summary, started)
+            summary["readiness_attempt_count"] = readiness_attempts
+            summary["readiness_elapsed_ms"] = round((time.monotonic() - readiness_started) * 1000, 3)
             ids: list[str] = []
             for title in ("Panelink Identity Probe A", "Panelink Identity Probe B"):
                 if not safe_deadline(deadline):
@@ -433,6 +584,10 @@ def rep_result(executable: str, launcher: str, repetition: int) -> dict[str, Any
                     return finish_rep(summary, started)
             hashes = [hash_session(identifier) for identifier in ids]
             summary["sessions_created_count"] = len(hashes)
+            # Restore the committed TUI discovery path only after server
+            # readiness and session setup, so the server never sees the TUI
+            # plugin config during startup.
+            prepare_configured_fixture(fixture_path, config_path, records_path)
             tui_argv = launcher_argv(
                 executable, launcher, ["--print-logs", "--session", ids[0], str(project)],
             )
@@ -444,6 +599,18 @@ def rep_result(executable: str, launcher: str, repetition: int) -> dict[str, Any
             def records_now() -> tuple[list[dict[str, Any]], int]:
                 return read_records(records_path)
 
+            tui_screen_ready = wait_until(
+                lambda: ("Loading" not in tui.screen_text()
+                         and ("Panelink Identity Probe A" in tui.screen_text()
+                              or not tui.alive())),
+                deadline=min(deadline, time.monotonic() + 8.0), pty_child=tui,
+            )
+            summary["tui_screen_ready"] = tui_screen_ready
+            tui_opened = wait_until(
+                lambda: tui_screen_ready or not tui.alive(),
+                deadline=min(deadline, time.monotonic() + 20.0), pty_child=tui,
+            )
+            summary["tui_opened"] = tui_opened
             loaded = wait_until(
                 lambda: any(record["kind"] == "plugin_loaded" for record in records_now()[0]),
                 deadline=min(deadline, time.monotonic() + 12.0), pty_child=tui,
@@ -453,84 +620,34 @@ def rep_result(executable: str, launcher: str, repetition: int) -> dict[str, Any
             summary["plugin_loaded"] = loaded
             safe_output = tui.recent_text(bytes(tui.output)) if tui is not None else ""
             summary["pty_output_bytes"] = len(tui.output) if tui is not None else 0
+            safe_output_lower = safe_output.lower()
+            summary["tui_output_markers"] = {
+                token: token in safe_output_lower
+                for token in ("plugin", "failed", "error", "session", "server",
+                              "loading", "connect", "provider", "home", "tui")
+            }
             summary["tui_process_alive_after_plugin_wait"] = tui.alive() if tui is not None else False
             summary["plugin_error_log_seen"] = "[tui.plugin]" in safe_output
             summary["local_plugin_path_seen"] = "panelink-tui-probe.js" in safe_output
             summary["plugin_module_name_seen"] = "panelink-tui-probe" in safe_output
             summary["auth_prompt_seen"] = bool(re.search(
                 r"no providers available|connect (?:a |your )?provider|(?:provider|api key).{0,40}(?:connect|missing|required)",
-                safe_output.lower(),
+                safe_output_lower,
             ))
             summary["route_change_callback_observed_count"] = sum(
                 record["kind"] == "route_change_callback" for record in records
             )
             summary["route_change_callback_api"] = (
-                "tui.session.select_listener_registered" if any(
+                "tui.session.select_listener_registered_route_poll_fallback" if any(
                     record["callback_registered"] for record in records
-                ) else "candidate_listener_not_observed"
+                ) else "listener_unavailable_route_poll_fallback"
             )
             summary["initial_route_captured"] = any(
                 record["route_name"] == "session" and record["session_id_hash"] == hashes[0]
                 for record in records
             )
             if not loaded:
-                navigation = []
-                for label in ("B", "A"):
-                    title = f"Panelink Identity Probe {label}"
-                    tui.output.clear()
-                    try:
-                        tui.send(b"\x18l")
-                    except OSError:
-                        navigation.append({"picker_visible": False, "title_observed": False})
-                        break
-                    picker_buffer = bytearray()
-                    picker_until = min(deadline, time.monotonic() + 2.0)
-                    while safe_deadline(picker_until) and tui.alive():
-                        picker_buffer.extend(tui.drain(0.05))
-                        visible = tui.recent_text(bytes(picker_buffer))
-                        if all(candidate in visible for candidate in
-                               ("Panelink Identity Probe A", "Panelink Identity Probe B")):
-                            break
-                    picker_visible = all(candidate in tui.recent_text(bytes(picker_buffer))
-                                         for candidate in
-                                         ("Panelink Identity Probe A", "Panelink Identity Probe B"))
-                    if not picker_visible:
-                        navigation.append({"picker_visible": False, "title_observed": False})
-                        break
-                    try:
-                        tui.send(title.encode("ascii"))
-                        time.sleep(0.12)
-                        tui.drain(0.0)
-                        tui.send(b"\r")
-                    except OSError:
-                        navigation.append({"picker_visible": True, "title_observed": False})
-                        break
-                    title_until = min(deadline, time.monotonic() + SWITCH_DEADLINE_SECONDS)
-                    while safe_deadline(title_until) and tui.alive() and not tui.osc_title_seen(title):
-                        tui.drain(0.05)
-                    navigation.append({
-                        "picker_visible": True,
-                        "title_observed": tui.osc_title_seen(title),
-                    })
-                    if not navigation[-1]["title_observed"]:
-                        break
-                summary["navigation_attempts"] = navigation
-                summary["route_change_callback_api"] = "navigation_attempted_plugin_load_not_observed"
-                if len(navigation) == 2 and all(item["title_observed"] for item in navigation):
-                    try:
-                        tui.send(b"\x18n")
-                        time.sleep(0.2)
-                        tui.drain(0.0)
-                        tui.send(b"\x1b")
-                        summary["new_session"] = "empty_new_session_key_attempted_no_prompt"
-                    except OSError:
-                        summary["new_session"] = "attempt_failed"
-                if summary.get("auth_prompt_seen"):
-                    summary["reason"] = "tui_requires_provider_auth"
-                elif summary.get("plugin_error_log_seen"):
-                    summary["reason"] = "plugin_load_error"
-                else:
-                    summary["reason"] = "tui_plugin_not_loaded"
+                summary["reason"] = "tui_plugin_not_loaded"
                 return finish_rep(summary, started)
             if not summary["initial_route_captured"]:
                 summary["reason"] = "initial_session_route_not_captured"
@@ -544,26 +661,18 @@ def rep_result(executable: str, launcher: str, repetition: int) -> dict[str, Any
                 if not safe_deadline(deadline):
                     summary["reason"] = "experiment_deadline"
                     break
-                pre_action_records, _ = records_now()
-                after_seq = max((int(record["seq"]) for record in pre_action_records), default=-1)
-                last_record_ms = max(
-                    (float(record["monotonic_ms"]) for record in pre_action_records),
-                    default=0.0,
-                )
-                tui.output.clear()
                 # Installed 1.19.0 defaults: Ctrl-X is the leader and L opens session list.
-                tui.send(b"\x18")
-                time.sleep(0.12)
-                tui.send(b"l")
-                dialog_text = bytearray()
+                # Send the key sequence without a timing guess, then wait for the actual list.
+                tui.send(b"\x18l")
                 dialog_visible = False
                 dialog_deadline = min(deadline, time.monotonic() + 2.5)
                 while safe_deadline(dialog_deadline) and tui.alive():
-                    chunk = tui.drain(0.05)
-                    dialog_text.extend(chunk)
-                    rendered = tui.recent_text(bytes(dialog_text))
-                    if ("Panelink Identity Probe A" in rendered and
-                            "Panelink Identity Probe B" in rendered):
+                    tui.drain(0.05)
+                    rendered = tui.screen_text()
+                    if session_list_visible(
+                        rendered,
+                        ("Panelink Identity Probe A", "Panelink Identity Probe B"),
+                    ):
                         dialog_visible = True
                         break
                 if not dialog_visible:
@@ -571,8 +680,24 @@ def rep_result(executable: str, launcher: str, repetition: int) -> dict[str, Any
                     break
                 query = f"Panelink Identity Probe {label}".encode("ascii")
                 tui.send(query)
-                time.sleep(0.12)
-                tui.drain(0.0)
+                target_title = f"Panelink Identity Probe {label}"
+                other_title = f"Panelink Identity Probe {'A' if label == 'B' else 'B'}"
+                filter_deadline = min(deadline, time.monotonic() + 2.0)
+                filtered = False
+                while safe_deadline(filter_deadline) and tui.alive():
+                    tui.drain(0.05)
+                    if filtered_session_row_visible(tui.screen_text(), target_title, other_title):
+                        filtered = True
+                        break
+                if not filtered:
+                    summary["reason"] = "filtered_session_row_not_safely_identified"
+                    break
+                before_select, _ = records_now()
+                after_seq = max((int(record["seq"]) for record in before_select), default=-1)
+                last_record_ms = max(
+                    (float(record["monotonic_ms"]) for record in before_select),
+                    default=0.0,
+                )
                 issued_ms = last_record_ms
                 tui.send(b"\r")
                 marker = {"after_seq": after_seq, "issued_ms": issued_ms}
@@ -591,6 +716,17 @@ def rep_result(executable: str, launcher: str, repetition: int) -> dict[str, Any
                 previous = target_hash
                 if not expected_seen:
                     summary["reason"] = "controlled_session_selection_not_observed"
+                    break
+                # Require the visible session route to settle before opening the next picker.
+                selected_title = f"Panelink Identity Probe {label}"
+                route_settled = wait_until(
+                    lambda selected_title=selected_title: tui.osc_title_seen(selected_title),
+                    deadline=min(deadline, time.monotonic() + 1.5),
+                    pty_child=tui,
+                    interval=0.025,
+                )
+                if not route_settled:
+                    summary["reason"] = "selected_session_screen_not_settled"
                     break
 
             records, rejected = records_now()
@@ -672,7 +808,7 @@ def run(executable: str | None = None) -> dict[str, Any]:
         "plugin_api_package_version": "1.18.32",
         "plugin_api_version_matches_cli": False,
         "defaults": {"leader": "ctrl+x", "session_list": "l", "session_new": "n"},
-        "route_change_callback_api": "SDK event type tui.session.select; listener observation depends on loaded TUI plugin",
+        "route_change_callback_api": "SDK tui.session.select push event; keyboard route changes use changed-route polling fallback",
         "network_scope": "loopback_only_local_session_creation",
         "prompt_submissions": 0,
         "repetitions": [],
@@ -730,10 +866,12 @@ def run(executable: str | None = None) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--executable", help="explicit OpenCode/tescode executable")
+    parser.add_argument("--sandboxed", action="store_true",
+                        help="apply the optional macOS loopback-only sandbox profile")
     arguments = parser.parse_args()
     sandboxed = os.environ.get("PANELINK_TUI_PROBE_SANDBOXED") == "1"
     sandbox = shutil.which("sandbox-exec") if sys.platform == "darwin" else None
-    if sys.platform == "darwin" and not sandboxed:
+    if sys.platform == "darwin" and not sandboxed and arguments.sandboxed:
         if sandbox is None:
             result = {
                 "launcher": None,

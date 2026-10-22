@@ -7,6 +7,7 @@ const maxBytes = 2 * 1024 * 1024
 let sequence = 0
 let callbackRegistered = false
 let stopped = false
+let lastRouteKey
 
 function sessionHash(sessionID) {
   if (typeof sessionID !== "string" || sessionID.length === 0) return null

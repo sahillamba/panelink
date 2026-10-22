@@ -1,12 +1,16 @@
 import json
+import socket
 import unittest
 
 from scripts.probe_opencode_identity import resolve_executable
 from scripts.probe_opencode_tui_identity import (
     classify_repetition,
     correlate_switches,
+    filtered_session_row_visible,
     launcher_argv,
+    open_loopback_listener,
     parse_records,
+    session_list_visible,
 )
 
 
@@ -93,6 +97,38 @@ class OpenCodeTuiIdentityProbeTests(unittest.TestCase):
         self.assertEqual(classify_repetition(**{**common, "switch_observed": False},
                                              blocked_reason=None), "not_proven")
         self.assertEqual(classify_repetition(**common, blocked_reason="plugin_api_absent"), "blocked")
+
+    def test_session_picker_waits_require_dialog_and_filtered_target_row(self):
+        picker = "Sessions\nPanelink Identity Probe A\nPanelink Identity Probe B"
+        filtered = "Sessions\nPanelink Identity Probe B\n"
+
+        self.assertTrue(session_list_visible(
+            picker, ("Panelink Identity Probe A", "Panelink Identity Probe B"),
+        ))
+        self.assertFalse(session_list_visible(
+            "Panelink Identity Probe A\nPanelink Identity Probe B",
+            ("Panelink Identity Probe A", "Panelink Identity Probe B"),
+        ))
+        self.assertTrue(filtered_session_row_visible(
+            filtered, "Panelink Identity Probe B", "Panelink Identity Probe A",
+        ))
+        self.assertFalse(filtered_session_row_visible(
+            picker, "Panelink Identity Probe B", "Panelink Identity Probe A",
+        ))
+
+    def test_loopback_listener_reserves_a_loopback_ephemeral_port(self):
+        listener, port = open_loopback_listener()
+
+        self.assertIsNotNone(listener)
+        self.assertIsNotNone(port)
+        assert listener is not None and port is not None
+        try:
+            self.assertEqual(listener.getsockname(), ("127.0.0.1", port))
+            with socket.socket() as contender:
+                with self.assertRaises(OSError):
+                    contender.bind(("127.0.0.1", port))
+        finally:
+            listener.close()
 
     def test_launcher_resolution_obeys_explicit_path_and_fallback_order(self):
         usable = lambda path: path.name in {"explicit-opencode", "path-opencode", "home-opencode", "tescode"}

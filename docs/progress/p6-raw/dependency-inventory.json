@@ -1,0 +1,327 @@
+{
+  "commands": [
+    {
+      "command": "cargo metadata --locked --offline --format-version 1",
+      "exit_code": 101,
+      "stderr": "error: failed to download `linux-raw-sys v0.12.1`\n\nCaused by:\n  attempting to make an HTTP request, but --offline was specified\n",
+      "stdout": ""
+    },
+    {
+      "command": "cargo tree --locked --offline -e normal,build --prefix none",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout": "panelink v0.1.0 (/Users/sahillamba/panelink)\ncrossterm-input v0.29.0-panelink.1 (/Users/sahillamba/panelink/vendor/crossterm-input)\nbitflags v2.13.2\nlibc v0.2.191\nrustix v1.1.5\nbitflags v2.13.2\nerrno v0.3.14\nlibc v0.2.191\nlibc v0.2.191\nrustix-openpty v0.2.0\nerrno v0.3.14 (*)\nlibc v0.2.191\nrustix v1.1.5 (*)\nsignal-hook v0.4.5\nlibc v0.2.191\nsignal-hook-registry v1.4.8\nerrno v0.3.14 (*)\nlibc v0.2.191\nunicode-width v0.2.2\nvt100 v0.16.2-panelink.2 (/Users/sahillamba/panelink/vendor/vt100)\nitoa v1.0.18\nunicode-width v0.2.2\nvte v0.15.0\narrayvec v0.7.8\nmemchr v2.8.3\n"
+    }
+  ],
+  "inventory": {
+    "advisory_scan": {
+      "cargo_audit_installed": false,
+      "cargo_deny_installed": false,
+      "note": "Advisory scanning was not performed: cargo-audit and cargo-deny are not installed; no network or advisory database was used.",
+      "status": "blocked"
+    },
+    "direct_count": 7,
+    "metadata_status": "blocked; package rows are from Cargo.lock; any unavailable local package manifest retains unknown license/build metadata",
+    "package_count": 17,
+    "packages": [
+      {
+        "build_script": false,
+        "license_expression": "MIT OR Apache-2.0",
+        "name": "arrayvec",
+        "proc_macro": false,
+        "pulled_by": [
+          "vt100"
+        ],
+        "review_flags": [
+          "metadata-unavailable"
+        ],
+        "role": "transitive",
+        "source": "registry",
+        "version": "0.7.8"
+      },
+      {
+        "build_script": false,
+        "license_expression": "MIT OR Apache-2.0",
+        "name": "bitflags",
+        "proc_macro": false,
+        "pulled_by": [
+          "crossterm-input",
+          "rustix",
+          "rustix-openpty"
+        ],
+        "review_flags": [
+          "metadata-unavailable"
+        ],
+        "role": "transitive",
+        "source": "registry",
+        "version": "2.13.2"
+      },
+      {
+        "build_script": false,
+        "license_expression": "MIT",
+        "name": "crossterm-input",
+        "proc_macro": false,
+        "pulled_by": [
+          "crossterm-input"
+        ],
+        "review_flags": [
+          "metadata-unavailable"
+        ],
+        "role": "direct",
+        "source": "vendored",
+        "version": "0.29.0-panelink.1"
+      },
+      {
+        "build_script": false,
+        "license_expression": "MIT OR Apache-2.0",
+        "name": "errno",
+        "proc_macro": false,
+        "pulled_by": [
+          "rustix",
+          "rustix-openpty",
+          "signal-hook"
+        ],
+        "review_flags": [
+          "metadata-unavailable"
+        ],
+        "role": "transitive",
+        "source": "registry",
+        "version": "0.3.14"
+      },
+      {
+        "build_script": false,
+        "license_expression": "MIT OR Apache-2.0",
+        "name": "itoa",
+        "proc_macro": false,
+        "pulled_by": [
+          "vt100"
+        ],
+        "review_flags": [
+          "metadata-unavailable"
+        ],
+        "role": "transitive",
+        "source": "registry",
+        "version": "1.0.18"
+      },
+      {
+        "build_script": true,
+        "license_expression": "MIT OR Apache-2.0",
+        "name": "libc",
+        "proc_macro": false,
+        "pulled_by": [
+          "libc",
+          "rustix",
+          "rustix-openpty",
+          "signal-hook"
+        ],
+        "review_flags": [
+          "build-script-review",
+          "metadata-unavailable"
+        ],
+        "role": "direct",
+        "source": "registry",
+        "version": "0.2.191"
+      },
+      {
+        "build_script": null,
+        "license_expression": null,
+        "name": "linux-raw-sys",
+        "proc_macro": null,
+        "pulled_by": [
+          "rustix",
+          "rustix-openpty"
+        ],
+        "review_flags": [
+          "build-targets-unknown",
+          "metadata-unavailable",
+          "unknown-license"
+        ],
+        "role": "transitive",
+        "source": "registry",
+        "version": "0.12.1"
+      },
+      {
+        "build_script": false,
+        "license_expression": "Unlicense OR MIT",
+        "name": "memchr",
+        "proc_macro": false,
+        "pulled_by": [
+          "vt100"
+        ],
+        "review_flags": [
+          "metadata-unavailable",
+          "non-permissive-or-unreviewed-license:Unlicense"
+        ],
+        "role": "transitive",
+        "source": "registry",
+        "version": "2.8.3"
+      },
+      {
+        "build_script": true,
+        "license_expression": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+        "name": "rustix",
+        "proc_macro": false,
+        "pulled_by": [
+          "rustix",
+          "rustix-openpty"
+        ],
+        "review_flags": [
+          "build-script-review",
+          "metadata-unavailable"
+        ],
+        "role": "direct",
+        "source": "registry",
+        "version": "1.1.5"
+      },
+      {
+        "build_script": false,
+        "license_expression": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+        "name": "rustix-openpty",
+        "proc_macro": false,
+        "pulled_by": [
+          "rustix-openpty"
+        ],
+        "review_flags": [
+          "metadata-unavailable"
+        ],
+        "role": "direct",
+        "source": "registry",
+        "version": "0.2.0"
+      },
+      {
+        "build_script": true,
+        "license_expression": "MIT OR Apache-2.0",
+        "name": "signal-hook",
+        "proc_macro": false,
+        "pulled_by": [
+          "signal-hook"
+        ],
+        "review_flags": [
+          "build-script-review",
+          "metadata-unavailable"
+        ],
+        "role": "direct",
+        "source": "registry",
+        "version": "0.4.5"
+      },
+      {
+        "build_script": false,
+        "license_expression": "MIT OR Apache-2.0",
+        "name": "signal-hook-registry",
+        "proc_macro": false,
+        "pulled_by": [
+          "signal-hook"
+        ],
+        "review_flags": [
+          "metadata-unavailable"
+        ],
+        "role": "transitive",
+        "source": "registry",
+        "version": "1.4.8"
+      },
+      {
+        "build_script": false,
+        "license_expression": "MIT OR Apache-2.0",
+        "name": "unicode-width",
+        "proc_macro": false,
+        "pulled_by": [
+          "unicode-width",
+          "vt100"
+        ],
+        "review_flags": [
+          "metadata-unavailable"
+        ],
+        "role": "direct",
+        "source": "registry",
+        "version": "0.2.2"
+      },
+      {
+        "build_script": false,
+        "license_expression": "MIT",
+        "name": "vt100",
+        "proc_macro": false,
+        "pulled_by": [
+          "vt100"
+        ],
+        "review_flags": [
+          "metadata-unavailable"
+        ],
+        "role": "direct",
+        "source": "vendored",
+        "version": "0.16.2-panelink.2"
+      },
+      {
+        "build_script": false,
+        "license_expression": "Apache-2.0 OR MIT",
+        "name": "vte",
+        "proc_macro": false,
+        "pulled_by": [
+          "vt100"
+        ],
+        "review_flags": [
+          "metadata-unavailable"
+        ],
+        "role": "transitive",
+        "source": "registry",
+        "version": "0.15.0"
+      },
+      {
+        "build_script": null,
+        "license_expression": null,
+        "name": "windows-link",
+        "proc_macro": null,
+        "pulled_by": [
+          "rustix",
+          "rustix-openpty",
+          "signal-hook"
+        ],
+        "review_flags": [
+          "build-targets-unknown",
+          "metadata-unavailable",
+          "unknown-license"
+        ],
+        "role": "transitive",
+        "source": "registry",
+        "version": "0.2.1"
+      },
+      {
+        "build_script": null,
+        "license_expression": null,
+        "name": "windows-sys",
+        "proc_macro": null,
+        "pulled_by": [
+          "rustix",
+          "rustix-openpty",
+          "signal-hook"
+        ],
+        "review_flags": [
+          "build-targets-unknown",
+          "metadata-unavailable",
+          "unknown-license"
+        ],
+        "role": "transitive",
+        "source": "registry",
+        "version": "0.61.2"
+      }
+    ],
+    "schema_version": 1,
+    "transitive_count": 10,
+    "vendored_cross_checks": [
+      {
+        "cross_check": "review-needed",
+        "name": "crossterm-input",
+        "p2_replacement_mentions_component": false,
+        "third_party_notices_mentions_component": true,
+        "vendor_directory_present": true
+      },
+      {
+        "cross_check": "matched",
+        "name": "vt100",
+        "p2_replacement_mentions_component": true,
+        "third_party_notices_mentions_component": true,
+        "vendor_directory_present": true
+      }
+    ]
+  },
+  "schema_version": 1
+}

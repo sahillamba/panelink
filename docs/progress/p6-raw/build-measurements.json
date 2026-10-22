@@ -1,0 +1,180 @@
+{
+  "aggregate": {
+    "clean_release_build_ms": {
+      "p50": 6738.224,
+      "p95": 11389.224,
+      "samples": [
+        11389.224,
+        6738.224
+      ]
+    },
+    "incremental_rebuild_ms": {
+      "p50": 1749.197,
+      "p95": 2138.73,
+      "samples": [
+        2138.73,
+        1749.197
+      ]
+    },
+    "release_binary_bytes": {
+      "max": 2069888.0,
+      "min": 2069888.0,
+      "samples": [
+        2069888.0,
+        2069888.0
+      ]
+    },
+    "run_count": 2,
+    "stripped_binary_bytes": {
+      "max": 2069944.0,
+      "min": 2069944.0,
+      "samples": [
+        2069944.0,
+        2069944.0
+      ]
+    }
+  },
+  "hardware_query": {
+    "command": [
+      "/usr/sbin/sysctl",
+      "-n",
+      "hw.model",
+      "hw.ncpu",
+      "hw.memsize"
+    ],
+    "exit_code": 0,
+    "stderr": "",
+    "stdout": "Mac16,8\n12\n25769803776\n"
+  },
+  "host": {
+    "machine": "arm64",
+    "processor": "arm",
+    "python": "3.15.1",
+    "system": "macOS-26.6.1-arm64-arm-64bit-Mach-O"
+  },
+  "method": "Two independent fresh private CARGO_TARGET_DIR directories; each clean release build followed by a rebuild after touching src/lib.rs. Release artifact copied to private temp before optional strip; repository binary/source bytes are never modified.",
+  "runs": [
+    {
+      "clean_release_build_ms": 11389.224,
+      "commands": [
+        {
+          "command": [
+            "cargo",
+            "build",
+            "--locked",
+            "--offline",
+            "--release"
+          ],
+          "elapsed_ms": 11389.224,
+          "exit_code": 0,
+          "stderr": "   Compiling libc v0.2.191\n   Compiling bitflags v2.13.2\n   Compiling rustix v1.1.5\n   Compiling memchr v2.8.3\n   Compiling signal-hook v0.4.5\n   Compiling arrayvec v0.7.8\n   Compiling unicode-width v0.2.2\n   Compiling itoa v1.0.18\n   Compiling crossterm-input v0.29.0-panelink.1 (/private/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/source-1/vendor/crossterm-input)\n   Compiling vte v0.15.0\n   Compiling vt100 v0.16.2-panelink.2 (/private/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/source-1/vendor/vt100)\n   Compiling errno v0.3.14\n   Compiling signal-hook-registry v1.4.8\n   Compiling rustix-openpty v0.2.0\n   Compiling panelink v0.1.0 (/private/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/source-1)\n    Finished `release` profile [optimized] target(s) in 11.35s\n",
+          "stdout": ""
+        },
+        {
+          "command": [
+            "/usr/bin/strip",
+            "-S",
+            "-o",
+            "/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/panelink-1-stripped-copy",
+            "/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/target-1/release/panelink"
+          ],
+          "elapsed_ms": 6137.919,
+          "exit_code": 0,
+          "stderr": "",
+          "stdout": ""
+        },
+        {
+          "command": [
+            "cargo",
+            "build",
+            "--locked",
+            "--offline",
+            "--release"
+          ],
+          "elapsed_ms": 2138.73,
+          "exit_code": 0,
+          "stderr": "   Compiling panelink v0.1.0 (/private/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/source-1)\n    Finished `release` profile [optimized] target(s) in 2.09s\n",
+          "stdout": ""
+        }
+      ],
+      "incremental_rebuild_ms": 2138.73,
+      "private_cargo_target_dir": "/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/target-1",
+      "private_source_copy": "/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/source-1",
+      "registry_cache_origin": "/Users/sahillamba/.cargo/registry",
+      "release_binary_bytes": 2069888,
+      "run": 1,
+      "status": "passed",
+      "strip_available": true,
+      "strip_path": "/usr/bin/strip",
+      "stripped_binary_bytes": 2069944
+    },
+    {
+      "clean_release_build_ms": 6738.224,
+      "commands": [
+        {
+          "command": [
+            "cargo",
+            "build",
+            "--locked",
+            "--offline",
+            "--release"
+          ],
+          "elapsed_ms": 6738.224,
+          "exit_code": 0,
+          "stderr": "   Compiling libc v0.2.191\n   Compiling bitflags v2.13.2\n   Compiling rustix v1.1.5\n   Compiling signal-hook v0.4.5\n   Compiling memchr v2.8.3\n   Compiling arrayvec v0.7.8\n   Compiling itoa v1.0.18\n   Compiling unicode-width v0.2.2\n   Compiling crossterm-input v0.29.0-panelink.1 (/private/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/source-2/vendor/crossterm-input)\n   Compiling vte v0.15.0\n   Compiling vt100 v0.16.2-panelink.2 (/private/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/source-2/vendor/vt100)\n   Compiling errno v0.3.14\n   Compiling signal-hook-registry v1.4.8\n   Compiling rustix-openpty v0.2.0\n   Compiling panelink v0.1.0 (/private/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/source-2)\n    Finished `release` profile [optimized] target(s) in 6.69s\n",
+          "stdout": ""
+        },
+        {
+          "command": [
+            "/usr/bin/strip",
+            "-S",
+            "-o",
+            "/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/panelink-2-stripped-copy",
+            "/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/target-2/release/panelink"
+          ],
+          "elapsed_ms": 21.479,
+          "exit_code": 0,
+          "stderr": "",
+          "stdout": ""
+        },
+        {
+          "command": [
+            "cargo",
+            "build",
+            "--locked",
+            "--offline",
+            "--release"
+          ],
+          "elapsed_ms": 1749.197,
+          "exit_code": 0,
+          "stderr": "   Compiling panelink v0.1.0 (/private/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/source-2)\n    Finished `release` profile [optimized] target(s) in 1.72s\n",
+          "stdout": ""
+        }
+      ],
+      "incremental_rebuild_ms": 1749.197,
+      "private_cargo_target_dir": "/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/target-2",
+      "private_source_copy": "/var/folders/zk/280x24r52md1tjr11y6h1wm00000gp/T/panelink-p6-build-ged_wbfh/source-2",
+      "registry_cache_origin": "/Users/sahillamba/.cargo/registry",
+      "release_binary_bytes": 2069888,
+      "run": 2,
+      "status": "passed",
+      "strip_available": true,
+      "strip_path": "/usr/bin/strip",
+      "stripped_binary_bytes": 2069944
+    }
+  ],
+  "schema_version": 1,
+  "synthetic": false,
+  "toolchain": {
+    "cargo": {
+      "exit_code": 0,
+      "stderr": "",
+      "stdout": "cargo 1.99.1 (5f94df478 2026-08-27)\nrelease: 1.99.1\ncommit-hash: 5f94df4789f005f9a352888e8355ffc645b7ed0e\ncommit-date: 2026-08-27\nhost: aarch64-apple-darwin\nlibgit2: 1.9.6 (sys:0.21.0 vendored)\nlibcurl: 8.7.1 (sys:0.4.90+curl-8.21.0 system ssl:(SecureTransport) LibreSSL/3.3.6)\nssl: OpenSSL 3.6.3 9 Jun 2026\nos: Mac OS 26.6.1 [64-bit]\n"
+    },
+    "rustc": {
+      "exit_code": 0,
+      "stderr": "",
+      "stdout": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n"
+    }
+  }
+}

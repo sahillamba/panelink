@@ -302,7 +302,22 @@ mod tests {
         assert_eq!(bytes.len(), 3 * 56);
         assert!(!bytes.windows(10).any(|part| part == b"DO_NOT_PER"));
         drop(started);
-        assert_eq!(ServerStorage::open(&fixture.0).unwrap().generation(), 2);
+        // A concurrent test's fork-to-exec window can briefly inherit the
+        // released flock descriptor (see server_storage::reopen_after_drop);
+        // retry boundedly, a real competing holder still fails.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let reopened = loop {
+            match ServerStorage::open(&fixture.0) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                result => break result,
+            }
+        };
+        assert_eq!(reopened.unwrap().generation(), 2);
     }
 
     #[test]

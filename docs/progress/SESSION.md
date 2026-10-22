@@ -1,5 +1,17 @@
 # Implementation session checkpoint — 2026-10-17
 
+## P4 switch signal + Phase 6 start — 2026-10-21 (read this first)
+
+Two GPT-6-Luna workers. Both were interrupted by a machine sleep + LLM auth
+broker timeout, resumed, then stopped by the parent after exceeding their
+timeboxes. L8: decisive bundle evidence that 1.19.0 keyboard selection never
+publishes tui.session.select (polling only); probe regressions found/fixed
+but 5-rep rerun incomplete. L9: build measurements and offline license
+inventory done; ten-pane workload compiles (parent removed an input-resend
+retry) but fails child-ack. Parent also killed two leaked 2-day-old test
+servers (pl-p3b-close) that were burning ~80% CPU. Intermittent timing tests
+reproduced on baseline. Committed; no push.
+
 ## Recovery relaunch + links — 2026-10-21 (read this first)
 
 Two GPT-6-Luna (xhigh) workers in parallel against a parent-frozen link API
