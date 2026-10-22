@@ -6,6 +6,11 @@
 //! parent separately adopts it. One caller-supplied ledger owns every lease,
 //! launch, control result, status, and receipt in this generation.
 
+mod async_split;
+
+use self::async_split::ActiveAsyncSplit;
+pub(crate) use self::async_split::AsyncSplitAdmission;
+
 use super::{
     decode_request_payload, encode_response, is_capacity_error, owner_rejection, preflight_reply,
     terminal_outcome, Connection, EffectSink, EventPage, GlobalAuthority, OwnerMutation,
@@ -142,6 +147,12 @@ pub struct MultiSessionOwner<E: EffectSink> {
     /// Bounded per-pane size state keyed by full target: last confirmed
     /// absolute PTY size and, while a resize is pending, the desired size.
     pane_sizes: [Option<PaneSizeState>; crate::pane_layout::MAX_PANES],
+    /// One schema-7 split whose prepare/spawn/journal work is outside the
+    /// owner thread. All authority and topology remain here.
+    active_async_split: Option<Box<ActiveAsyncSplit>>,
+    /// A child handle returned by a worker whose key/target could not be
+    /// reconciled with the active reservation. Retained until owner teardown.
+    async_emergency_effect: Option<Box<E>>,
 }
 
 #[derive(Clone, Copy)]
@@ -206,6 +217,10 @@ impl<E: EffectSink> fmt::Debug for MultiSessionOwner<E> {
             .field("launches", &self.launches)
             .field("layout_established", &self.layout.is_some())
             .field("committed_splits", &self.committed_splits.len())
+            .field(
+                "async_emergency_effect_retained",
+                &self.async_emergency_effect.is_some(),
+            )
             .field("close_results", &self.close_results.len())
             .field("active_closes", &self.active_closes.len())
             .field(
@@ -348,6 +363,8 @@ impl std::error::Error for SplitError {}
 pub enum LayoutResizeError {
     /// No layout exists yet.
     NoLayout,
+    /// A split launch is in progress; topology changes are temporarily held.
+    InProgress,
     /// The layout rejected the request; nothing changed and no PTY was resized.
     Layout(LayoutError),
     /// The new layout is committed but some sessions were not resized.
@@ -366,6 +383,7 @@ impl fmt::Display for LayoutResizeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::NoLayout => "no pane layout exists",
+            Self::InProgress => "pane split is in progress",
             Self::Layout(LayoutError::StaleRevision) => "pane layout revision is stale",
             Self::Layout(LayoutError::LayoutTooSmall | LayoutError::InvalidDimensions) => {
                 "pane layout is too small or too large"
@@ -406,12 +424,20 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             close_results: Vec::new(),
             active_closes: Vec::new(),
             pane_sizes: [None; crate::pane_layout::MAX_PANES],
+            active_async_split: None,
+            async_emergency_effect: None,
         })
     }
 
     /// Return whether at least one session exists and every retained session
     /// has exited or failed, so no live child remains.
     pub fn all_sessions_ended(&self) -> bool {
+        // A worker-returned handle that could not be attached is still a
+        // server-owned child. Never publish a terminal-owner result while it
+        // is retained for emergency shutdown.
+        if self.async_emergency_effect.is_some() || self.active_async_split.is_some() {
+            return false;
+        }
         let mut any = false;
         for record in self.launches.records() {
             any = true;
@@ -426,6 +452,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     /// layout exists and EVERY target in it has a positively recorded
     /// `Exited` state. Unknown, failed lookup or a live state is not proof.
     pub fn layout_terminal_empty(&self) -> bool {
+        if self.active_async_split.is_some() {
+            return false;
+        }
         let Some(layout) = self.layout_snapshot() else {
             return false;
         };
@@ -477,6 +506,322 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         })
     }
 
+    /// Whether the owner currently retains one accepted schema-7 split.
+    pub(crate) fn async_split_active(&self) -> bool {
+        self.active_async_split.is_some()
+    }
+
+    /// Key whose accepted split currently owns the launch-work slot.
+    pub(crate) fn async_split_key(&self) -> Option<OperationKey> {
+        self.active_async_split.as_ref().map(|split| split.key)
+    }
+
+    /// Read a retained terminal split result without reauthorizing or extending
+    /// the request's lease. This also settles bounded pending reply waiters.
+    pub(crate) fn async_split_result(&self, key: OperationKey) -> Option<SplitResult> {
+        self.committed_splits
+            .iter()
+            .find(|result| result.key == key)
+            .copied()
+    }
+
+    /// Admit and reserve one schema-7 split without preparation, storage IO or
+    /// process creation. Only the exact duplicate path may observe the active
+    /// operation while it is pending.
+    pub(crate) fn begin_async_split(
+        &mut self,
+        payload: &[u8],
+        now_secs: u64,
+        can_start: bool,
+    ) -> Result<AsyncSplitAdmission, SplitError> {
+        let request = decode_split_request(payload).map_err(SplitError::InvalidPayload)?;
+        let key = request.key();
+        if key.generation != self.global.generation {
+            return Err(SplitError::GenerationMismatch);
+        }
+        if let Some(admission) = self
+            .global
+            .ledger
+            .existing_admission(key, payload, now_secs)
+            .map_err(SplitError::Ledger)?
+        {
+            if self
+                .active_async_split
+                .as_ref()
+                .is_some_and(|active| active.key == key)
+                && matches!(admission, Admission::InProgress)
+            {
+                return Ok(AsyncSplitAdmission::Pending);
+            }
+            if let Some(result) = self.async_split_result(key) {
+                return Ok(AsyncSplitAdmission::Terminal(result));
+            }
+            if matches!(admission, Admission::Completed(Outcome::Unknown))
+                && self
+                    .launches
+                    .retained_result(key)
+                    .is_some_and(|result| result.outcome == Outcome::Unknown)
+            {
+                return Ok(AsyncSplitAdmission::Uncertain);
+            }
+            return match self.split_duplicate(key, request.target(), admission) {
+                Ok(result) => Ok(AsyncSplitAdmission::Terminal(result)),
+                Err(SplitError::Failed { result, .. }) => {
+                    Ok(AsyncSplitAdmission::Terminal(*result))
+                }
+                Err(error) => Err(error),
+            };
+        }
+        if self.active_async_split.is_some()
+            || self.async_emergency_effect.is_some()
+            || !self.active_closes.is_empty()
+            || !can_start
+        {
+            return Err(SplitError::InProgress);
+        }
+        match self
+            .global
+            .ledger
+            .admit(key, payload, now_secs)
+            .map_err(SplitError::Ledger)?
+        {
+            Admission::Execute => {}
+            Admission::InProgress | Admission::Completed(_) => {
+                return Err(SplitError::InternalInvariant);
+            }
+        }
+
+        let failed = SplitResult {
+            key,
+            outcome: Outcome::Failed,
+            committed_layout_revision: 0,
+            existing_target: request.target(),
+            new_target: None,
+        };
+        if self.launches.retained_result(key).is_some() {
+            let _ = self.global.ledger.complete(key, Outcome::Failed);
+            return Err(SplitError::InternalInvariant);
+        }
+        self.reclaim_failed_slots();
+        let (preview, new_target) = match self.plan_split(&request) {
+            Ok(plan) => plan,
+            Err(_) => {
+                self.global
+                    .ledger
+                    .complete(key, Outcome::Failed)
+                    .map_err(|_| SplitError::InternalInvariant)?;
+                return Ok(AsyncSplitAdmission::Terminal(failed));
+            }
+        };
+        let planned = preview.planned_snapshot();
+        let Some(existing_rect) = planned
+            .panes
+            .into_iter()
+            .flatten()
+            .find(|pane| pane.target == request.target())
+            .map(|pane| pane.rect)
+        else {
+            self.global
+                .ledger
+                .complete(key, Outcome::Failed)
+                .map_err(|_| SplitError::InternalInvariant)?;
+            return Ok(AsyncSplitAdmission::Terminal(failed));
+        };
+        let seed = match TargetStateSeed::prepare(self.global.generation, new_target) {
+            Ok(seed) => seed,
+            Err(_) => {
+                self.global
+                    .ledger
+                    .complete(key, Outcome::Failed)
+                    .map_err(|_| SplitError::InternalInvariant)?;
+                return Ok(AsyncSplitAdmission::Terminal(failed));
+            }
+        };
+        if self.launches.reserve_async(key, new_target).is_err() {
+            self.global
+                .ledger
+                .complete(key, Outcome::Failed)
+                .map_err(|_| SplitError::InternalInvariant)?;
+            return Ok(AsyncSplitAdmission::Terminal(failed));
+        }
+        self.active_async_split = Some(Box::new(ActiveAsyncSplit {
+            key,
+            existing_target: request.target(),
+            new_target,
+            preview,
+            existing_rect,
+            dimensions: request.launch().dimensions(),
+            seed: Some(seed),
+            child_attached: false,
+        }));
+        Ok(AsyncSplitAdmission::Start {
+            key,
+            target: new_target,
+        })
+    }
+
+    /// Attach a child returned by the worker. The owner consumes its prebuilt
+    /// target state before acknowledging the worker's final journal phase.
+    pub(crate) fn attach_async_split(
+        &mut self,
+        key: OperationKey,
+        target: TargetRef,
+        effects: E,
+    ) -> Result<(), SplitError> {
+        let seed = match self
+            .active_async_split
+            .as_mut()
+            .filter(|active| active.key == key && active.new_target == target)
+            .and_then(|active| active.seed.take())
+        {
+            Some(seed) => seed,
+            None => {
+                debug_assert!(self.async_emergency_effect.is_none());
+                self.async_emergency_effect = Some(Box::new(effects));
+                self.launches.mark_unhealthy();
+                return Err(SplitError::InternalInvariant);
+            }
+        };
+        if let Some(active) = self.active_async_split.as_mut() {
+            active.child_attached = true;
+        }
+        self.launches
+            .attach_async(key, target, seed.attach(effects))
+            .map_err(|_| SplitError::InternalInvariant)
+    }
+
+    /// Finish one attached async split after the worker's Spawned/Applied
+    /// journal result arrives. Unknown still commits and retains the child.
+    pub(crate) fn finish_async_split<RE, Resize>(
+        &mut self,
+        key: OperationKey,
+        target: TargetRef,
+        outcome: Outcome,
+        unhealthy: bool,
+        mut resize: Resize,
+    ) -> Result<AsyncSplitAdmission, SplitError>
+    where
+        Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
+    {
+        let Some(active) = self
+            .active_async_split
+            .as_ref()
+            .filter(|active| active.key == key && active.new_target == target)
+        else {
+            return Err(SplitError::InternalInvariant);
+        };
+        if !active.child_attached {
+            let terminal = if outcome == Outcome::Failed {
+                Outcome::Failed
+            } else {
+                Outcome::Unknown
+            };
+            return self.fail_async_split(key, target, terminal, unhealthy);
+        }
+        let active = self
+            .active_async_split
+            .take()
+            .expect("active split was checked above");
+        let committed = match self
+            .layout
+            .as_mut()
+            .map(|layout| layout.commit_split(active.preview))
+        {
+            Some(Ok(snapshot)) => snapshot,
+            _ => {
+                // The process exists, but the owner could not publish its
+                // preview. Preserve the child while recording uncertainty.
+                self.launches
+                    .finish_async(key, target, Outcome::Unknown, true, true)
+                    .map_err(|_| SplitError::InternalInvariant)?;
+                self.global
+                    .ledger
+                    .complete(key, Outcome::Unknown)
+                    .map_err(|_| SplitError::InternalInvariant)?;
+                return Ok(AsyncSplitAdmission::Uncertain);
+            }
+        };
+        let launch = self
+            .launches
+            .finish_async(key, target, outcome, true, unhealthy)
+            .map_err(|_| SplitError::InternalInvariant)?;
+        self.record_pane_size(active.new_target, active.dimensions, None);
+        let existing_exited =
+            self.launches.state(active.existing_target) == Ok(SessionState::Exited);
+        let resized = existing_exited
+            || self.apply_pane_size(active.existing_target, active.existing_rect, &mut resize);
+        let final_outcome = match (launch.outcome, resized) {
+            (Outcome::Applied, true) => Outcome::Applied,
+            (Outcome::Applied, false) => Outcome::Partial,
+            _ => Outcome::Unknown,
+        };
+        let mut result = SplitResult {
+            key,
+            outcome: final_outcome,
+            committed_layout_revision: committed.revision,
+            existing_target: active.existing_target,
+            new_target: Some(active.new_target),
+        };
+        if self.collapse_exited_panes().is_err() {
+            result.outcome = Outcome::Unknown;
+        }
+        self.committed_splits.push(result);
+        if self.global.ledger.complete(key, result.outcome).is_err() {
+            result.outcome = Outcome::Unknown;
+            if let Some(retained) = self.committed_splits.last_mut() {
+                *retained = result;
+            }
+        }
+        Ok(AsyncSplitAdmission::Terminal(result))
+    }
+
+    /// Complete a worker failure known to have acquired no child.
+    pub(crate) fn fail_async_split(
+        &mut self,
+        key: OperationKey,
+        target: TargetRef,
+        outcome: Outcome,
+        unhealthy: bool,
+    ) -> Result<AsyncSplitAdmission, SplitError> {
+        let active = self
+            .active_async_split
+            .as_ref()
+            .filter(|active| active.key == key && active.new_target == target)
+            .ok_or(SplitError::InternalInvariant)?;
+        if active.child_attached {
+            return Err(SplitError::InternalInvariant);
+        }
+        let launch = self
+            .launches
+            .finish_async(key, target, outcome, false, unhealthy)
+            .map_err(|_| SplitError::InternalInvariant)?;
+        let active = self
+            .active_async_split
+            .take()
+            .expect("active split was checked above");
+        let split_outcome = launch.outcome;
+        if split_outcome == Outcome::Unknown {
+            self.global
+                .ledger
+                .complete(key, Outcome::Unknown)
+                .map_err(|_| SplitError::InternalInvariant)?;
+            return Ok(AsyncSplitAdmission::Uncertain);
+        }
+        let result = SplitResult {
+            key,
+            outcome: Outcome::Failed,
+            committed_layout_revision: 0,
+            existing_target: active.existing_target,
+            new_target: None,
+        };
+        self.global
+            .ledger
+            .complete(key, Outcome::Failed)
+            .map_err(|_| SplitError::InternalInvariant)?;
+        self.committed_splits.push(result);
+        Ok(AsyncSplitAdmission::Terminal(result))
+    }
+
     /// Execute or observe one trusted schema-6 managed launch.
     ///
     /// The caller must validate launch authority before invoking this method.
@@ -503,6 +848,19 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         Prepare: FnOnce(LaunchRequestView<'_>, TargetRef) -> Result<P, PE>,
         Spawn: FnOnce(P) -> Result<E, SE>,
     {
+        if self.active_async_split.is_some() || self.async_emergency_effect.is_some() {
+            if let Ok(request) = decode_launch_request(payload) {
+                if self
+                    .global
+                    .ledger
+                    .existing_admission(request.key(), payload, now_secs)
+                    .map_err(ManagedLaunchError::Ledger)?
+                    .is_none()
+                {
+                    return Err(ManagedLaunchError::InProgress);
+                }
+            }
+        }
         let generation = self.global.generation;
         let result = self.launches.execute(
             payload,
@@ -588,6 +946,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         {
             return self.split_duplicate(key, request.target(), admission);
         }
+        if self.active_async_split.is_some() || self.async_emergency_effect.is_some() {
+            return Err(SplitError::InProgress);
+        }
         match self
             .global
             .ledger
@@ -596,7 +957,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         {
             Admission::Execute => {}
             Admission::InProgress | Admission::Completed(_) => {
-                return Err(SplitError::InternalInvariant)
+                return Err(SplitError::InternalInvariant);
             }
         }
 
@@ -740,6 +1101,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     where
         Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
     {
+        if self.active_async_split.is_some() || self.async_emergency_effect.is_some() {
+            return Err(LayoutResizeError::InProgress);
+        }
         let layout = self.layout.as_mut().ok_or(LayoutResizeError::NoLayout)?;
         let before = layout.snapshot().revision;
         let snapshot = layout
@@ -927,8 +1291,8 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         } else if let Some(slot) = self.pane_sizes.iter_mut().find(|slot| slot.is_none()) {
             *slot = Some(entry);
         }
-        // Both prototype panes are tracked from layout establishment and split
-        // commit, so a third distinct target cannot reach this point.
+        // Every layout pane has one bounded entry, so a fifth distinct target
+        // cannot reach this point.
     }
 
     /// Attach to an exact retained target and issue a fresh global lease or
@@ -1460,10 +1824,10 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 Ok(Admission::Execute) => {}
                 Ok(Admission::InProgress) => return status_reply(key, OperationStatus::InProgress),
                 Ok(Admission::Completed(outcome)) => {
-                    return status_reply(key, OperationStatus::Completed(outcome))
+                    return status_reply(key, OperationStatus::Completed(outcome));
                 }
                 Err(error) if is_capacity_error(&error) => {
-                    return rejected_reply(key, RejectionCode::Capacity)
+                    return rejected_reply(key, RejectionCode::Capacity);
                 }
                 Err(error) => return Err(ServerError::Protocol(error)),
             }
@@ -1508,18 +1872,21 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         if let Some(reply) = known_reply(&self.global, key, payload, now_secs)? {
             return Ok(RootResizeReply::Response(reply));
         }
+        if self.active_async_split.is_some() || self.async_emergency_effect.is_some() {
+            return rejected_reply(key, RejectionCode::Capacity).map(RootResizeReply::Response);
+        }
         match self.global.ledger.admit(key, payload, now_secs) {
             Ok(Admission::Execute) => {}
             Ok(Admission::InProgress) => {
                 return status_reply(key, OperationStatus::InProgress)
-                    .map(RootResizeReply::Response)
+                    .map(RootResizeReply::Response);
             }
             Ok(Admission::Completed(outcome)) => {
                 return status_reply(key, OperationStatus::Completed(outcome))
-                    .map(RootResizeReply::Response)
+                    .map(RootResizeReply::Response);
             }
             Err(error) if is_capacity_error(&error) => {
-                return rejected_reply(key, RejectionCode::Capacity).map(RootResizeReply::Response)
+                return rejected_reply(key, RejectionCode::Capacity).map(RootResizeReply::Response);
             }
             Err(error) => return Err(ServerError::Protocol(error)),
         }
@@ -1791,6 +2158,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 None => Err(CloseError::InternalInvariant),
             };
         }
+        if self.active_async_split.is_some() || self.async_emergency_effect.is_some() {
+            return Err(CloseError::InProgress);
+        }
         if self.close_results.len() + self.active_closes.len() >= MAX_RETAINED_CLOSE_RESULTS {
             return Err(CloseError::Capacity);
         }
@@ -1802,7 +2172,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         {
             Admission::Execute => {}
             Admission::InProgress | Admission::Completed(_) => {
-                return Err(CloseError::InternalInvariant)
+                return Err(CloseError::InternalInvariant);
             }
         }
 
@@ -1901,6 +2271,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 CloseError::InternalInvariant
             });
         }
+        if self.active_async_split.is_some() || self.async_emergency_effect.is_some() {
+            return Err(CloseError::InProgress);
+        }
         if self.close_results.len() + self.active_closes.len() >= MAX_RETAINED_CLOSE_RESULTS {
             return Err(CloseError::Capacity);
         }
@@ -1912,7 +2285,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         {
             Admission::Execute => {}
             Admission::InProgress | Admission::Completed(_) => {
-                return Err(CloseError::InternalInvariant)
+                return Err(CloseError::InternalInvariant);
             }
         }
         let rejection = if self
@@ -2151,6 +2524,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     }
 
     fn plan_close(&self, request: &CloseRequest) -> Result<(), CloseRejection> {
+        if self.active_async_split.is_some() || self.async_emergency_effect.is_some() {
+            return Err(CloseRejection::StaleLayout);
+        }
         let layout = self.layout.as_ref().ok_or(CloseRejection::NoLayout)?;
         let current = layout.snapshot();
         let target = request.target;
@@ -2242,28 +2618,33 @@ impl<E: EffectSink> MultiSessionOwner<E> {
 
     /// Collapse every exited pane that still has a sibling in the layout.
     fn collapse_exited_panes(&mut self) -> Result<(), ()> {
-        // One layout revision is produced for each individual close.
-        let Some(layout) = self.layout.as_ref() else {
-            return Ok(());
-        };
-        let snapshot = layout.snapshot();
-        if snapshot.pane_count() <= 1 {
+        if self.active_async_split.is_some() || self.async_emergency_effect.is_some() {
             return Ok(());
         }
-        let exited = snapshot.panes.into_iter().flatten().find(|pane| {
-            !self
-                .active_closes
-                .iter()
-                .any(|close| close.request.target == pane.target)
-                && matches!(self.launches.state(pane.target), Ok(SessionState::Exited))
-        });
-        match exited {
-            Some(pane) => self
-                .finish_pane_exit(pane.target, &mut |effects: &mut E, rows, columns| {
-                    effects.apply_size(rows, columns)
-                })
-                .map(|_| ()),
-            None => Ok(()),
+        // A split can be pending while several existing children exit. Keep
+        // each exit pending until its preview commits, then produce one
+        // revision per individual collapse as the owner settles all exits.
+        loop {
+            let Some(layout) = self.layout.as_ref() else {
+                return Ok(());
+            };
+            let snapshot = layout.snapshot();
+            if snapshot.pane_count() <= 1 {
+                return Ok(());
+            }
+            let exited = snapshot.panes.into_iter().flatten().find(|pane| {
+                !self
+                    .active_closes
+                    .iter()
+                    .any(|close| close.request.target == pane.target)
+                    && matches!(self.launches.state(pane.target), Ok(SessionState::Exited))
+            });
+            let Some(pane) = exited else {
+                return Ok(());
+            };
+            self.finish_pane_exit(pane.target, &mut |effects: &mut E, rows, columns| {
+                effects.apply_size(rows, columns)
+            })?;
         }
     }
 
@@ -4651,7 +5032,10 @@ mod tests {
 
 #[cfg(test)]
 mod split_tests {
-    use super::{LayoutResizeError, MultiSessionOwner, SplitError, SplitFailure};
+    use super::{
+        AsyncSplitAdmission, CloseError, LayoutResizeError, MultiSessionOwner, SplitError,
+        SplitFailure,
+    };
     use crate::control_protocol::{Command, ReadSource, TargetRef};
     use crate::managed_launch::LaunchJournalPort;
     use crate::managed_launch_protocol::{encode_launch_request, EnvironmentEntry, LaunchRequest};
@@ -4665,6 +5049,7 @@ mod split_tests {
     use std::cell::RefCell;
     use std::io;
     use std::rc::Rc;
+    use std::time::Instant;
 
     const GENERATION: u64 = 73;
     const LEASE: u64 = 1;
@@ -4721,7 +5106,7 @@ mod split_tests {
         }
 
         fn child_exited(&self) -> bool {
-            false
+            self.session == u64::MAX
         }
 
         fn screen_revision(&self) -> Option<u64> {
@@ -5891,6 +6276,480 @@ mod split_tests {
         }
         assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 4);
         assert_no_input(&fixture);
+    }
+
+    #[test]
+    fn async_split_admission_deduplicates_before_busy_checks_and_has_no_io() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            planned_size(SplitDirection::Right),
+            b"async",
+        );
+        let start = fixture
+            .owner
+            .begin_async_split(&payload, NOW, true)
+            .unwrap();
+        let AsyncSplitAdmission::Start {
+            key: started,
+            target,
+        } = start
+        else {
+            panic!("expected asynchronous start");
+        };
+        assert_eq!(started, key(2));
+        assert!(fixture.log.borrow().is_empty());
+        assert!(matches!(
+            fixture.owner.begin_async_split(&payload, NOW, false),
+            Ok(AsyncSplitAdmission::Pending)
+        ));
+
+        let changed = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            planned_size(SplitDirection::Right),
+            b"changed",
+        );
+        assert!(matches!(
+            fixture.owner.begin_async_split(&changed, NOW, true),
+            Err(SplitError::Ledger(ProtocolError::OperationConflict))
+        ));
+        assert!(matches!(
+            fixture.owner.begin_async_split(
+                &split_bytes(
+                    key(3),
+                    fixture.first,
+                    1,
+                    SplitDirection::Right,
+                    planned_size(SplitDirection::Right),
+                    b"competing",
+                ),
+                NOW,
+                true,
+            ),
+            Err(SplitError::InProgress)
+        ));
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 1);
+        assert!(matches!(
+            fixture
+                .owner
+                .resize_layout(1, ROOT_ROWS, ROOT_COLUMNS, |_, _, _| Ok::<_, ()>(())),
+            Err(LayoutResizeError::InProgress)
+        ));
+        assert_eq!(fixture.owner.async_split_key(), Some(key(2)));
+        assert_eq!(fixture.owner.async_split_result(key(2)), None);
+        assert!(fixture.owner.launches.state(target).is_ok());
+    }
+
+    #[test]
+    fn async_split_worker_failure_without_child_releases_topology_slot() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            planned_size(SplitDirection::Right),
+            b"async",
+        );
+        let AsyncSplitAdmission::Start { key, target } = fixture
+            .owner
+            .begin_async_split(&payload, NOW, true)
+            .unwrap()
+        else {
+            panic!("expected asynchronous start");
+        };
+        let AsyncSplitAdmission::Terminal(result) = fixture
+            .owner
+            .fail_async_split(key, target, Outcome::Failed, false)
+            .unwrap()
+        else {
+            panic!("expected terminal failure");
+        };
+        assert_eq!(result.outcome, Outcome::Failed);
+        assert_eq!(result.new_target, None);
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 1);
+        assert_eq!(fixture.owner.async_split_key(), None);
+        assert_eq!(fixture.owner.async_split_result(key), Some(result));
+        assert!(matches!(
+            fixture.owner.begin_async_split(&payload, NOW, false),
+            Ok(AsyncSplitAdmission::Terminal(duplicate)) if duplicate == result
+        ));
+    }
+
+    #[test]
+    fn async_split_no_child_unknown_latches_uncertainty_without_layout_commit() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            planned_size(SplitDirection::Right),
+            b"async",
+        );
+        let AsyncSplitAdmission::Start { key, target } = fixture
+            .owner
+            .begin_async_split(&payload, NOW, true)
+            .unwrap()
+        else {
+            panic!("expected asynchronous start");
+        };
+        assert!(matches!(
+            fixture
+                .owner
+                .fail_async_split(key, target, Outcome::Unknown, true),
+            Ok(AsyncSplitAdmission::Uncertain)
+        ));
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 1);
+        assert_eq!(fixture.owner.async_split_key(), None);
+        assert_eq!(fixture.owner.async_split_result(key), None);
+        assert!(matches!(
+            fixture.owner.begin_async_split(&payload, NOW, true),
+            Ok(AsyncSplitAdmission::Uncertain)
+        ));
+        assert!(!fixture.owner.all_sessions_ended());
+    }
+
+    #[test]
+    fn async_split_attached_unknown_commits_and_keeps_child_owned() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            planned_size(SplitDirection::Right),
+            b"async",
+        );
+        let AsyncSplitAdmission::Start { key, target } = fixture
+            .owner
+            .begin_async_split(&payload, NOW, true)
+            .unwrap()
+        else {
+            panic!("expected asynchronous start");
+        };
+        fixture
+            .owner
+            .attach_async_split(
+                key,
+                target,
+                Sink {
+                    session: target.session,
+                    log: Rc::clone(&fixture.log),
+                },
+            )
+            .unwrap();
+        let AsyncSplitAdmission::Terminal(result) = fixture
+            .owner
+            .finish_async_split(key, target, Outcome::Unknown, true, |_, _, _| {
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+        else {
+            panic!("expected terminal split result");
+        };
+        assert_eq!(result.outcome, Outcome::Unknown);
+        assert_eq!(result.committed_layout_revision, 2);
+        assert_eq!(result.new_target, Some(target));
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 2);
+        assert_eq!(fixture.owner.async_split_result(key), Some(result));
+        assert_eq!(
+            fixture.owner.pane_statuses()[1].unwrap().state,
+            SessionState::Unknown
+        );
+    }
+
+    #[test]
+    fn exited_children_do_not_end_workspace_before_async_split_settles() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            planned_size(SplitDirection::Right),
+            b"async-exit",
+        );
+        let AsyncSplitAdmission::Start { key, target } = fixture
+            .owner
+            .begin_async_split(&payload, NOW, true)
+            .unwrap()
+        else {
+            panic!("expected asynchronous start");
+        };
+        fixture
+            .owner
+            .attach_async_split(
+                key,
+                target,
+                Sink {
+                    session: target.session,
+                    log: Rc::clone(&fixture.log),
+                },
+            )
+            .unwrap();
+        fixture
+            .owner
+            .for_each_effects_mut(|_, sink| sink.session = u64::MAX);
+        fixture.owner.poll(NOW).unwrap();
+        assert!(!fixture.owner.all_sessions_ended());
+        assert!(!fixture.owner.layout_terminal_empty());
+        let AsyncSplitAdmission::Terminal(result) = fixture
+            .owner
+            .finish_async_split(key, target, Outcome::Applied, false, |_, _, _| {
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+        else {
+            panic!("expected terminal split result");
+        };
+        assert_eq!(result.outcome, Outcome::Applied);
+        assert!(fixture.owner.all_sessions_ended());
+        assert!(fixture.owner.layout_terminal_empty());
+        assert!(fixture
+            .owner
+            .pane_statuses()
+            .into_iter()
+            .flatten()
+            .all(|pane| pane.state == SessionState::Exited));
+    }
+
+    #[test]
+    fn existing_pane_exit_during_async_split_keeps_preview_until_finish() {
+        let mut fixture = fixture();
+        let payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            planned_size(SplitDirection::Right),
+            b"async",
+        );
+        let AsyncSplitAdmission::Start { key, target } = fixture
+            .owner
+            .begin_async_split(&payload, NOW, true)
+            .unwrap()
+        else {
+            panic!("expected asynchronous start");
+        };
+        fixture.owner.for_each_effects_mut(|pane, sink| {
+            if pane == fixture.first {
+                sink.session = u64::MAX;
+            }
+        });
+        fixture.owner.poll(NOW).unwrap();
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 1);
+        fixture
+            .owner
+            .attach_async_split(
+                key,
+                target,
+                Sink {
+                    session: target.session,
+                    log: Rc::clone(&fixture.log),
+                },
+            )
+            .unwrap();
+        let AsyncSplitAdmission::Terminal(result) = fixture
+            .owner
+            .finish_async_split(key, target, Outcome::Applied, false, |_, _, _| {
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+        else {
+            panic!("expected terminal split result");
+        };
+        assert_eq!(result.outcome, Outcome::Applied);
+        assert_eq!(result.committed_layout_revision, 2);
+        let layout = fixture.owner.layout_snapshot().unwrap();
+        assert_eq!(layout.revision, 3);
+        assert_eq!(layout.pane_count(), 1);
+        assert_eq!(layout.panes[0].unwrap().target, target);
+        assert!(!fixture.owner.all_sessions_ended());
+    }
+
+    #[test]
+    fn async_splits_grow_two_to_three_and_three_to_four_panes() {
+        let mut fixture = fixture();
+        let mut sequence = 2;
+        let mut split_leaf = |fixture: &mut Fixture, target: TargetRef, direction| {
+            let layout = fixture.owner.layout_snapshot().unwrap();
+            let rect = layout
+                .panes
+                .iter()
+                .flatten()
+                .find(|pane| pane.target == target)
+                .unwrap()
+                .rect;
+            let size = crate::pane_layout::split_geometry(rect, direction).unwrap();
+            let payload = split_bytes(
+                key(sequence),
+                target,
+                layout.revision,
+                direction,
+                size,
+                b"async-four-pane",
+            );
+            sequence += 1;
+            let AsyncSplitAdmission::Start {
+                key,
+                target: new_target,
+            } = fixture
+                .owner
+                .begin_async_split(&payload, NOW, true)
+                .unwrap()
+            else {
+                panic!("expected asynchronous split start");
+            };
+            fixture
+                .owner
+                .attach_async_split(
+                    key,
+                    new_target,
+                    Sink {
+                        session: new_target.session,
+                        log: Rc::clone(&fixture.log),
+                    },
+                )
+                .unwrap();
+            let AsyncSplitAdmission::Terminal(result) = fixture
+                .owner
+                .finish_async_split(key, new_target, Outcome::Applied, false, |_, _, _| {
+                    Ok::<_, ()>(())
+                })
+                .unwrap()
+            else {
+                panic!("expected terminal split result");
+            };
+            assert_eq!(result.outcome, Outcome::Applied);
+            assert!(result.committed_layout_revision > layout.revision);
+            result.new_target.unwrap()
+        };
+
+        let first = fixture.first;
+        let second = split_leaf(&mut fixture, first, SplitDirection::Right);
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 2);
+        let third = split_leaf(&mut fixture, first, SplitDirection::Down);
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 3);
+        let fourth = split_leaf(&mut fixture, second, SplitDirection::Down);
+        let snapshot = fixture.owner.layout_snapshot().unwrap();
+        assert_eq!(snapshot.pane_count(), 4);
+        assert!([first, second, third, fourth].iter().all(|target| snapshot
+            .panes
+            .iter()
+            .flatten()
+            .any(|pane| pane.target == *target)));
+        assert!(fixture.owner.pending_resizes().iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn multiple_exits_during_async_split_wait_for_preview_then_collapse() {
+        let mut fixture = fixture();
+        let second_payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            planned_size(SplitDirection::Right),
+            b"second",
+        );
+        let second = split(&mut fixture, &second_payload, true, true)
+            .unwrap()
+            .new_target
+            .unwrap();
+        let payload = split_bytes(
+            key(3),
+            fixture.first,
+            2,
+            SplitDirection::Down,
+            crate::pane_layout::split_geometry(
+                fixture
+                    .owner
+                    .layout_snapshot()
+                    .unwrap()
+                    .panes
+                    .iter()
+                    .flatten()
+                    .find(|pane| pane.target == fixture.first)
+                    .unwrap()
+                    .rect,
+                SplitDirection::Down,
+            )
+            .unwrap(),
+            b"third",
+        );
+        let AsyncSplitAdmission::Start {
+            key: split_key,
+            target,
+        } = fixture
+            .owner
+            .begin_async_split(&payload, NOW, true)
+            .unwrap()
+        else {
+            panic!("expected asynchronous split start");
+        };
+        fixture.owner.for_each_effects_mut(|pane, sink| {
+            if pane == fixture.first || pane == second {
+                sink.session = u64::MAX;
+            }
+        });
+        fixture.owner.poll(NOW).unwrap();
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 2);
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 2);
+        assert!(matches!(
+            fixture
+                .owner
+                .resize_layout(2, 30, 100, |_, _, _| Ok::<_, ()>(())),
+            Err(LayoutResizeError::InProgress)
+        ));
+        let close_payload = {
+            let request = crate::close_protocol::CloseRequest {
+                key: key(4),
+                target: fixture.first,
+                expected_layout_revision: 2,
+            };
+            let mut bytes = Vec::new();
+            crate::close_protocol::encode_close_request(&request, &mut bytes).unwrap();
+            bytes
+        };
+        assert!(matches!(
+            fixture
+                .owner
+                .begin_close(&close_payload, NOW, Instant::now()),
+            Err(CloseError::InProgress)
+        ));
+        fixture
+            .owner
+            .attach_async_split(
+                split_key,
+                target,
+                Sink {
+                    session: target.session,
+                    log: Rc::clone(&fixture.log),
+                },
+            )
+            .unwrap();
+        let AsyncSplitAdmission::Terminal(result) = fixture
+            .owner
+            .finish_async_split(split_key, target, Outcome::Applied, false, |_, _, _| {
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+        else {
+            panic!("expected terminal split result");
+        };
+        assert_eq!(result.committed_layout_revision, 3);
+        let snapshot = fixture.owner.layout_snapshot().unwrap();
+        assert_eq!(snapshot.pane_count(), 1);
+        assert_eq!(snapshot.panes[0].unwrap().target, target);
+        assert_eq!(snapshot.revision, 5);
+        assert_eq!(fixture.owner.async_split_result(split_key), Some(result));
     }
 }
 

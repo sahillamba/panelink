@@ -1,5 +1,34 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Combined-tree merge checkpoint — 2026-10-22 (read this first)
+
+The origin/main work and local stash work are combined in the working tree.
+Parent reviewed the code/document resolutions and added core/socketpair
+regressions for async growth to four panes and deferred multiple exits.
+Final serial library675pass/0fail/4ignored; all-target check, strict Clippy,
+fmt and component fingerprints pass. The full sweep's49 integration targets
+report196pass/27fail/11ignored, with40 targets free of failures; binary118pass/
+1fail at pathname-bind EPERM. Other server-startup/host/chooser assertions
+remain failed, not passes. See [STASH-MERGE-RESULT.md](STASH-MERGE-RESULT.md)
+for raw-run/rerun distinctions and index-resolution status. No commit or push
+is part of this checkpoint. All Luna ownership is released.
+
+Final build passes; decoder39/39 passes. Python76/77 passes, with its loopback
+listener test denied by EPERM (direct loopback bind reproduces the denial).
+Docs235/0, whitespace and conflict-marker checks pass. Attempting to mark the
+five resolved paths with `git add` failed at `.git/index.lock` with Operation
+not permitted; the worktree resolution is complete, but the index remains
+unmerged until that same add runs where Git metadata is writable. No stash
+was dropped and all reapplied/untracked work is preserved.
+
+The upstream history reported verifier 8/8 and 993 passed / 0 failed / 15
+ignored after merge commit 095bf45 plus four-pane, agent CLI, L16 relaunch,
+L17 attach and L18 exit-status work. This was before stash integration. The
+stash history reported library 641 passed / 4 ignored, focused integration
+73 passed / 0 failed, and verifier 7/8 with binary 115 passed / 1 failed at
+pathname-bind EPERM for async launch. These are separate prior evidence sets,
+not combined-tree verification.
+
 ## Merge with origin/main + L16/L17/L18 — 2026-10-22 (read this first)
 
 Merged origin/main (Wave1 usability, Wave2 async client worker and owner-tick
@@ -115,6 +144,58 @@ inventory done; ten-pane workload compiles (parent removed an input-resend
 retry) but fails child-ack. Parent also killed two leaked 2-day-old test
 servers (pl-p3b-close) that were burning ~80% CPU. Intermittent timing tests
 reproduced on baseline. Committed; no push.
+
+## Live-split launch/journal isolation completed — 2026-10-22
+
+User approved the bounded architecture/build task following layout storage.
+Parent accepted [ADR-LAUNCH-01](ASYNC-LAUNCH-DESIGN.md), orchestrated three Luna
+high workers and integrated/reviewed the owner/worker/storage/runtime changes.
+Live splits now perform preparation, journal IO and spawn off the owner through
+one serialized worker. Owner adoption precedes final journal sync. Duplicate,
+uncertain-result, disconnect, topology-busy and shutdown behavior is recorded
+in [ASYNC-LAUNCH-RESULT.md](ASYNC-LAUNCH-RESULT.md).
+
+Final parent checks: library641pass/4ignored; selected integration73pass/0fail;
+verifier7/8 with binary115pass/1fail at existing pathname-bind EPERM. Strict
+Clippy/fmt/build, decoder39, Python60 and component fingerprints pass. Final
+docs216/0. The first normal-stack integration run exposed inline pending-state
+stack growth; bounded boxes corrected it and the normal-stack rerun passes.
+New gated tests prove real existing-pane input/read progress before release,
+one child after exact retry/disconnect, singleton retention on cancellation,
+and safe finalization after child exits. All worker ownership is released.
+
+No wire/dependency/vendor/manifest changes or Git mutations. Initial startup
+and legacy direct-core launch stay synchronous. Blocking calls cannot be
+forcibly interrupted; bounded shutdown reports incomplete if its shared
+deadline expires and makes no cleanup claim beyond process exit. Broad
+Phase3/5/6, physical reboot and provider/host gates stay open. Follow ROADMAP.md
+for the next phase; do not repeat this completed live-split slice.
+
+## Bounded layout storage completed and reverified — 2026-10-22
+
+User requested completion with Luna workers and deferred Git work. The store,
+guarded writer, lifecycle capture and read-only CLI already existed in the
+combined tree. Two Luna high reviewers checked the integrated boundaries;
+parent fixed abandoned pending-shutdown cancellation and added its gated
+regression. New acceptance covers uncertain last-pane close, explicit last
+close, shutdown during phased close, and a single shared metadata deadline
+with both writers blocked after child exit. Parent reviewed and independently
+ran all new cases. See [P5-LAYOUT-COMPLETION.md](P5-LAYOUT-COMPLETION.md).
+
+Final focused integration: 66 passed/0 failed/0 ignored. Library: 625 passed,
+4 ignored. Combined verifier: 7/8; binary 115 passed/1 failed on the existing
+pathname-bind EPERM. Decoder 39 and Python 60 pass; strict all-target Clippy,
+fmt, build, component fingerprints pass. Final docs check: 214 files/0 findings.
+The direct verifier initially selected an empty Cargo cache; the rerun used
+the populated default cache through a runner wrapper, as documented in the
+completion report. No dependencies/vendor/manifest changes or Git mutations.
+All worker ownership is released.
+
+Bounded layout storage is complete within this slice. Launch preparation and
+launch-journal sync remain synchronous on the server owner and need a separate
+architecture task. Full Phase 5/reboot/provider/host acceptance remain open.
+Follow ROADMAP.md for subsequent phase work; do not repeat the storage build
+or treat its completion as approval for concurrent launches.
 
 ## Wave2 scoped implementation integrated — 2026-10-22
 

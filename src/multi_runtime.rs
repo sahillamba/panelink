@@ -2,9 +2,11 @@
 //! validated requests to the single owner thread, which alone touches PTYs.
 //!
 //! This is a parallel runtime beside the one-child [`crate::server_runtime`].
-//! Workers never spawn, resize, read or write a PTY; every launch, split,
-//! key delivery and screen capture runs inside [`MultiServerDriver::tick`] on
-//! the thread that owns the driver. Connection loss never cancels admitted
+//! Connection workers never touch PTYs. One separate serialized launch worker
+//! prepares/spawns new children and performs launch-journal IO; the driver
+//! adopts every child before final journal acknowledgment. Layout, existing
+//! PTYs, key delivery and screen capture remain owner-thread work.
+//! Connection loss never cancels admitted
 //! work and never stops a child.
 //!
 //! Connection model: each lease grant is pinned to one full target, so a UI
@@ -26,9 +28,9 @@ use crate::history_capture::{lock_capture, HistoryCaptureCoordinator, SharedHist
 use crate::history_diagnostics::{HistoryDiagnostics, HistoryReason};
 use crate::history_store::HistoryStore;
 use crate::history_writer::{HistoryWriter, MAX_SHUTDOWN_WAIT};
+use crate::launch_worker::{LaunchWorkResult, LaunchWorker};
 use crate::layout_store::LayoutStore;
 use crate::layout_writer::{LayoutShutdownOutcome, LayoutStatusHandle, LayoutWriter};
-use crate::managed_launch_prepare::prepare_launch;
 use crate::managed_launch_protocol::{decode_launch_result, decode_status_query};
 use crate::pane_layout::LayoutSnapshot;
 use crate::pane_layout::Rect;
@@ -76,6 +78,9 @@ pub enum PaneExit {
     /// The child was terminated by this signal.
     Signal(i32),
 }
+
+#[cfg(test)]
+mod launch_tests;
 
 /// Maximum finite watches retained between owner ticks.
 pub const MAX_PENDING_WATCHES: usize = 8;
@@ -315,9 +320,12 @@ pub struct MultiServerDriver {
     hub: Hub,
     pending_watches: Vec<PendingWatch>,
     pending_closes: Vec<PendingClose>,
+    pending_splits: Vec<PendingSplitReply>,
+    launch_worker: Option<LaunchWorker>,
+    active_launch_target: Option<TargetRef>,
+    stopping: bool,
     owner: MultiSessionOwner<PtyEffects>,
     storage: ServerStorage,
-    terminfo: PathBuf,
     history_capture: Option<SharedHistoryCapture>,
     history_failure: Arc<AtomicBool>,
     history_diagnostics: HistoryDiagnostics,
@@ -405,11 +413,6 @@ impl LayoutObserver {
     }
 }
 
-struct HistoryCapture<'a> {
-    coordinator: Option<&'a SharedHistoryCapture>,
-    failure: &'a Arc<AtomicBool>,
-}
-
 impl fmt::Debug for MultiServerDriver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MultiServerDriver")
@@ -421,9 +424,18 @@ impl fmt::Debug for MultiServerDriver {
 
 impl Drop for MultiServerDriver {
     fn drop(&mut self) {
+        self.stopping = true;
+        // Request cancellation now; the bounded wait happens at the common
+        // metadata-drain boundary after owned-child shutdown. The worker keeps
+        // exclusion through any late IO and unclaimed-child cleanup.
+        let launch_worker = self.launch_worker.take();
+        if let Some(worker) = &launch_worker {
+            worker.request_shutdown();
+        }
         self.hub.shutdown();
         self.settle_pending_watches();
         self.settle_pending_closes();
+        self.settle_pending_splits();
         // Capture and freeze the pre-stop topology so shutdown-caused exits
         // cannot replace it with an empty tombstone.
         self.observe_layout();
@@ -456,8 +468,8 @@ impl Drop for MultiServerDriver {
                 Duration::from_millis(10).min(kill_deadline.saturating_duration_since(now)),
             );
         }
-        // History and layout share one bounded metadata-drain budget after the
-        // child shutdown window.
+        // History, layout and launch-worker shutdown share one bounded wait
+        // budget after the child shutdown window.
         let deadline = Instant::now() + MAX_SHUTDOWN_WAIT;
         let layout_writer = self
             .layout
@@ -498,6 +510,11 @@ impl Drop for MultiServerDriver {
         if let Some(pending) = layout_outcome {
             let _: LayoutShutdownOutcome = pending.wait_until(deadline);
         }
+        if let Some(worker) = launch_worker {
+            if !worker.shutdown_until(deadline) {
+                eprintln!("panelink: launch shutdown incomplete");
+            }
+        }
     }
 }
 
@@ -505,19 +522,24 @@ impl MultiServerDriver {
     /// Assemble a driver from an owner whose generation matches `storage`.
     ///
     /// `terminfo` is the explicit server-owned terminfo directory used by
-    /// split launch preparation. No thread or listener is created here.
+    /// split launch preparation. The serialized launch worker is started here,
+    /// before the live owner loop; no listener is created.
     pub fn new(
         owner: MultiSessionOwner<PtyEffects>,
         storage: ServerStorage,
         terminfo: PathBuf,
     ) -> Self {
+        let launch_worker = LaunchWorker::start(&storage, terminfo.clone()).ok();
         Self {
             hub: Hub::new(),
             pending_watches: Vec::with_capacity(MAX_PENDING_WATCHES),
             pending_closes: Vec::with_capacity(MAX_PENDING_CLOSES),
+            pending_splits: Vec::with_capacity(MAX_CONNECTIONS),
+            launch_worker,
+            active_launch_target: None,
+            stopping: false,
             owner,
             storage,
-            terminfo,
             history_capture: None,
             history_failure: Arc::new(AtomicBool::new(false)),
             history_diagnostics: HistoryDiagnostics::new(),
@@ -669,7 +691,9 @@ impl MultiServerDriver {
         // Close ownership belongs to the driver, never to the bounded worker
         // reply lifetime. Advance even when the original worker timed out.
         let _ = self.owner.advance_closes_at(Instant::now());
+        self.advance_launch();
         self.process_pending(&clock);
+        self.process_pending_splits();
         self.process_pending_closes(&clock);
         self.process_pending_watches(&clock);
         self.hub.reap_finished();
@@ -706,10 +730,12 @@ impl MultiServerDriver {
     /// Stop workers and settle queued requests; children stay alive until
     /// the driver drops.
     pub fn stop_connections(&mut self, clock: impl Fn() -> u64) {
+        self.stopping = true;
         self.hub.shutdown();
         self.process_pending(&clock);
         self.settle_pending_watches();
         self.settle_pending_closes();
+        self.settle_pending_splits();
     }
 
     fn process_pending(&mut self, clock: &impl Fn() -> u64) {
@@ -717,21 +743,20 @@ impl MultiServerDriver {
             let Ok(envelope) = self.hub.receiver.try_recv() else {
                 break;
             };
-            let result = dispatch(
-                &mut self.owner,
-                &mut self.storage,
-                &self.terminfo,
-                HistoryCapture {
-                    coordinator: self.history_capture.as_ref(),
-                    failure: &self.history_failure,
-                },
-                &envelope.request,
-                clock(),
-                PendingCapacity {
-                    watches: self.pending_watches.len() < MAX_PENDING_WATCHES,
-                    closes: self.pending_closes.len() < MAX_PENDING_CLOSES,
-                },
-            );
+            let result = if matches!(&envelope.request, MultiRequest::Request { payload, .. } if payload.get(..2) == Some(&[0, 7]))
+            {
+                self.dispatch_async_split(&envelope.request, clock())
+            } else {
+                dispatch(
+                    &mut self.owner,
+                    &envelope.request,
+                    clock(),
+                    PendingCapacity {
+                        watches: self.pending_watches.len() < MAX_PENDING_WATCHES,
+                        closes: self.pending_closes.len() < MAX_PENDING_CLOSES,
+                    },
+                )
+            };
             // Detach is an observation boundary, not a process stop. Save
             // changed visible screens after the owner's request is handled.
             if matches!(&envelope.request, MultiRequest::Request { payload, .. } if crate::session_protocol::decode_session_request(payload).is_ok_and(|request| matches!(request, SessionRequest::Detach)))
@@ -752,6 +777,13 @@ impl MultiServerDriver {
                 }
                 DispatchResult::PendingClose { key, deadline } => {
                     self.pending_closes.push(PendingClose {
+                        envelope,
+                        key,
+                        deadline,
+                    });
+                }
+                DispatchResult::PendingSplit { key, deadline } => {
+                    self.pending_splits.push(PendingSplitReply {
                         envelope,
                         key,
                         deadline,
@@ -802,6 +834,182 @@ impl MultiServerDriver {
         }
     }
 
+    fn dispatch_async_split(&mut self, request: &MultiRequest, now: u64) -> DispatchResult {
+        use crate::server::multi_session::AsyncSplitAdmission;
+        let MultiRequest::Request {
+            connection,
+            payload,
+        } = request
+        else {
+            return reply(MultiReply::Error("invalid_split_request"));
+        };
+        if crate::split_protocol::decode_split_status_query(payload).is_ok() {
+            return reply(MultiReply::Error("split_status_unsupported"));
+        }
+        let decoded = match decode_split_request(payload) {
+            Ok(value) => value,
+            Err(_) => return reply(MultiReply::Error("invalid_split_request")),
+        };
+        if let Err(error) = self.owner.authorize_split(connection, &decoded, now) {
+            return self::error(&error);
+        }
+        if self.stopping {
+            return reply(MultiReply::Error("server_stopping"));
+        }
+        let key = decoded.key();
+        let waiter_available = self.pending_splits.len() < MAX_CONNECTIONS;
+        let admission = self.owner.begin_async_split(
+            payload,
+            now,
+            self.launch_worker.is_some() && waiter_available,
+        );
+        match admission {
+            Ok(AsyncSplitAdmission::Terminal(result)) => reply(split_reply(&result)),
+            Ok(AsyncSplitAdmission::Uncertain) => {
+                reply(MultiReply::Error("launch_outcome_unknown"))
+            }
+            Ok(AsyncSplitAdmission::Pending) => {
+                if !waiter_available {
+                    return reply(MultiReply::Error("split_waiter_capacity"));
+                }
+                DispatchResult::PendingSplit {
+                    key,
+                    deadline: Instant::now() + OWNER_REPLY_DEADLINE,
+                }
+            }
+            Ok(AsyncSplitAdmission::Start { key, target }) => {
+                self.active_launch_target = Some(target);
+                if self
+                    .launch_worker
+                    .as_ref()
+                    .is_none_or(|worker| worker.submit_start(payload.clone(), target).is_err())
+                {
+                    self.fail_launch(crate::protocol::Outcome::Failed);
+                    return reply(
+                        self.owner
+                            .async_split_result(key)
+                            .as_ref()
+                            .map(split_reply)
+                            .unwrap_or(MultiReply::Error("launch_unavailable")),
+                    );
+                }
+                DispatchResult::PendingSplit {
+                    key,
+                    deadline: Instant::now() + OWNER_REPLY_DEADLINE,
+                }
+            }
+            Err(crate::server::multi_session::SplitError::InProgress)
+                if self.launch_worker.is_none() =>
+            {
+                reply(MultiReply::Error("launch_worker_unavailable"))
+            }
+            Err(error) => reply(split_error_reply(error)),
+        }
+    }
+
+    fn fail_launch(&mut self, outcome: crate::protocol::Outcome) {
+        self.launch_worker.take();
+        if let (Some(key), Some(target)) = (
+            self.owner.async_split_key(),
+            self.active_launch_target.take(),
+        ) {
+            let _ = self.owner.finish_async_split(
+                key,
+                target,
+                outcome,
+                true,
+                |effects: &mut PtyEffects, rows, columns| effects.resize(rows, columns),
+            );
+        }
+    }
+
+    fn advance_launch(&mut self) {
+        if !self.owner.async_split_active() {
+            return;
+        }
+        let Some(key) = self.owner.async_split_key() else {
+            return;
+        };
+        let Some(target) = self.active_launch_target else {
+            return;
+        };
+        let result = match self.launch_worker.as_mut() {
+            Some(worker) => worker.poll(),
+            None => {
+                self.fail_launch(crate::protocol::Outcome::Unknown);
+                return;
+            }
+        };
+        match result {
+            Ok(None) => {}
+            Ok(Some(LaunchWorkResult::Spawned(session))) => {
+                let mut effects = PtyEffects::new(*session);
+                if let Some(coordinator) = &self.history_capture {
+                    effects.enable_async_capture(
+                        Arc::clone(coordinator),
+                        Arc::clone(&self.history_failure),
+                        target,
+                    );
+                }
+                if self.owner.attach_async_split(key, target, effects).is_err() {
+                    self.fail_launch(crate::protocol::Outcome::Unknown);
+                    return;
+                }
+                if self
+                    .launch_worker
+                    .as_ref()
+                    .is_none_or(|worker| worker.submit_finalize(key, target).is_err())
+                {
+                    self.fail_launch(crate::protocol::Outcome::Unknown);
+                }
+            }
+            Ok(Some(LaunchWorkResult::Finished { outcome, unhealthy })) => {
+                let _ = self.owner.finish_async_split(
+                    key,
+                    target,
+                    outcome,
+                    unhealthy,
+                    |effects: &mut PtyEffects, rows, columns| effects.resize(rows, columns),
+                );
+                self.active_launch_target = None;
+                if unhealthy {
+                    self.launch_worker.take();
+                }
+            }
+            Err(_) => self.fail_launch(crate::protocol::Outcome::Unknown),
+        }
+    }
+
+    fn process_pending_splits(&mut self) {
+        let mut index = 0;
+        while index < self.pending_splits.len() {
+            let pending = &self.pending_splits[index];
+            let response = if let Some(result) = self.owner.async_split_result(pending.key) {
+                Some(split_reply(&result))
+            } else if self.owner.async_split_key() != Some(pending.key) {
+                Some(MultiReply::Error("launch_outcome_unknown"))
+            } else if Instant::now() >= pending.deadline {
+                Some(MultiReply::Error("split_reply_timeout"))
+            } else {
+                None
+            };
+            if let Some(response) = response {
+                let pending = self.pending_splits.swap_remove(index);
+                let _ = pending.envelope.try_reply(response);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn settle_pending_splits(&mut self) {
+        for pending in self.pending_splits.drain(..) {
+            let _ = pending
+                .envelope
+                .try_reply(MultiReply::Error("server_stopping"));
+        }
+    }
+
     fn process_pending_watches(&mut self, clock: &impl Fn() -> u64) {
         let mut index = 0;
         while index < self.pending_watches.len() {
@@ -836,18 +1044,6 @@ impl MultiServerDriver {
             lock_capture(coordinator).drive();
         }
     }
-}
-
-/// Prepare a split child only from its embedded schema-6 request (the
-/// client's captured cwd/environment) and the server-owned terminfo.
-pub(crate) fn split_prepare(
-    terminfo: &std::path::Path,
-) -> impl FnOnce(
-    crate::managed_launch_protocol::LaunchRequestView<'_>,
-    TargetRef,
-) -> Result<crate::managed_launch_prepare::PreparedLaunch, ()>
-       + '_ {
-    move |request, target| prepare_launch(request, target, terminfo).map_err(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -1165,6 +1361,12 @@ struct PendingClose {
     deadline: Instant,
 }
 
+struct PendingSplitReply {
+    envelope: MultiEnvelope,
+    key: OperationKey,
+    deadline: Instant,
+}
+
 enum DispatchResult {
     Reply(MultiReply),
     Pending {
@@ -1172,6 +1374,10 @@ enum DispatchResult {
         deadline: Instant,
     },
     PendingClose {
+        key: OperationKey,
+        deadline: Instant,
+    },
+    PendingSplit {
         key: OperationKey,
         deadline: Instant,
     },
@@ -1192,9 +1398,6 @@ struct PendingCapacity {
 
 fn dispatch(
     owner: &mut MultiSessionOwner<PtyEffects>,
-    storage: &mut ServerStorage,
-    terminfo: &std::path::Path,
-    history: HistoryCapture<'_>,
     request: &MultiRequest,
     now: u64,
     pending: PendingCapacity,
@@ -1239,9 +1442,7 @@ fn dispatch(
                 Err(_) => reply(MultiReply::Error("invalid_watch_request")),
             },
             Some([0, 6]) => dispatch_launch(owner, connection, payload, now),
-            Some([0, 7]) => {
-                dispatch_split(owner, storage, terminfo, history, connection, payload, now)
-            }
+            Some([0, 7]) => reply(MultiReply::Error("split_dispatch_unavailable")),
             Some([0, 8]) => dispatch_ui(owner, connection, payload, now),
             Some([0, 9]) => dispatch_close(owner, connection, payload, now, pending.closes),
             _ => reply(MultiReply::Error("unsupported_request_schema")),
@@ -1291,84 +1492,28 @@ fn dispatch_launch(
     }
 }
 
-fn dispatch_split(
-    owner: &mut MultiSessionOwner<PtyEffects>,
-    storage: &mut ServerStorage,
-    terminfo: &std::path::Path,
-    history: HistoryCapture<'_>,
-    connection: &Connection,
-    payload: &[u8],
-    now: u64,
-) -> DispatchResult {
-    if crate::split_protocol::decode_split_status_query(payload).is_ok() {
-        // A lost split acknowledgment is recovered by resending the exact
-        // split bytes, which returns the retained result without effects.
-        return reply(MultiReply::Error("split_status_unsupported"));
-    }
-    let request = match decode_split_request(payload) {
-        Ok(request) => request,
-        Err(_) => return reply(MultiReply::Error("invalid_split_request")),
-    };
-    if let Err(error) = owner.authorize_split(connection, &request, now) {
-        return self::error(&error);
-    }
-    let mut journal = match storage.journal() {
-        Ok(journal) => journal,
-        Err(_) => return reply(MultiReply::Error("launch_journal_unavailable")),
-    };
-    let result = owner.execute_split(
-        payload,
-        now,
-        &mut journal,
-        |request, target| {
-            split_prepare(terminfo)(request, target).map(|prepared| (prepared, target))
-        },
-        |prepared| {
-            let (prepared, target) = prepared;
-            prepared
-                .spawn()
-                .map(|session| {
-                    let mut effects = PtyEffects::new(session);
-                    if let Some(coordinator) = history.coordinator {
-                        effects.enable_async_capture(
-                            Arc::clone(coordinator),
-                            Arc::clone(history.failure),
-                            target,
-                        );
-                    }
-                    effects
-                })
-                .map_err(|_| ())
-        },
-        |effects: &mut PtyEffects, rows, columns| effects.resize(rows, columns),
-    );
-    let result = match result {
-        Ok(result) => result,
-        Err(error) => match error.failure() {
-            Some((_, failed)) => failed,
-            None => {
-                return reply(MultiReply::Error(match error {
-                    crate::server::multi_session::SplitError::Ledger(
-                        crate::protocol::ProtocolError::OperationConflict,
-                    ) => "operation_conflict",
-                    crate::server::multi_session::SplitError::Ledger(_) => "split_ledger_rejected",
-                    crate::server::multi_session::SplitError::InProgress => "split_in_progress",
-                    crate::server::multi_session::SplitError::GenerationMismatch => {
-                        "wrong_generation"
-                    }
-                    crate::server::multi_session::SplitError::InvalidPayload(_) => {
-                        "invalid_split_request"
-                    }
-                    _ => "split_failed",
-                }));
-            }
-        },
-    };
+fn split_reply(result: &crate::split_protocol::SplitResult) -> MultiReply {
     let mut bytes = Vec::with_capacity(crate::split_protocol::SPLIT_RESULT_BYTES);
-    match crate::split_protocol::encode_split_result(&result, &mut bytes) {
-        Ok(_) => reply(MultiReply::Response(bytes)),
-        Err(_) => reply(MultiReply::Error("invalid_split_result")),
+    match crate::split_protocol::encode_split_result(result, &mut bytes) {
+        Ok(_) => MultiReply::Response(bytes),
+        Err(_) => MultiReply::Error("invalid_split_result"),
     }
+}
+
+fn split_error_reply(error: crate::server::multi_session::SplitError) -> MultiReply {
+    if let Some((_, failed)) = error.failure() {
+        return split_reply(&failed);
+    }
+    MultiReply::Error(match error {
+        crate::server::multi_session::SplitError::Ledger(
+            crate::protocol::ProtocolError::OperationConflict,
+        ) => "operation_conflict",
+        crate::server::multi_session::SplitError::Ledger(_) => "split_ledger_rejected",
+        crate::server::multi_session::SplitError::InProgress => "split_in_progress",
+        crate::server::multi_session::SplitError::GenerationMismatch => "wrong_generation",
+        crate::server::multi_session::SplitError::InvalidPayload(_) => "invalid_split_request",
+        _ => "split_failed",
+    })
 }
 
 /// Schema-9 route: explicit pane close, close status, and pane status.
@@ -1562,6 +1707,9 @@ fn dispatch_ui(
                 }
                 Ok(RootResizeReply::LayoutRejected(error)) => {
                     reply(MultiReply::Error(match error {
+                        crate::server::multi_session::LayoutResizeError::InProgress => {
+                            "launch_in_progress"
+                        }
                         crate::server::multi_session::LayoutResizeError::NoLayout => "no_layout",
                         crate::server::multi_session::LayoutResizeError::Layout(
                             crate::pane_layout::LayoutError::StaleRevision,
@@ -2734,6 +2882,7 @@ mod tests {
         entered: std::sync::mpsc::SyncSender<()>,
         release: Option<std::sync::mpsc::Receiver<()>>,
         observed_targets: std::sync::Arc<std::sync::Mutex<Vec<TargetRef>>>,
+        completed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -2750,6 +2899,9 @@ mod tests {
             if let Some(release) = self.release.take() {
                 let _ = self.entered.send(());
                 let _ = release.recv();
+            }
+            if let Some(completed) = &self.completed {
+                completed.store(true, Ordering::Release);
             }
             Ok(())
         }
@@ -2783,6 +2935,214 @@ mod tests {
 
         fn mark_ended(&mut self, _target: TargetRef, _at_unix_ms: u64) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    struct BlockingLayoutBackend {
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: Option<std::sync::mpsc::Receiver<()>>,
+        completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    impl crate::layout_writer::LayoutBackend for BlockingLayoutBackend {
+        fn save(
+            &mut self,
+            _bound_generation: u64,
+            _bound_workspace: u64,
+            _candidate: &SavedLayout,
+        ) -> io::Result<crate::layout_store::SaveOutcome> {
+            if let Some(release) = self.release.take() {
+                let _ = self.entered.send(());
+                let _ = release.recv();
+            }
+            self.completed.store(true, Ordering::Release);
+            Ok(crate::layout_store::SaveOutcome::Written)
+        }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    struct ReleaseBlockedWriters(Vec<std::sync::mpsc::SyncSender<()>>);
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    impl ReleaseBlockedWriters {
+        fn release(&self) {
+            for sender in &self.0 {
+                let _ = sender.try_send(());
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    impl Drop for ReleaseBlockedWriters {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn driver_shutdown_shares_metadata_deadline_after_children_exit() {
+        use crate::launch::LaunchContext;
+        use crate::multi_startup::{StartedMultiServer, StartupLaunch};
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::fs::DirBuilderExt;
+        use std::sync::mpsc::sync_channel;
+        use std::time::{Duration, Instant};
+
+        let root = PathBuf::from("/private/tmp").join(format!(
+            "panelink-shared-metadata-deadline-{}-{}",
+            std::process::id(),
+            NEXT_BLOCKED_CAPTURE_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let _cleanup = RemoveFixture(root.clone());
+        let server_dir = root.join("server");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&server_dir)
+            .unwrap();
+        let terminfo = root.join("terminfo");
+        fs::DirBuilder::new().mode(0o700).create(&terminfo).unwrap();
+
+        let context = LaunchContext {
+            working_directory: root.clone(),
+            environment: [
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                (OsString::from("HOME"), root.as_os_str().to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let arguments = vec![OsString::from("-c"), OsString::from("exit 0")];
+        let executable = OsString::from("/bin/sh");
+        let started = StartedMultiServer::start(
+            ServerStorage::initialize(&server_dir).unwrap(),
+            &terminfo,
+            &StartupLaunch {
+                executable: &executable,
+                arguments: &arguments,
+                context: &context,
+                rows: 8,
+                columns: 60,
+            },
+            true,
+        )
+        .unwrap();
+        let target = started.startup().target.unwrap();
+        let mut driver = started.into_driver();
+
+        let (history_entered_send, history_entered_recv) = sync_channel(1);
+        let (history_release_send, history_release_recv) = sync_channel(1);
+        let (layout_entered_send, layout_entered_recv) = sync_channel(1);
+        let (layout_release_send, layout_release_recv) = sync_channel(1);
+        let history_completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let layout_completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release_guards = ReleaseBlockedWriters(vec![history_release_send, layout_release_send]);
+
+        driver.enable_history_backend_for_test(Box::new(BlockingHistoryBackend {
+            entered: history_entered_send,
+            release: Some(history_release_recv),
+            observed_targets: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            completed: Some(std::sync::Arc::clone(&history_completed)),
+        }));
+        history_entered_recv
+            .recv_timeout(Duration::from_secs(3))
+            .expect("history worker should block in its active save");
+
+        let exit_deadline = Instant::now() + Duration::from_secs(3);
+        while !driver.owner().layout_terminal_empty() && Instant::now() < exit_deadline {
+            driver.tick(|| 1).unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            driver.owner().layout_terminal_empty(),
+            "child must be positively recorded Exited before measuring metadata drain"
+        );
+
+        // Start layout persistence only after the owner has recorded exit, so
+        // the first and only observed candidate is the terminal-empty tombstone.
+        let layout_writer = LayoutWriter::start_with_backend(
+            Box::new(BlockingLayoutBackend {
+                entered: layout_entered_send,
+                release: Some(layout_release_recv),
+                completed: std::sync::Arc::clone(&layout_completed),
+            }),
+            &driver.storage,
+            DEFAULT_WORKSPACE,
+        )
+        .unwrap();
+        let layout_status = layout_writer.status_handle();
+        driver.layout = Some(LayoutObserver {
+            writer: Some(layout_writer),
+            status: layout_status.clone(),
+            generation: target.generation,
+            last: None,
+            sequence: 0,
+            disabled: false,
+            frozen: false,
+        });
+        driver.observe_layout();
+        layout_entered_recv
+            .recv_timeout(Duration::from_secs(3))
+            .expect("layout worker should block in its active save");
+        assert_eq!(
+            layout_status
+                .status()
+                .last_submitted
+                .unwrap()
+                .snapshot_sequence,
+            1
+        );
+
+        let storage_dir = driver.storage.directory_path().to_owned();
+        let started = Instant::now();
+        drop(driver);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(425),
+            "metadata shutdown took {elapsed:?}; expected one shared 250 ms drain budget"
+        );
+        assert!(
+            matches!(
+                layout_status.status().last_submitted,
+                Some(crate::layout_writer::LayoutKey {
+                    generation,
+                    snapshot_sequence: 1
+                }) if generation == target.generation
+            ),
+            "layout candidate should be admitted before shutdown"
+        );
+        assert_eq!(layout_status.status().last_durable, None);
+        assert!(!history_completed.load(Ordering::Acquire));
+        assert!(!layout_completed.load(Ordering::Acquire));
+        assert_eq!(
+            ServerStorage::lock_for_maintenance(&storage_dir)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock,
+            "blocked metadata workers must retain the singleton until released"
+        );
+
+        release_guards.release();
+        let release_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match ServerStorage::lock_for_maintenance(&storage_dir) {
+                Ok(lock) => {
+                    drop(lock);
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("maintenance lock failed after release: {error}"),
+            }
+            assert!(
+                Instant::now() < release_deadline,
+                "metadata workers did not release the singleton after their gates opened"
+            );
+            std::thread::sleep(Duration::from_millis(2));
         }
     }
 
@@ -2928,6 +3288,7 @@ mod tests {
             entered: entered_send,
             release: Some(release_recv),
             observed_targets: std::sync::Arc::clone(&observed_targets),
+            completed: None,
         }));
         entered_recv
             .recv_timeout(IO_DEADLINE)
@@ -3279,6 +3640,7 @@ mod tests {
             entered: entered_send,
             release: Some(release_recv),
             observed_targets: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            completed: None,
         }));
         entered_recv
             .recv_timeout(Duration::from_secs(3))

@@ -540,6 +540,37 @@ fn legacy_close_does_not_stop_a_target_owned_by_an_active_close() {
 }
 
 #[test]
+fn uncertain_last_pane_close_is_not_proof_of_empty_layout() {
+    let mut fixture = Fixture::new();
+    fixture.next_stop = StopOutcome::Unknown;
+    let first = fixture.first;
+    let before = fixture.owner.layout_snapshot().unwrap();
+    let bytes = fixture.close_bytes(first, before.revision);
+    let start = Instant::now();
+    assert!(matches!(
+        fixture.owner.begin_close(&bytes, NOW, start).unwrap(),
+        super::CloseStatus::InProgress
+    ));
+    assert!(!fixture.owner.layout_terminal_empty());
+    fixture
+        .owner
+        .advance_closes_at(start + Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(fixture.owner.layout_snapshot(), Some(before));
+    assert!(!fixture.owner.layout_terminal_empty());
+    assert_eq!(
+        fixture.owner.launches.state(first),
+        Ok(SessionState::Applied)
+    );
+
+    // An actual subsequent exit supplies the missing positive evidence.
+    fixture.exited.borrow_mut().insert(first.session);
+    fixture.owner.poll(NOW).unwrap();
+    assert_eq!(fixture.owner.layout_snapshot(), Some(before));
+    assert!(fixture.owner.layout_terminal_empty());
+}
+
+#[test]
 fn phased_close_timeout_retains_closing_target_without_reenabling_it() {
     let mut fixture = Fixture::new();
     fixture.next_stop = StopOutcome::Unknown;

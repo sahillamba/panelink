@@ -1,6 +1,6 @@
 # Panelink: working implementation specification
 
-Revision: 0.15, 2026-10-22. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoint below records current code without converting prototype assumptions into product requirements. This revision preserves the reviewed contracts for command retries, agent identity, history semantics, child environments, and terminal clipboard requests, and records the implemented bounded saved-layout snapshot and read-only inspection without enabling recovery or relaunch. Also records client IO isolation and tick-driven close (Wave2).
+Revision: 0.17, 2026-10-22. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
 
 ## Purpose and requirement authority
 
@@ -193,9 +193,31 @@ KILL phases on owner ticks. Closing targets reject input/resize; final capture,
 collapse and ledger/result completion precede the terminal schema9 reply.
 Worker loss does not cancel admitted close. Unknown retains ownership and
 disabled input; process exit and PTY EOF remain distinct. Driver shutdown uses
-shared child deadlines. Legacy synchronous core APIs and launch/journal work
-remain separate. See [Wave2 integration](progress/WAVE2-RESULT.md) for evidence
+shared child deadlines. Legacy synchronous core APIs remain separate.
+See [Wave2 integration](progress/WAVE2-RESULT.md) for evidence
 and remaining gates; no general latency budget is certified.
+
+Live-split launch checkpoint2026-10-22: one bounded worker performs launch
+preparation, journal reads/syncs and PTY spawn outside the multi-pane owner.
+The owner retains authorization, exact-byte ledger admission, reserved target,
+layout preview and results. Durable Intent precedes spawn; an acquired child
+is attached to the owner's registry before the worker writes Spawned/Applied.
+Post-acquisition journal failure retains the child and records Unknown.
+Disconnect or reply timeout cannot cancel/repeat the admitted launch. One
+active split, one command slot, one completion slot and at most eight finite
+reply waiters bound this path. No independent launch backlog is accepted.
+
+Root resize, close and competing topology changes are busy while the preview
+is reserved; existing-pane input/read/watch and local detach remain available.
+Natural exits stay recorded, including children exiting during finalization;
+the owner reconciles topology after the split settles. Worker cancellation
+starts at shutdown, with any wait sharing the existing250ms metadata deadline.
+Late IO/unclaimed-child cleanup retains singleton exclusion while the process
+lives; deadline expiry reports incomplete shutdown and cannot certify cleanup
+after process exit. Initial startup and legacy direct-core launch calls remain
+synchronous. No wire, dependency, provider or general latency contract changes.
+See [the design](progress/ASYNC-LAUNCH-DESIGN.md) and
+[implementation evidence](progress/ASYNC-LAUNCH-RESULT.md).
 
 The next bounded notification foundation provides a fixed72byte metadata event
 payload and a volatile64event journal with generation-scoped cursors and explicit
@@ -349,17 +371,20 @@ invoking-client context, is refused while a workspace runs, keeps old-to-new
 links for the 30-day history retention, and never resumes provider
 conversations (manual pick only). See [P5-RECOVERY-VIEWER.md](progress/P5-RECOVERY-VIEWER.md).
 
-Implementation status (2026-10-21): the codec, two-slot store, guarded async
+Implementation status (2026-10-22): the codec, two-slot store, guarded async
 writer, owner/driver observation with freeze-before-stop and one shared
 250 ms metadata deadline, `serve` wiring and read-only
 `panelink layout show [--previous]` are implemented and tested; see
-[P5-LAYOUT-SLICE.md](progress/P5-LAYOUT-SLICE.md). No layout is restored into
-live control, no process/provider is relaunched, and machine-reboot acceptance
-remains open.
+[P5-LAYOUT-SLICE.md](progress/P5-LAYOUT-SLICE.md). This storage slice does not
+restore historical targets into live control or relaunch processes/providers;
+the separate explicit fresh-shell relaunch prototype is described above.
+Machine-reboot acceptance remains open.
 
 [ADR-P5-LAYOUT-01](progress/P5-SAVED-LAYOUT.md) scopes a dependency-free
-historical snapshot for the current two-pane equal layout, with current and
-immediately preceding-generation slots. It stores only
+historical snapshot for layouts of up to four panes, with current and
+immediately preceding-generation slots. The current codec uses fixed 280-byte
+records and migrates supported legacy 160-byte records; migration preserves
+historical metadata and does not restore targets to live control. It stores only
 root dimensions, spatial historical targets, orientation and explicit snapshot
 metadata. Client-local focus, launch data, environment values, titles, PID and
 provider identities are excluded. An independent snapshot sequence handles
@@ -367,17 +392,20 @@ last-pane exit without assuming a layout revision changes. Ordinary pane
 removal may publish an empty snapshot; driver/workspace teardown preserves the
 pre-stop topology and must distinguish shutdown-caused exits.
 
-The pure fixed160-byte codec is implemented with strict identity, geometry,
-reserved/unused-field and whole-record validation; see its
-[component result](progress/P5-SAVED-LAYOUT-CODEC.md). It handles historical data
-only and performs no storage or live restoration. Separate
-store/async writer/guard/runtime and read-only CLI slices follow. The future
-workers must share one total250ms metadata-drain wait, retain singleton exclusion
+The fixed 280-byte current codec and legacy 160-byte migration path use strict
+identity, geometry, reserved/unused-field and whole-record validation; see the
+[component result](progress/P5-SAVED-LAYOUT-CODEC.md). They handle historical
+data only and perform no live restoration. The integrated
+store/async writer/guard/runtime and read-only CLI are separate components.
+The workers share one total250ms metadata-drain wait, retain singleton exclusion
 through late IO and expose last confirmed rather than assumed current-at-crash
 state. Layout/history files are not an atomic snapshot. Missing/corrupt history
 sources remain separate from valid historical layout metadata.
+Abandoning the layout writer or its pending shutdown handle cancels queued
+saves and retries without waiting; an already-running storage call can finish
+while retaining its singleton guard.
 
-Before the first current-slot save from a higher generation, the future store
+Before the first current-slot save from a higher generation, the store
 must preserve the exact previous current bytes into the previous slot and
 finish that directory sync before replacing current. Normal fresh-shell
 startup therefore keeps the preceding saved generation available for explicit
@@ -386,11 +414,12 @@ not a multi-file transaction; interrupted rotation may expose duplicate old
 snapshots. Corrupt/unsafe/unsupported slots are preserved and refuse mutation;
 readers never silently substitute previous for invalid current.
 
-This design does not implement file persistence, restored views, a new CLI
-command, automatic recovery or a relaunch. Existing plain-panelink fresh-shell
-startup remains unchanged. Historical targets never become live dispatch
-identities; explicit future relaunch requires fresh context and new targets.
-Pending hierarchy/provider choices and full V-HISTORY acceptance remain open.
+The bounded persistence, read-only view, recovery chooser and explicit fresh
+shell relaunch prototypes are implemented. Relaunch creates new live targets
+and fresh client context; saved historical targets never become dispatch
+identities. This does not restore live PTYs, checkpointed emulator state,
+provider conversations or arbitrary prior processes. A physically rebooted
+host has not been accepted, and full V-HISTORY acceptance remains open.
 
 ### Meaning of saved history
 

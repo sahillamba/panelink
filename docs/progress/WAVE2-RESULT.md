@@ -82,10 +82,13 @@ ordering; no end-to-end delayed-fsync injection or full host-terminal PTY
 acceptance is claimed. PaneConn's durable-before-send/nonreplay ordering is
 unchanged and was source-reviewed.
 
-Launch preparation/journal sync still run synchronously on the owner. Legacy
+Launch preparation/journal sync ran synchronously on the owner at this
+checkpoint; the live split path subsequently adopted the serialized worker
+in [ASYNC-LAUNCH-RESULT.md](ASYNC-LAUNCH-RESULT.md). Legacy
 synchronous cleanup outside phased close remains separate. The saved-layout
 store/rotation, guarded writer, lifecycle observation and read-only inspection
-are still pending in the reviewed order. No tabs/sidebar choice, Subagents
+were pending at this checkpoint; the incoming implementation subsequently
+delivered them (see [P5-LAYOUT-SLICE.md](P5-LAYOUT-SLICE.md)). No tabs/sidebar choice, Subagents
 observer, provider identity/recovery or machine-reboot acceptance was added.
 Pathname/host/provider restrictions remain gates, not passes or manual tasks
 assigned to the user.

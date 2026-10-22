@@ -54,6 +54,12 @@ waits for the server. If typing backs up, a busy status appears. Ctrl-X still
 detaches; any keys that could not be queued are discarded with a notice after
 the terminal is restored. Uncertain input is never automatically resent.
 
+Starting a split prepares the new shell and saves its launch records in a
+background worker while existing panes keep running. Splits run one at a time;
+resize and close may report busy until the pending split finishes. A launch
+storage failure leaves existing shells running and prevents further launches
+until the workspace is restarted.
+
 Workspace state lives in `~/Library/Application Support/Panelink` (private,
 mode 0700). Set `PANELINK_HOME` to use a different directory. The background
 server's output goes to `server.log` there.
@@ -87,6 +93,14 @@ component for that target is invalid. The files are preserved; cleanup and clear
 do not repair them. Healthy targets can still be read by their explicit IDs.
 The current format validates structure and safe text, but has no checksum to
 detect every content change. See the [recovery policy](docs/progress/P5-COMMITTED-CORRUPTION.md).
+
+Panelink also saves the latest layout in two bounded 160-byte records under
+`server/layout/`. `panelink layout show` reads the latest saved layout;
+`panelink layout show --previous` reads the preceding saved generation.
+These commands work without starting a workspace. Layouts contain historical
+pane identities and geometry; saved rows and screens remain separate sources.
+Background saves can lag live changes, and malformed records are refused and
+preserved. This storage slice does not establish full reboot recovery.
 
 **Implementation roadmap:** [ROADMAP.md](ROADMAP.md) tracks phases and
 verification evidence. Selected components retain their

@@ -401,6 +401,7 @@ impl LayoutWriter {
 }
 
 /// Admission is closed; waiting is deferred to a caller-owned deadline.
+/// Dropping this handle cancels queued saves and retries without waiting.
 pub struct PendingLayoutShutdown {
     done: Receiver<LayoutShutdownOutcome>,
     cancel: Arc<AtomicBool>,
@@ -409,6 +410,12 @@ pub struct PendingLayoutShutdown {
 impl fmt::Debug for PendingLayoutShutdown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("PendingLayoutShutdown { .. }")
+    }
+}
+
+impl Drop for PendingLayoutShutdown {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
     }
 }
 
@@ -1182,6 +1189,45 @@ mod tests {
         gate.release();
         wait_for_lock(&fixture.root);
         // The blocked first save completes; the queued second never starts.
+        assert_eq!(control.calls().len(), 1);
+        assert_eq!(
+            handle
+                .status()
+                .last_durable
+                .map(|key| key.snapshot_sequence),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn abandoned_shutdown_starts_no_new_save_stage() {
+        let fixture = Fixture::new();
+        let control = FakeControl::default();
+        let gate = Arc::new(Gate::new());
+        control.schedule(Call::Save, Behavior::Block(Arc::clone(&gate)));
+        let (storage, mut writer) = fake_writer(&fixture, control.clone());
+        assert_eq!(
+            writer.observe(saved_layout_one(1, 1, 1, 1)),
+            LayoutSubmit::Accepted
+        );
+        gate.wait_until_entered();
+        assert_eq!(
+            writer.observe(saved_layout_one(1, 1, 2, 2)),
+            LayoutSubmit::Accepted
+        );
+        let handle = writer.status_handle();
+        let pending = writer.begin_shutdown();
+        drop(pending);
+        drop(storage);
+        // Abandoning shutdown never releases exclusion while a save is active.
+        assert_eq!(
+            ServerStorage::lock_for_maintenance(&fixture.root)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        gate.release();
+        wait_for_lock(&fixture.root);
         assert_eq!(control.calls().len(), 1);
         assert_eq!(
             handle

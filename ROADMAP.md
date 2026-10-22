@@ -1,17 +1,19 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: Phase 6 DONE for personal alpha scope (2026-10-22): idle real-OpenCode 10-session workload, build/resource measurements, release manifest + install script, license inventory + cargo-audit, security review pack. Firm approval, signing, active-agent load remain open
-last-updated: 2026-10-21
-checkpoint-commit: saved-layout slice committed by parent per phase-completion authorization; no push
-last-verified: 2026-10-22 — verifier 8/8; full suite 993 passed/0 failed/15 ignored after origin/main merge (095bf45) + four-pane, agent CLI, L16 relaunch, L17 attach, L18 exit status (uncommitted)
-next-action: Remaining open gates: Phase 3 wider contracts (agent-control API, managed launch, events), Phase 4 identity (blocked upstream), Phase 5 hierarchy/mouse selection/full reboot. Ask user.
+current-phase: Phase 6 DONE for personal alpha scope (2026-10-22); Phase 2 DONE for scoped feasibility gates (2026-10-22); four-pane, agent CLI, relaunch/attach/exit-status, recovery, Wave2 and serialized live-split launch work are integrated locally. See STASH-MERGE-RESULT.md for current combined-tree checks and limits.
+last-updated: 2026-10-22
+checkpoint: Main/stash content conflicts resolved and checked; Git index staging is separate. No commit or push is part of this checkpoint.
+last-verified: Combined-tree library675pass/0fail/4ignored, all-target check and strict Clippy/fmt pass; full integration sweep196pass/27fail/11ignored across49 targets (40 targets pass). Binary118pass/1fail at socket bind EPERM; other host/startup assertions remain failed. See STASH-MERGE-RESULT.md.
+prior-evidence-upstream: verifier 8/8; full suite 993 passed/0 failed/15 ignored after origin/main merge (095bf45) and four-pane, agent CLI, L16 relaunch, L17 attach, L18 exit status, before stash integration; not combined-tree verification.
+prior-evidence-stash: live-split slice library 641 passed/4 ignored, focused integration 73 passed/0 failed, verifier 7/8 with binary 115 passed/1 failed at pathname-bind EPERM; not combined-tree verification. See docs/progress/ASYNC-LAUNCH-RESULT.md.
+next-action: Finish Git index resolution when writable, then resume open Phase 3 contracts, Phase 4 identity proof (blocked upstream), and Phase 5 hierarchy, mouse selection and full reboot/history acceptance. Phase 6 personal-alpha scope and Phase 2 scoped feasibility gates remain DONE with their documented limits; current host/socket failures are not passes.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
-blocked-on: Phase 4 live identity is blocked upstream (OpenCode 1.19.0 publishes no keyboard session-switch signal). Phase 2 host acceptance DONE 2026-10-22.
+blocked-on: Phase 4 live identity is blocked upstream (OpenCode 1.19.0 publishes no keyboard session-switch signal). Phase 2 scoped acceptance is DONE 2026-10-22 with remaining host evidence limits in docs/progress/SESSION.md.
 merged-origin: 2026-10-22 merged origin/main (Wave1 usability, Wave2 client/server close, Herdr study, Subagents SA plan); see docs/progress/WAVE2-RESULT.md, USABILITY-WAVE1-RESULT.md, SUBAGENTS-PLAN.md
-setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1 rechecked, offline builds pass, current verifier 7/8 with socket restriction; previous full 8/8 at f82d968 remains historical evidence.
+setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1 rechecked. Prior verifier results above are historical; current combined-tree checks are in STASH-MERGE-RESULT.md.
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 phase-3a: DONE — 2026-10-19 — see docs/progress/P3A-DEFAULT-OPEN.md and INTEGRATION.md
 phase-3b-stop: DONE as scoped two-pane stop slice — 2026-10-20 — checkpoint c3e207e; broader Phase 3 remains open
@@ -23,7 +25,8 @@ phase-p5-final-tail: DONE as bounded suffix admission — 2026-10-21 — see doc
 phase-p5-drain-metadata: DONE as timeout-only accepted-end finalization — 2026-10-21 — see docs/progress/P5-DRAIN-METADATA.md; payload loss and full Phase5 remain OPEN
 phase-p5-committed-corruption: DONE as whole-file refusal/preservation policy and acceptance — 2026-10-21 — see docs/progress/P5-COMMITTED-CORRUPTION.md; no salvage, checksum or full reboot claim
 phase-p5-saved-layout-design: DONE as reviewed engineering contract — see docs/progress/P5-SAVED-LAYOUT.md and P5-SAVED-LAYOUT-REVIEW.md
-phase-p5-saved-layout-impl: DONE as bounded codec/store/writer/observation/read-only view — see docs/progress/P5-LAYOUT-SLICE.md; no reboot or full history claim
+phase-p5-saved-layout-impl: DONE as bounded codec/store/writer/observation/read-only view; post-integration shutdown hardening and evidence in docs/progress/P5-LAYOUT-COMPLETION.md; no reboot or full history claim
+phase-p3-async-launch: DONE as serialized live-split prepare/journal/spawn worker with owner adoption and bounded shutdown; initial startup and legacy direct-core calls remain synchronous. See docs/progress/ASYNC-LAUNCH-RESULT.md.
 phase-p5-recovery: prototype view, chooser, in-workspace menu, explicit relaunch and 30-day old-to-new links implemented; full reboot remains open
 phase-sa-feasibility: ATTEMPTED/BLOCKED — OpenCode2.0.32 ACP/server readiness blocked by local socket permissions; OpenCode1.19.0 probe did not prove selected-session switching. See SUBAGENTS-FEASIBILITY.md and P4-OPENCODE-TUI-IDENTITY.md.
 phase-usability-wave1: scoped implementation delivered 2026-10-22; typed keys/help/cleanup and automated evidence. Full acceptance remains open; see USABILITY-WAVE1-RESULT.md.
@@ -276,8 +279,8 @@ open.
 - [x] Recovery chooser at plain startup and in-workspace 'View saved layout' item; see P5-RECOVERY-CHOOSER.md, P5-RECOVERY-MENU.md.
 - [x] Explicit relaunch (default shell, refuse while running) and 30-day old-to-new links; see P5-RECOVERY-RELAUNCH.md, P5-RECOVERY-LINKS.md.
 - [x] Scoped saved-layout/restart engineering design and exact codec task, with independent review; see P5-SAVED-LAYOUT.md. No saved-layout implementation or new command is delivered by that design.
-- [x] Pure fixed160-byte saved-layout codec with historical-only geometry and strict canonical validation; parent corrected the minimum-leaf invariant.
-- [x] Bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection; see P5-LAYOUT-SLICE.md. No reboot restoration claim.
+- [x] Historical-only saved-layout codec: current 280-byte records with supported legacy 160-byte migration; strict canonical validation and no live target restoration.
+- [x] Bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection; see P5-LAYOUT-SLICE.md and P5-LAYOUT-COMPLETION.md. No reboot restoration claim.
 - [ ] Full V-HISTORY reboot/layout recovery and representative workload/throughput acceptance; see P5-SAVED-HISTORY.md and docs/SPEC.md.
 
 ## Planned phase SA — Subagents visibility (not started)

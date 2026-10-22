@@ -61,6 +61,8 @@ pub enum ManagedLaunchError {
     KeyOwnedElsewhere,
     /// The request key has no retained result in this coordinator.
     UnknownKey,
+    /// An asynchronous split temporarily owns the launch slot.
+    InProgress,
     /// The bounded coordinator retained a lifecycle invariant failure.
     Unhealthy,
     /// Two-session capacity or checked identity allocation failed.
@@ -95,6 +97,7 @@ impl fmt::Debug for ManagedLaunchError {
             Self::Ledger(_) => "Ledger(<redacted>)",
             Self::KeyOwnedElsewhere => "KeyOwnedElsewhere",
             Self::UnknownKey => "UnknownKey",
+            Self::InProgress => "InProgress",
             Self::Unhealthy => "Unhealthy",
             Self::Registry(error) => return f.debug_tuple("Registry").field(error).finish(),
             Self::JournalPreflightFailed => "JournalPreflightFailed",
@@ -115,6 +118,7 @@ impl fmt::Display for ManagedLaunchError {
             Self::Ledger(_) => "managed launch ledger validation failed",
             Self::KeyOwnedElsewhere => "operation key is not owned by this coordinator",
             Self::UnknownKey => "managed launch result is unavailable",
+            Self::InProgress => "managed launch owner is busy",
             Self::Unhealthy => "managed launch coordinator is unhealthy",
             Self::Registry(RegistryError::Capacity) => "managed session capacity is exhausted",
             Self::Registry(RegistryError::IdentifierExhausted) => {
@@ -192,6 +196,11 @@ impl<E> ManagedLaunchCoordinator<E> {
     /// Whether new operations are accepted. Exact retained duplicates remain observable.
     pub const fn is_healthy(&self) -> bool {
         !self.unhealthy
+    }
+
+    /// Fail closed after an owner-side async attachment could not be matched.
+    pub(crate) fn mark_unhealthy(&mut self) {
+        self.unhealthy = true;
     }
 
     /// Return immutable lifecycle metadata for all retained identities.
@@ -382,6 +391,194 @@ impl<E> ManagedLaunchCoordinator<E> {
             .preflight_launch(key, target.session)
             .map_err(|_| ManagedLaunchError::JournalPreflightFailed)?;
         self.run_reserved(key, target, prepared, None, journal, spawn)
+    }
+
+    /// Reserve one coordinator identity for an already-admitted asynchronous
+    /// launch. No journal or process work is performed here. The owner remains
+    /// responsible for retaining any subsequently acquired effect handle.
+    pub(crate) fn reserve_async(
+        &mut self,
+        key: OperationKey,
+        expected_target: TargetRef,
+    ) -> Result<(), ManagedLaunchError> {
+        if key.generation != self.generation {
+            return Err(ManagedLaunchError::GenerationMismatch);
+        }
+        if self.unhealthy || self.emergency_effect.is_some() {
+            self.unhealthy = true;
+            return Err(ManagedLaunchError::Unhealthy);
+        }
+        if self.entry(key).is_some() {
+            return Err(ManagedLaunchError::InternalInvariant);
+        }
+        let target = self.next_target().map_err(ManagedLaunchError::Registry)?;
+        if target != expected_target {
+            return Err(ManagedLaunchError::InternalInvariant);
+        }
+        let reserved = self
+            .registry
+            .reserve()
+            .map_err(ManagedLaunchError::Registry)?;
+        if reserved != target
+            || self
+                .store_entry(
+                    key,
+                    LaunchResult {
+                        key,
+                        outcome: Outcome::Accepted,
+                        target: Some(target),
+                    },
+                )
+                .is_err()
+        {
+            self.unhealthy = true;
+            let _ = self.registry.transition(reserved, SessionState::Failed);
+            return Err(ManagedLaunchError::InternalInvariant);
+        }
+        Ok(())
+    }
+
+    /// Adopt the child returned by the asynchronous worker. An unexpected
+    /// attachment failure still retains the acquired handle in the emergency
+    /// slot and fails the coordinator closed.
+    pub(crate) fn attach_async(
+        &mut self,
+        key: OperationKey,
+        target: TargetRef,
+        effects: E,
+    ) -> Result<(), ManagedLaunchError> {
+        let valid = self.entry(key).is_some_and(|entry| {
+            entry.result.target == Some(target) && entry.result.outcome == Outcome::Accepted
+        });
+        if !valid {
+            self.unhealthy = true;
+            self.emergency_effect = Some(effects);
+            self.store_existing_result(
+                key,
+                LaunchResult {
+                    key,
+                    outcome: Outcome::Unknown,
+                    target: Some(target),
+                },
+            );
+            return Err(ManagedLaunchError::InternalInvariant);
+        }
+        if self.registry.state(target) == Ok(SessionState::Reserved)
+            && self
+                .registry
+                .transition(target, SessionState::Intent)
+                .is_err()
+        {
+            self.unhealthy = true;
+            self.emergency_effect = Some(effects);
+            self.store_existing_result(
+                key,
+                LaunchResult {
+                    key,
+                    outcome: Outcome::Unknown,
+                    target: Some(target),
+                },
+            );
+            return Err(ManagedLaunchError::InternalInvariant);
+        }
+        if let Err(attach_error) = self.registry.attach_spawned(target, effects) {
+            let (_, effects) = attach_error.into_parts();
+            self.unhealthy = true;
+            debug_assert!(self.emergency_effect.is_none());
+            self.emergency_effect = Some(effects);
+            let _ = self.registry.transition(target, SessionState::Unknown);
+            self.store_existing_result(
+                key,
+                LaunchResult {
+                    key,
+                    outcome: Outcome::Unknown,
+                    target: Some(target),
+                },
+            );
+            return Err(ManagedLaunchError::InternalInvariant);
+        }
+        self.store_existing_result(
+            key,
+            LaunchResult {
+                key,
+                outcome: Outcome::Accepted,
+                target: Some(target),
+            },
+        );
+        Ok(())
+    }
+
+    /// Finish a reserved asynchronous launch. The caller has already completed
+    /// journal work; `child_attached` selects truthful no-child failure versus
+    /// post-spawn uncertainty. An observed exit is never moved backwards.
+    pub(crate) fn finish_async(
+        &mut self,
+        key: OperationKey,
+        target: TargetRef,
+        outcome: Outcome,
+        child_attached: bool,
+        unhealthy: bool,
+    ) -> Result<LaunchResult, ManagedLaunchError> {
+        self.unhealthy |= unhealthy;
+        if self
+            .entry(key)
+            .is_none_or(|entry| entry.result.target != Some(target))
+        {
+            self.unhealthy = true;
+            return Err(ManagedLaunchError::InternalInvariant);
+        }
+        let final_outcome = if child_attached {
+            if outcome == Outcome::Applied {
+                Outcome::Applied
+            } else {
+                Outcome::Unknown
+            }
+        } else if outcome == Outcome::Failed {
+            Outcome::Failed
+        } else {
+            Outcome::Unknown
+        };
+        let state = self.registry.state(target).map_err(|_| {
+            self.unhealthy = true;
+            ManagedLaunchError::InternalInvariant
+        })?;
+        if child_attached {
+            let next = match (state, final_outcome) {
+                (SessionState::Exited, _) => SessionState::Exited,
+                (_, Outcome::Applied) => SessionState::Applied,
+                _ => SessionState::Unknown,
+            };
+            if state != next && self.registry.transition(target, next).is_err() {
+                self.unhealthy = true;
+            }
+        } else if final_outcome == Outcome::Unknown {
+            let transitioned = match state {
+                SessionState::Reserved => self
+                    .registry
+                    .transition(target, SessionState::Intent)
+                    .and_then(|()| self.registry.transition(target, SessionState::Unknown)),
+                SessionState::Intent => self.registry.transition(target, SessionState::Unknown),
+                SessionState::Unknown => Ok(()),
+                _ => Err(RegistryError::IllegalTransition),
+            };
+            if transitioned.is_err() {
+                self.unhealthy = true;
+            }
+        } else if !matches!(state, SessionState::Failed)
+            && self
+                .registry
+                .transition(target, SessionState::Failed)
+                .is_err()
+        {
+            self.unhealthy = true;
+        }
+        let result = LaunchResult {
+            key,
+            outcome: final_outcome,
+            target: Some(target),
+        };
+        self.store_existing_result(key, result);
+        Ok(result)
     }
 
     /// Observe this coordinator's retained launch result for one key.

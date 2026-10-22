@@ -149,6 +149,7 @@ pub struct ServerStorage {
     generation: u64,
     history_writer_claimed: Arc<AtomicBool>,
     layout_writer_claimed: Arc<AtomicBool>,
+    launch_writer_claimed: Arc<AtomicBool>,
 }
 
 /// Exclusively claims the one history worker and retains its singleton lock.
@@ -172,6 +173,20 @@ impl Drop for HistoryWriterGuard {
 pub(crate) struct LayoutWriterGuard {
     _lock: File,
     claimed: Arc<AtomicBool>,
+}
+
+/// Exclusive serialized launch journal owner. The duplicated storage keeps
+/// the same server generation and singleton lock alive while all launch
+/// journal IO runs away from the runtime owner.
+pub(crate) struct LaunchWriterGuard {
+    storage: ServerStorage,
+    claimed: Arc<AtomicBool>,
+}
+
+impl Drop for LaunchWriterGuard {
+    fn drop(&mut self) {
+        self.claimed.store(false, Ordering::Release);
+    }
 }
 
 impl Drop for LayoutWriterGuard {
@@ -261,6 +276,7 @@ impl ServerStorage {
             generation,
             history_writer_claimed: Arc::new(AtomicBool::new(false)),
             layout_writer_claimed: Arc::new(AtomicBool::new(false)),
+            launch_writer_claimed: Arc::new(AtomicBool::new(false)),
         };
         storage.verify_identity()?;
         Ok(storage)
@@ -298,6 +314,7 @@ impl ServerStorage {
             generation,
             history_writer_claimed: Arc::new(AtomicBool::new(false)),
             layout_writer_claimed: Arc::new(AtomicBool::new(false)),
+            launch_writer_claimed: Arc::new(AtomicBool::new(false)),
         };
         storage.verify_identity()?;
         Ok(storage)
@@ -375,6 +392,44 @@ impl ServerStorage {
         }
     }
 
+    /// Claim the single serialized launch journal writer while preserving
+    /// this server generation and singleton lock. A failed claim has no IO
+    /// effects and does not advance startup state.
+    pub(crate) fn claim_launch_writer(&self) -> io::Result<LaunchWriterGuard> {
+        if self
+            .launch_writer_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "launch writer is already active",
+            ));
+        }
+        let result = (|| {
+            self.verify_identity()?;
+            let directory = File::from(rustix::io::fcntl_dupfd_cloexec(&self.directory, 0)?);
+            let lock = File::from(rustix::io::fcntl_dupfd_cloexec(&self._lock, 0)?);
+            self.verify_identity()?;
+            Ok(LaunchWriterGuard {
+                storage: ServerStorage {
+                    directory,
+                    directory_path: self.directory_path.clone(),
+                    _lock: lock,
+                    generation: self.generation,
+                    history_writer_claimed: Arc::clone(&self.history_writer_claimed),
+                    layout_writer_claimed: Arc::clone(&self.layout_writer_claimed),
+                    launch_writer_claimed: Arc::clone(&self.launch_writer_claimed),
+                },
+                claimed: Arc::clone(&self.launch_writer_claimed),
+            })
+        })();
+        if result.is_err() {
+            self.launch_writer_claimed.store(false, Ordering::Release);
+        }
+        result
+    }
+
     /// Exact private directory of this storage domain, for binding a
     /// stream store (history or layout) to its held server identity.
     pub(crate) fn directory_path(&self) -> &Path {
@@ -397,9 +452,26 @@ impl ServerStorage {
 
     /// Open the append-only journal while keeping the singleton lock borrowed.
     pub fn journal(&mut self) -> io::Result<LaunchJournal<'_>> {
+        if self.launch_writer_claimed.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "launch journal is owned by its worker",
+            ));
+        }
+        self.journal_unchecked()
+    }
+
+    fn journal_unchecked(&self) -> io::Result<LaunchJournal<'_>> {
         self.verify_identity()?;
         let file = open_file(&self.directory, "launch.journal")?;
         LaunchJournal::load(self, file)
+    }
+}
+
+impl LaunchWriterGuard {
+    /// Open or reload the launch journal using the duplicated locked identity.
+    pub(crate) fn journal(&mut self) -> io::Result<LaunchJournal<'_>> {
+        self.storage.journal_unchecked()
     }
 }
 
@@ -757,6 +829,29 @@ mod tests {
         );
         drop(layout);
         assert_eq!(reopen_after_drop(&fixture.0).unwrap().generation(), 2);
+    }
+
+    #[test]
+    fn launch_writer_excludes_direct_journal_and_retains_exact_identity() {
+        let fixture = Fixture::new();
+        let mut storage = ServerStorage::initialize_for_test(&fixture.0).unwrap();
+        let generation = storage.generation();
+        let mut writer = storage.claim_launch_writer().unwrap();
+        assert_eq!(writer.storage.generation(), generation);
+        assert!(rustix::io::fcntl_getfd(&writer.storage._lock)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC));
+        assert_eq!(
+            storage.journal().err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            storage.claim_launch_writer().err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(writer.journal().is_ok());
+        drop(writer);
+        assert!(storage.journal().is_ok());
     }
 
     #[test]

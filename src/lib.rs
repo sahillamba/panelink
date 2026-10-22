@@ -12,6 +12,8 @@ pub mod history_rows;
 pub mod history_store;
 pub mod input_owner;
 pub mod launch;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod launch_worker;
 pub mod managed_launch_protocol;
 pub mod pane_layout;
 pub mod protocol;

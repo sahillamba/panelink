@@ -1,5 +1,9 @@
 # P5 saved-layout implementation slice — result — 2026-10-21
 
+Post-integration completion and shutdown hardening (2026-10-22): see
+[P5-LAYOUT-COMPLETION.md](P5-LAYOUT-COMPLETION.md). The counts below describe
+the original implementation run, not the current combined tree.
+
 Scope: implement the accepted [ADR](P5-SAVED-LAYOUT.md) stages 1-5 for the
 current two-pane prototype. Parent orchestration with Kimi K2.6 workers
 (user-selected model for this run; two parallel at a time) and parent review,

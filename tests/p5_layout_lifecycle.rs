@@ -1048,3 +1048,193 @@ fn close_one_pane_of_two_leaves_survivor_and_new_sequence() {
     drop(driver);
     assert!(!alive(second_pid), "closed pane must be reaped");
 }
+
+#[test]
+fn explicit_close_of_last_pane_publishes_empty_after_settled_exit() {
+    let fixture = Fixture::new();
+    let home = fixture.root.join("home");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let context = zsh_context(&home);
+    let arguments = zsh_arguments("last-close");
+    let started = StartedMultiServer::start(
+        ServerStorage::initialize(&fixture.server).unwrap(),
+        &fixture.terminfo,
+        &StartupLaunch {
+            executable: OsStr::new("/bin/zsh"),
+            arguments: &arguments,
+            context: &context,
+            rows: ROOT_ROWS,
+            columns: ROOT_COLUMNS,
+        },
+        true,
+    )
+    .unwrap();
+    let target = started.startup().target.unwrap();
+    let mut driver = started.into_driver();
+    driver
+        .enable_layout(LayoutStore::prepare(&fixture.server).unwrap())
+        .unwrap();
+
+    let started_at = Instant::now();
+    let link = connect(&mut driver, None, 66);
+    let (mut client, child_pid) = drive(&mut driver, started_at, move || {
+        let mut client = handshake(link);
+        let screen = wait_screen(&mut client, target, "P5LC-READY-last-close");
+        (client, marker_pid(&screen, "P5LC-READY-last-close"))
+    });
+    assert!(alive(child_pid));
+    pump_until_layout_durable(&mut driver, 1);
+
+    let (mut client, request) = drive(&mut driver, started_at, move || {
+        let layout = client.layout();
+        let key = client.key();
+        let mut payload = Vec::new();
+        encode_close_request(
+            &CloseRequest {
+                key,
+                target,
+                expected_layout_revision: layout.revision,
+            },
+            &mut payload,
+        )
+        .unwrap();
+        (client, payload)
+    });
+    let result =
+        panelink::close_protocol::decode_close_result(&drive(&mut driver, started_at, move || {
+            client.request(&request)
+        }))
+        .expect("CloseResult");
+    assert!(
+        matches!(
+            result.outcome,
+            CloseOutcome::Stopped(StopOutcome::Exited | StopOutcome::Escalated)
+        ),
+        "last-pane close must settle as an exited child: {:?}",
+        result.outcome
+    );
+    assert_eq!(
+        result.layout_revision, 1,
+        "last-leaf retention keeps revision"
+    );
+
+    // The owner publishes the tombstone only after close settlement recorded
+    // the child as exited; ordering follows the snapshot sequence, not revision.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let _ = driver.tick(|| 1);
+        if fixture
+            .layout_store()
+            .load(LayoutSlot::Current)
+            .unwrap()
+            .is_some_and(|saved| saved.pane_count() == 0)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "last-pane tombstone not durable");
+        thread::sleep(Duration::from_millis(5));
+    }
+    let saved = fixture
+        .layout_store()
+        .load(LayoutSlot::Current)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.metadata().snapshot_sequence(), 2);
+    assert_eq!(saved.metadata().layout_revision(), 1);
+    assert_eq!(saved.pane_count(), 0);
+    assert!(!alive(child_pid), "settled close must reap the child");
+    drop(driver);
+}
+
+#[test]
+fn drop_during_phased_last_pane_close_preserves_nonempty_snapshot() {
+    let fixture = Fixture::new();
+    let home = fixture.root.join("home");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let context = zsh_context(&home);
+    let hup_marker = fixture.root.join("close-hup-seen");
+    let script = format!(
+        "trap 'printf hup > {}' HUP; printf 'P5LC-PENDING-CLOSE-READY-PID-%s-END\\n' \"$$\"; while :; do /bin/sleep 1; done",
+        hup_marker.display()
+    );
+    let arguments = vec![OsString::from("-c"), OsString::from(script)];
+    let started = StartedMultiServer::start(
+        ServerStorage::initialize(&fixture.server).unwrap(),
+        &fixture.terminfo,
+        &StartupLaunch {
+            executable: OsStr::new("/bin/sh"),
+            arguments: &arguments,
+            context: &context,
+            rows: ROOT_ROWS,
+            columns: ROOT_COLUMNS,
+        },
+        true,
+    )
+    .unwrap();
+    let target = started.startup().target.unwrap();
+    let mut driver = started.into_driver();
+    driver
+        .enable_layout(LayoutStore::prepare(&fixture.server).unwrap())
+        .unwrap();
+
+    let started_at = Instant::now();
+    let link = connect(&mut driver, None, 67);
+    let (mut client, child_pid) = drive(&mut driver, started_at, move || {
+        let mut client = handshake(link);
+        let screen = wait_screen(&mut client, target, "P5LC-PENDING-CLOSE-READY");
+        let pid = marker_pid(&screen, "P5LC-PENDING-CLOSE-READY");
+        (client, pid)
+    });
+    assert!(alive(child_pid));
+    pump_until_layout_durable(&mut driver, 1);
+
+    // Start a phased close and stop the driver before its HUP phase can settle.
+    let (mut client, close_key, payload) = drive(&mut driver, started_at, move || {
+        let layout = client.layout();
+        let close_key = client.key();
+        let mut payload = Vec::new();
+        encode_close_request(
+            &CloseRequest {
+                key: close_key,
+                target,
+                expected_layout_revision: layout.revision,
+            },
+            &mut payload,
+        )
+        .unwrap();
+        (client, close_key, payload)
+    });
+    client.send(&payload);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while !hup_marker.exists() {
+        let _ = driver.tick(|| 2);
+        assert!(Instant::now() < deadline, "close did not deliver HUP");
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(close_key.generation, target.generation);
+    assert_eq!(close_key.sequence, 1);
+
+    let before = fixture
+        .layout_store()
+        .load(LayoutSlot::Current)
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.pane_count(), 1);
+    assert_eq!(before.metadata().snapshot_sequence(), 1);
+
+    drop(driver);
+
+    let after = fixture
+        .layout_store()
+        .load(LayoutSlot::Current)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.pane_count(),
+        1,
+        "shutdown completion cannot publish empty"
+    );
+    assert_eq!(after.panes()[0], Some(target));
+    assert_eq!(after.metadata().snapshot_sequence(), 1);
+    assert!(!alive(child_pid), "driver drop must stop the child");
+}
