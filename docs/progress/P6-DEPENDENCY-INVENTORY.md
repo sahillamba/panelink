@@ -47,6 +47,22 @@ Metadata command exit: 101; tree command exit: 0.
 
 ## Advisory scan
 
-**Blocked:** cargo-audit and cargo-deny are not installed. Advisory scanning was not performed; no tools or advisory database were fetched.
+Originally blocked (tools absent). With the user's approval (2026-10-21) the
+parent installed `cargo-audit 0.22.2` via Homebrew and ran it against
+`Cargo.lock` (18 crate entries including Panelink and target-gated crates):
+
+```text
+$ cargo audit --json
+database: RustSec advisory-db commit 4b587f00996ebe5c05a73eaef105ef241e876414,
+          last updated 2026-10-21T08:20:38+02:00, 1348 advisories
+vulnerabilities: found=false, count=0
+warnings (unmaintained/unsound/notice): none
+```
+
+The first attempt failed with a network timeout fetching the advisory DB; a
+retry succeeded. Raw JSON: [p6-raw/cargo-audit.json](p6-raw/cargo-audit.json).
+This is a point-in-time advisory check, not a security approval; vendored
+local patches (vt100, crossterm-input) are not covered by RustSec beyond
+their upstream crate names. cargo-deny was not installed or run.
 
 Raw Cargo stdout/stderr, exit codes, package rows and command strings are retained in [p6-raw/dependency-inventory.json](p6-raw/dependency-inventory.json).
