@@ -1308,6 +1308,27 @@ fn storage_openable(server_dir: &Path) -> bool {
     panelink::server_storage::ServerStorage::open(server_dir).is_ok()
 }
 
+/// A concurrent child may briefly inherit the dropped flock descriptor
+/// between fork and exec. Retry only that transient WouldBlock result.
+#[cfg(test)]
+fn wait_until_storage_openable(server_dir: &Path) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match panelink::server_storage::ServerStorage::open(server_dir) {
+            Ok(storage) => {
+                drop(storage);
+                return true;
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
 /// Read-only `panelink layout show [--previous]`: display the saved layout for
 /// the requested slot, or exit with a fixed sanitized error.
 pub(crate) fn layout_show(previous: bool) -> i32 {
@@ -2143,7 +2164,7 @@ mod tests {
         assert!(!storage_openable(&server));
         drop(storage);
         assert!(!server_lock_held(&server));
-        assert!(storage_openable(&server));
+        assert!(wait_until_storage_openable(&server));
         fs::remove_dir_all(&dir).unwrap();
     }
 

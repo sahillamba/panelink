@@ -2434,6 +2434,13 @@ mod tests {
         use std::sync::mpsc::sync_channel;
         use std::time::{Duration, Instant};
 
+        // Permit scheduler delay under the deliberate CPU-load repetitions.
+        // Each driver-loop cap still bounds a deadlock, and the tick cap stays
+        // far below the overall progress deadline to catch blocking storage IO.
+        const IO_DEADLINE: Duration = Duration::from_secs(30);
+        const DRIVER_PROGRESS_DEADLINE: Duration = Duration::from_secs(60);
+        const MAX_TICK_LATENCY: Duration = Duration::from_millis(250);
+
         let root = PathBuf::from("/private/tmp").join(format!(
             "panelink-live-capture-blocked-{}-{}",
             std::process::id(),
@@ -2491,7 +2498,7 @@ mod tests {
             observed_targets: std::sync::Arc::clone(&observed_targets),
         }));
         entered_recv
-            .recv_timeout(Duration::from_secs(3))
+            .recv_timeout(IO_DEADLINE)
             .expect("writer should reach the deterministic blocking backend");
 
         let (server_socket, client_socket) = UnixStream::pair().unwrap();
@@ -2502,7 +2509,7 @@ mod tests {
         let client_cwd = root.clone();
         let client = std::thread::scope(|scope| {
             let task = scope.spawn(move || {
-                let deadline = || Instant::now() + Duration::from_secs(3);
+                let deadline = || Instant::now() + IO_DEADLINE;
                 let mut stream = AuthenticatedStream::new(client_socket).unwrap();
                 let hello = encode_session_hello(&SessionHello {
                     hello: Hello {
@@ -2586,7 +2593,7 @@ mod tests {
                     ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
                 ));
 
-                let deadline_at = Instant::now() + Duration::from_secs(3);
+                let deadline_at = Instant::now() + IO_DEADLINE;
                 let input_screen = loop {
                     let screen = encode_screen_query(target).unwrap();
                     let reply = send(&mut stream, &mut request_id, &screen);
@@ -2662,16 +2669,16 @@ mod tests {
                 (input_screen, split_target)
             });
 
-            let deadline = Instant::now() + Duration::from_secs(6);
+            let deadline = Instant::now() + DRIVER_PROGRESS_DEADLINE;
             while !task.is_finished() {
                 let tick_started = Instant::now();
                 driver.tick(|| 100).unwrap();
                 assert!(
-                    tick_started.elapsed() < Duration::from_millis(250),
+                    tick_started.elapsed() < MAX_TICK_LATENCY,
                     "owner tick waited for blocked history storage"
                 );
                 assert!(Instant::now() < deadline, "socket control did not progress");
-                std::thread::sleep(Duration::from_millis(1));
+                std::thread::sleep(Duration::from_millis(5));
             }
             task.join().unwrap()
         });
@@ -2700,55 +2707,52 @@ mod tests {
                 stream
                     .write_frame(
                         &Frame::new(MessageKind::Hello, 0, &hello).unwrap(),
-                        Instant::now() + Duration::from_secs(3),
+                        Instant::now() + IO_DEADLINE,
                     )
                     .unwrap();
-                let welcome = stream
-                    .read_frame(Instant::now() + Duration::from_secs(3))
-                    .unwrap();
+                let welcome = stream.read_frame(Instant::now() + IO_DEADLINE).unwrap();
                 assert_eq!(welcome.kind(), MessageKind::Welcome);
                 let _welcome = decode_welcome(welcome.payload()).unwrap();
                 stream.enable_snapshot_reads().unwrap();
                 let query = encode_screen_query(split_target).unwrap();
-                let deadline = Instant::now() + Duration::from_secs(3);
+                let deadline = Instant::now() + IO_DEADLINE;
+                let mut request_id = 0_u64;
                 loop {
+                    request_id += 1;
                     stream
                         .write_frame(
-                            &Frame::new(MessageKind::Request, 1, &query).unwrap(),
-                            Instant::now() + Duration::from_secs(3),
+                            &Frame::new(MessageKind::Request, request_id, &query).unwrap(),
+                            Instant::now() + IO_DEADLINE,
                         )
                         .unwrap();
-                    let reply = stream
-                        .read_frame(Instant::now() + Duration::from_secs(3))
-                        .unwrap();
-                    if reply.kind() == MessageKind::Snapshot {
-                        let snapshot = decode_screen_reply(reply.payload()).unwrap();
-                        let checkpoint = decode_checkpoint(snapshot.checkpoint()).unwrap();
-                        let text = (0..checkpoint.rows())
-                            .map(|row| {
-                                (0..checkpoint.columns())
-                                    .map(|column| checkpoint.cell(row, column).unwrap().text())
-                                    .collect::<String>()
-                            })
-                            .collect::<String>();
-                        if text.contains("ASYNC-SPLIT-READY") {
-                            return text;
-                        }
+                    let reply = stream.read_frame(Instant::now() + IO_DEADLINE).unwrap();
+                    assert_eq!(reply.kind(), MessageKind::Snapshot);
+                    let snapshot = decode_screen_reply(reply.payload()).unwrap();
+                    let checkpoint = decode_checkpoint(snapshot.checkpoint()).unwrap();
+                    let text = (0..checkpoint.rows())
+                        .map(|row| {
+                            (0..checkpoint.columns())
+                                .map(|column| checkpoint.cell(row, column).unwrap().text())
+                                .collect::<String>()
+                        })
+                        .collect::<String>();
+                    if text.contains("ASYNC-SPLIT-READY") {
+                        return text;
                     }
                     assert!(Instant::now() < deadline, "split PTY did not start");
                     std::thread::sleep(Duration::from_millis(2));
                 }
             });
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + DRIVER_PROGRESS_DEADLINE;
             while !task.is_finished() {
                 driver.tick(|| 100).unwrap();
                 assert!(Instant::now() < deadline, "split screen query timed out");
-                std::thread::sleep(Duration::from_millis(1));
+                std::thread::sleep(Duration::from_millis(5));
             }
             task.join().unwrap()
         });
         assert!(screen.contains("ASYNC-SPLIT-READY"));
-        let capture_deadline = Instant::now() + Duration::from_secs(3);
+        let capture_deadline = Instant::now() + IO_DEADLINE;
         while !observed_targets.lock().unwrap().contains(&split_target) {
             driver.tick(|| 100).unwrap();
             assert!(

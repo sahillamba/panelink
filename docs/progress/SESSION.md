@@ -1,5 +1,16 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Phase 6: robustness, ten-pane runs, audit — 2026-10-21 (read this first)
+
+User approved all three follow-ups. Parent installed cargo-audit (Homebrew,
+0.22.2): 0 vulnerabilities across 18 lockfile crates vs 1348 advisories.
+L10 (Luna) hardened load-flaky tests with root causes (fork-to-exec flock
+window, HUP fixture process group, short socket deadlines, two writer-test
+races); test-only. L11 (Luna) fixed the ten-pane harness (idle-connection
+timeout keepalive; proven live-bench input protocol) and recorded two
+SYNTHETIC proxy runs. Parent added a p3_detach marker-wait fix and rebuilt
+the repo binary. Committed; no push.
+
 ## P4 switch signal + Phase 6 start — 2026-10-21 (read this first)
 
 Two GPT-6-Luna workers. Both were interrupted by a machine sleep + LLM auth

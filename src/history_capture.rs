@@ -1342,7 +1342,7 @@ mod tests {
             }
         ));
         capture.observe(TARGET, observation(1, 1));
-        entered_recv.recv_timeout(Duration::from_secs(3)).unwrap();
+        entered_recv.recv_timeout(Duration::from_secs(30)).unwrap();
         for token in 2..=crate::history_writer::MAX_QUEUED_BATCHES as u64 {
             capture
                 .writer
@@ -1369,7 +1369,7 @@ mod tests {
         );
         release_send.send(()).unwrap();
         wait_for(
-            Instant::now() + Duration::from_secs(3),
+            Instant::now() + Duration::from_secs(30),
             || events.lock().unwrap().contains(&Event::Ended(TARGET, 777)),
             "reserved end did not settle",
         );

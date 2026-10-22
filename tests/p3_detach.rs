@@ -108,12 +108,16 @@ fn read_sink_screen<E: EffectSink>(state: &mut StateOwner<E>) -> String {
         .text
 }
 
+/// Shell startup under heavy machine load can exceed the 3 s IO deadline;
+/// waiting longer for a marker never weakens what the test proves.
+const MARKER_DEADLINE: Duration = Duration::from_secs(10);
+
 fn wait_for_screen<E: EffectSink>(
     state: &mut StateOwner<E>,
     now: impl Fn() -> u64,
     needle: &str,
 ) -> String {
-    let deadline = Instant::now() + IO_DEADLINE;
+    let deadline = Instant::now() + MARKER_DEADLINE;
     loop {
         state
             .poll(now())

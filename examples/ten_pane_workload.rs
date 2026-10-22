@@ -29,10 +29,10 @@ mod workload {
         encode_attach_target, encode_key_input, encode_layout_query, KeyInput,
     };
     use std::ffi::{OsStr, OsString};
-    use std::fs::{self, DirBuilder};
-    use std::io;
+    use std::fs::{self, DirBuilder, OpenOptions};
+    use std::io::{self, Read, Write};
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command};
@@ -44,10 +44,12 @@ mod workload {
     const PANES: usize = 2;
     const SECONDS: u64 = 30;
     const SAMPLE_EVERY: Duration = Duration::from_secs(1);
+    const KEEPALIVE_EVERY: Duration = Duration::from_millis(800);
     const OWNER_POLL: Duration = Duration::from_millis(2);
-    const IO_TIMEOUT: Duration = Duration::from_secs(4);
+    const IO_TIMEOUT: Duration = Duration::from_secs(8);
     const ROOT_ROWS: u16 = 49;
     const ROOT_COLUMNS: u16 = 80;
+    const CHILD_MODE: &str = "--panelink-ten-pane-child";
 
     type WorkResult<T> = Result<T, &'static str>;
 
@@ -171,6 +173,10 @@ mod workload {
             Ok(reply_rx)
         }
 
+        fn keepalive(&self) -> WorkResult<()> {
+            self.query(encode_layout_query().to_vec())
+        }
+
         fn query(&self, payload: Vec<u8>) -> WorkResult<()> {
             self.command
                 .send(ClientCommand::Query { payload })
@@ -196,14 +202,14 @@ mod workload {
         targets: [TargetRef; PANES],
         children: [u32; PANES],
         clients: Vec<ClientWorker>,
+        pending_ready: Vec<Receiver<WorkResult<()>>>,
         ready_ack: [PathBuf; PANES],
         next_probe: Instant,
+        next_keepalive: Instant,
         probe_round: usize,
         pending_probes: Vec<(Receiver<WorkResult<()>>, Instant)>,
         owner_ticks: Vec<u64>,
         probe_latencies: Vec<u64>,
-        rss_bytes: Vec<u64>,
-        cpu_percent: Vec<f64>,
         history_ok: bool,
         layout_ok: bool,
         shutdown_ms: Option<u64>,
@@ -227,8 +233,9 @@ mod workload {
             let storage = ServerStorage::initialize(&server)
                 .map_err(|_| "server storage initialization failed")?;
             let context = launch_context(&path, &terminfo);
-            let executable = PathBuf::from("/bin/sh");
-            let root_args = shell_args(&path, 0);
+            let executable =
+                std::env::current_exe().map_err(|_| "workload executable lookup failed")?;
+            let root_args = child_args(&path, 0);
             let started = StartedMultiServer::start(
                 storage,
                 &terminfo,
@@ -281,14 +288,14 @@ mod workload {
                 targets: [target0, target1],
                 children: [0, 0],
                 clients: Vec::with_capacity(PANES),
+                pending_ready: Vec::with_capacity(PANES),
                 ready_ack: [path.join("pane-0.ack"), path.join("pane-1.ack")],
-                next_probe: Instant::now() + Duration::from_secs(3),
+                next_probe: Instant::now() + Duration::from_secs(1),
+                next_keepalive: Instant::now() + KEEPALIVE_EVERY,
                 probe_round: 0,
                 pending_probes: Vec::with_capacity(PANES),
                 owner_ticks: Vec::new(),
                 probe_latencies: Vec::new(),
-                rss_bytes: Vec::new(),
-                cpu_percent: Vec::new(),
                 history_ok: false,
                 layout_ok: false,
                 shutdown_ms: None,
@@ -298,64 +305,47 @@ mod workload {
                 read_marker_pid(&workspace.root.join("pane-0.ready"))?,
                 read_marker_pid(&workspace.root.join("pane-1.ready"))?,
             ];
-            for (pane, target) in workspace.targets.iter().copied().enumerate() {
+            Ok(workspace)
+        }
+
+        fn connect_clients(&mut self) -> WorkResult<()> {
+            for (pane, target) in self.targets.iter().copied().enumerate() {
                 let worker = ClientWorker::start(
-                    workspace.driver.as_mut().ok_or("driver missing")?,
+                    self.driver.as_mut().ok_or("driver missing")?,
                     target,
                     pane,
-                    1000 + (index as u64 * 10) + pane as u64,
+                    1000 + (self.index as u64 * 10) + pane as u64,
                     1,
                 )?;
-                workspace.clients.push(worker);
+                self.clients.push(worker);
             }
-            let mut ready = workspace
+            Ok(())
+        }
+
+        fn announce_ready(&mut self) -> WorkResult<()> {
+            self.pending_ready = self
                 .clients
                 .iter()
                 .map(ClientWorker::connected)
                 .collect::<WorkResult<Vec<_>>>()?;
-            let deadline = Instant::now() + IO_TIMEOUT;
-            while !ready.is_empty() {
-                workspace.tick(false)?;
-                let mut index = 0;
-                while index < ready.len() {
-                    match ready[index].try_recv() {
-                        Ok(result) => {
-                            result?;
-                            ready.swap_remove(index);
-                        }
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            eprintln!("client readiness disconnected before reply");
-                            return Err("client handshake worker disconnected");
-                        }
-                        Err(mpsc::TryRecvError::Empty) => index += 1,
+            Ok(())
+        }
+
+        fn poll_ready(&mut self) -> WorkResult<bool> {
+            let mut index = 0;
+            while index < self.pending_ready.len() {
+                match self.pending_ready[index].try_recv() {
+                    Ok(result) => {
+                        result?;
+                        self.pending_ready.swap_remove(index);
                     }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err("client handshake worker disconnected");
+                    }
+                    Err(mpsc::TryRecvError::Empty) => index += 1,
                 }
-                if Instant::now() >= deadline {
-                    return Err("client handshake timed out");
-                }
-                thread::sleep(OWNER_POLL);
             }
-            workspace.clients[0].query(encode_layout_query().to_vec())?;
-            let deadline = Instant::now() + IO_TIMEOUT;
-            loop {
-                workspace.tick(false)?;
-                if LayoutStore::open(&server.join("layout"))
-                    .ok()
-                    .and_then(|store| store.load(LayoutSlot::Current).ok().flatten())
-                    .is_some_and(|saved| {
-                        saved.pane_count() == 2
-                            && saved.panes()
-                                == [Some(workspace.targets[0]), Some(workspace.targets[1])]
-                    })
-                {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    return Err("two-pane layout not confirmed durable before probes");
-                }
-                thread::sleep(OWNER_POLL);
-            }
-            Ok(workspace)
+            Ok(self.pending_ready.is_empty())
         }
 
         fn wait_ready(&mut self) -> WorkResult<()> {
@@ -377,7 +367,7 @@ mod workload {
             self.driver
                 .as_mut()
                 .ok_or("workspace driver missing")?
-                .tick(|| 1)
+                .tick(|| 1 + elapsed_whole_seconds())
                 .map_err(|_| "owner tick failed")?;
             if measured && self.clients.is_empty() {
                 return Err("no connected control clients");
@@ -390,7 +380,13 @@ mod workload {
 
         fn advance(&mut self, now: Instant, stop_at: Instant) -> WorkResult<()> {
             self.tick(true)?;
-            if now >= self.next_probe && now < stop_at {
+            if now >= self.next_keepalive {
+                for client in &self.clients {
+                    client.keepalive()?;
+                }
+                self.next_keepalive = now + KEEPALIVE_EVERY;
+            }
+            if self.probe_round < CHILD_PROBES && now >= self.next_probe && now < stop_at {
                 self.probe_round += 1;
                 for (pane, client) in self.clients.iter().enumerate() {
                     let previous = marker_number(&self.ready_ack[pane])?;
@@ -415,7 +411,7 @@ mod workload {
                     }
                     Ok(Err(_)) => return Err("child input acknowledgment failed"),
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        return Err("probe client disconnected")
+                        return Err("probe client disconnected");
                     }
                     Err(mpsc::TryRecvError::Empty) => {
                         if now.saturating_duration_since(self.pending_probes[index].1) >= IO_TIMEOUT
@@ -426,16 +422,6 @@ mod workload {
                     }
                 }
             }
-            Ok(())
-        }
-
-        fn sample_children(&mut self) -> WorkResult<()> {
-            let mut pids = Vec::with_capacity(PANES + 1);
-            pids.push(process::id());
-            pids.extend(self.children);
-            let (rss, cpu) = sample_processes(&pids)?;
-            self.rss_bytes.push(rss);
-            self.cpu_percent.push(cpu);
             Ok(())
         }
 
@@ -509,16 +495,104 @@ mod workload {
         }
     }
 
-    fn shell_args(root: &Path, pane: usize) -> Vec<OsString> {
+    fn child_args(root: &Path, pane: usize) -> Vec<OsString> {
         vec![
-            OsString::from("-c"),
-            OsString::from(
-                "root=$1; pane=$2; ready=\"$root/pane-$pane.ready\"; ack=\"$root/pane-$pane.ack\"; printf 'SYNTHETIC-PANE-%s-READY\\r\\n' \"$pane\"; printf '%s\\n' \"$$\" > \"$ready\"; (i=0; while :; do i=$((i+1)); case $((i % 3)) in 0) text='plain mixed text' ;; 1) text='quoted \"text\"' ;; *) text='unicode café λ' ;; esac; printf 'pane=%s tick=%s %s\\r\\n' \"$pane\" \"$i\" \"$text\"; sleep 0.25; done) & producer=$!; trap 'kill \"$producer\" 2>/dev/null; exit 0' HUP TERM INT; count=0; while IFS= read -r token; do count=$((count+1)); printf '%s\\n' \"$count\" > \"$ack\"; done; kill \"$producer\" 2>/dev/null; wait \"$producer\" 2>/dev/null; exit 0",
-            ),
-            OsString::from("panelink-ten-pane"),
+            OsString::from(CHILD_MODE),
             root.as_os_str().to_owned(),
             OsString::from(pane.to_string()),
         ]
+    }
+
+    const CHILD_PROBES: usize = 6;
+
+    pub fn child_mode() -> Option<WorkResult<()>> {
+        let arguments = std::env::args_os().collect::<Vec<_>>();
+        if arguments.get(1).map(OsStr::new) != Some(OsStr::new(CHILD_MODE)) {
+            return None;
+        }
+        Some((|| {
+            if arguments.len() != 4 {
+                return Err("synthetic child arguments invalid");
+            }
+            let root = PathBuf::from(&arguments[2]);
+            let pane = arguments[3]
+                .to_str()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|pane| *pane < PANES)
+                .ok_or("synthetic child pane invalid")?;
+            run_synthetic_child(&root, pane)
+        })())
+    }
+
+    fn run_synthetic_child(root: &Path, pane: usize) -> WorkResult<()> {
+        let ready = root.join(format!("pane-{pane}.ready"));
+        let ack = root.join(format!("pane-{pane}.ack"));
+        let reader_ack = ack.clone();
+        let reader = thread::Builder::new()
+            .name(format!("ten-pane-input-{pane}"))
+            .spawn(move || read_child_inputs(&reader_ack, CHILD_PROBES))
+            .map_err(|_| "synthetic child input reader could not start")?;
+        let mut stdout = io::stdout().lock();
+        stdout
+            .write_all(format!("SYNTHETIC-PANE-{pane}-READY\r\n").as_bytes())
+            .and_then(|()| stdout.flush())
+            .map_err(|_| "synthetic child readiness output failed")?;
+        fs::write(&ready, format!("{}\n", process::id()))
+            .map_err(|_| "synthetic child readiness marker failed")?;
+        let mut tick = 0_u64;
+        loop {
+            tick += 1;
+            let text = match tick % 3 {
+                0 => "plain mixed text",
+                1 => "quoted \"text\"",
+                _ => "unicode café λ",
+            };
+            if writeln!(stdout, "pane={pane} tick={tick} {text}")
+                .and_then(|()| stdout.flush())
+                .is_err()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        drop(stdout);
+        reader
+            .join()
+            .map_err(|_| "synthetic child input reader panicked")??;
+        Ok(())
+    }
+
+    fn read_child_inputs(path: &Path, count: usize) -> WorkResult<()> {
+        let mut stdin = io::stdin().lock();
+        for completed in 1..=count {
+            let mut input = [0_u8; 2];
+            stdin
+                .read_exact(&mut input)
+                .map_err(|_| "synthetic child input was not acknowledged")?;
+            if input != *b"q\n" && input != *b"q\r" {
+                return Err("synthetic child received unexpected input");
+            }
+            atomic_write(path, format!("{completed}\n").as_bytes())
+                .map_err(|_| "synthetic child acknowledgment write failed")?;
+        }
+        Ok(())
+    }
+
+    fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::other("invalid private marker name"))?;
+        let mut temporary_name = name.to_os_string();
+        temporary_name.push(".pending");
+        let temporary = path.with_file_name(temporary_name);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        drop(file);
+        fs::rename(temporary, path)
     }
 
     fn split_second_pane(
@@ -562,7 +636,7 @@ mod workload {
                     return result;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err("split client stopped before result")
+                    return Err("split client stopped before result");
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -678,7 +752,7 @@ mod workload {
             lease: welcome.lease,
             sequence,
         };
-        let arguments = shell_args(root, 1);
+        let arguments = child_args(root, 1);
         let argument_refs = arguments
             .iter()
             .map(|argument| argument.as_bytes())
@@ -766,7 +840,7 @@ mod workload {
     fn service_client(
         socket: UnixStream,
         target: TargetRef,
-        pane: usize,
+        _pane: usize,
         nonce: u64,
         sequence: &mut u64,
         commands: Receiver<ClientCommand>,
@@ -805,6 +879,9 @@ mod workload {
             .map_err(|_| "client describe request failed")?;
         let info =
             decode_session_info(info_frame.payload()).map_err(|_| "client session info invalid")?;
+        if info.target != target {
+            return Err("client session target did not match attachment");
+        }
         let claim = encode_session_request(&SessionRequest::Claim {
             key: OperationKey {
                 generation: welcome.generation,
@@ -816,7 +893,6 @@ mod workload {
             ttl_seconds: 30,
         })
         .map_err(|_| "client input claim invalid")?;
-        *sequence += 1;
         let claim_frame = request(&mut stream, &mut request_id, &claim)
             .map_err(|_| "client claim request failed")?;
         let response = decode_response_payload(claim_frame.payload())
@@ -825,14 +901,18 @@ mod workload {
             response.body,
             ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
         ) {
-            eprintln!("synthetic claim rejected: {:?}", response.body);
             return Err("client claim refused");
         }
-        *sequence += 1;
+        *sequence = sequence
+            .checked_add(1)
+            .ok_or("client operation sequence exhausted")?;
         let owner_frame = request(&mut stream, &mut request_id, &describe)
             .map_err(|_| "client owner refresh request failed")?;
         let owner = decode_session_info(owner_frame.payload())
             .map_err(|_| "client owner refresh invalid")?;
+        if owner.target != target || owner.owner_lease != welcome.lease {
+            return Err("client input ownership was not confirmed");
+        }
         loop {
             match commands.recv() {
                 Ok(ClientCommand::Stop) | Err(_) => return Ok(()),
@@ -840,8 +920,9 @@ mod workload {
                     let _ = reply.send(Ok(()));
                 }
                 Ok(ClientCommand::Query { payload }) => {
-                    request(&mut stream, &mut request_id, &payload)
-                        .map_err(|_| "client layout query failed")?;
+                    if request(&mut stream, &mut request_id, &payload).is_err() {
+                        return Err("client layout query failed");
+                    }
                 }
                 Ok(ClientCommand::Probe {
                     probe,
@@ -853,31 +934,37 @@ mod workload {
                         &mut stream,
                         &mut request_id,
                         target,
-                        pane,
                         welcome.generation,
                         welcome.lease,
                         owner.owner_revision,
                         sequence,
-                        probe,
                     );
-                    if result.is_ok() {
-                        *sequence += 1;
-                    }
-                    let deadline = Instant::now() + IO_TIMEOUT;
-                    let result = result.and_then(|()| loop {
-                        if marker_number(&ack_path).is_ok_and(|value| value > previous_ack) {
-                            return Ok(());
+                    let result = result.and_then(|sequence_used| {
+                        *sequence = sequence_used
+                            .checked_add(1)
+                            .ok_or("client operation sequence exhausted")?;
+                        let deadline = Instant::now() + IO_TIMEOUT;
+                        loop {
+                            if marker_number(&ack_path)
+                                .is_ok_and(|value| value >= probe as u64 && value > previous_ack)
+                            {
+                                return Ok(());
+                            }
+                            if Instant::now() >= deadline {
+                                return Err("child acknowledgment timed out");
+                            }
+                            thread::sleep(OWNER_POLL);
                         }
-                        if Instant::now() >= deadline {
-                            return Err("child acknowledgment timed out");
-                        }
-                        thread::sleep(OWNER_POLL);
                     });
-                    if result.is_err() {
-                        let _ = reply.send(result);
-                        return Err("child probe failed");
+                    match result {
+                        Ok(()) => {
+                            let _ = reply.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            return Err("child probe failed");
+                        }
                     }
-                    let _ = reply.send(result);
                 }
             }
         }
@@ -888,22 +975,19 @@ mod workload {
         stream: &mut AuthenticatedStream,
         request_id: &mut u64,
         target: TargetRef,
-        pane: usize,
         generation: u64,
         lease: u64,
         owner_revision: u64,
         sequence: &mut u64,
-        probe: usize,
-    ) -> WorkResult<()> {
-        let text = format!("p{probe}n{pane}");
-        let mut keys = text.chars().map(Key::Char).collect::<Vec<_>>();
-        keys.push(Key::Enter);
+    ) -> WorkResult<u64> {
+        let keys = [Key::Char('q'), Key::Enter];
+        let key = OperationKey {
+            generation,
+            lease,
+            sequence: *sequence,
+        };
         let payload = encode_key_input(&KeyInput {
-            key: OperationKey {
-                generation,
-                lease,
-                sequence: *sequence,
-            },
+            key,
             target,
             expected_owner_revision: owner_revision,
             keys: &keys,
@@ -935,9 +1019,8 @@ mod workload {
             decoded.body,
             ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
         ) {
-            Ok(())
+            Ok(key.sequence)
         } else {
-            eprintln!("client input rejected: {:?}", decoded.body);
             Err("client input was not applied")
         }
     }
@@ -1023,6 +1106,13 @@ mod workload {
         u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
     }
 
+    fn elapsed_whole_seconds() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
     fn percentile(samples: &[u64], fraction: f64) -> Option<u64> {
         if samples.is_empty() {
             return None;
@@ -1035,35 +1125,44 @@ mod workload {
             .copied()
     }
 
-    fn percentile_float(samples: &[f64], fraction: f64) -> Option<f64> {
-        if samples.is_empty() {
-            return None;
-        }
-        let mut sorted = samples.to_vec();
-        sorted.sort_by(f64::total_cmp);
-        let rank = ((fraction * sorted.len() as f64).ceil() as usize).max(1);
-        sorted
-            .get(rank.saturating_sub(1).min(sorted.len() - 1))
-            .copied()
-    }
-
     fn json_num(value: Option<u64>) -> String {
         value.map_or_else(|| "null".to_owned(), |value| value.to_string())
     }
-    fn json_float(value: Option<f64>) -> String {
-        value.map_or_else(|| "null".to_owned(), |value| format!("{value:.2}"))
+    fn print_workspace(workspace: &Workspace) {
+        print!(
+            "{{\"workspace\":{},\"owner_ticks\":{{\"count\":{},\"p50_us\":{},\"p95_us\":{},\"max_us\":{}}},\"child_ack\":{{\"count\":{},\"p50_us\":{},\"p95_us\":{},\"max_us\":{}}},\"history_ok\":{},\"layout_ok\":{},\"shutdown_ms\":{}}}",
+            workspace.index,
+            workspace.owner_ticks.len(),
+            json_num(percentile(&workspace.owner_ticks, 0.50)),
+            json_num(percentile(&workspace.owner_ticks, 0.95)),
+            json_num(workspace.owner_ticks.iter().copied().max()),
+            workspace.probe_latencies.len(),
+            json_num(percentile(&workspace.probe_latencies, 0.50)),
+            json_num(percentile(&workspace.probe_latencies, 0.95)),
+            json_num(workspace.probe_latencies.iter().copied().max()),
+            workspace.history_ok,
+            workspace.layout_ok,
+            workspace
+                .shutdown_ms
+                .map_or_else(|| "null".to_owned(), |value| value.to_string())
+        );
     }
 
-    fn print_workspace(workspace: &Workspace) {
-        print!("{{\"workspace\":{},\"owner_ticks\":{{\"count\":{},\"p50_us\":{},\"p95_us\":{},\"max_us\":{}}},\"child_ack\":{{\"count\":{},\"p50_us\":{},\"p95_us\":{},\"max_us\":{}}},\"process_samples\":{},\"children_rss_bytes\":{{\"p50\":{},\"p95\":{},\"max\":{}}},\"children_cpu_percent\":{{\"p50\":{},\"p95\":{},\"max\":{}}},\"history_ok\":{},\"layout_ok\":{},\"shutdown_ms\":{}}}",
-            workspace.index, workspace.owner_ticks.len(), json_num(percentile(&workspace.owner_ticks, 0.50)), json_num(percentile(&workspace.owner_ticks, 0.95)), json_num(workspace.owner_ticks.iter().copied().max()),
-            workspace.probe_latencies.len(), json_num(percentile(&workspace.probe_latencies, 0.50)), json_num(percentile(&workspace.probe_latencies, 0.95)), json_num(workspace.probe_latencies.iter().copied().max()),
-            workspace.rss_bytes.len(), json_num(percentile(&workspace.rss_bytes, 0.50)), json_num(percentile(&workspace.rss_bytes, 0.95)), json_num(workspace.rss_bytes.iter().copied().max()),
-            json_float(percentile_float(&workspace.cpu_percent, 0.50)), json_float(percentile_float(&workspace.cpu_percent, 0.95)), json_float(workspace.cpu_percent.iter().copied().reduce(f64::max)),
-            workspace.history_ok, workspace.layout_ok, workspace.shutdown_ms.map_or_else(|| "null".to_owned(), |value| value.to_string()));
+    fn print_resource_samples(samples: &[(u64, f64)]) {
+        print!("\"process_samples\":[");
+        for (index, (rss_bytes, cpu_percent)) in samples.iter().copied().enumerate() {
+            if index > 0 {
+                print!(",");
+            }
+            print!("{{\"rss_bytes\":{rss_bytes},\"cpu_percent\":{cpu_percent:.2}}}");
+        }
+        print!("],");
     }
 
     pub fn main() -> WorkResult<()> {
+        if let Some(result) = child_mode() {
+            return result;
+        }
         let arguments = std::env::args_os().collect::<Vec<_>>();
         if arguments.len() != 1 {
             return Err("ten-pane workload takes no arguments");
@@ -1076,9 +1175,67 @@ mod workload {
                 root.0.join(format!("workspace-{index}")),
             )?);
         }
+        for workspace in &mut workspaces {
+            workspace.connect_clients()?;
+        }
+        for workspace in &mut workspaces {
+            workspace.wait_ready()?;
+            workspace.children = [
+                read_marker_pid(&workspace.root.join("pane-0.ready"))?,
+                read_marker_pid(&workspace.root.join("pane-1.ready"))?,
+            ];
+        }
+        for workspace in &mut workspaces {
+            workspace.announce_ready()?;
+        }
+        let ready_deadline = Instant::now() + IO_TIMEOUT;
+        loop {
+            let mut all_ready = true;
+            for workspace in &mut workspaces {
+                workspace.tick(false)?;
+                all_ready &= workspace.poll_ready()?;
+            }
+            if all_ready {
+                break;
+            }
+            if Instant::now() >= ready_deadline {
+                return Err("client handshake timed out");
+            }
+            thread::sleep(OWNER_POLL);
+        }
+        for workspace in &mut workspaces {
+            for client in &workspace.clients {
+                client.query(encode_layout_query().to_vec())?;
+            }
+            workspace.tick(false)?;
+        }
+        let layout_deadline = Instant::now() + IO_TIMEOUT;
+        loop {
+            let mut all_durable = true;
+            for workspace in &mut workspaces {
+                workspace.tick(false)?;
+                let server = workspace.root.join("server");
+                all_durable &= LayoutStore::open(&server.join("layout"))
+                    .ok()
+                    .and_then(|store| store.load(LayoutSlot::Current).ok().flatten())
+                    .is_some_and(|saved| {
+                        saved.pane_count() == 2
+                            && saved.panes()
+                                == [Some(workspace.targets[0]), Some(workspace.targets[1])]
+                    });
+            }
+            if all_durable {
+                break;
+            }
+            if Instant::now() >= layout_deadline {
+                return Err("two-pane layout not confirmed durable before probes");
+            }
+            thread::sleep(OWNER_POLL);
+        }
         let start = Instant::now();
         for workspace in &mut workspaces {
-            workspace.next_probe = start + Duration::from_secs(3);
+            workspace.next_probe = start + Duration::from_secs(5);
+            workspace.next_keepalive = start + KEEPALIVE_EVERY;
         }
         for workspace in &workspaces {
             fs::write(workspace.root.join("workload.start"), b"go\n")
@@ -1086,15 +1243,17 @@ mod workload {
         }
         let stop_at = start + Duration::from_secs(SECONDS);
         let mut next_sample = start + SAMPLE_EVERY;
+        let mut process_samples = Vec::new();
         while Instant::now() < stop_at {
             let now = Instant::now();
             for workspace in &mut workspaces {
                 workspace.advance(now, stop_at)?;
             }
             if now >= next_sample {
-                for workspace in &mut workspaces {
-                    workspace.sample_children()?;
-                }
+                let mut pids = Vec::with_capacity(1 + WORKSPACES * PANES);
+                pids.push(process::id());
+                pids.extend(workspaces.iter().flat_map(|workspace| workspace.children));
+                process_samples.push(sample_processes(&pids)?);
                 next_sample += SAMPLE_EVERY;
             }
             thread::sleep(OWNER_POLL);
@@ -1107,7 +1266,13 @@ mod workload {
             .flat_map(|workspace| workspace.children)
             .collect::<Vec<_>>();
         let cleanup_verified = verify_processes_stopped(&pids)?;
-        println!("{{\"schema_version\":1,\"synthetic\":true,\"spec_ten_agent_acceptance\":false,\"server_limit_model\":\"five independent two-pane workspaces and storage domains in one process\",\"workspaces\":{WORKSPACES},\"panes\":{},\"workload_seconds\":{SECONDS},\"cleanup_processes_verified_stopped\":{},\"results\":[", WORKSPACES * PANES, cleanup_verified);
+        print!(
+            "{{\"schema_version\":1,\"synthetic\":true,\"spec_ten_agent_acceptance\":false,\"server_limit_model\":\"five independent two-pane workspaces and storage domains in one process\",\"workspaces\":{WORKSPACES},\"panes\":{},\"workload_seconds\":{SECONDS},\"cleanup_processes_verified_stopped\":{},",
+            WORKSPACES * PANES,
+            cleanup_verified
+        );
+        print_resource_samples(&process_samples);
+        print!("\"results\":[");
         for (index, workspace) in workspaces.iter().enumerate() {
             if index > 0 {
                 print!(",");

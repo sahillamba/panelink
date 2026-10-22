@@ -1572,6 +1572,10 @@ mod tests {
             writer.shutdown(MAX_SHUTDOWN_WAIT).outcome,
             ShutdownOutcome::Drained
         );
+        // Release the independently-owned storage handle, then wait for the
+        // worker's retained duplicate lock before opening the committed store.
+        drop(storage);
+        wait_for_lock(&fixture.root);
         let store = HistoryStore::open(&fixture.history).unwrap();
         let saved_known = store.load_rows(known).unwrap().unwrap();
         assert_eq!(saved_known.ended_at_unix_ms, 777);
@@ -1602,7 +1606,7 @@ mod tests {
     }
 
     fn wait_receipt(receipt: &mut Receipt) -> CommitStatus {
-        let deadline = Instant::now() + Duration::from_secs(4);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let status = receipt.poll();
             if status != CommitStatus::Pending {
@@ -1615,7 +1619,7 @@ mod tests {
     }
 
     fn wait_for_lock(path: &Path) {
-        let deadline = Instant::now() + Duration::from_secs(4);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             match ServerStorage::lock_for_maintenance(path) {
                 Ok(lock) => {
@@ -1679,7 +1683,7 @@ mod tests {
         }
 
         fn wait_until_entered(&self) {
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let deadline = Instant::now() + Duration::from_secs(30);
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             while !state.0 {
                 let left = deadline.saturating_duration_since(Instant::now());
@@ -2926,12 +2930,15 @@ mod tests {
     fn backend_panic_fails_current_receipt_and_closes_writer() {
         let fixture = Fixture::new();
         let control = FakeControl::default();
-        control.schedule(Call::Load, Behavior::Panic);
+        let gate = Arc::new(Gate::new());
+        control.schedule(Call::Load, Behavior::BlockThenPanic(Arc::clone(&gate)));
         let (_storage, mut writer, target) = fake_writer(&fixture, control);
         let diagnostics = writer.diagnostics();
         let mut receipt = writer
             .try_submit(empty_batch(target, 1, 1))
-            .expect("admit batch before worker panic");
+            .expect("admit batch while startup is gated");
+        gate.wait_until_entered();
+        gate.release();
         assert_eq!(wait_receipt(&mut receipt), CommitStatus::Failed);
         assert!(writer.had_storage_error());
         assert!(diagnostics

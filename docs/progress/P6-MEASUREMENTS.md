@@ -1,9 +1,8 @@
-# Phase 6 measurements — partial — 2026-10-21
+# Phase 6 measurements — partial — 2026-10-22
 
-Worker: GPT-6-Luna (xhigh), interrupted once by machine sleep + LLM auth
-broker timeout, resumed, then stopped by the parent after ~50 minutes stuck
-on the ten-pane workload driver (17 failed patch attempts). Parent recorded
-the completed parts honestly. Phase 6 remains OPEN.
+Phase 6 remains OPEN. The ten-pane harness was repaired and two sequential
+release observations are recorded below; these are synthetic proxy measurements,
+not the SPEC ten-agent acceptance and not budgets.
 
 ## Build/resource (completed)
 
@@ -22,17 +21,46 @@ The first clean build likely included cold-cache effects; two samples are
 observations, not a budget. `strip` did not reduce size (the release binary
 is already effectively stripped); recorded as observed.
 
-## Ten-pane synthetic workload (NOT completed)
+## Ten-pane synthetic workload — completed bounded proxy observations
 
-`examples/ten_pane_workload.rs` (five independent two-pane workspaces, two
-paced producer children each, history + layout enabled) compiles after
-parent fixes (a type mismatch and removal of a retry that resent input
-under a new request ID, which would violate the nonreplayable-input
-contract). A parent release run exited 1 after 4.5 s: every pane's child
-probe acknowledgment failed. No processes leaked (checked with pgrep).
-No workload numbers exist; the example's probe/ack logic needs a separate
-debugging task. This would in any case be a synthetic proxy, not the
-SPEC ten-agent acceptance.
+`examples/ten_pane_workload.rs` ran twice sequentially in release on the current
+Apple Silicon macOS host. Each run started five independent two-pane workspace
+and storage domains in one process, with one paced synthetic producer child per
+pane, history and saved layout enabled, and a 30-second measured interval.
+Input ownership is claimed and confirmed per pane; the harness uses the
+working live-history benchmark's `q` + Enter input and child acknowledgment
+marker protocol. The driver also sends read-only layout queries under 800 ms
+to keep its bounded one-second idle connection alive. Input is never retried.
+Raw per-workspace latency/resource samples are in
+[run 1](p6-raw/ten-pane-run1.json) and
+[run 2](p6-raw/ten-pane-run2.json).
+
+**SYNTHETIC proxy only:** this is not ten OpenCode agents, is not the SPEC
+R-03 ten-agent acceptance, and establishes no latency/resource budget. CPU is
+the sum of `ps %cpu` for the workload process plus ten producer children, sampled
+once per second; RSS is their summed resident bytes. CPU values may exceed 100%
+on multi-core systems. Each row below reports the range across the five
+independent workspace results where per-workspace metrics apply; CPU/RSS are
+aggregate process-group observations.
+
+| Run | Owner tick p50 / p95 / max (µs; per-workspace range) | Child ack p50 / p95 / max (µs; per-workspace range) | RSS min–max (MiB; aggregate) | CPU mean; min–max % (aggregate) | History / layout flags | Shutdown (ms; per-workspace range) | Child/server cleanup |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 101–114 / 151–178 / 713–7,224 | 39,691–41,405 / 47,270–49,504 / 47,270–49,504 | 29.57–43.50 | 28.64; 12.10–36.50 | 5/5 true / 5/5 true | 113–255 | Verified stopped: true |
+| 2 | 98–112 / 129–160 / 1,706–8,738 | 89,037–97,842 / 126,067–138,386 / 126,067–138,386 | 29.37–46.36 | 25.35; 15.00–32.40 | 5/5 true / 5/5 true | 277–283 | Verified stopped: true |
+
+The harness verified every producer PID exited after each run; a subsequent
+`ps -axo pid,ppid,stat,command` process listing contained no workload child or
+Panelink server process. Per-second RSS and CPU records are preserved in raw
+JSON. The two observations differed materially in child-ack latency and shutdown
+time, so they remain observations only; do not infer a workload budget from
+them.
+
+The connection failure in the prior run came from the runtime's bounded
+one-second idle read timeout, not the child stdin reader or acknowledgment path.
+Periodic read-only layout queries keep the synthetic client attached while
+retaining nonreplayable input semantics. Both corrected full runs completed all
+ten child acknowledgments per workspace (five probes per pane), confirmed
+history/layout storage flags, and verified cleanup.
 
 ## Tests
 

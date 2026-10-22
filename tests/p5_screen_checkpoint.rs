@@ -134,7 +134,10 @@ fn hup_final_output_is_captured_or_reported_incomplete_before_pty_close() {
     let directory = PrivateDir::new().unwrap();
     let size = TerminalSize::new(8, 60).unwrap();
     let mut session = launch_shell(
-        "trap 'printf P5-FINAL-ON-HUP\\n; exit 0' HUP; printf P5-HUP-READY\\n; while :; do /bin/sleep 10; done",
+        // Keep the shell itself blocked after the readiness marker. A foreground
+        // sleep shares the process group and makes the HUP/trap ordering depend
+        // on scheduling the extra child before the cleanup escalation window.
+        "trap 'printf P5-FINAL-ON-HUP\\n; exit 0' HUP; printf P5-HUP-READY\\n; while :; do IFS= read -r line; done",
         directory.path(),
         size,
     );
