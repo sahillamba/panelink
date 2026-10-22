@@ -29,6 +29,7 @@ reattach to it.
 | --- | --- |
 | Split a pane | Right-click it, then pick Left/Right/Up/Down (or press `l`/`r`/`u`/`d`) |
 | Navigation mode | Press **Control**-B (the Control key, not Command). A `NAV` bar appears at the bottom |
+| Shortcut help | Ctrl-B, then `?`; Esc or `?` closes help |
 | ...then split | `r` right, `l` left, `u` up, `d` down (also `%` and `"`), or `s` for the menu |
 | ...then switch pane | Arrow keys, Tab or `o` (stays in NAV mode so you can keep moving) |
 | ...then close focused pane | `x`, then `y` to confirm; the last pane ends the workspace |
@@ -40,9 +41,18 @@ reattach to it.
 | Reattach | `panelink` |
 | Close the workspace | `exit` in every shell, or `panelink stop` |
 
-Current limits: at most two panes, no tabs. Function keys, Alt combinations
-and Ctrl keys other than Ctrl-C are not yet sent to shells. There is no
-provider (OpenCode) session recovery.
+Current limits: at most two panes, no tabs. The attach client forwards ordinary
+Ctrl-letter keys, Alt/Meta characters when delivered by the host, F1–F12,
+Delete/Insert/Page Up/Page Down and Shift-Tab. Ctrl-B remains navigation and
+Ctrl-X detaches; Ctrl-C goes to the focused child. Modified function/navigation
+keys and application mouse pass-through remain unsupported. Help consumes
+typing, paste and mouse actions while open. There is no provider (OpenCode)
+session recovery. The older disposable probe retains its narrower input map.
+
+Local help, navigation and Ctrl-X remain available while the attach client
+waits for the server. If typing backs up, a busy status appears. Ctrl-X still
+detaches; any keys that could not be queued are discarded with a notice after
+the terminal is restored. Uncertain input is never automatically resent.
 
 Workspace state lives in `~/Library/Application Support/Panelink` (private,
 mode 0700). Set `PANELINK_HOME` to use a different directory. The background

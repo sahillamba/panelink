@@ -1,0 +1,66 @@
+{
+  "created_utc": "2026-10-21T16:20:05.506424+00:00",
+  "scope": "S0 bootstrap only; no live child/session acceptance",
+  "executable": "/Users/sahillamba/.opencode/bin/opencode",
+  "version": "2.0.32",
+  "executable_sha256": "e43ec2df6f36842fd17d1a71a866acb9a84884b489988376c19bf9a7250dabbf",
+  "upstream_tag_commit": "843a6c514e606b436a7fe713422ace0a93ad3d61",
+  "binary_source_correspondence_verified": false,
+  "initial_default_cli": "EPERM opening normal user log",
+  "fixture_root": "/private/tmp/panelink-sa-spike-zz7pi_qk",
+  "environment": "fresh XDG data/config/cache/state roots; environment allowlist; HOME unchanged",
+  "cli_checks": {
+    "version": "passed",
+    "help": "passed",
+    "acp_help": "passed",
+    "serve_help": "passed"
+  },
+  "bootstrap": [
+    {
+      "mode": "acp",
+      "exit": 1,
+      "stdout_bytes": 0,
+      "status": "blocked_before_readiness"
+    },
+    {
+      "mode": "serve",
+      "exit": 1,
+      "stdout_bytes": 0,
+      "status": "blocked_before_readiness"
+    },
+    {
+      "mode": "stdio",
+      "exit": 1,
+      "stdout_bytes": 0,
+      "status": "blocked_before_readiness"
+    }
+  ],
+  "independent_bind_checks": [
+    {
+      "family": "AF_INET",
+      "address": "127.0.0.1:0",
+      "status": "blocked",
+      "errno": 1
+    },
+    {
+      "family": "AF_UNIX",
+      "address": "fixture/probe.sock",
+      "status": "blocked",
+      "errno": 1
+    }
+  ],
+  "live_cases": {
+    "actual_subagent_creation": "not_run_bootstrap_blocked",
+    "exact_parent_child_linkage": "not_run_bootstrap_blocked",
+    "two_parent_isolation": "not_run_bootstrap_blocked",
+    "nested_workers": "not_run_bootstrap_blocked",
+    "live_activity": "not_run_bootstrap_blocked",
+    "after_parent_turn_visibility": "not_run_bootstrap_blocked",
+    "missed_event_reconciliation": "not_run_bootstrap_blocked",
+    "zero_duplicate_execution": "not_run_bootstrap_blocked",
+    "wrapper_compatibility": "not_run_bootstrap_blocked"
+  },
+  "model_prompts_sent": 0,
+  "result": "blocked",
+  "completed_subagents_feasibility": false
+}

@@ -30,9 +30,11 @@
 //! | 78 | 10 | reserved, zero |
 //! | 88 | 8 each | key: code u16, reserved u16 zero, scalar u32 |
 //!
-//! Key codes: 1 Char (scalar must be a non-control Unicode scalar), 2 Enter,
-//! 3 Tab, 4 Backspace, 5 Escape, 6 Interrupt, 7 Up, 8 Down, 9 Left, 10 Right,
-//! 11 Home, 12 End. Non-Char keys require a zero scalar field.
+//! Key codes 1..=12 preserve their original Char, Enter, Tab, Backspace,
+//! Escape, Interrupt, arrows, Home, and End meanings. Code 13 is Control
+//! (scalar 1..=26), 14 AltChar (non-control Unicode scalar), and 15 Function
+//! (scalar 1..=12). Codes 16..=20 are Delete, Insert, PageUp, PageDown and
+//! BackTab with scalar zero. Other non-character keys require zero scalar.
 //!
 //! RootResize: `0 schema | 2 kind 4 | 4 key (24) | 28 expected layout revision
 //! u64 nonzero | 36 rows u16 | 38 columns u16`.
@@ -998,6 +1000,17 @@ fn key_code(key: Key) -> Result<(u16, u32), UiCodecError> {
         Key::Right => (10, 0),
         Key::Home => (11, 0),
         Key::End => (12, 0),
+        Key::Control(value @ 1..=26) => (13, u32::from(value)),
+        Key::Control(_) => return Err(UiCodecError::InvalidKeyScalar),
+        Key::AltChar(scalar) if !scalar.is_control() => (14, u32::from(scalar)),
+        Key::AltChar(_) => return Err(UiCodecError::InvalidKeyScalar),
+        Key::Function(number @ 1..=12) => (15, u32::from(number)),
+        Key::Function(_) => return Err(UiCodecError::InvalidKeyScalar),
+        Key::Delete => (16, 0),
+        Key::Insert => (17, 0),
+        Key::PageUp => (18, 0),
+        Key::PageDown => (19, 0),
+        Key::BackTab => (20, 0),
     })
 }
 
@@ -1024,6 +1037,22 @@ fn decode_key_entry(entry: &[u8]) -> Result<Key, UiCodecError> {
         10 => Key::Right,
         11 => Key::Home,
         12 => Key::End,
+        13 if (1..=26).contains(&scalar) => return Ok(Key::Control(scalar as u8)),
+        13 => return Err(UiCodecError::InvalidKeyScalar),
+        14 => {
+            let character = char::from_u32(scalar).ok_or(UiCodecError::InvalidKeyScalar)?;
+            if character.is_control() {
+                return Err(UiCodecError::InvalidKeyScalar);
+            }
+            return Ok(Key::AltChar(character));
+        }
+        15 if (1..=12).contains(&scalar) => return Ok(Key::Function(scalar as u8)),
+        15 => return Err(UiCodecError::InvalidKeyScalar),
+        16 => Key::Delete,
+        17 => Key::Insert,
+        18 => Key::PageUp,
+        19 => Key::PageDown,
+        20 => Key::BackTab,
         _ => return Err(UiCodecError::UnknownKeyCode),
     };
     if scalar != 0 {
@@ -1477,6 +1506,16 @@ mod tests {
             Key::Right,
             Key::Home,
             Key::End,
+            Key::Control(1),
+            Key::Control(26),
+            Key::AltChar('é'),
+            Key::Function(1),
+            Key::Function(12),
+            Key::Delete,
+            Key::Insert,
+            Key::PageUp,
+            Key::PageDown,
+            Key::BackTab,
         ];
         let bytes = encode_key_input(&KeyInput {
             key: KEY,
@@ -1616,11 +1655,35 @@ mod tests {
             decode_ui_request(&zero_count),
             Err(UiCodecError::InvalidKeyCount)
         );
-        for code in [0_u16, 13, 0xffff] {
+        for code in [0_u16, 21, 0xffff] {
             let mut bytes = one.clone();
             bytes[88..90].copy_from_slice(&code.to_be_bytes());
             bytes[92..96].fill(0);
             assert_eq!(decode_ui_request(&bytes), Err(UiCodecError::UnknownKeyCode));
+        }
+        for (code, scalar) in [
+            (13_u16, 0_u32),
+            (13, 27),
+            (14, 0x0a),
+            (14, 0xd800),
+            (15, 0),
+            (15, 13),
+        ] {
+            let mut bytes = one.clone();
+            bytes[88..90].copy_from_slice(&code.to_be_bytes());
+            bytes[92..96].copy_from_slice(&scalar.to_be_bytes());
+            assert_eq!(
+                decode_ui_request(&bytes),
+                Err(UiCodecError::InvalidKeyScalar)
+            );
+        }
+        for code in 16_u16..=20 {
+            let mut bytes = one.clone();
+            bytes[88..90].copy_from_slice(&code.to_be_bytes());
+            assert_eq!(
+                decode_ui_request(&bytes),
+                Err(UiCodecError::InvalidKeyScalar)
+            );
         }
         // Control, surrogate and out-of-range Char scalars.
         for scalar in [0x0a_u32, 0x1b, 0x7f, 0xd800, 0x11_0000] {

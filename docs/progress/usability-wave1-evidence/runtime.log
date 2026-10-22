@@ -1,0 +1,79 @@
+   Compiling bitflags v2.13.2
+   Compiling memchr v2.8.3
+   Compiling arrayvec v0.7.8
+   Compiling itoa v1.0.18
+   Compiling unicode-width v0.2.2
+   Compiling libc v0.2.191
+   Compiling crossterm-input v0.29.0-panelink.1 (/Users/sahillamba/panelink/vendor/crossterm-input)
+   Compiling vte v0.15.0
+   Compiling errno v0.3.14
+   Compiling vt100 v0.16.2-panelink.2 (/Users/sahillamba/panelink/vendor/vt100)
+   Compiling rustix v1.1.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling signal-hook v0.4.5
+   Compiling rustix-openpty v0.2.0
+   Compiling panelink v0.1.0 (/Users/sahillamba/panelink)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.60s
+     Running tests/p3a_runtime.rs (target/debug/deps/p3a_runtime-e37769232b1d2f86)
+
+running 1 test
+test split_ui_keys_and_resize_over_socketpairs_with_two_real_zsh_children ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running tests/p3b_close.rs (target/debug/deps/p3b_close-5c43279bca54bb21)
+
+running 2 tests
+test sh_close_stop_collapse_and_resplit_on_real_ptys ... ok
+test zsh_close_stop_collapse_and_resplit_on_real_ptys ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.37s
+
+     Running tests/p3b_close_runtime.rs (target/debug/deps/p3b_close_runtime-06306b6201408190)
+
+running 5 tests
+test alternate_screen_checkpoint_is_distinct_from_normal_screen ... FAILED
+test ctrl_b_x_y_in_the_attach_client_closes_the_focused_pane ... FAILED
+test live_capture_and_storage_failure_leave_the_shell_running ... FAILED
+test normal_scrollback_rows_survive_close_without_replaying_the_child ... FAILED
+test panes_and_close_commands_collapse_layout_and_end_workspace ... FAILED
+
+failures:
+
+---- alternate_screen_checkpoint_is_distinct_from_normal_screen stdout ----
+
+thread 'alternate_screen_checkpoint_is_distinct_from_normal_screen' (21151014) panicked at tests/p3b_close_runtime.rs:397:17:
+attach exited before raw mode (1): "panelink: could not start the panelink server (see server.log)\r\n"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- ctrl_b_x_y_in_the_attach_client_closes_the_focused_pane stdout ----
+
+thread 'ctrl_b_x_y_in_the_attach_client_closes_the_focused_pane' (21151104) panicked at tests/p3b_close_runtime.rs:397:17:
+attach exited before raw mode (1): "panelink: could not start the panelink server (see server.log)\r\n"
+
+---- live_capture_and_storage_failure_leave_the_shell_running stdout ----
+
+thread 'live_capture_and_storage_failure_leave_the_shell_running' (21151119) panicked at tests/p3b_close_runtime.rs:397:17:
+attach exited before raw mode (1): "panelink: could not start the panelink server (see server.log)\r\n"
+
+---- normal_scrollback_rows_survive_close_without_replaying_the_child stdout ----
+
+thread 'normal_scrollback_rows_survive_close_without_replaying_the_child' (21151146) panicked at tests/p3b_close_runtime.rs:397:17:
+attach exited before raw mode (1): "panelink: could not start the panelink server (see server.log)\r\n"
+
+---- panes_and_close_commands_collapse_layout_and_end_workspace stdout ----
+
+thread 'panes_and_close_commands_collapse_layout_and_end_workspace' (21151165) panicked at tests/p3b_close_runtime.rs:397:17:
+attach exited before raw mode (1): "panelink: could not start the panelink server (see server.log)\r\n"
+
+
+failures:
+    alternate_screen_checkpoint_is_distinct_from_normal_screen
+    ctrl_b_x_y_in_the_attach_client_closes_the_focused_pane
+    live_capture_and_storage_failure_leave_the_shell_running
+    normal_scrollback_rows_survive_close_without_replaying_the_child
+    panes_and_close_commands_collapse_layout_and_end_workspace
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.14s
+
+error: test failed, to rerun pass `--test p3b_close_runtime`

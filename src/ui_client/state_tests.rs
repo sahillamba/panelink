@@ -68,6 +68,9 @@ struct Fake {
     pastes: Vec<TargetRef>,
     splits: Vec<SplitPlan>,
     split_reply: Option<Result<TargetRef, &'static str>>,
+    split_async: bool,
+    split_request: Option<(u64, u64)>,
+    reject_keys: bool,
     closes: Vec<ClosePlan>,
     close_reply: Option<Result<CloseOutcome, &'static str>>,
     recovery_available: bool,
@@ -76,6 +79,9 @@ struct Fake {
 
 impl Effects for Fake {
     fn send_keys(&mut self, target: TargetRef, keys: &[Key]) -> Result<(), &'static str> {
+        if self.reject_keys {
+            return Err("client busy: request queue full");
+        }
         self.keys.push((target, keys.to_vec()));
         Ok(())
     }
@@ -83,16 +89,30 @@ impl Effects for Fake {
         self.pastes.push(target);
         Ok(())
     }
-    fn split(&mut self, plan: SplitPlan) -> Result<TargetRef, &'static str> {
+    fn split(
+        &mut self,
+        plan: SplitPlan,
+        request_id: u64,
+        focus_generation: u64,
+    ) -> Result<Option<TargetRef>, &'static str> {
         self.splits.push(plan);
-        self.split_reply.unwrap_or(Ok(target(2)))
+        self.split_request = Some((request_id, focus_generation));
+        if self.split_async {
+            Ok(None)
+        } else {
+            self.split_reply.unwrap_or(Ok(target(2))).map(Some)
+        }
     }
-    fn close(&mut self, plan: ClosePlan) -> Result<CloseResult, &'static str> {
+    fn close(
+        &mut self,
+        plan: ClosePlan,
+        _request_id: u64,
+    ) -> Result<Option<CloseResult>, &'static str> {
         self.closes.push(plan);
         let outcome = self
             .close_reply
             .unwrap_or(Ok(CloseOutcome::Stopped(StopOutcome::Exited)))?;
-        Ok(CloseResult {
+        Ok(Some(CloseResult {
             key: OperationKey {
                 generation: 7,
                 lease: 1,
@@ -102,7 +122,7 @@ impl Effects for Fake {
             target: Some(plan.target),
             layout_revision: plan.expected_layout_revision + 1,
             survivor_resize_pending: false,
-        })
+        }))
     }
 }
 
@@ -186,6 +206,102 @@ fn typed_keys_batch_to_the_focused_pane_and_flush_on_focus_change() {
 }
 
 #[test]
+fn retained_key_batch_stays_pinned_and_blocks_later_paste_and_mutation() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(two_panes());
+    feed(&mut app, &mut fake, b"a");
+    fake.reject_keys = true;
+    app.flush(Instant::now(), &mut fake);
+    assert!(app.retry_pending_keys());
+
+    // A focus change does not retarget the retained batch. Paste is held
+    // behind it and a split request cannot pass it either.
+    app.focus_target(target(2));
+    feed(&mut app, &mut fake, b"\x1b[200~paste\x1b[201~");
+    assert!(fake.pastes.is_empty());
+    feed(&mut app, &mut fake, b"\x02xy");
+    assert!(fake.closes.is_empty());
+
+    fake.reject_keys = false;
+    app.flush(Instant::now(), &mut fake);
+    assert_eq!(fake.keys, vec![(target(1), vec![Key::Char('a')])]);
+    assert_eq!(app.focus(), Some(target(2)));
+}
+
+#[test]
+fn stale_split_completion_cannot_override_focus_moved_before_layout_update() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake {
+        split_async: true,
+        ..Fake::default()
+    };
+    app.set_layout(one_pane(5));
+    feed(&mut app, &mut fake, b"\x1b[<2;10;5M\x1b[<2;10;5m r");
+    let (request_id, focus_generation) = fake.split_request.unwrap();
+    assert_eq!(app.focus(), Some(target(1)));
+
+    // A deliberate local focus choice can happen before the new layout poll.
+    app.focus_target(target(9));
+    app.complete_split(
+        request_id,
+        focus_generation,
+        target(1),
+        Ok(target(2)),
+        Instant::now(),
+    );
+    assert_eq!(app.focus(), Some(target(9)));
+}
+
+#[test]
+fn split_completion_waits_for_newer_validated_layout_before_focusing_target() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake {
+        split_async: true,
+        ..Fake::default()
+    };
+    app.set_layout(one_pane(5));
+    feed(&mut app, &mut fake, b"\x1b[<2;10;5M\x1b[<2;10;5m r");
+    let (request_id, focus_generation) = fake.split_request.unwrap();
+
+    app.complete_split(
+        request_id,
+        focus_generation,
+        target(1),
+        Ok(target(2)),
+        Instant::now(),
+    );
+    assert_eq!(app.focus(), Some(target(1)));
+
+    // A delayed poll captured before the split cannot erase its focus intent.
+    app.set_layout(one_pane(5));
+    assert_eq!(app.focus(), Some(target(1)));
+    assert_eq!(app.layout().unwrap().revision, 5);
+
+    let mut layout = two_panes();
+    layout.revision = 6;
+    app.set_layout(layout);
+    assert_eq!(app.focus(), Some(target(2)));
+}
+
+#[test]
+fn ctrl_x_quits_even_when_a_key_batch_is_retained() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake {
+        reject_keys: true,
+        ..Fake::default()
+    };
+    app.set_layout(one_pane(1));
+    feed(&mut app, &mut fake, b"a");
+    app.flush(Instant::now(), &mut fake);
+    assert!(app.retry_pending_keys());
+
+    assert_eq!(feed(&mut app, &mut fake, b"\x18"), Flow::Quit);
+    assert!(app.abandon_pending_keys());
+    assert!(!app.retry_pending_keys());
+}
+
+#[test]
 fn right_click_opens_menu_for_pane_under_pointer_and_menu_inputs_never_reach_panes() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
@@ -194,17 +310,19 @@ fn right_click_opens_menu_for_pane_under_pointer_and_menu_inputs_never_reach_pan
     feed(&mut app, &mut fake, b"\x1b[<2;5;5M");
     assert!(app.menu_open());
     assert_eq!(app.menu.captured_target(), Some(target(1)));
-    // Every kind of input while open is consumed: keys, Enter on a disabled
-    // item (capacity), paste, Ctrl-X, mouse, arrows.
+    // The menu owns ordinary keys, Enter on a disabled item (capacity),
+    // paste, mouse, and arrows; detach remains globally available.
     let flow = feed(
         &mut app,
         &mut fake,
-        b"xyz\r\x1b[B\x1b[200~paste\x1b[201~\x18\x03\x1b[<2;5;5m",
+        b"xyz\r\x1b[B\x1b[200~paste\x1b[201~\x03\x1b[<2;5;5m",
     );
     assert_eq!(flow, Flow::Continue);
     assert!(app.menu_open(), "disabled items keep the menu open");
     app.flush(Instant::now(), &mut fake);
     assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.splits.is_empty());
+    assert_eq!(feed(&mut app, &mut fake, b"\x18"), Flow::Quit);
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty());
     feed(&mut app, &mut fake, b"\x1b");
     assert!(!app.menu_open());
     app.flush(Instant::now(), &mut fake);
@@ -302,6 +420,10 @@ fn split_intent_uses_captured_target_and_server_revision_then_focuses_new_pane()
             columns: 40,
         }]
     );
+    assert_eq!(app.focus(), Some(target(1)));
+    let mut split_layout = two_panes();
+    split_layout.revision = 7;
+    app.set_layout(split_layout);
     assert_eq!(app.focus(), Some(target(2)));
     assert!(fake.keys.is_empty());
 }
@@ -419,7 +541,8 @@ fn screen_text(app: &App) -> String {
     let mut output = Vec::new();
     app.render(&mut compositor, &mut output, Instant::now())
         .unwrap();
-    let mut parser = vt100::Parser::new(24, 81, 0);
+    let (rows, columns) = app.host;
+    let mut parser = vt100::Parser::new(rows.max(1), columns.max(1), 0);
     parser.process(&output);
     parser.screen().contents()
 }
@@ -433,6 +556,7 @@ fn ctrl_b_enters_navigation_mode_with_a_visible_banner() {
     feed(&mut app, &mut fake, b"\x02");
     assert!(app.nav_active());
     assert!(screen_text(&app).contains(" NAV "), "banner visible");
+    assert!(screen_text(&app).contains("? help"), "help is discoverable");
     // Esc leaves the mode; nothing reached the pane.
     feed(&mut app, &mut fake, b"\x1b");
     assert!(!app.nav_active());
@@ -526,6 +650,100 @@ fn navigation_mode_ctrl_x_still_detaches() {
     app.set_layout(one_pane(1));
     assert_eq!(feed(&mut app, &mut fake, b"\x02\x18"), Flow::Quit);
     assert!(fake.closes.is_empty());
+}
+
+#[test]
+fn navigation_help_is_modal_persistent_and_has_no_hidden_pane_effects() {
+    let (mut app, mut fake) = two_focused_on_second();
+    // Pending input is flushed exactly once to the pane it was entered for
+    // before Ctrl-B starts NAV; the ? itself is consumed locally.
+    feed(&mut app, &mut fake, b"ab\x02?");
+    assert!(app.help_open());
+    assert!(!app.nav_active());
+    assert_eq!(app.focus(), Some(target(2)));
+    assert_eq!(
+        fake.keys,
+        vec![(target(2), vec![Key::Char('a'), Key::Char('b')])]
+    );
+    assert!(fake.splits.is_empty() && fake.closes.is_empty());
+
+    // Every non-dismissal event is isolated while the modal is open.
+    feed(
+        &mut app,
+        &mut fake,
+        b"z\x1b[200~secret\x1b[201~\x1b[<0;5;5M\x1b[<2;50;5M",
+    );
+    app.expire_status(Instant::now() + Duration::from_secs(30));
+    assert!(app.help_open(), "help does not inherit the NAV timeout");
+    assert_eq!(app.focus(), Some(target(2)));
+    assert!(!app.menu_open() && !app.confirm_open());
+    assert!(fake.keys.len() == 1 && fake.pastes.is_empty());
+    assert!(fake.splits.is_empty() && fake.closes.is_empty());
+
+    let visible = screen_text(&app);
+    assert!(visible.contains("Panelink help"), "{visible}");
+    assert!(visible.contains("detach"), "{visible}");
+    assert!(visible.contains("reconnect"), "{visible}");
+    feed(&mut app, &mut fake, b"?");
+    assert!(!app.help_open());
+    feed(&mut app, &mut fake, b"q");
+    app.flush(Instant::now(), &mut fake);
+    assert_eq!(fake.keys[1], (target(2), vec![Key::Char('q')]));
+}
+
+#[test]
+fn help_ctrl_x_detaches_and_esc_dismisses() {
+    let (mut app, mut fake) = two_focused_on_second();
+    feed(&mut app, &mut fake, b"\x02?");
+    assert!(app.help_open());
+    assert_eq!(feed(&mut app, &mut fake, b"\x18"), Flow::Quit);
+    assert!(!app.help_open());
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty());
+
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(1));
+    feed(&mut app, &mut fake, b"\x02?");
+    feed(&mut app, &mut fake, b"\x1b");
+    assert!(!app.help_open());
+    assert!(!app.nav_active());
+    assert!(fake.keys.is_empty());
+}
+
+#[test]
+fn help_overlay_clips_on_resize_and_unchanged_frames_write_nothing() {
+    let (mut app, mut fake) = two_focused_on_second();
+    let mut compositor = Compositor::try_new().unwrap();
+    let mut baseline = Vec::new();
+    app.render(&mut compositor, &mut baseline, Instant::now())
+        .unwrap();
+    assert!(compositor.commit());
+    feed(&mut app, &mut fake, b"\x02?");
+    let mut first = Vec::new();
+    app.render(&mut compositor, &mut first, Instant::now())
+        .unwrap();
+    assert!(compositor.commit());
+    assert!(
+        !first.windows(4).any(|window| window == b"\x1b[2J"),
+        "help repaint cleared the screen: {:?}",
+        String::from_utf8_lossy(&first)
+    );
+    let mut unchanged = Vec::new();
+    app.render(&mut compositor, &mut unchanged, Instant::now())
+        .unwrap();
+    assert!(unchanged.is_empty(), "unchanged help frame is incremental");
+
+    app.set_host(2, 5);
+    let clipped = screen_text(&app);
+    assert!(clipped.lines().count() <= 2);
+    assert!(clipped.lines().all(|line| line.chars().count() <= 5));
+    assert!(app.help_open());
+    app.set_host(18, 60);
+    app.set_status("lower priority notice", Instant::now());
+    let resized = screen_text(&app);
+    assert!(resized.contains("Panelink help"), "{resized}");
+    assert!(!resized.contains("lower priority notice"), "{resized}");
+    assert!(!resized.contains("NAV"), "help takes notice priority");
 }
 
 /// Two panes, pane 2 focused, with pending typed keys flushed first.
@@ -820,6 +1038,11 @@ fn split_works_again_after_a_close_shrinks_the_layout() {
     feed(&mut app, &mut fake, b"\x02xy");
     assert_eq!(app.focus(), Some(target(2)));
     app.set_layout(survivor_only());
+    feed(&mut app, &mut fake, b"\x1b[<2;5;5M");
+    let text = render_text(&app);
+    assert!(text.contains("Split Right"), "{text}");
+    assert!(!text.contains("Pane limit"), "{text}");
+    feed(&mut app, &mut fake, b"\x1b");
     fake.split_reply = Some(Ok(target(3)));
     feed(&mut app, &mut fake, b"\x02d");
     assert_eq!(
@@ -832,10 +1055,16 @@ fn split_works_again_after_a_close_shrinks_the_layout() {
             columns: 81,
         }]
     );
+    assert_eq!(app.focus(), Some(target(2)));
+    let mut split_layout = survivor_only();
+    split_layout.revision = 4;
+    split_layout.panes[1] = Some(UiPane {
+        target: target(3),
+        rect: rect(41, 0, 24, 40),
+        pending_confirmed: None,
+    });
+    split_layout.panes[0].as_mut().unwrap().rect = rect(0, 0, 24, 40);
+    split_layout.divider = Some(rect(40, 0, 24, 1));
+    app.set_layout(split_layout);
     assert_eq!(app.focus(), Some(target(3)));
-    // The menu also offers splits again on the survivor.
-    feed(&mut app, &mut fake, b"\x1b[<2;5;5M");
-    let text = render_text(&app);
-    assert!(text.contains("Split Right"), "{text}");
-    assert!(!text.contains("Pane limit"), "{text}");
 }

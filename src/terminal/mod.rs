@@ -4,6 +4,7 @@
 //! not provide host input IO, persistence, or server lifetime.
 
 mod checkpoint_load;
+mod cleanup_discard;
 pub mod compose;
 pub mod render;
 
@@ -127,6 +128,22 @@ pub enum Key {
     Home,
     /// End.
     End,
+    /// A control byte from 1 through 26.
+    Control(u8),
+    /// An Alt-modified printable Unicode scalar.
+    AltChar(char),
+    /// Function key F1 through F12.
+    Function(u8),
+    /// Delete key.
+    Delete,
+    /// Insert key.
+    Insert,
+    /// Page Up key.
+    PageUp,
+    /// Page Down key.
+    PageDown,
+    /// Back-tab (Shift-Tab).
+    BackTab,
 }
 
 impl fmt::Debug for Key {
@@ -144,6 +161,14 @@ impl fmt::Debug for Key {
             Self::Right => f.write_str("Right"),
             Self::Home => f.write_str("Home"),
             Self::End => f.write_str("End"),
+            Self::Control(_) => f.write_str("Control(<redacted>)"),
+            Self::AltChar(_) => f.write_str("AltChar(<redacted>)"),
+            Self::Function(number) => f.debug_tuple("Function").field(number).finish(),
+            Self::Delete => f.write_str("Delete"),
+            Self::Insert => f.write_str("Insert"),
+            Self::PageUp => f.write_str("PageUp"),
+            Self::PageDown => f.write_str("PageDown"),
+            Self::BackTab => f.write_str("BackTab"),
         }
     }
 }
@@ -361,6 +386,26 @@ fn encode_key(key: Key, application_cursor: bool) -> Result<Vec<u8>, TerminalErr
             c.encode_utf8(&mut bytes).as_bytes().to_vec()
         }
         Key::Char(_) => return Err(TerminalError::InvalidKey),
+        Key::Control(value) if (1..=26).contains(&value) => vec![value],
+        Key::Control(_) => return Err(TerminalError::InvalidKey),
+        Key::AltChar(character) if !character.is_control() => {
+            let mut bytes = vec![0x1b];
+            let mut encoded = [0; 4];
+            bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+            bytes
+        }
+        Key::AltChar(_) => return Err(TerminalError::InvalidKey),
+        Key::Function(number @ 1..=4) => vec![0x1b, b'O', b'P' + number - 1],
+        Key::Function(number @ 5..=12) => {
+            let code = [15, 17, 18, 19, 20, 21, 23, 24][usize::from(number - 5)];
+            format!("\x1b[{code}~").into_bytes()
+        }
+        Key::Function(_) => return Err(TerminalError::InvalidKey),
+        Key::Delete => b"\x1b[3~".to_vec(),
+        Key::Insert => b"\x1b[2~".to_vec(),
+        Key::PageUp => b"\x1b[5~".to_vec(),
+        Key::PageDown => b"\x1b[6~".to_vec(),
+        Key::BackTab => b"\x1b[Z".to_vec(),
         Key::Enter => vec![b'\r'],
         Key::Tab => vec![b'\t'],
         Key::Backspace => vec![0x7f],
@@ -814,6 +859,7 @@ pub struct TerminalSession {
     snapshot: ScreenSnapshot,
     cleanup: Option<Result<(), TerminalError>>,
     kill_sent: bool,
+    nonblocking_shutdown_started: bool,
     preserve_cleanup_output: bool,
     final_output_complete: bool,
     final_output_bytes: usize,
@@ -906,6 +952,7 @@ impl TerminalSession {
             snapshot,
             cleanup: None,
             kill_sent: false,
+            nonblocking_shutdown_started: false,
             preserve_cleanup_output: false,
             final_output_complete: false,
             final_output_bytes: 0,
@@ -960,7 +1007,7 @@ impl TerminalSession {
 
     /// Coalesce this request with the newest checked absolute size.
     pub fn request_resize(&mut self, size: TerminalSize) -> Result<(), TerminalError> {
-        if self.cleanup.is_some() {
+        if self.cleanup.is_some() || self.nonblocking_shutdown_started {
             return Err(TerminalError::SessionClosed);
         }
         self.pending_resize = Some(size);
@@ -1012,7 +1059,9 @@ impl TerminalSession {
                 Ok(None) => {}
                 Err(error) => {
                     let reported = io_error("poll child", error);
-                    let _ = self.shutdown();
+                    if !self.nonblocking_shutdown_started {
+                        let _ = self.shutdown();
+                    }
                     return Err(reported);
                 }
             }
@@ -1055,7 +1104,9 @@ impl TerminalSession {
             }
             Err(error) => {
                 let reported = io_error("read PTY", error);
-                let _ = self.shutdown();
+                if !self.nonblocking_shutdown_started {
+                    let _ = self.shutdown();
+                }
                 Err(reported)
             }
         }
@@ -1069,7 +1120,9 @@ impl TerminalSession {
             Ok(count) => Ok(count),
             Err(error) => {
                 let reported = io_error("write PTY", error);
-                let _ = self.shutdown();
+                if !self.nonblocking_shutdown_started {
+                    let _ = self.shutdown();
+                }
                 Err(reported)
             }
         }
@@ -1108,6 +1161,51 @@ impl TerminalSession {
     /// escalated one; it does not change cleanup ordering or windows.
     pub const fn kill_escalated(&self) -> bool {
         self.kill_sent
+    }
+
+    /// Disable input/resize and send HUP without waiting for process exit.
+    ///
+    /// This is the live multi-pane close primitive. The owner must continue
+    /// polling the PTY and call [`Self::poll_shutdown_exit`] on later ticks.
+    pub(crate) fn begin_nonblocking_shutdown(&mut self) -> Result<bool, TerminalError> {
+        if self.nonblocking_shutdown_started {
+            return self.poll_exit();
+        }
+        self.nonblocking_shutdown_started = true;
+        self.input.clear();
+        self.input_enabled = false;
+        self.pending_resize = None;
+        if self.poll_exit()? {
+            return Ok(true);
+        }
+        send_group_signal(self.process_group, Signal::HUP)?;
+        Ok(false)
+    }
+
+    /// Poll the child once without waiting. PTY EOF is tracked separately.
+    pub(crate) fn poll_shutdown_exit(&mut self) -> Result<bool, TerminalError> {
+        self.poll_exit()
+    }
+
+    /// Send the one-time KILL escalation without waiting.
+    pub(crate) fn escalate_nonblocking_shutdown(&mut self) -> Result<(), TerminalError> {
+        if self.kill_sent {
+            return Ok(());
+        }
+        self.kill_sent = true;
+        send_group_signal(self.process_group, Signal::KILL)
+    }
+
+    /// Finish teardown after `poll_shutdown_exit` confirmed child exit.
+    ///
+    /// The ordinary shutdown path sees an already-reaped child and does not
+    /// enter either deadline wait. Final PTY drain remains capped by the
+    /// existing fixed read budget.
+    pub(crate) fn finish_reaped_shutdown(&mut self) -> Result<bool, TerminalError> {
+        if self.exit_status.is_none() {
+            return Err(TerminalError::ShutdownTimedOut);
+        }
+        self.shutdown_with_final_output()
     }
 
     /// Stop and reap the managed child within the two cleanup windows.
@@ -1217,31 +1315,12 @@ impl TerminalSession {
     /// The session is terminal, so no bytes read here are deliverable; they
     /// are dropped without touching the parser or the retained snapshot.
     fn discard_queued_output(&mut self) {
-        const CLEANUP_SCRATCH_BYTES: usize = 4096;
         let Some(master) = self.master.as_mut() else {
             return;
         };
-        let mut scratch = [0_u8; CLEANUP_SCRATCH_BYTES];
-        let mut eof = false;
-        loop {
-            match master.read(&mut scratch) {
-                Ok(0) => {
-                    eof = true;
-                    break;
-                }
-                Ok(_) => continue,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
-        if eof {
+        // Return to wait_bounded's child/deadline checks even while a child
+        // continuously fills the PTY. Budget exhaustion does not imply EOF.
+        if cleanup_discard::discard_available(master) {
             self.pty_eof = true;
         }
     }
@@ -1277,6 +1356,30 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
+        if self.nonblocking_shutdown_started {
+            // A live close owner may still be between HUP and KILL. Drop must
+            // never create a fresh pair of synchronous wait windows.
+            let _ = self.poll_exit();
+            if self.child.is_some() {
+                self.kill_sent = true;
+                let _ = send_group_signal(self.process_group, Signal::KILL);
+                self.child.take();
+            }
+            self.master.take();
+            return;
+        }
+        // The owner already spent its shared HUP/KILL shutdown windows. Make
+        // one final nonblocking reap attempt and release descriptors instead
+        // of starting a second pair of sleeps for an unconfirmed child.
+        if self.kill_sent && self.child.is_some() {
+            let _ = self.poll_exit();
+            if self.child.is_some() {
+                let _ = send_group_signal(self.process_group, Signal::KILL);
+                self.child.take();
+                self.master.take();
+                return;
+            }
+        }
         let _ = self.shutdown();
     }
 }

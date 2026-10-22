@@ -1,0 +1,9 @@
+   Compiling panelink v0.1.0 (/Users/sahillamba/panelink)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
+     Running tests/w2_server_shutdown.rs (target/debug/deps/w2_server_shutdown-c5822c276807984e)
+
+running 1 test
+test driver_drop_signals_both_children_before_shared_escalation_deadlines ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+

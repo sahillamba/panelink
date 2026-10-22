@@ -1,0 +1,7 @@
+{
+  "mode": "stdio",
+  "early_exit": 1,
+  "exit": 1,
+  "stdout": "",
+  "stderr": "timestamp=2026-10-21T16:18:50.321Z level=ERROR run=360dc0ab message=\"cli process failed\" cause=\"Cause([Fail(ServeError (cause: Error: Failed to start server. Is port 65535 in use?))])\" args=\"[\\\"--print-logs\\\",\\\"serve\\\",\\\"--stdio\\\"]\" role=cli\nServeError: \n    at q (/$bunfs/root/chunk-2388pc86.js:52:7706)\n    at applyHandlers (node:events:64:20)\n    at emitError (node:events:44:27)\n    at emitListenErrorNextTick (node:_http_server:134:12)\n    at processTicksAndRejections (unknown:7:39) {\n  [cause]: Error: Failed to start server. Is port 65535 in use?\n      at serve (unknown)\n      at <anonymous> (node:_http_server:359:39)\n      at <anonymous> (node:_http_server:332:33)\n      at <anonymous> (/$bunfs/root/chunk-2388pc86.js:52:7744)\n}\n"
+}

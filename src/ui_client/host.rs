@@ -22,8 +22,9 @@ use rustix::termios::{
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 
-use super::net::Net;
+use super::net::{Net, NetView};
 use super::state::{App, Flow};
+use super::worker::{ClientResult, WorkerHandle};
 use panelink::recovery_view::RecoverySlot;
 
 /// Enter: alternate screen, hide cursor, bracketed paste, button mouse
@@ -41,7 +42,6 @@ const RENDER_INTERVAL: Duration = Duration::from_millis(16);
 const KEY_FLUSH_DELAY: Duration = Duration::from_millis(4);
 const OUTPUT_STALL_TIMEOUT: Duration = Duration::from_secs(1);
 const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
-const SERVER_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 /// Exit code reported when the server ended (every shell exited or it was
 /// stopped); the client then prints a short notice instead of an error.
 pub(crate) const SERVER_ENDED_EXIT: i32 = 3;
@@ -292,7 +292,7 @@ fn run_inner(directory: PathBuf, context_dir: PathBuf) -> i32 {
         Ok(net) => net,
         Err(label) => return fail(label),
     };
-    let mut net = Some(net);
+    let mut net = Some(WorkerHandle::start(net));
     let result = host.enter().and_then(|()| {
         event_loop(
             &mut host,
@@ -304,17 +304,24 @@ fn run_inner(directory: PathBuf, context_dir: PathBuf) -> i32 {
             &stop,
         )
     });
+    let abandoned_keys = app.abandon_pending_keys();
     // Restore-first: the host terminal leaves raw/mouse/alternate-screen mode
     // before any further network work, so a stalled server can never hold
     // the user's terminal. (`HostGuard::drop` also restores on unwind.)
     let restored = restore_then_detach(
         || host.restore(),
         || {
-            if let Some(net) = net.take() {
-                net.detach();
+            if let Some(worker) = net.take() {
+                worker.detach_after_restore();
             }
         },
     );
+    if abandoned_keys {
+        report_notice(
+            "[panelink: unsent queued keys were discarded on detach]",
+            &mut host.tty,
+        );
+    }
     let code = match (result, restored) {
         (Ok(SERVER_ENDED_EXIT), Ok(())) => {
             report_notice(
@@ -332,7 +339,7 @@ fn run_inner(directory: PathBuf, context_dir: PathBuf) -> i32 {
 
 /// Exit ordering: restore the host terminal first, then do the bounded
 /// network release work (children keep running either way).
-fn restore_then_detach<R>(restore: impl FnOnce() -> R, detach: impl FnOnce()) -> R {
+pub(crate) fn restore_then_detach<R>(restore: impl FnOnce() -> R, detach: impl FnOnce()) -> R {
     let restored = restore();
     detach();
     restored
@@ -390,24 +397,22 @@ fn previous_layout_availability(server_dir: &std::path::Path) -> Availability {
 fn event_loop(
     host: &mut HostGuard,
     app: &mut App,
-    net_slot: &mut Option<Net>,
+    worker_slot: &mut Option<WorkerHandle>,
     compositor: &mut Compositor,
     output: &mut Output,
     decoder: &mut Decoder,
     stop: &AtomicBool,
 ) -> Result<i32, HostError> {
-    let Some(net) = net_slot.as_mut() else {
+    let Some(worker) = worker_slot.as_mut() else {
         return Err(HostError::Setup);
     };
-    let server_dir_owned = net.server_directory().to_path_buf();
-    let server_dir = server_dir_owned.as_path();
+    let server_dir = worker.server_directory().to_path_buf();
     let mut chunk = [0_u8; INPUT_CHUNK_BYTES];
     let (mut start, mut end) = (0_usize, 0_usize);
     let mut last_input_at: Option<Instant> = None;
     let mut last_key_at: Option<Instant> = None;
     let mut last_resize_check = Instant::now();
     let mut last_render: Option<Instant> = None;
-    let mut last_server_check = Instant::now();
     loop {
         if stop.load(Ordering::Relaxed) {
             break Ok(130);
@@ -444,11 +449,11 @@ fn event_loop(
                 last_key_at = Some(Instant::now());
                 let needs_check = app.needs_recovery_availability(&event);
                 let availability = if needs_check {
-                    previous_layout_availability(server_dir)
+                    previous_layout_availability(&server_dir)
                 } else {
                     Availability::Disabled(DisabledReason::NoPreviousLayoutSaved)
                 };
-                match app.handle_event(&event, Instant::now(), availability, net) {
+                match app.handle_event(&event, Instant::now(), availability, worker) {
                     Flow::Quit => {
                         quit = true;
                         break;
@@ -468,14 +473,14 @@ fn event_loop(
             }
         }
         if view_recovery {
-            app.flush(Instant::now(), net);
+            app.flush(Instant::now(), worker);
             output.discard();
             compositor.invalidate();
             *decoder = Decoder::new();
             start = 0;
             end = 0;
             host.discard_pending_input()?;
-            match panelink::recovery_reader::read_recovery(server_dir, RecoverySlot::Previous) {
+            match panelink::recovery_reader::read_recovery(&server_dir, RecoverySlot::Previous) {
                 Ok(view) => {
                     if let Err(label) = super::recovery::run_in_workspace(&view, host, stop) {
                         app.set_status(label, Instant::now());
@@ -515,11 +520,11 @@ fn event_loop(
                         Ok(Some(event)) => {
                             let needs_check = app.needs_recovery_availability(&event);
                             let availability = if needs_check {
-                                previous_layout_availability(server_dir)
+                                previous_layout_availability(&server_dir)
                             } else {
                                 Availability::Disabled(DisabledReason::NoPreviousLayoutSaved)
                             };
-                            match app.handle_event(&event, Instant::now(), availability, net) {
+                            match app.handle_event(&event, Instant::now(), availability, worker) {
                                 Flow::Quit => break Ok(0),
                                 // A lone Esc never opens the viewer; ignore.
                                 Flow::Continue | Flow::ViewRecovery => {}
@@ -536,7 +541,7 @@ fn event_loop(
         let now = Instant::now();
         // Typed keys are batched briefly, then sent once (never resent).
         if last_key_at.is_some_and(|at| now.duration_since(at) >= KEY_FLUSH_DELAY) {
-            app.flush(now, net);
+            app.flush(now, worker);
             last_key_at = None;
         }
         if now.duration_since(last_resize_check) >= RESIZE_INTERVAL {
@@ -547,16 +552,46 @@ fn event_loop(
         if stop.load(Ordering::Relaxed) {
             break Ok(130);
         }
-        net.poll(app, now, stop);
-        app.expire_status(now);
-        if now.duration_since(last_server_check) >= SERVER_CHECK_INTERVAL {
-            last_server_check = now;
-            // The server removes its endpoint when it stops (for example after
-            // the last shell exits); there is nothing left to show.
-            if !net.server_endpoint_present() {
-                break Ok(SERVER_ENDED_EXIT);
+        worker.poll(NetView {
+            focus: app.focus(),
+            desired_root: app.desired_root(),
+        });
+        let mut server_ended = false;
+        while let Some(envelope) = worker.try_result() {
+            match worker.release_result(envelope) {
+                ClientResult::Keys(result) | ClientResult::Paste(result) => {
+                    if let Err(label) = result {
+                        app.report_worker_status(label, now);
+                    }
+                }
+                ClientResult::Split {
+                    id,
+                    focus_generation,
+                    target,
+                    result,
+                } => {
+                    app.complete_split(id, focus_generation, target, result, now);
+                }
+                ClientResult::Close { id, target, result } => {
+                    app.complete_close(id, target, result, now);
+                }
+                ClientResult::Poll(update) => {
+                    let present = update.server_present;
+                    app.apply_net_update(update, now);
+                    if !present {
+                        server_ended = true;
+                    }
+                }
+                ClientResult::Detached => {}
             }
         }
+        if app.retry_pending_keys() {
+            app.flush(now, worker);
+        }
+        if server_ended {
+            break Ok(SERVER_ENDED_EXIT);
+        }
+        app.expire_status(now);
 
         if !output.pending()
             && last_render.is_none_or(|at| now.duration_since(at) >= RENDER_INTERVAL)

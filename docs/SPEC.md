@@ -1,6 +1,6 @@
 # Panelink: working implementation specification
 
-Revision: 0.15, 2026-10-22. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoint below records current code without converting prototype assumptions into product requirements. This revision preserves the reviewed contracts for command retries, agent identity, history semantics, child environments, and terminal clipboard requests, and records the implemented bounded saved-layout snapshot and read-only inspection without enabling recovery or relaunch.
+Revision: 0.15, 2026-10-22. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoint below records current code without converting prototype assumptions into product requirements. This revision preserves the reviewed contracts for command retries, agent identity, history semantics, child environments, and terminal clipboard requests, and records the implemented bounded saved-layout snapshot and read-only inspection without enabling recovery or relaunch. Also records client IO isolation and tick-driven close (Wave2).
 
 ## Purpose and requirement authority
 
@@ -28,6 +28,8 @@ Confirmed requirements come from the user's answers recorded in [discovery](PANE
 | R-14 | Avoid clearing and repainting the whole screen for ordinary local changes. | Unchanged frames emit no output; local cell/cursor changes update only the affected cells/cursor. First render, resize and invalidated display state may rebuild the frame. |
 | R-15 | Provide an easy scriptable API for agents to read and control other managed panes, agents and processes. | Stable targets and machine-readable CLI/local API support discovery, bounded sanitized output reads and explicit input/control operations under a documented access/ownership contract. The full API remains unimplemented; a bounded one-child prototype exposes only a subset. Detailed proposed contracts and acceptance scenarios are in [AGENT-CONTROL.md](AGENT-CONTROL.md). |
 | R-16 | Offer Split Left, Right, Up and Down from a pane's right-click menu. | Each action splits relative to the clicked pane and opens one fresh independent terminal session on the chosen side, preserving the original process/session. Use deterministic geometry, stable identity, minimum-size handling and a matching agent/CLI operation. The [layout design](PANE-LAYOUT.md) and newly prioritized [Phase3A](progress/P3A-RIGHT-CLICK-SPLITS.md) track implementation and host validation, which remain pending. |
+
+| R-17 | Automatically expose newly started background agents/subagents from OpenCode or compatible OpenCode wrappers in a tab named Subagents, so the user can optionally switch there and observe them (requested 2026-10-21). | Exact provider parent/child identity routes each supported worker to the correct workspace; observation never duplicates its execution. See [Phase SA plan](progress/SUBAGENTS-PLAN.md) for proposed read-only UX, version/wrapper feasibility gates and acceptance. This does not settle the remaining tab/sidebar hierarchy. |
 
 Numeric latency, memory, history, and build budgets remain to be established on real hardware. The workload statement is an evaluation target, not a measured result.
 
@@ -156,6 +158,44 @@ This private-PTY proof is a separately authorized experiment while Phase 2 manua
 For this prototype, `Applied` on input means all request bytes were accepted through the PTY write interface; for interrupt it means the signal call succeeded. Neither means the child application accepted the input or completed a task. The input adapter's normal drain window is 100 ms, but a PTY hard-error cleanup can add up to two seconds, so this is not a hard 100 ms whole-call deadline. The bounded journal records only operation key, managed session ID, and lifecycle state; it does not persist launch arguments, environment values, or process identity.
 
 ## Proposed local protocol contract
+
+Scoped usability checkpoint2026-10-22: the attach client accepts typed Ctrl-letter
+keys (CtrlB/X remain local, CtrlC remains Interrupt), Alt printable characters,
+F1–F12, Delete/Insert/PageUp/PageDown and BackTab. Schema8 key codes1–12 keep
+their bytes; codes13–20 add bounded validated variants as documented in
+`src/ui_protocol.rs`. Raw host escape streams remain inadmissible. Unknown key
+codes on older servers fail request validation; this is not negotiated
+mixed-version support. Modifier combinations beyond the implemented profile,
+application mouse pass-through and full host compatibility remain open.
+
+CtrlB then `?` opens a bounded local help overlay, independent of NAV expiry;
+Esc/`?` dismisses it and CtrlX detaches. While open, help consumes keys, paste
+and mouse without dispatching provider or child actions; rendering stays
+incremental. Cleanup discard work is now capped per iteration so a continuously
+readable PTY returns to the existing shutdown deadline checks. Wave1 alone does
+not resolve the separate owner/client responsiveness findings. See
+[wave1 tasks](progress/USABILITY-WAVE1-TASKS.md)
+and [integration result](progress/USABILITY-WAVE1-RESULT.md) for exact scope and
+checks; no broader UI phase or provider acceptance is implied.
+
+Wave2 checkpoint2026-10-22: active attach socket/context work now has one
+bounded IO owner, while the host owns rendering, focus and local controls.
+Thirty-two admitted commands/results share a4MiB payload/reservation budget,
+including in-flight work; fixed transport/decode and screen buffers are
+additional. Durable key reservation still precedes send, and uncertain input
+is never replayed. Unadmitted keys remain pinned under overload; CtrlX always
+detaches and reports any abandoned unsent batch after restoration. Startup
+connection remains synchronous before raw mode, and one IO worker serializes
+both panes. Delayed-fsync and complete host-terminal acceptance remain unproved.
+
+Live multi-pane close now admits one transaction, sends HUP and advances exit/
+KILL phases on owner ticks. Closing targets reject input/resize; final capture,
+collapse and ledger/result completion precede the terminal schema9 reply.
+Worker loss does not cancel admitted close. Unknown retains ownership and
+disabled input; process exit and PTY EOF remain distinct. Driver shutdown uses
+shared child deadlines. Legacy synchronous core APIs and launch/journal work
+remain separate. See [Wave2 integration](progress/WAVE2-RESULT.md) for evidence
+and remaining gates; no general latency budget is certified.
 
 The next bounded notification foundation provides a fixed72byte metadata event
 payload and a volatile64event journal with generation-scoped cursors and explicit
@@ -297,7 +337,7 @@ restoration, provider conversation resume and V-HISTORY reboot acceptance
 remain unproved; committed partial-tail refusal is specified below. No stored
 bytes are replayed.
 
-### Scoped saved-layout/restart design (implemented as bounded snapshot + read-only view)
+### Scoped saved-layout/restart design (bounded snapshot, read-only recovery and explicit relaunch prototype)
 
 Recovery viewer/relaunch user decisions (2026-10-21, prototype scope): plain
 `panelink` offers a chooser when a saved layout exists (non-interactive or
@@ -327,8 +367,10 @@ last-pane exit without assuming a layout revision changes. Ordinary pane
 removal may publish an empty snapshot; driver/workspace teardown preserves the
 pre-stop topology and must distinguish shutdown-caused exits.
 
-The planned first implementation is a pure fixed160-byte codec with strict
-identity, geometry, reserved/unused-field and whole-record validation. Separate
+The pure fixed160-byte codec is implemented with strict identity, geometry,
+reserved/unused-field and whole-record validation; see its
+[component result](progress/P5-SAVED-LAYOUT-CODEC.md). It handles historical data
+only and performs no storage or live restoration. Separate
 store/async writer/guard/runtime and read-only CLI slices follow. The future
 workers must share one total250ms metadata-drain wait, retain singleton exclusion
 through late IO and expose last confirmed rather than assumed current-at-crash

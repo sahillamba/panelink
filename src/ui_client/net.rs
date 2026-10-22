@@ -25,13 +25,13 @@ use super::conn::{
     InputResult, LeaseAction, PaneConn, Reply, ResumeError, CLOSE_DEADLINE, DEADLINE, OP_DEADLINE,
     SPLIT_DEADLINE,
 };
-use super::state::{App, ClosePlan, Effects, SplitPlan};
+use super::state::{App, ClosePlan, SplitPlan};
 
 const LAYOUT_INTERVAL: Duration = Duration::from_millis(250);
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
 const SCREEN_FALLBACK_INTERVAL: Duration = Duration::from_millis(100);
 /// Total wall-clock budget for detach work after the host is restored.
-const DETACH_BUDGET: Duration = Duration::from_millis(1_500);
+pub(crate) const DETACH_BUDGET: Duration = Duration::from_millis(1_500);
 const MAX_ENV_ENTRIES: usize = 1_024;
 const MAX_ENV_BYTES: usize = 48 * 1024;
 
@@ -44,20 +44,44 @@ pub(crate) struct Net {
     resize_sent: Option<(u64, u16, u16)>,
     /// Device/inode of the control socket observed at attach.
     endpoint_identity: Option<(u64, u64)>,
+    layout: Option<LayoutReply>,
+    screen_revisions: [(Option<TargetRef>, u64); 2],
+}
+
+/// Host-owned view inputs needed by one network poll.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct NetView {
+    pub focus: Option<TargetRef>,
+    pub desired_root: Option<(u16, u16)>,
+}
+
+/// One validated checkpoint update returned to the host thread.
+pub(crate) struct ScreenUpdate {
+    pub target: TargetRef,
+    pub revision: u64,
+    pub checkpoint: Vec<u8>,
+}
+
+/// Bounded view delta from one worker poll.
+pub(crate) struct NetUpdate {
+    pub layout: Option<LayoutReply>,
+    pub screens: Vec<ScreenUpdate>,
+    pub status: Option<&'static str>,
+    pub server_present: bool,
 }
 
 impl Net {
+    /// Private server directory this client attached to (read-only use).
+    pub(crate) fn server_directory(&self) -> &std::path::Path {
+        &self.directory
+    }
+
     /// Connect and load the initial layout.
     ///
     /// Discovery first tries to resume an existing context under
     /// `context_dir` (so reattaching never creates a new lease). Only if none
     /// resumes does it open a fresh, trailer-less Hello; that lease is then
     /// adopted as the first pane's new context, never leaked.
-    /// Private server directory this client attached to (read-only use).
-    pub(crate) fn server_directory(&self) -> &std::path::Path {
-        &self.directory
-    }
-
     pub(crate) fn connect(
         directory: PathBuf,
         context_dir: PathBuf,
@@ -78,6 +102,8 @@ impl Net {
             next_layout: now,
             resize_sent: None,
             endpoint_identity,
+            layout: None,
+            screen_revisions: [(None, 0), (None, 0)],
         };
         let layout = match net.resume_any_context(now)? {
             Some(layout) => layout,
@@ -105,8 +131,10 @@ impl Net {
                 layout
             }
         };
+        net.layout = Some(layout);
         app.set_layout(layout);
-        net.sync_panes(app, now, DEADLINE);
+        let mut ignored_status = None;
+        net.sync_panes(layout, now, DEADLINE, &mut ignored_status);
         for pane in &mut net.panes {
             pane.set_deadline(OP_DEADLINE);
         }
@@ -163,10 +191,13 @@ impl Net {
     }
 
     /// Connect to any layout pane we lack; drop panes that left the layout.
-    fn sync_panes(&mut self, app: &mut App, now: Instant, deadline: std::time::Duration) {
-        let Some(layout) = app.layout().copied() else {
-            return;
-        };
+    fn sync_panes(
+        &mut self,
+        layout: LayoutReply,
+        now: Instant,
+        deadline: Duration,
+        status: &mut Option<&'static str>,
+    ) {
         self.panes.retain(|pane| {
             layout
                 .panes
@@ -190,7 +221,7 @@ impl Net {
                     pane.set_deadline(OP_DEADLINE);
                     self.panes.push(pane);
                 }
-                Err(label) => app.set_status(label, now),
+                Err(label) => *status = Some(label),
             }
         }
     }
@@ -198,7 +229,7 @@ impl Net {
     /// Lease maintenance for one pane: proactive resume before expiry,
     /// reconnect after loss, and re-attach after a proven lease death.
     /// Never resends input; uncertainty is settled by status only.
-    fn maintain(&mut self, index: usize, app: &mut App, now: Instant) {
+    fn maintain(&mut self, index: usize, now: Instant) -> Option<&'static str> {
         let pane = &mut self.panes[index];
         if pane.lease_dead {
             let target = pane.target;
@@ -217,17 +248,17 @@ impl Net {
             ) {
                 Ok(pane) => self.panes.insert(index, pane),
                 Err(label) => {
-                    app.set_status(label, now);
                     self.sync_later(now);
+                    return Some(label);
                 }
             }
-            return;
+            return None;
         }
         if !pane.connected() {
             if now >= pane.next_retry && pane.reconnect(&self.directory, now).is_err() {
                 pane.disconnect(now);
             }
-            return;
+            return None;
         }
         if pane.lease_schedule.action(now) == LeaseAction::Renew {
             // Proactive resume Hello on a new stream renews the lease; the
@@ -239,10 +270,11 @@ impl Net {
                     if pane.lease_schedule.past_ttl(now) {
                         pane.lease_dead = true;
                     }
-                    app.set_status(label, now);
+                    return Some(label);
                 }
             }
         }
+        None
     }
 
     /// A pane could not be re-attached now; layout polling retries it.
@@ -270,25 +302,33 @@ impl Net {
         }
     }
 
-    pub(crate) fn poll(&mut self, app: &mut App, now: Instant, stop: &AtomicBool) {
+    pub(crate) fn poll(&mut self, view: NetView, now: Instant, stop: &AtomicBool) -> NetUpdate {
+        let mut update = NetUpdate {
+            layout: None,
+            screens: Vec::with_capacity(2),
+            status: None,
+            server_present: self.server_endpoint_present(),
+        };
         let mut index = 0;
         while index < self.panes.len() {
             let before = self.panes.len();
-            self.maintain(index, app, now);
+            update.status = self.maintain(index, now).or(update.status);
             if self.panes.len() == before {
                 index += 1;
             }
         }
         if now >= self.next_layout {
             self.next_layout = now + LAYOUT_INTERVAL;
-            self.refresh_layout(app, now);
-            self.maybe_resize(app, now);
+            self.refresh_layout(now, &mut update);
+            self.maybe_resize(view.desired_root, now, &mut update);
         }
-        let focus = app.focus();
         for index in 0..self.panes.len() {
             if stop.load(Ordering::Relaxed) {
-                return;
+                break;
             }
+            let target = self.panes[index].target;
+            let known_revision = self.screen_revision(target);
+            let mut remember_revision = None;
             let pane = &mut self.panes[index];
             if !pane.connected() {
                 continue;
@@ -296,12 +336,12 @@ impl Net {
             if pane.owner_revision.is_none() && now >= pane.next_claim {
                 match pane.claim(now) {
                     Ok(true) => {}
-                    Ok(false) if Some(pane.target) == focus => {
-                        app.set_status("pane input is owned by another client", now)
+                    Ok(false) if Some(pane.target) == view.focus => {
+                        update.status = Some("pane input is owned by another client")
                     }
                     Ok(false) => {}
                     Err(label) => {
-                        app.set_status(label, now);
+                        update.status = Some(label);
                         pane.disconnect(now);
                         continue;
                     }
@@ -309,7 +349,7 @@ impl Net {
             } else if pane.owner_revision.is_some() && now >= pane.next_claim {
                 // Renew before the 30 s owner TTL elapses.
                 if let Err(label) = pane.claim(now) {
-                    app.set_status(label, now);
+                    update.status = Some(label);
                 }
             }
             if now < pane.next_watch {
@@ -320,7 +360,7 @@ impl Net {
                 match pane.watch() {
                     Ok(changed) => changed,
                     Err(label) => {
-                        app.set_status(label, now);
+                        update.status = Some(label);
                         pane.disconnect(now);
                         continue;
                     }
@@ -330,19 +370,27 @@ impl Net {
                 true
             };
             if changed || pane.needs_screen {
-                let target = pane.target;
-                match fetch_screen(pane, app, target) {
-                    Ok(()) => pane.needs_screen = false,
+                match fetch_screen(pane, target, known_revision) {
+                    Ok(Some(screen)) => {
+                        remember_revision = Some(screen.revision);
+                        update.screens.push(screen);
+                        pane.needs_screen = false;
+                    }
+                    Ok(None) => pane.needs_screen = false,
                     Err(label) => {
-                        app.set_status(label, now);
+                        update.status = Some(label);
                         pane.needs_screen = true;
                     }
                 }
             }
+            if let Some(revision) = remember_revision {
+                self.remember_screen(target, revision);
+            }
         }
+        update
     }
 
-    fn refresh_layout(&mut self, app: &mut App, now: Instant) {
+    fn refresh_layout(&mut self, now: Instant, update: &mut NetUpdate) {
         let Some(pane) = self.any_connected() else {
             return;
         };
@@ -357,25 +405,42 @@ impl Net {
         };
         match reply {
             Ok(layout) => {
-                let before = app.layout().copied();
-                app.set_layout(layout);
+                let before = self.layout;
+                self.layout = Some(layout);
                 if before != Some(layout) {
                     for pane in &mut self.panes {
                         pane.needs_screen = true;
                     }
+                    for (target, revision) in &mut self.screen_revisions {
+                        if target.is_some_and(|target| {
+                            !layout
+                                .panes
+                                .iter()
+                                .flatten()
+                                .any(|pane| pane.target == target)
+                        }) {
+                            *target = None;
+                            *revision = 0;
+                        }
+                    }
+                    update.layout = Some(layout);
                 }
                 // Also re-attaches panes whose earlier attach failed.
-                self.sync_panes(app, now, OP_DEADLINE);
+                self.sync_panes(layout, now, OP_DEADLINE, &mut update.status);
             }
-            Err(label) => app.set_status(label, now),
+            Err(label) => update.status = Some(label),
         }
     }
 
     /// Send one RootResize when the host size differs from the layout root.
     /// Below the minimum the last accepted layout is kept untouched.
-    fn maybe_resize(&mut self, app: &mut App, now: Instant) {
-        let (Some(layout), Some((rows, columns))) = (app.layout().copied(), app.desired_root())
-        else {
+    fn maybe_resize(
+        &mut self,
+        desired_root: Option<(u16, u16)>,
+        now: Instant,
+        update: &mut NetUpdate,
+    ) {
+        let (Some(layout), Some((rows, columns))) = (self.layout, desired_root) else {
             return;
         };
         if (layout.rows, layout.columns) == (rows, columns)
@@ -423,21 +488,42 @@ impl Net {
                     },
                     _ => {}
                 }
-                app.set_status("resize was not applied", now);
+                update.status = Some("resize was not applied");
             }
             Ok((_, Reply::Error(label))) => {
-                app.set_status(label, now);
+                update.status = Some(label);
                 self.next_layout = now;
             }
-            Ok((_, Reply::Snapshot(_))) => app.set_status("resize reply invalid", now),
-            Err(label) => app.set_status(label, now),
+            Ok((_, Reply::Snapshot(_))) => update.status = Some("resize reply invalid"),
+            Err(label) => update.status = Some(label),
+        }
+    }
+
+    fn screen_revision(&self, target: TargetRef) -> Option<u64> {
+        self.screen_revisions
+            .iter()
+            .find_map(|(known, revision)| (*known == Some(target)).then_some(*revision))
+    }
+
+    fn remember_screen(&mut self, target: TargetRef, revision: u64) {
+        let index = self
+            .screen_revisions
+            .iter()
+            .position(|(known, _)| *known == Some(target))
+            .or_else(|| {
+                self.screen_revisions
+                    .iter()
+                    .position(|(known, _)| known.is_none())
+            });
+        if let Some(index) = index {
+            self.screen_revisions[index] = (Some(target), revision);
         }
     }
 
     /// Bounded detach: settle, release claims and retire results on each
     /// connected pane (each exchange ≤ `DETACH_DEADLINE`, stopping at the
     /// first stall), then drop connections. Children keep running.
-    pub(crate) fn detach(mut self) {
+    pub(crate) fn detach(&mut self) {
         let budget = Instant::now() + DETACH_BUDGET;
         for pane in &mut self.panes {
             if Instant::now() >= budget {
@@ -488,7 +574,11 @@ pub(crate) fn encode_close(key: OperationKey, plan: ClosePlan) -> Result<Vec<u8>
     Ok(payload)
 }
 
-fn fetch_screen(pane: &mut PaneConn, app: &mut App, target: TargetRef) -> Result<(), &'static str> {
+fn fetch_screen(
+    pane: &mut PaneConn,
+    target: TargetRef,
+    known_revision: Option<u64>,
+) -> Result<Option<ScreenUpdate>, &'static str> {
     let query = encode_screen_query(target).map_err(|_| "request_invalid")?;
     let bytes = match pane.request(&query)? {
         Reply::Snapshot(bytes) => bytes,
@@ -499,17 +589,23 @@ fn fetch_screen(pane: &mut PaneConn, app: &mut App, target: TargetRef) -> Result
     if view.target() != target {
         return Err("screen reply invalid");
     }
-    if app.screen_revision(target) == Some(view.screen_revision()) {
-        return Ok(());
+    if known_revision == Some(view.screen_revision()) {
+        return Ok(None);
     }
-    let checkpoint =
-        panelink::screen_checkpoint::decode(view.checkpoint()).map_err(|_| "screen invalid")?;
-    app.load_screen(target, view.screen_revision(), &checkpoint)
-        .map_err(|_| "screen invalid")
+    panelink::screen_checkpoint::decode(view.checkpoint()).map_err(|_| "screen invalid")?;
+    Ok(Some(ScreenUpdate {
+        target,
+        revision: view.screen_revision(),
+        checkpoint: view.checkpoint().to_vec(),
+    }))
 }
 
-impl Effects for Net {
-    fn send_keys(&mut self, target: TargetRef, keys: &[Key]) -> Result<(), &'static str> {
+impl Net {
+    pub(crate) fn send_keys(
+        &mut self,
+        target: TargetRef,
+        keys: &[Key],
+    ) -> Result<(), &'static str> {
         let pane = self.pane_mut(target).ok_or("pane not connected")?;
         // Not yet owner (for example a freshly split or reconnected pane):
         // try one immediate claim rather than dropping the keys.
@@ -526,7 +622,7 @@ impl Effects for Net {
         }
     }
 
-    fn send_paste(&mut self, target: TargetRef, text: &str) -> Result<(), &'static str> {
+    pub(crate) fn send_paste(&mut self, target: TargetRef, text: &str) -> Result<(), &'static str> {
         let pane = self.pane_mut(target).ok_or("pane not connected")?;
         match pane.send_paste(text)? {
             InputResult::Applied => Ok(()),
@@ -535,7 +631,7 @@ impl Effects for Net {
         }
     }
 
-    fn split(&mut self, plan: SplitPlan) -> Result<TargetRef, &'static str> {
+    pub(crate) fn split(&mut self, plan: SplitPlan) -> Result<TargetRef, &'static str> {
         let context = capture_launch_context()?;
         let pane = self.pane_mut(plan.target).ok_or("pane not connected")?;
         // The server spawns a child for this request: allow longer.
@@ -587,7 +683,7 @@ impl Effects for Net {
         Ok(new_target)
     }
 
-    fn close(&mut self, plan: ClosePlan) -> Result<CloseResult, &'static str> {
+    pub(crate) fn close(&mut self, plan: ClosePlan) -> Result<CloseResult, &'static str> {
         let index = self
             .close_connection(plan.target)
             .ok_or("close not sent: no connected pane")?;

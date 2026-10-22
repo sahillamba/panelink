@@ -1,0 +1,19 @@
+   Compiling panelink v0.1.0 (/Users/sahillamba/panelink)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
+     Running tests/p2_pty.rs (target/debug/deps/p2_pty-54a98b69cd92e468)
+
+running 11 tests
+test child_output_populates_separate_normal_and_alternate_screens ... ok
+test clipboard_denial_does_not_inject_reply_bytes_before_the_next_shell_input ... ok
+test final_output_larger_than_one_chunk_is_drained_after_exit ... ok
+test forged_launch_environment_arguments_and_dimensions_are_rejected_before_spawn ... ok
+test four_allowlisted_queries_are_written_back_to_the_child_pty ... ok
+test hup_ignoring_child_is_killed_reaped_and_cleanup_is_cached ... ok
+test output_flood_keeps_engine_and_snapshot_within_visible_bounds ... ok
+test paste_framing_follows_engine_bracketed_mode ... ok
+test pending_input_is_discarded_once_child_exit_is_observed ... ok
+test resize_coalesces_and_commits_only_the_newest_successful_size ... ok
+test stdio_is_a_tty_and_child_gets_only_the_explicit_environment_and_cwd ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.76s
+

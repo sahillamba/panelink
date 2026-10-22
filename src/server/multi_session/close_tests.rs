@@ -21,6 +21,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::io;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 const GENERATION: u64 = 77;
 const LEASE: u64 = 1;
@@ -31,6 +32,11 @@ const COLUMNS: u16 = 81;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Effect {
     Stop(u64),
+    BeginStop(u64),
+    StopPoll {
+        session: u64,
+        kill: bool,
+    },
     Resize {
         session: u64,
         rows: u16,
@@ -89,6 +95,29 @@ impl EffectSink for Sink {
             self.exited.borrow_mut().insert(self.session);
         }
         self.stop
+    }
+
+    fn begin_stop(&mut self) -> Result<Option<StopOutcome>, StopOutcome> {
+        self.log.borrow_mut().push(Effect::BeginStop(self.session));
+        Ok(None)
+    }
+
+    fn advance_stop(&mut self, kill: bool) -> Result<Option<StopOutcome>, StopOutcome> {
+        self.log.borrow_mut().push(Effect::StopPoll {
+            session: self.session,
+            kill,
+        });
+        match (self.stop, kill) {
+            (StopOutcome::Exited, false) => {
+                self.exited.borrow_mut().insert(self.session);
+                Ok(Some(StopOutcome::Exited))
+            }
+            (StopOutcome::Escalated, true) => {
+                self.exited.borrow_mut().insert(self.session);
+                Ok(Some(StopOutcome::Escalated))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn apply_size(&mut self, rows: u16, columns: u16) -> Result<(), Outcome> {
@@ -405,6 +434,144 @@ fn escalated_and_unknown_stops_are_reported_and_unknown_keeps_the_pane() {
         OperationStatus::Completed(Outcome::Unknown)
     );
     // A later observed exit collapses through poll.
+    fixture.exited.borrow_mut().insert(second.session);
+    fixture.owner.poll(NOW).unwrap();
+    assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 1);
+    assert!(fixture.owner.launches.is_retired(second));
+}
+
+#[test]
+fn phased_close_keeps_ledger_pending_until_tick_driven_completion() {
+    let mut fixture = Fixture::new();
+    fixture.next_stop = StopOutcome::Escalated;
+    let first = fixture.first;
+    let second = fixture.split_right(first);
+    fixture.take_log();
+    let bytes = fixture.close_bytes(second, 2);
+    let started = Instant::now();
+    let status = fixture.owner.begin_close(&bytes, NOW, started).unwrap();
+    assert!(matches!(status, super::CloseStatus::InProgress));
+    let key = crate::close_protocol::decode_close_request(&bytes)
+        .unwrap()
+        .key;
+    assert_eq!(
+        fixture.ledger_status(key.sequence),
+        OperationStatus::InProgress
+    );
+    assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 2);
+    assert!(matches!(
+        fixture.owner.begin_close(&bytes, NOW, started).unwrap(),
+        super::CloseStatus::InProgress
+    ));
+    assert_eq!(fixture.take_log(), [Effect::BeginStop(second.session)]);
+
+    fixture.owner.advance_closes_at(started).unwrap();
+    assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 2);
+    fixture
+        .owner
+        .advance_closes_at(started + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 1);
+    assert_eq!(
+        fixture.ledger_status(key.sequence),
+        OperationStatus::Completed(Outcome::Applied)
+    );
+    assert_eq!(
+        fixture.owner.close_results.last().unwrap().outcome,
+        CloseOutcome::Stopped(StopOutcome::Escalated)
+    );
+    assert_eq!(
+        fixture.take_log(),
+        [
+            Effect::StopPoll {
+                session: second.session,
+                kill: false,
+            },
+            Effect::StopPoll {
+                session: second.session,
+                kill: true,
+            },
+            Effect::ApplySize {
+                session: first.session,
+                rows: ROWS,
+                columns: COLUMNS,
+            },
+        ]
+    );
+    fixture
+        .owner
+        .advance_closes_at(started + Duration::from_secs(3))
+        .unwrap();
+    assert_eq!(fixture.owner.close_results.len(), 1);
+    assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 1);
+}
+
+#[test]
+fn legacy_close_does_not_stop_a_target_owned_by_an_active_close() {
+    let mut fixture = Fixture::new();
+    fixture.next_stop = StopOutcome::Escalated;
+    let first = fixture.first;
+    let second = fixture.split_right(first);
+    fixture.take_log();
+    let phased = fixture.close_bytes(second, 2);
+    let start = Instant::now();
+    assert!(matches!(
+        fixture.owner.begin_close(&phased, NOW, start).unwrap(),
+        super::CloseStatus::InProgress
+    ));
+
+    let legacy = fixture.close_bytes(second, 2);
+    let rejected = fixture.close_no_effects(&legacy).unwrap();
+    assert_eq!(
+        rejected.outcome,
+        CloseOutcome::Rejected(CloseRejection::AlreadyClosed)
+    );
+    assert_eq!(
+        fixture.ledger_status(rejected.key.sequence),
+        OperationStatus::Completed(Outcome::Failed)
+    );
+    assert_eq!(fixture.take_log(), [Effect::BeginStop(second.session)]);
+    assert_eq!(fixture.owner.active_closes.len(), 1);
+    fixture
+        .owner
+        .advance_closes_at(start + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 1);
+}
+
+#[test]
+fn phased_close_timeout_retains_closing_target_without_reenabling_it() {
+    let mut fixture = Fixture::new();
+    fixture.next_stop = StopOutcome::Unknown;
+    let first = fixture.first;
+    let second = fixture.split_right(first);
+    let bytes = fixture.close_bytes(second, 2);
+    let start = Instant::now();
+    let key = crate::close_protocol::decode_close_request(&bytes)
+        .unwrap()
+        .key;
+    assert!(matches!(
+        fixture.owner.begin_close(&bytes, NOW, start).unwrap(),
+        super::CloseStatus::InProgress
+    ));
+    fixture.owner.advance_closes_at(start).unwrap();
+    fixture
+        .owner
+        .advance_closes_at(start + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(
+        fixture.ledger_status(key.sequence),
+        OperationStatus::InProgress
+    );
+    fixture
+        .owner
+        .advance_closes_at(start + Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        fixture.ledger_status(key.sequence),
+        OperationStatus::Completed(Outcome::Unknown)
+    );
+    assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 2);
     fixture.exited.borrow_mut().insert(second.session);
     fixture.owner.poll(NOW).unwrap();
     assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 1);

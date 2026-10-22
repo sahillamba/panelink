@@ -11,6 +11,7 @@ mod keys;
 mod net;
 pub(crate) mod recovery;
 mod state;
+mod worker;
 
 use std::path::PathBuf;
 

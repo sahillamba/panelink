@@ -1,6 +1,64 @@
 use super::*;
 
 #[test]
+fn phased_shutdown_pump_error_does_not_enter_legacy_wait_cleanup() {
+    let launch = ResolvedLaunch {
+        requested_path: "/bin/sh".into(),
+        executable_path: "/bin/sh".into(),
+        working_directory: "/private/tmp".into(),
+    };
+    let arguments = vec![
+        OsString::from("-c"),
+        OsString::from("trap '' HUP; while :; do /bin/sleep 1; done"),
+    ];
+    let environment = [(OsString::from("TERM"), OsString::from("panelink-probe"))]
+        .into_iter()
+        .collect();
+    let mut session = TerminalSession::spawn(
+        &launch,
+        &arguments,
+        &environment,
+        TerminalSize::new(8, 40).unwrap(),
+    )
+    .unwrap();
+    assert!(!session.begin_nonblocking_shutdown().unwrap());
+    assert_eq!(
+        session.request_resize(TerminalSize::new(9, 40).unwrap()),
+        Err(TerminalError::SessionClosed)
+    );
+
+    // Replace the PTY master with a read-only failure seam. Pump must report
+    // the error while preserving the child handle for owner-driven escalation.
+    session.master = Some(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap(),
+    );
+    let started = std::time::Instant::now();
+    assert!(session.pump().is_err());
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(session.child.is_some());
+    assert!(session.exit_status().is_none());
+    session.child.as_mut().unwrap().kill().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while session
+        .child
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_none()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "test child should exit"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
 fn render_snapshot_cache_copies_without_reallocation_across_viewport_changes() {
     let small_size = TerminalSize::new(5, 20).unwrap();
     let large_size = TerminalSize::new(80, 240).unwrap();
@@ -157,6 +215,58 @@ fn typed_keys_use_engine_cursor_mode_and_reject_control_scalars() {
         encode_key(Key::Char('\u{1b}'), false),
         Err(TerminalError::InvalidKey)
     );
+    for value in 1..=26 {
+        assert_eq!(encode_key(Key::Control(value), false).unwrap(), [value]);
+    }
+    assert_eq!(
+        encode_key(Key::Control(0), false),
+        Err(TerminalError::InvalidKey)
+    );
+    assert_eq!(
+        encode_key(Key::Control(27), false),
+        Err(TerminalError::InvalidKey)
+    );
+    assert_eq!(
+        encode_key(Key::AltChar('é'), false).unwrap(),
+        "\x1bé".as_bytes()
+    );
+    assert_eq!(
+        encode_key(Key::AltChar('\n'), false),
+        Err(TerminalError::InvalidKey)
+    );
+    for (number, expected) in [
+        (1, &b"\x1bOP"[..]),
+        (2, b"\x1bOQ"),
+        (3, b"\x1bOR"),
+        (4, b"\x1bOS"),
+        (5, b"\x1b[15~"),
+        (6, b"\x1b[17~"),
+        (7, b"\x1b[18~"),
+        (8, b"\x1b[19~"),
+        (9, b"\x1b[20~"),
+        (10, b"\x1b[21~"),
+        (11, b"\x1b[23~"),
+        (12, b"\x1b[24~"),
+    ] {
+        assert_eq!(encode_key(Key::Function(number), false).unwrap(), expected);
+    }
+    assert_eq!(
+        encode_key(Key::Function(0), false),
+        Err(TerminalError::InvalidKey)
+    );
+    assert_eq!(
+        encode_key(Key::Function(13), false),
+        Err(TerminalError::InvalidKey)
+    );
+    for (key, expected) in [
+        (Key::Delete, &b"\x1b[3~"[..]),
+        (Key::Insert, b"\x1b[2~"),
+        (Key::PageUp, b"\x1b[5~"),
+        (Key::PageDown, b"\x1b[6~"),
+        (Key::BackTab, b"\x1b[Z"),
+    ] {
+        assert_eq!(encode_key(key, false).unwrap(), expected);
+    }
 }
 
 #[test]
@@ -278,6 +388,8 @@ fn snapshot_text_sanitization_and_debug_redaction_hold() {
     }
     assert!(!unsafe_for_host('é'));
     assert_eq!(format!("{:?}", Key::Char('X')), "Char(<redacted>)");
+    assert_eq!(format!("{:?}", Key::Control(1)), "Control(<redacted>)");
+    assert_eq!(format!("{:?}", Key::AltChar('X')), "AltChar(<redacted>)");
 
     let mut parser = Parser::new_with_callbacks(8, 20, 0, CoreCallbacks::new());
     parser.process("café界e\u{301}".as_bytes());
