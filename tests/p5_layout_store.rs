@@ -83,8 +83,11 @@ fn snap_one(rows: u16, columns: u16, revision: u64, gen: u64, ws: u64) -> Layout
                 },
             }),
             None,
+            None,
+            None,
         ],
         divider: None,
+        dividers: [None; panelink::pane_layout::MAX_PANES - 1],
     }
 }
 
@@ -127,6 +130,8 @@ fn saved_two(generation: u64, workspace: u64, sequence: u64, revision: u64) -> S
                     columns: second_cols,
                 },
             }),
+            None,
+            None,
         ],
         divider: Some(Rect {
             x: first_cols,
@@ -134,6 +139,16 @@ fn saved_two(generation: u64, workspace: u64, sequence: u64, revision: u64) -> S
             rows: MIN_PANE_ROWS + 1,
             columns: 1,
         }),
+        dividers: [
+            Some(Rect {
+                x: first_cols,
+                y: 0,
+                rows: MIN_PANE_ROWS + 1,
+                columns: 1,
+            }),
+            None,
+            None,
+        ],
     };
     SavedLayout::from_snapshot(meta(generation, workspace, sequence, revision), &snapshot)
         .expect("valid two-pane saved layout")

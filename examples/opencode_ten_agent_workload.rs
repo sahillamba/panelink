@@ -672,7 +672,7 @@ done
                 .ok()
                 .flatten()
                 .is_some_and(|saved| {
-                    saved.pane_count() == 2 && saved.panes() == self.targets.map(Some)
+                    saved.pane_count() == 2 && saved.panes()[..2] == self.targets.map(Some)
                 });
             Ok(())
         }
@@ -960,7 +960,7 @@ done
                 .ok()
                 .and_then(|store| store.load(LayoutSlot::Current).ok().flatten())
                 .is_some_and(|layout| {
-                    layout.pane_count() == 2 && layout.panes() == [Some(first), Some(second)]
+                    layout.pane_count() == 2 && layout.panes()[..2] == [Some(first), Some(second)]
                 });
             if durable {
                 return Ok(());

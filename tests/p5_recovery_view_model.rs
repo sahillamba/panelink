@@ -33,6 +33,8 @@ fn saved(axis: LayoutAxis, rows: u16, columns: u16, pane_count: usize) -> SavedL
                     },
                 }),
                 None,
+                None,
+                None,
             ],
             None,
         ),
@@ -59,6 +61,8 @@ fn saved(axis: LayoutAxis, rows: u16, columns: u16, pane_count: usize) -> SavedL
                             columns: second,
                         },
                     }),
+                    None,
+                    None,
                 ],
                 Some(Rect {
                     x: first,
@@ -91,6 +95,8 @@ fn saved(axis: LayoutAxis, rows: u16, columns: u16, pane_count: usize) -> SavedL
                             columns,
                         },
                     }),
+                    None,
+                    None,
                 ],
                 Some(Rect {
                     x: 0,
@@ -110,6 +116,7 @@ fn saved(axis: LayoutAxis, rows: u16, columns: u16, pane_count: usize) -> SavedL
             columns,
             panes,
             divider,
+            dividers: [divider, None, None],
         },
     )
     .unwrap()
@@ -133,6 +140,84 @@ fn from_layout_preserves_historical_spatial_order_and_empty_tombstone() {
 
     let empty = view(LayoutAxis::Single, 0, 0, 0);
     assert!(empty.panes.is_empty());
+}
+
+#[test]
+fn from_layout_preserves_four_historical_panes_and_geometry() {
+    let metadata = LayoutMetadata::new(7, 8, 1, 1, 10).unwrap();
+    let panes = [
+        Some(PaneGeometry {
+            target: target(1, 1),
+            rect: Rect {
+                x: 0,
+                y: 0,
+                rows: 10,
+                columns: 39,
+            },
+        }),
+        Some(PaneGeometry {
+            target: target(2, 2),
+            rect: Rect {
+                x: 40,
+                y: 0,
+                rows: 10,
+                columns: 40,
+            },
+        }),
+        Some(PaneGeometry {
+            target: target(3, 3),
+            rect: Rect {
+                x: 0,
+                y: 11,
+                rows: 10,
+                columns: 39,
+            },
+        }),
+        Some(PaneGeometry {
+            target: target(4, 4),
+            rect: Rect {
+                x: 40,
+                y: 11,
+                rows: 10,
+                columns: 40,
+            },
+        }),
+    ];
+    let dividers = [
+        Some(Rect {
+            x: 39,
+            y: 0,
+            rows: 10,
+            columns: 1,
+        }),
+        Some(Rect {
+            x: 39,
+            y: 11,
+            rows: 10,
+            columns: 1,
+        }),
+        Some(Rect {
+            x: 0,
+            y: 10,
+            rows: 1,
+            columns: 80,
+        }),
+    ];
+    let saved = SavedLayout::from_snapshot(
+        metadata,
+        &LayoutSnapshot {
+            revision: 1,
+            rows: 21,
+            columns: 80,
+            panes,
+            divider: dividers[0],
+            dividers,
+        },
+    )
+    .unwrap();
+    let view = RecoveryView::from_layout(saved);
+    assert_eq!(view.panes.len(), 4);
+    assert_eq!(view.panes[3].historical_target, target(4, 4));
 }
 
 #[test]

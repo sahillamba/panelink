@@ -305,11 +305,79 @@ fn serve_binary_splits_over_the_pathname_socket_and_stops_on_sigterm() {
     assert_eq!(field(&layout, "pane_count"), Some("2"), "{layout}");
     assert!(layout.contains(&second_target));
 
+    // Fill the remaining capacity (SESSION_CAPACITY = MAX_PANES) through the
+    // CLI. one.ctx is pinned to the first pane, so it keeps splitting that pane
+    // down: its 24x39 area halves to 11 rows, then 5, both >= the 5-row minimum.
+    let capacity = panelink::session_registry::SESSION_CAPACITY;
+    let mut pane_count = 2;
+    let mut revision = 2;
+    let mut extra_targets = Vec::new();
+    while pane_count < capacity {
+        let (code, extra) = control(
+            &fixture,
+            "one.ctx",
+            &["split", &first, &revision.to_string(), "down"],
+        );
+        assert_eq!(code, 0, "split within capacity: {extra}");
+        assert_eq!(field(&extra, "outcome"), Some("applied"), "{extra}");
+        revision += 1;
+        assert_eq!(
+            field(&extra, "layout_revision"),
+            Some(revision.to_string().as_str()),
+            "{extra}"
+        );
+        extra_targets.push(field(&extra, "new_target").unwrap().to_owned());
+        pane_count += 1;
+        let (code, layout) = control(&fixture, "one.ctx", &["layout"]);
+        assert_eq!(code, 0, "layout: {layout}");
+        assert_eq!(
+            field(&layout, "pane_count"),
+            Some(pane_count.to_string().as_str()),
+            "{layout}"
+        );
+        assert_eq!(
+            field(&layout, "revision"),
+            Some(revision.to_string().as_str())
+        );
+    }
+    for extra in &extra_targets {
+        assert_ne!(extra, &first);
+        assert_ne!(extra, &second_target);
+    }
+
     // At capacity the CLI's local preview refuses before sending anything;
     // the server-side capacity/stale rejection is covered by p3a_runtime.
-    let (code, full) = control(&fixture, "one.ctx", &["split", &first, "2", "down"]);
+    let (code, full) = control(
+        &fixture,
+        "one.ctx",
+        &["split", &first, &revision.to_string(), "down"],
+    );
     assert_eq!(code, 1, "{full}");
     assert_eq!(field(&full, "error"), Some("split_unavailable"));
+    // `first` is now only 5 rows tall, so that refusal is geometric. Prove the
+    // capacity contract itself with a pane that still has room (the 24x40
+    // second pane): the server refuses and nothing changes.
+    let (code, init) = control(&fixture, "cap.ctx", &["init", &second_target]);
+    assert_eq!(code, 0, "init pane 2 for capacity probe: {init}");
+    let (code, over) = control(
+        &fixture,
+        "cap.ctx",
+        &["split", &second_target, &revision.to_string(), "down"],
+    );
+    assert_eq!(code, 1, "{over}");
+    assert_eq!(field(&over, "outcome"), Some("failed"), "{over}");
+    assert_eq!(field(&over, "new_target"), Some("null"), "{over}");
+    let (code, layout) = control(&fixture, "one.ctx", &["layout"]);
+    assert_eq!(code, 0, "layout after refusal: {layout}");
+    assert_eq!(
+        field(&layout, "revision"),
+        Some(revision.to_string().as_str())
+    );
+    assert_eq!(
+        field(&layout, "pane_count"),
+        Some(capacity.to_string().as_str()),
+        "{layout}"
+    );
 
     // Schema-4 reconcile/watch from the existing control CLI work against
     // serve (mapped onto the pinned target).

@@ -299,12 +299,20 @@ impl LayoutStore {
         }
         let file = opened.ok_or_else(unsafe_storage)?;
         validate_file(&file)?;
-        if file.metadata()?.len() != SAVED_LAYOUT_BYTES as u64 {
+        let length = file.metadata()?.len();
+        if length != SAVED_LAYOUT_BYTES as u64
+            && length != crate::saved_layout::LEGACY_SAVED_LAYOUT_BYTES as u64
+        {
             return Err(invalid());
         }
+        if length == crate::saved_layout::LEGACY_SAVED_LAYOUT_BYTES as u64 {
+            let mut legacy = vec![0u8; crate::saved_layout::LEGACY_SAVED_LAYOUT_BYTES];
+            file.take(length).read_exact(&mut legacy)?;
+            let decoded = block_decode(&legacy)?;
+            return Ok(Some(encode(&decoded)));
+        }
         let mut bytes = [0u8; SAVED_LAYOUT_BYTES];
-        file.take(SAVED_LAYOUT_BYTES as u64)
-            .read_exact(&mut bytes)?;
+        file.take(length).read_exact(&mut bytes)?;
         Ok(Some(bytes))
     }
 
@@ -682,8 +690,11 @@ mod tests {
                     },
                 }),
                 None,
+                None,
+                None,
             ],
             divider: None,
+            dividers: [None; crate::pane_layout::MAX_PANES - 1],
         }
     }
 
@@ -714,6 +725,8 @@ mod tests {
                         columns: second_cols,
                     },
                 }),
+                None,
+                None,
             ],
             divider: Some(Rect {
                 x: first_cols,
@@ -721,6 +734,16 @@ mod tests {
                 rows,
                 columns: 1,
             }),
+            dividers: [
+                Some(Rect {
+                    x: 40,
+                    y: 0,
+                    rows: 10,
+                    columns: 1,
+                }),
+                None,
+                None,
+            ],
         }
     }
 

@@ -1,4 +1,4 @@
-//! Pure, bounded composition of up to two pane snapshots, a one-cell divider
+//! Pure, bounded composition of up to four pane snapshots and dividers
 //! and an optional ASCII overlay into one host terminal frame.
 //!
 //! The compositor writes ANSI straight to a caller-supplied writer and keeps
@@ -83,10 +83,12 @@ pub struct ComposeFrame<'a> {
     pub host_rows: u16,
     /// Host viewport width.
     pub host_columns: u16,
-    /// Up to two non-overlapping panes, in stable slot order.
-    pub panes: [Option<PaneView<'a>>; 2],
-    /// One-cell-thick divider: `|` when one column wide, else `-`.
+    /// Up to four non-overlapping panes, in stable slot order.
+    pub panes: [Option<PaneView<'a>>; crate::pane_layout::MAX_PANES],
+    /// First one-cell-thick divider, retained for compatibility.
     pub divider: Option<Rect>,
+    /// All one-cell-thick dividers in stable traversal order.
+    pub dividers: [Option<Rect>; crate::pane_layout::MAX_PANES - 1],
     /// Slot whose cursor is shown, when it holds a snapshot.
     pub focused: Option<usize>,
     /// Overlay drawn last; while present the host cursor is hidden.
@@ -131,8 +133,9 @@ enum CursorState {
 struct FrameMeta {
     host_rows: u16,
     host_columns: u16,
-    slots: [SlotMeta; 2],
+    slots: [SlotMeta; crate::pane_layout::MAX_PANES],
     divider: Option<Rect>,
+    dividers: [Option<Rect>; crate::pane_layout::MAX_PANES - 1],
     overlay: Option<Rect>,
     overlay_styles: [OverlayStyle; MAX_ROWS],
     cursor: CursorState,
@@ -142,8 +145,9 @@ impl FrameMeta {
     const EMPTY: Self = Self {
         host_rows: 0,
         host_columns: 0,
-        slots: [SlotMeta::EMPTY; 2],
+        slots: [SlotMeta::EMPTY; crate::pane_layout::MAX_PANES],
         divider: None,
+        dividers: [None; crate::pane_layout::MAX_PANES - 1],
         overlay: None,
         overlay_styles: [OverlayStyle::Normal; MAX_ROWS],
         cursor: CursorState::Hidden,
@@ -166,8 +170,8 @@ enum PaneWork {
 /// after a partial write, call [`Compositor::invalidate`] so the next frame is
 /// a full repaint. A writer error inside `render` invalidates automatically.
 pub struct Compositor {
-    displayed: [ScreenSnapshot; 2],
-    target: [ScreenSnapshot; 2],
+    displayed: [Option<ScreenSnapshot>; crate::pane_layout::MAX_PANES],
+    target: [Option<ScreenSnapshot>; crate::pane_layout::MAX_PANES],
     displayed_overlay: Box<[u8]>,
     target_overlay: Box<[u8]>,
     displayed_meta: FrameMeta,
@@ -186,19 +190,12 @@ impl std::fmt::Debug for Compositor {
 }
 
 impl Compositor {
-    /// Reserve every baseline needed for two maximum-size panes and a
-    /// maximum-size overlay. Rendering never allocates afterwards.
+    /// Reserve fixed slot arrays and the maximum-size overlay. Pane snapshots
+    /// allocate only to the active pane dimensions as frames are staged.
     pub fn try_new() -> Result<Self, TerminalError> {
-        let size = TerminalSize::new(MAX_RECT_ROWS, MAX_RECT_COLUMNS)?;
         Ok(Self {
-            displayed: [
-                ScreenSnapshot::try_new(size)?,
-                ScreenSnapshot::try_new(size)?,
-            ],
-            target: [
-                ScreenSnapshot::try_new(size)?,
-                ScreenSnapshot::try_new(size)?,
-            ],
+            displayed: std::array::from_fn(|_| None),
+            target: std::array::from_fn(|_| None),
             displayed_overlay: overlay_buffer()?,
             target_overlay: overlay_buffer()?,
             displayed_meta: FrameMeta::EMPTY,
@@ -222,7 +219,7 @@ impl Compositor {
         if !self.pending_ready {
             return false;
         }
-        for slot in 0..2 {
+        for slot in 0..crate::pane_layout::MAX_PANES {
             if self.pending_meta.slots[slot].kind == SlotKind::Snapshot {
                 let (displayed, target) = (&mut self.displayed, &mut self.target);
                 std::mem::swap(&mut displayed[slot], &mut target[slot]);
@@ -263,6 +260,13 @@ impl Compositor {
         meta.host_rows = frame.host_rows;
         meta.host_columns = frame.host_columns;
         meta.divider = frame.divider;
+        meta.dividers = if frame.dividers.iter().any(Option::is_some) {
+            frame.dividers
+        } else {
+            let mut dividers = [None; crate::pane_layout::MAX_PANES - 1];
+            dividers[0] = frame.divider;
+            dividers
+        };
 
         for (slot, pane) in frame.panes.iter().enumerate() {
             let Some(pane) = pane else {
@@ -273,7 +277,17 @@ impl Compositor {
             match pane.content {
                 PaneContent::Snapshot(snapshot) => {
                     slot_meta.kind = SlotKind::Snapshot;
-                    self.target[slot].copy_from(snapshot);
+                    match self.target[slot].as_mut() {
+                        Some(target) => target.copy_from(snapshot),
+                        None => {
+                            let size = TerminalSize::new(pane.rect.rows, pane.rect.columns)
+                                .expect("validated pane dimensions");
+                            let mut target = ScreenSnapshot::try_new(size)
+                                .expect("bounded compositor pane allocation");
+                            target.copy_from(snapshot);
+                            self.target[slot] = Some(target);
+                        }
+                    }
                 }
                 PaneContent::Placeholder(text) => {
                     slot_meta.kind = SlotKind::Placeholder;
@@ -330,6 +344,7 @@ impl Compositor {
             || pending.host_rows != displayed.host_rows
             || pending.host_columns != displayed.host_columns
             || pending.divider != displayed.divider
+            || pending.dividers != displayed.dividers
             || pending
                 .slots
                 .iter()
@@ -358,7 +373,12 @@ impl Compositor {
         match (pending.kind, displayed.kind) {
             (SlotKind::Empty, _) => PaneWork::None,
             (SlotKind::Snapshot, SlotKind::Snapshot) => {
-                if overlay_moved || self.target[slot].cells() != self.displayed[slot].cells() {
+                if overlay_moved
+                    || self.target[slot]
+                        .as_ref()
+                        .zip(self.displayed[slot].as_ref())
+                        .is_none_or(|(target, displayed)| target.cells() != displayed.cells())
+                {
                     PaneWork::Diff
                 } else {
                     PaneWork::None
@@ -391,10 +411,8 @@ impl Compositor {
         } else {
             [None, None]
         };
-        let work = [
-            self.pane_work(0, overlay_moved),
-            self.pane_work(1, overlay_moved),
-        ];
+        let work: [PaneWork; crate::pane_layout::MAX_PANES] =
+            std::array::from_fn(|slot| self.pane_work(slot, overlay_moved));
 
         if !overlay_changed && work.iter().all(|work| *work == PaneWork::None) {
             return write_cursor_update(output, displayed.cursor, pending.cursor);
@@ -409,7 +427,7 @@ impl Compositor {
                 PaneWork::None => {}
                 PaneWork::Full => self.paint_pane(output, slot, None, damage)?,
                 PaneWork::Diff => {
-                    self.paint_pane(output, slot, Some(&self.displayed[slot]), damage)?;
+                    self.paint_pane(output, slot, self.displayed[slot].as_ref(), damage)?;
                 }
             }
         }
@@ -428,7 +446,7 @@ impl Compositor {
         output.write_all(b"\x1b[?7l")?;
         output.write_all(b"\x1b[0m")?;
         output.write_all(b"\x1b[2J")?;
-        for slot in 0..2 {
+        for slot in 0..crate::pane_layout::MAX_PANES {
             self.paint_pane(output, slot, None, [None, None])?;
         }
         self.paint_divider(output, None)?;
@@ -463,7 +481,9 @@ impl Compositor {
         match meta.kind {
             SlotKind::Empty => Ok(()),
             SlotKind::Snapshot => {
-                let snapshot = &self.target[slot];
+                let snapshot = self.target[slot]
+                    .as_ref()
+                    .ok_or_else(|| invalid("snapshot slot missing"))?;
                 let placement = Placement {
                     row: rect.y,
                     column: rect.x,
@@ -516,24 +536,23 @@ impl Compositor {
 
     /// Paint the divider, or with `only`, just its cells inside that rectangle.
     fn paint_divider<W: Write>(&self, output: &mut W, only: Option<Rect>) -> io::Result<()> {
-        let Some(divider) = self.pending_meta.divider else {
-            return Ok(());
-        };
-        output.write_all(b"\x1b[0m")?;
-        let glyph = if divider.columns == 1 { b'|' } else { b'-' };
-        let exclude = self.pending_meta.overlay;
-        for row in divider.y..divider.y + divider.rows {
-            write_ascii_run(
-                output,
-                row,
-                divider.x,
-                divider.columns,
-                |column| {
-                    excluded(exclude, row, column)
-                        || only.is_some_and(|only| !only.contains(column, row))
-                },
-                |_| glyph,
-            )?;
+        for divider in self.pending_meta.dividers.iter().flatten().copied() {
+            output.write_all(b"\x1b[0m")?;
+            let glyph = if divider.columns == 1 { b'|' } else { b'-' };
+            let exclude = self.pending_meta.overlay;
+            for row in divider.y..divider.y + divider.rows {
+                write_ascii_run(
+                    output,
+                    row,
+                    divider.x,
+                    divider.columns,
+                    |column| {
+                        excluded(exclude, row, column)
+                            || only.is_some_and(|only| !only.contains(column, row))
+                    },
+                    |_| glyph,
+                )?;
+            }
         }
         Ok(())
     }
@@ -544,7 +563,11 @@ impl Compositor {
         let meta = &self.pending_meta;
         let covered = |row: u16, column: u16| {
             excluded(meta.overlay, row, column)
-                || excluded(meta.divider, row, column)
+                || meta
+                    .dividers
+                    .iter()
+                    .flatten()
+                    .any(|divider| excluded(Some(*divider), row, column))
                 || meta
                     .slots
                     .iter()
@@ -737,22 +760,81 @@ fn validate_frame(frame: &ComposeFrame<'_>) -> io::Result<()> {
         }
     }
 
-    if let [Some(first), Some(second)] = &frame.panes {
-        if overlaps(first.rect, second.rect) {
-            return Err(invalid("pane rectangles overlap"));
-        }
-    }
-
-    if let Some(divider) = frame.divider {
-        if !rect_fits(divider, host_rows, host_columns)
+    let dividers = if frame.dividers.iter().any(Option::is_some) {
+        frame.dividers
+    } else {
+        let mut dividers = [None; crate::pane_layout::MAX_PANES - 1];
+        dividers[0] = frame.divider;
+        dividers
+    };
+    for divider in dividers.iter().flatten() {
+        if !rect_fits(*divider, host_rows, host_columns)
             || (divider.columns != 1 && divider.rows != 1)
             || frame
                 .panes
                 .iter()
                 .flatten()
-                .any(|pane| overlaps(pane.rect, divider))
+                .any(|pane| overlaps(pane.rect, *divider))
         {
             return Err(invalid("divider rectangle is invalid"));
+        }
+    }
+    let mut covered = [false; MAX_RECT_ROWS as usize * MAX_RECT_COLUMNS as usize];
+    for pane in frame.panes.iter().flatten() {
+        for row in pane.rect.y..pane.rect.y + pane.rect.rows {
+            for column in pane.rect.x..pane.rect.x + pane.rect.columns {
+                let index = usize::from(row) * MAX_RECT_COLUMNS as usize + usize::from(column);
+                if std::mem::replace(&mut covered[index], true) {
+                    return Err(invalid("pane rectangles overlap"));
+                }
+            }
+        }
+    }
+    for divider in dividers.iter().flatten() {
+        for row in divider.y..divider.y + divider.rows {
+            for column in divider.x..divider.x + divider.columns {
+                let index = usize::from(row) * MAX_RECT_COLUMNS as usize + usize::from(column);
+                if std::mem::replace(&mut covered[index], true) {
+                    return Err(invalid("divider rectangles overlap"));
+                }
+            }
+        }
+    }
+    if frame.panes.iter().flatten().count() <= 2 {
+        return Ok(());
+    }
+    let mut cells = [false; 80 * 240];
+    for pane in frame.panes.iter().flatten() {
+        for row in pane.rect.y..pane.rect.y + pane.rect.rows {
+            for column in pane.rect.x..pane.rect.x + pane.rect.columns {
+                cells[usize::from(row) * 240 + usize::from(column)] = true;
+            }
+        }
+    }
+    for divider in dividers.iter().flatten() {
+        for row in divider.y..divider.y + divider.rows {
+            for column in divider.x..divider.x + divider.columns {
+                cells[usize::from(row) * 240 + usize::from(column)] = true;
+            }
+        }
+    }
+    for row in 0..host_rows {
+        for column in 0..host_columns {
+            if !cells[usize::from(row) * 240 + usize::from(column)] {
+                return Err(invalid(
+                    "pane and divider geometry does not partition the host",
+                ));
+            }
+        }
+    }
+    for divider in dividers.iter().flatten() {
+        let full_span = (divider.columns == 1 && divider.rows == host_rows)
+            || (divider.rows == 1 && divider.columns == host_columns);
+        if !full_span
+            && frame.dividers.iter().flatten().count() <= 1
+            && frame.panes.iter().flatten().count() > 2
+        {
+            return Err(invalid("divider must span its complete parent region"));
         }
     }
 
@@ -815,8 +897,11 @@ mod tests {
                     rect: rect(0, 21, 10, 20),
                     content: PaneContent::Snapshot(right),
                 }),
+                None,
+                None,
             ],
             divider: Some(rect(0, 20, 10, 1)),
+            dividers: [Some(rect(0, 20, 10, 1)), None, None],
             focused: None,
             overlay: None,
         }
@@ -967,8 +1052,11 @@ mod tests {
                     rect: rect(6, 0, 5, 20),
                     content: PaneContent::Snapshot(&bottom),
                 }),
+                None,
+                None,
             ],
             divider: Some(rect(5, 0, 1, 20)),
+            dividers: [Some(rect(5, 0, 1, 20)), None, None],
             focused: None,
             overlay: None,
         };
@@ -981,6 +1069,59 @@ mod tests {
         assert_eq!(cell_text(&parser, 6, 5), "M");
         for column in 0..20 {
             assert_eq!(cell_text(&parser, 5, column), "-");
+        }
+    }
+
+    #[test]
+    fn three_and_four_pane_layouts_render_every_divider_and_placeholder() {
+        let panes = [
+            snapshot_from("P1", 10, 20),
+            snapshot_from("P2", 10, 20),
+            snapshot_from("P3", 10, 20),
+            snapshot_from("P4", 10, 20),
+        ];
+        let frame = ComposeFrame {
+            host_rows: 21,
+            host_columns: 41,
+            panes: [
+                Some(PaneView {
+                    rect: rect(0, 0, 10, 20),
+                    content: PaneContent::Snapshot(&panes[0]),
+                }),
+                Some(PaneView {
+                    rect: rect(0, 21, 10, 20),
+                    content: PaneContent::Snapshot(&panes[1]),
+                }),
+                Some(PaneView {
+                    rect: rect(11, 0, 10, 20),
+                    content: PaneContent::Snapshot(&panes[2]),
+                }),
+                Some(PaneView {
+                    rect: rect(11, 21, 10, 20),
+                    content: PaneContent::Snapshot(&panes[3]),
+                }),
+            ],
+            divider: Some(rect(0, 20, 21, 1)),
+            dividers: [
+                Some(rect(0, 20, 21, 1)),
+                Some(rect(10, 0, 1, 20)),
+                Some(rect(10, 21, 1, 20)),
+            ],
+            focused: None,
+            overlay: None,
+        };
+        let output = fresh_render(&frame);
+        let rendered = screen(&output, &frame);
+        assert_eq!(cell_text(&rendered, 0, 0), "P");
+        assert_eq!(cell_text(&rendered, 0, 21), "P");
+        assert_eq!(cell_text(&rendered, 11, 0), "P");
+        assert_eq!(cell_text(&rendered, 11, 21), "P");
+        for row in 0..21 {
+            assert_eq!(cell_text(&rendered, row, 20), "|");
+        }
+        for column in 0..20 {
+            assert_eq!(cell_text(&rendered, 10, column), "-");
+            assert_eq!(cell_text(&rendered, 10, column + 21), "-");
         }
     }
 
@@ -1035,11 +1176,12 @@ mod tests {
             content: PaneContent::Snapshot(&narrow),
         });
         moved.divider = Some(rect(0, 21, 10, 1));
+        moved.dividers = [Some(rect(0, 21, 10, 1)), None, None];
         let output = rendered_committed(&mut compositor, &moved);
         assert!(output.starts_with(b"\x1b[?25l\x1b[?7l\x1b[0m\x1b[2J"));
 
         let mut grown = moved;
-        grown.host_rows = 11;
+        grown.host_columns = 43;
         assert!(contains(
             &rendered_committed(&mut compositor, &grown),
             b"\x1b[2J"
@@ -1149,8 +1291,8 @@ mod tests {
         assert_eq!(parser.screen().cursor_position(), (2, 24));
         assert!(!parser.screen().hide_cursor());
 
-        let lines = [];
         let mut overlaid = frame;
+        let lines: [OverlayLine<'_>; 0] = [];
         overlaid.overlay = Some(OverlayView {
             rect: rect(0, 0, 2, 5),
             lines: &lines,
@@ -1221,7 +1363,6 @@ mod tests {
     fn invalid_geometry_is_rejected_before_any_byte() {
         let left = snapshot_from("L", 10, 20);
         let small = snapshot_from("S", 5, 20);
-        let lines = [];
         let valid = side_by_side(&left, &left);
         let pane = |rect, snapshot| {
             Some(PaneView {
@@ -1243,21 +1384,21 @@ mod tests {
         cases.push(frame);
         let mut frame = valid;
         frame.divider = Some(rect(0, 19, 10, 1));
+        frame.dividers = [frame.divider, None, None];
         cases.push(frame);
         let mut frame = valid;
         frame.divider = Some(rect(0, 20, 10, 2));
-        cases.push(frame);
-        let mut frame = valid;
-        frame.overlay = Some(OverlayView {
-            rect: rect(10, 0, 1, 5),
-            lines: &lines,
-        });
+        frame.dividers = [frame.divider, None, None];
         cases.push(frame);
         let mut frame = valid;
         frame.panes[1] = Some(PaneView {
             rect: rect(0, 21, 0, 20),
             content: PaneContent::Placeholder("x"),
         });
+        cases.push(frame);
+        let mut frame = valid;
+        frame.divider = Some(rect(0, 20, 10, 2));
+        frame.dividers = [Some(rect(0, 20, 10, 2)), None, None];
         cases.push(frame);
         let mut frame = valid;
         frame.panes[1] = Some(PaneView {
@@ -1267,9 +1408,12 @@ mod tests {
         cases.push(frame);
 
         let mut compositor = Compositor::try_new().unwrap();
-        for frame in cases {
+        for (index, frame) in cases.into_iter().enumerate() {
             let mut sink = CountingSink::default();
-            let error = compositor.render(&frame, &mut sink).unwrap_err();
+            let error = match compositor.render(&frame, &mut sink) {
+                Err(error) => error,
+                Ok(()) => panic!("invalid case {index} accepted"),
+            };
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
             assert_eq!(sink.0, 0);
             assert!(!compositor.commit());
@@ -1434,8 +1578,11 @@ mod tests {
                     rect: rect(0, 120, 80, 120),
                     content: PaneContent::Snapshot(&second),
                 }),
+                None,
+                None,
             ],
             divider: Some(rect(0, 119, 80, 1)),
+            dividers: [Some(rect(0, 119, 80, 1)), None, None],
             focused: Some(0),
             overlay: None,
         };

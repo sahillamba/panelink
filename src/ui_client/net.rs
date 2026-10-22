@@ -45,7 +45,7 @@ pub(crate) struct Net {
     /// Device/inode of the control socket observed at attach.
     endpoint_identity: Option<(u64, u64)>,
     layout: Option<LayoutReply>,
-    screen_revisions: [(Option<TargetRef>, u64); 2],
+    screen_revisions: [(Option<TargetRef>, u64); panelink::pane_layout::MAX_PANES],
 }
 
 /// Host-owned view inputs needed by one network poll.
@@ -103,7 +103,7 @@ impl Net {
             resize_sent: None,
             endpoint_identity,
             layout: None,
-            screen_revisions: [(None, 0), (None, 0)],
+            screen_revisions: [(None, 0); panelink::pane_layout::MAX_PANES],
         };
         let layout = match net.resume_any_context(now)? {
             Some(layout) => layout,

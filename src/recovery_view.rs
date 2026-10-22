@@ -5,7 +5,9 @@
 
 use crate::control_protocol::TargetRef;
 use crate::history_rows;
-use crate::pane_layout::{Rect, MAX_PANE_COLUMNS, MAX_PANE_ROWS, MIN_PANE_COLUMNS, MIN_PANE_ROWS};
+use crate::pane_layout::{
+    PaneGeometry, Rect, MAX_PANE_COLUMNS, MAX_PANE_ROWS, MIN_PANE_COLUMNS, MIN_PANE_ROWS,
+};
 use crate::saved_layout::{LayoutAxis, LayoutMetadata, SavedLayout};
 use crate::screen_checkpoint::ScreenBuffer;
 use std::fmt;
@@ -212,6 +214,10 @@ pub struct RecoveryView {
     pub saved_columns: u16,
     /// Historical spatial split orientation.
     pub axis: LayoutAxis,
+    /// Historical split dividers, retained for spatial overview rendering.
+    pub dividers: Vec<Rect>,
+    /// Historical pane rectangles in the same spatial order as `panes`.
+    pub pane_geometry: Vec<PaneGeometry>,
     /// Panes in validated saved spatial order; empty for a tombstone.
     pub panes: Vec<RecoveryPane>,
 }
@@ -233,10 +239,10 @@ impl fmt::Debug for RecoveryView {
 impl RecoveryView {
     /// Build an empty-data model from a fully validated layout.
     pub fn from_layout(layout: SavedLayout) -> Self {
-        let panes = layout
-            .geometry()
-            .into_iter()
-            .flatten()
+        let pane_geometry = layout.geometry().into_iter().flatten().collect::<Vec<_>>();
+        let panes = pane_geometry
+            .iter()
+            .copied()
             .map(|geometry| RecoveryPane {
                 historical_target: geometry.target,
                 rows: HistoryAvailability::Missing,
@@ -250,6 +256,8 @@ impl RecoveryView {
             saved_rows: layout.rows(),
             saved_columns: layout.columns(),
             axis: layout.axis(),
+            dividers: layout.dividers().iter().flatten().copied().collect(),
+            pane_geometry,
             panes,
         }
     }
@@ -292,6 +300,8 @@ pub enum DisplayPlan {
         panes: Vec<Rect>,
         /// One-cell divider when two panes are displayed.
         divider: Option<Rect>,
+        /// Full divider set for bounded multi-pane layouts.
+        dividers: Vec<Rect>,
     },
     /// The regular leaf sizes do not fit; draw only this scaled topology.
     Overview {
@@ -301,6 +311,8 @@ pub enum DisplayPlan {
         boxes: Vec<OverviewBox>,
         /// Divider coordinates in viewport-relative cells, when present.
         divider: Option<Rect>,
+        /// Full divider set for scaled multi-pane views.
+        dividers: Vec<Rect>,
     },
     /// The host is below the minimum size for even a labeled outline (<3x10).
     TooSmall,
@@ -339,6 +351,7 @@ pub fn plan_viewport(
                 viewport,
                 panes: Vec::new(),
                 divider: None,
+                dividers: Vec::new(),
             }
         } else {
             overview(view.axis, 0, content_rows, columns)
@@ -358,17 +371,19 @@ pub fn plan_viewport(
                     columns: display_columns,
                 }],
                 divider: None,
+                dividers: Vec::new(),
             };
         }
         return overview(LayoutAxis::Single, 1, content_rows, columns);
     }
 
-    let pane_geometry = regular_split(viewport.rows, viewport.columns, view.axis);
-    if let Some((panes, divider)) = pane_geometry {
+    let pane_geometry = regular_split(viewport.rows, viewport.columns, view.axis, view.panes.len());
+    if let Some((panes, dividers)) = pane_geometry {
         return DisplayPlan::Panes {
             viewport,
             panes,
-            divider,
+            divider: dividers.first().copied(),
+            dividers,
         };
     }
     overview(view.axis, view.panes.len(), viewport.rows, viewport.columns)
@@ -378,7 +393,68 @@ fn regular_leaf_fits(rows: u16, columns: u16) -> bool {
     rows >= MIN_PANE_ROWS && columns >= MIN_PANE_COLUMNS
 }
 
-fn regular_split(rows: u16, columns: u16, axis: LayoutAxis) -> Option<(Vec<Rect>, Option<Rect>)> {
+fn regular_split(
+    rows: u16,
+    columns: u16,
+    axis: LayoutAxis,
+    pane_count: usize,
+) -> Option<(Vec<Rect>, Vec<Rect>)> {
+    if pane_count > 2 {
+        let columns_per_side = (columns - 1) / 2;
+        let rows_per_side = (rows - 1) / 2;
+        if columns_per_side < MIN_PANE_COLUMNS || rows_per_side < MIN_PANE_ROWS {
+            return None;
+        }
+        let right_x = columns_per_side + 1;
+        let bottom_y = rows_per_side + 1;
+        let panes = vec![
+            Rect {
+                x: 0,
+                y: 0,
+                rows: rows_per_side,
+                columns: columns_per_side,
+            },
+            Rect {
+                x: right_x,
+                y: 0,
+                rows: rows_per_side,
+                columns: columns - right_x,
+            },
+            Rect {
+                x: 0,
+                y: bottom_y,
+                rows: rows - bottom_y,
+                columns: columns_per_side,
+            },
+            Rect {
+                x: right_x,
+                y: bottom_y,
+                rows: rows - bottom_y,
+                columns: columns - right_x,
+            },
+        ];
+        let dividers = vec![
+            Rect {
+                x: columns_per_side,
+                y: 0,
+                rows: rows_per_side,
+                columns: 1,
+            },
+            Rect {
+                x: columns_per_side,
+                y: bottom_y,
+                rows: rows - bottom_y,
+                columns: 1,
+            },
+            Rect {
+                x: 0,
+                y: rows_per_side,
+                rows: 1,
+                columns,
+            },
+        ];
+        return Some((panes, dividers));
+    }
     let (first, second, divider) = match axis {
         LayoutAxis::SideBySide => {
             let usable = columns.checked_sub(1)?;
@@ -439,7 +515,7 @@ fn regular_split(rows: u16, columns: u16, axis: LayoutAxis) -> Option<(Vec<Rect>
             && rect.rows <= MAX_PANE_ROWS
             && rect.columns <= MAX_PANE_COLUMNS
     }) {
-        Some((vec![first, second], Some(divider)))
+        Some((vec![first, second], vec![divider]))
     } else {
         None
     }
@@ -465,6 +541,59 @@ fn overview(axis: LayoutAxis, pane_count: usize, rows: u16, columns: u16) -> Dis
                 label: OverviewLabel::Empty,
             }],
             divider: None,
+            dividers: Vec::new(),
+        };
+    }
+
+    if pane_count > 2 {
+        let mid_x = columns / 2;
+        let mid_y = rows / 2;
+        let boxes = (0..pane_count.min(4))
+            .map(|index| {
+                let right = index % 2 == 1;
+                let bottom = index / 2 == 1;
+                let x = if right { mid_x + 1 } else { 0 };
+                let y = if bottom { mid_y + 1 } else { 0 };
+                OverviewBox {
+                    rect: Rect {
+                        x,
+                        y,
+                        rows: if bottom { rows - y } else { mid_y },
+                        columns: if right { columns - x } else { mid_x },
+                    },
+                    label: if index == 0 {
+                        OverviewLabel::PaneOne
+                    } else {
+                        OverviewLabel::PaneTwo
+                    },
+                }
+            })
+            .collect();
+        let dividers = [
+            Some(Rect {
+                x: mid_x,
+                y: 0,
+                rows: mid_y,
+                columns: 1,
+            }),
+            Some(Rect {
+                x: mid_x,
+                y: mid_y + 1,
+                rows: rows - mid_y - 1,
+                columns: 1,
+            }),
+            Some(Rect {
+                x: 0,
+                y: mid_y,
+                rows: 1,
+                columns,
+            }),
+        ];
+        return DisplayPlan::Overview {
+            viewport,
+            boxes,
+            divider: dividers[0],
+            dividers: dividers.into_iter().flatten().collect(),
         };
     }
 
@@ -560,6 +689,7 @@ fn overview(axis: LayoutAxis, pane_count: usize, rows: u16, columns: u16) -> Dis
         viewport,
         boxes,
         divider,
+        dividers: divider.into_iter().collect(),
     }
 }
 

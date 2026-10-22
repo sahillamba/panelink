@@ -83,8 +83,11 @@ fn saved_layout_one(generation: u64, workspace: u64, sequence: u64, revision: u6
                 },
             }),
             None,
+            None,
+            None,
         ],
         divider: None,
+        dividers: [None; panelink::pane_layout::MAX_PANES - 1],
     };
     SavedLayout::from_snapshot(meta, &snapshot).expect("valid one-pane saved layout")
 }

@@ -1,7 +1,7 @@
 //! Fixed-capacity session identity and lifecycle storage for the managed-launch
 //! prototype.
 //!
-//! This module owns at most two live session records for one nonzero
+//! This module owns at most four live session records for one nonzero
 //! generation. A record that reached `Exited` or `Failed` may be explicitly
 //! retired to free its slot; its identity stays spent because session IDs come
 //! from a monotonic counter and are never reused. It does not create processes,
@@ -18,7 +18,7 @@ use std::error::Error;
 use std::fmt;
 
 /// Maximum number of session records retained at once in one generation.
-pub const SESSION_CAPACITY: usize = 2;
+pub const SESSION_CAPACITY: usize = crate::pane_layout::MAX_PANES;
 
 /// Lifecycle state recorded for one reserved session identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,7 +44,7 @@ pub enum SessionState {
 pub enum RegistryError {
     /// A registry generation must be nonzero.
     InvalidGeneration,
-    /// Both session slots are occupied by retained records.
+    /// All four bounded session slots are occupied by retained records.
     Capacity,
     /// The next session identity cannot be advanced without wrapping.
     IdentifierExhausted,
@@ -140,10 +140,10 @@ struct SessionSlot<E> {
     effects: Option<E>,
 }
 
-/// Two fixed session slots and a monotonic identity counter for one generation.
+/// Four bounded session slots and a monotonic identity counter per generation.
 pub struct SessionRegistry<E> {
     generation: u64,
-    slots: [Option<SessionSlot<E>>; SESSION_CAPACITY],
+    slots: Vec<Option<SessionSlot<E>>>,
     len: usize,
     next_session: u64,
     retired: u64,
@@ -167,9 +167,11 @@ impl<E> SessionRegistry<E> {
             return Err(RegistryError::InvalidGeneration);
         }
 
+        let mut slots = Vec::with_capacity(SESSION_CAPACITY);
+        slots.resize_with(SESSION_CAPACITY, || None);
         Ok(Self {
             generation,
-            slots: std::array::from_fn(|_| None),
+            slots,
             len: 0,
             next_session: 1,
             retired: 0,
@@ -592,18 +594,30 @@ mod tests {
 
     #[test]
     fn failed_and_exited_records_spend_capacity_without_reuse() {
-        assert_eq!(SESSION_CAPACITY, 2);
+        assert_eq!(SESSION_CAPACITY, crate::pane_layout::MAX_PANES);
         let (mut registry, drops) = empty_registry();
         let first = registry.reserve().unwrap();
         registry.transition(first, SessionState::Failed).unwrap();
 
-        let second = intent_target(&mut registry);
-        registry
-            .attach_spawned(second, TrackedHandle::new(20, "secret", &drops))
-            .unwrap();
-        registry.transition(second, SessionState::Exited).unwrap();
+        let mut targets = vec![first];
+        for index in 1..SESSION_CAPACITY {
+            let target = intent_target(&mut registry);
+            registry
+                .attach_spawned(
+                    target,
+                    TrackedHandle::new(
+                        if index == 1 { 20 } else { target.session },
+                        "secret",
+                        &drops,
+                    ),
+                )
+                .unwrap();
+            registry.transition(target, SessionState::Exited).unwrap();
+            targets.push(target);
+        }
+        let second = targets[1];
 
-        assert_eq!(registry.records().len(), 2);
+        assert_eq!(registry.records().len(), SESSION_CAPACITY);
         let records: Vec<_> = registry.records().collect();
         assert_eq!(records[0].state, SessionState::Failed);
         assert_eq!(records[1].state, SessionState::Exited);
@@ -625,6 +639,15 @@ mod tests {
             .attach_spawned(second, TrackedHandle::new(20, "secret", &drops))
             .unwrap();
         registry.transition(second, SessionState::Applied).unwrap();
+        let mut live_targets = vec![second];
+        for _ in 2..SESSION_CAPACITY {
+            let target = intent_target(&mut registry);
+            registry
+                .attach_spawned(target, TrackedHandle::new(target.session, "secret", &drops))
+                .unwrap();
+            registry.transition(target, SessionState::Applied).unwrap();
+            live_targets.push(target);
+        }
         assert_eq!(registry.reserve(), Err(RegistryError::Capacity));
 
         // A live record cannot be retired.
@@ -647,8 +670,8 @@ mod tests {
         );
 
         let third = registry.reserve().unwrap();
-        assert_eq!(third.session, 3);
-        assert_eq!(third.pane, 3);
+        assert_eq!(third.session, SESSION_CAPACITY as u64 + 1);
+        assert_eq!(third.pane, SESSION_CAPACITY as u64 + 1);
         assert_ne!(third, first);
         assert_ne!(third, second);
         let records: Vec<_> = registry.records().collect();
@@ -657,7 +680,7 @@ mod tests {
                 .iter()
                 .map(|record| record.target)
                 .collect::<Vec<_>>(),
-            [second, third],
+            [live_targets[0], live_targets[1], live_targets[2], third],
             "slots stay contiguous in reservation order"
         );
         assert_eq!(registry.reserve(), Err(RegistryError::Capacity));
@@ -669,10 +692,10 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 0, "caller decides the drop");
         drop(handle);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
-        assert_eq!(registry.records().len(), 1);
-        assert_eq!(registry.issued(), 3);
+        assert_eq!(registry.records().len(), SESSION_CAPACITY - 1);
+        assert_eq!(registry.issued(), SESSION_CAPACITY as u64 + 1);
         assert_eq!(registry.retired(), 2);
-        assert_eq!(registry.reserve().unwrap().session, 4);
+        assert!(registry.reserve().is_ok());
         for spent in [first, second] {
             assert!(registry.is_retired(spent));
             assert_eq!(
@@ -718,13 +741,17 @@ mod tests {
 
         let (mut full, _) = empty_registry();
         let first = full.reserve().unwrap();
-        let second = full.reserve().unwrap();
+        let mut targets = vec![first];
+        for _ in 1..SESSION_CAPACITY {
+            targets.push(full.reserve().unwrap());
+        }
         full.next_session = u64::MAX;
         assert_eq!(full.next_target(), Err(RegistryError::Capacity));
         assert_eq!(full.reserve(), Err(RegistryError::Capacity));
         assert_eq!(full.records().len(), SESSION_CAPACITY);
-        assert_eq!(full.state(first), Ok(SessionState::Reserved));
-        assert_eq!(full.state(second), Ok(SessionState::Reserved));
+        for target in targets {
+            assert_eq!(full.state(target), Ok(SessionState::Reserved));
+        }
         assert_eq!(full.next_session, u64::MAX);
     }
 

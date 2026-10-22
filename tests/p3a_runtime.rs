@@ -587,8 +587,9 @@ fn split_ui_keys_and_resize_over_socketpairs_with_two_real_zsh_children() {
         assert_eq!(layout.revision, 2);
         // Third split: a fresh key at capacity is recorded Failed.
         let fake_single = LayoutReply {
-            panes: [layout.panes[0], None],
+            panes: [layout.panes[0], None, None, None],
             divider: None,
+            dividers: [None; panelink::pane_layout::MAX_PANES - 1],
             ..layout
         };
         let fake_single = LayoutReply {
@@ -602,6 +603,8 @@ fn split_ui_keys_and_resize_over_socketpairs_with_two_real_zsh_children() {
                     },
                     ..fake_single.panes[0].unwrap()
                 }),
+                None,
+                None,
                 None,
             ],
             ..fake_single

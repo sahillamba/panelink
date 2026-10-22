@@ -175,8 +175,8 @@ fn key(generation: u64, sequence: u64) -> OperationKey {
 fn split_payload(
     generation: u64,
     sequence: u64,
-    target: TargetRef,
-    revision: u64,
+    (target, revision): (TargetRef, u64),
+    (direction, rows, columns): (SplitDirection, u16, u16),
     shell: Shell,
     context: &LaunchContext,
     marker: &str,
@@ -186,8 +186,8 @@ fn split_payload(
     let split_key = key(generation, sequence);
     let launch = LaunchRequest {
         key: split_key,
-        rows: ROOT_ROWS,
-        columns: PANE_COLUMNS,
+        rows,
+        columns,
         requested_executable: shell.executable,
         requested_working_directory: &context.cwd,
         client_working_directory: &context.cwd,
@@ -200,7 +200,7 @@ fn split_payload(
             key: split_key,
             target,
             expected_layout_revision: revision,
-            direction: SplitDirection::Right,
+            direction,
             launch: &launch,
         },
         &mut payload,
@@ -511,8 +511,8 @@ fn split_scenario(shell: Shell) {
     let second_payload = split_payload(
         generation,
         2,
-        first_target,
-        layout.revision,
+        (first_target, layout.revision),
+        (SplitDirection::Right, ROOT_ROWS, PANE_COLUMNS),
         shell,
         &context,
         second_name,
@@ -622,28 +622,6 @@ fn split_scenario(shell: Shell) {
         owner.layout_snapshot().map(|layout| layout.revision),
         Some(2)
     );
-    // Still exactly two retained children: a third launch hits the cap.
-    let third = {
-        let mut journal = storage.journal().expect("open launch journal");
-        owner.execute_launch(
-            &launch_payload(
-                key(generation, 3),
-                shell,
-                (ROOT_ROWS, PANE_COLUMNS),
-                &context,
-                b"exit 0",
-                "third",
-            ),
-            NOW,
-            &mut journal,
-            |_, _| -> Result<PreparedLaunch, ()> { panic!("capacity precedes prepare") },
-            |_| -> Result<PtyEffects, ()> { panic!("capacity precedes spawn") },
-        )
-    };
-    assert!(matches!(
-        third,
-        Err(ManagedLaunchError::Registry(RegistryError::Capacity))
-    ));
     // Neither ACK was replayed by the retry.
     owner.poll(NOW).expect("poll after retry");
     let first_screen = read_screen(&mut owner, &mut first_client);
@@ -671,10 +649,90 @@ fn split_scenario(shell: Shell) {
         Some(3)
     );
 
+    // Fill the remaining capacity (SESSION_CAPACITY = MAX_PANES) with real
+    // children by splitting each 30x50 half down (feasible: 29 usable rows
+    // give a 14-row original and a 15-row new pane), then prove the next new
+    // identity is refused before prepare or spawn.
+    let capacity = panelink::session_registry::SESSION_CAPACITY as u64;
+    let split_sources = [first_target, second_target];
+    assert!(
+        capacity as usize <= 2 + split_sources.len(),
+        "extend the split sources if capacity grows"
+    );
+    let mut layout_revision = grown.revision;
+    let mut extra_pids = Vec::new();
+    for sequence in 3..=capacity {
+        let source = split_sources[(sequence - 3) as usize];
+        let name = format!("split-extra-{sequence}");
+        let ready = format!("P3SP-READY-{name}");
+        let payload = split_payload(
+            generation,
+            sequence,
+            (source, layout_revision),
+            (SplitDirection::Down, 15, 50),
+            shell,
+            &context,
+            &name,
+        );
+        let extra = {
+            let mut journal = storage.journal().expect("open launch journal");
+            owner
+                .execute_split(
+                    &payload,
+                    NOW,
+                    &mut journal,
+                    |request, target| prepare(request, target, fixture.path()),
+                    spawn,
+                    resize,
+                )
+                .expect("split down within capacity through the production launch path")
+        };
+        assert_eq!(extra.outcome, Outcome::Applied);
+        assert_eq!(extra.committed_layout_revision, layout_revision + 1);
+        assert_eq!(extra.existing_target, source);
+        layout_revision = extra.committed_layout_revision;
+        let extra_target = extra.new_target.expect("split assigns the new target");
+        let mut extra_client = connect_and_claim(&mut owner, extra_target, 303 + sequence);
+        let screen = wait_for(&mut owner, &mut extra_client, &ready, &[&first_ready]);
+        extra_pids.push(extract_pid(&screen, &ready).expect("extra READY carries PID"));
+    }
+    assert_eq!(
+        owner.layout_snapshot().map(|layout| layout.pane_count()),
+        Some(capacity as usize)
+    );
+
+    let refused = {
+        let mut journal = storage.journal().expect("open launch journal");
+        owner.execute_launch(
+            &launch_payload(
+                key(generation, capacity + 1),
+                shell,
+                (ROOT_ROWS, PANE_COLUMNS),
+                &context,
+                b"exit 0",
+                "over-capacity",
+            ),
+            NOW,
+            &mut journal,
+            |_, _| -> Result<PreparedLaunch, ()> { panic!("capacity precedes prepare") },
+            |_| -> Result<PtyEffects, ()> { panic!("capacity precedes spawn") },
+        )
+    };
+    assert!(matches!(
+        refused,
+        Err(ManagedLaunchError::Registry(RegistryError::Capacity))
+    ));
+
     assert_process_alive(first_pid);
     assert_process_alive(second_pid);
+    for pid in &extra_pids {
+        assert_process_alive(*pid);
+    }
     drop(owner);
     assert_process_reaped(first_pid);
     assert_process_reaped(second_pid);
+    for pid in &extra_pids {
+        assert_process_reaped(*pid);
+    }
     drop(storage);
 }

@@ -44,14 +44,14 @@ enum ViewerKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RecoveryUi {
     focus: usize,
-    buffers: [ScreenBuffer; 2],
+    buffers: [ScreenBuffer; panelink::pane_layout::MAX_PANES],
 }
 
 impl RecoveryUi {
     const fn new() -> Self {
         Self {
             focus: 0,
-            buffers: [ScreenBuffer::Normal; 2],
+            buffers: [ScreenBuffer::Normal; panelink::pane_layout::MAX_PANES],
         }
     }
 
@@ -132,6 +132,10 @@ fn run_frames(
             .map_err(|_| "could not allocate recovery view")?,
         ScreenSnapshot::try_new(TerminalSize::new(80, 240).map_err(|_| "invalid frame size")?)
             .map_err(|_| "could not allocate recovery view")?,
+        ScreenSnapshot::try_new(TerminalSize::new(80, 240).map_err(|_| "invalid frame size")?)
+            .map_err(|_| "could not allocate recovery view")?,
+        ScreenSnapshot::try_new(TerminalSize::new(80, 240).map_err(|_| "invalid frame size")?)
+            .map_err(|_| "could not allocate recovery view")?,
     ];
     let mut frame_bytes = Vec::new();
     frame_bytes
@@ -141,7 +145,8 @@ fn run_frames(
     let mut input = [0_u8; INPUT_BYTES];
     let mut decoder = Decoder::new();
     let mut ui = RecoveryUi::new();
-    let mut history_cache: [Option<(u16, u16, Vec<u8>)>; 2] = [None, None];
+    let mut history_cache: [Option<(u16, u16, Vec<u8>)>; panelink::pane_layout::MAX_PANES] =
+        std::array::from_fn(|_| None);
     let mut current_size = (rows, columns);
     let mut last_resize = Instant::now();
     let mut last_render = Instant::now() - RENDER_INTERVAL;
@@ -277,8 +282,8 @@ fn map_key(key: KeyEvent) -> ViewerKey {
 fn compose(
     view: &RecoveryView,
     ui: &mut RecoveryUi,
-    history_cache: &mut [Option<(u16, u16, Vec<u8>)>; 2],
-    snapshots: &mut [ScreenSnapshot; 2],
+    history_cache: &mut [Option<(u16, u16, Vec<u8>)>; panelink::pane_layout::MAX_PANES],
+    snapshots: &mut [ScreenSnapshot; panelink::pane_layout::MAX_PANES],
     (host_rows, host_columns): (u16, u16),
     compositor: &mut Compositor,
     output: &mut impl Write,
@@ -286,28 +291,41 @@ fn compose(
     let bounded_rows = host_rows.min(80);
     let bounded_columns = host_columns.min(240);
     let plan = plan_viewport(view, bounded_rows, bounded_columns, CHROME_ROWS);
-    let (_content_rows, pane_rects, divider, overview_boxes) = match &plan {
+    let (_content_rows, pane_rects, divider, dividers, overview_boxes) = match &plan {
         DisplayPlan::Panes {
             viewport,
             panes,
             divider,
-        } => (viewport.rows, panes.clone(), *divider, None),
+            dividers,
+        } => (
+            viewport.rows,
+            panes.clone(),
+            *divider,
+            dividers.clone(),
+            None,
+        ),
         DisplayPlan::Overview {
             viewport,
             boxes,
             divider,
+            dividers,
         } => (
             viewport.rows,
             Vec::new(),
             *divider,
+            dividers.clone(),
             Some((*viewport, boxes.clone())),
         ),
-        DisplayPlan::TooSmall => (0, Vec::new(), None, None),
+        DisplayPlan::TooSmall => (0, Vec::new(), None, Vec::new(), None),
     };
 
     if matches!(plan, DisplayPlan::TooSmall) {
         if bounded_rows == 0 || bounded_columns == 0 {
             return Ok(());
+        }
+        let mut recovery_dividers = [None; panelink::pane_layout::MAX_PANES - 1];
+        for (slot, divider) in recovery_dividers.iter_mut().zip(dividers.iter().copied()) {
+            *slot = Some(add_chrome(divider));
         }
         let frame = ComposeFrame {
             host_rows: bounded_rows,
@@ -323,8 +341,11 @@ fn compose(
                     content: PaneContent::Placeholder("terminal too small"),
                 }),
                 None,
+                None,
+                None,
             ],
             divider: None,
+            dividers: [None; panelink::pane_layout::MAX_PANES - 1],
             focused: None,
             overlay: None,
         };
@@ -333,7 +354,7 @@ fn compose(
             .map_err(|_| "could not render recovery notice");
     }
 
-    let mut has_snapshot = [false; 2];
+    let mut has_snapshot = [false; panelink::pane_layout::MAX_PANES];
     for (index, (pane, rect)) in view.panes.iter().zip(pane_rects.iter()).enumerate() {
         if index >= snapshots.len() {
             break;
@@ -372,7 +393,8 @@ fn compose(
         }
     }
 
-    let mut panes: [Option<PaneView<'_>>; 2] = [None, None];
+    let mut panes: [Option<PaneView<'_>>; panelink::pane_layout::MAX_PANES] =
+        [None; panelink::pane_layout::MAX_PANES];
     for (index, (pane, rect)) in view.panes.iter().zip(pane_rects.iter()).enumerate() {
         if index >= panes.len() {
             break;
@@ -440,6 +462,10 @@ fn compose(
             style: OverlayStyle::Normal,
         },
     ];
+    let mut recovery_dividers = [None; panelink::pane_layout::MAX_PANES - 1];
+    for (slot, divider) in recovery_dividers.iter_mut().zip(dividers.iter().copied()) {
+        *slot = Some(add_chrome(divider));
+    }
     let overlay = (bounded_rows > 0 && bounded_columns > 0).then_some(OverlayView {
         rect: panelink::pane_layout::Rect {
             x: 0,
@@ -469,6 +495,7 @@ fn compose(
             host_columns: bounded_columns,
             panes,
             divider: divider.map(add_chrome),
+            dividers: recovery_dividers,
             focused: None,
             overlay,
         };
@@ -479,17 +506,19 @@ fn compose(
         return Ok(());
     }
 
-    if let Some(first) = panes[0].as_mut() {
-        first.rect = add_chrome(first.rect);
+    for pane in panes.iter_mut().flatten() {
+        pane.rect = add_chrome(pane.rect);
     }
-    if let Some(second) = panes[1].as_mut() {
-        second.rect = add_chrome(second.rect);
+    let mut recovery_dividers = [None; panelink::pane_layout::MAX_PANES - 1];
+    for (slot, divider) in recovery_dividers.iter_mut().zip(dividers.iter().copied()) {
+        *slot = Some(add_chrome(divider));
     }
     let frame = ComposeFrame {
         host_rows: bounded_rows,
         host_columns: bounded_columns,
         panes,
         divider: divider.map(add_chrome),
+        dividers: recovery_dividers,
         focused: None,
         overlay,
     };
@@ -744,14 +773,14 @@ mod tests {
             30,
         ));
         let mut ui = RecoveryUi::new();
-        let mut snapshots = [snapshot(), snapshot()];
+        let mut snapshots = [snapshot(), snapshot(), snapshot(), snapshot()];
         let mut compositor = Compositor::try_new().unwrap();
         let mut bytes = [0_u8; 64 * 1024];
         let mut output = io::Cursor::new(&mut bytes[..]);
         compose(
             &saved,
             &mut ui,
-            &mut [None, None],
+            &mut [None, None, None, None],
             &mut snapshots,
             (10, 30),
             &mut compositor,
@@ -783,17 +812,23 @@ mod tests {
             },
             ..pane_with_checkpoint(checkpoint_record(5, 20, "other"), 5, 20)
         });
+        saved.dividers = vec![Rect {
+            x: 0,
+            y: 3,
+            rows: 5,
+            columns: 1,
+        }];
         saved.axis = panelink::saved_layout::LayoutAxis::SideBySide;
         for size in [(8, 20), (2, 10)] {
             let mut ui = RecoveryUi::new();
-            let mut snapshots = [snapshot(), snapshot()];
+            let mut snapshots = [snapshot(), snapshot(), snapshot(), snapshot()];
             let mut compositor = Compositor::try_new().unwrap();
             let mut bytes = [0_u8; 256 * 1024];
             let mut output = io::Cursor::new(&mut bytes[..]);
             compose(
                 &saved,
                 &mut ui,
-                &mut [None, None],
+                &mut [None, None, None, None],
                 &mut snapshots,
                 size,
                 &mut compositor,

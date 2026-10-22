@@ -101,6 +101,8 @@ fn layout(generation: u64, session: u64, pane_count: usize) -> SavedLayout {
                     },
                 }),
                 None,
+                None,
+                None,
             ],
             None,
         )
@@ -128,6 +130,8 @@ fn layout(generation: u64, session: u64, pane_count: usize) -> SavedLayout {
                         columns: 41,
                     },
                 }),
+                None,
+                None,
             ],
             Some(Rect {
                 x: 40,
@@ -145,6 +149,7 @@ fn layout(generation: u64, session: u64, pane_count: usize) -> SavedLayout {
             columns: if pane_count == 1 { 30 } else { 82 },
             panes,
             divider,
+            dividers: [divider, None, None],
         },
     )
     .unwrap()

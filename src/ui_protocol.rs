@@ -50,7 +50,7 @@
 //!
 //! | Kind | Name | Size |
 //! | ---: | --- | ---: |
-//! | `0x8001` | LayoutReply | 184 |
+//! | `0x8001` | LayoutReply schema 9 | 424 |
 //! | `0x8002` | ScreenReply header | 64 + checkpoint (Snapshot frame) |
 //! | `0x8003` | ResizeReply | 48 |
 //!
@@ -62,13 +62,12 @@
 //! | 4 | 8 | layout revision, nonzero |
 //! | 12 | 2 | root rows |
 //! | 14 | 2 | root columns |
-//! | 16 | 2 | pane count, 1 or 2 |
-//! | 18 | 2 | divider present, 0 or 1 |
-//! | 20 | 8 | divider rect x, y, rows, columns (u16 each; zero when absent) |
-//! | 28 | 4 | reserved, zero |
-//! | 32 | 72 | pane 0 |
-//! | 104 | 72 | pane 1 (all zero when absent) |
-//! | 176 | 8 | reserved, zero |
+//! | 16 | 2 | pane count, 1 through 4 |
+//! | 18 | 2 | divider count, 0 through 3 |
+//! | 20 | 24 | three divider rectangles (8 bytes each; zero when absent) |
+//! | 44 | 4 | reserved, zero |
+//! | 48 | 288 | four pane entries (72 bytes each; zero when absent) |
+//! | 336 | 88 | reserved, zero |
 //!
 //! Pane entry (72 bytes): target (40), rect x, y, rows, columns (8),
 //! pending-resize flag u16 (0 or 1), reserved u16 zero, confirmed rows u16,
@@ -80,13 +79,13 @@
 //! checkpoint is one complete `screen_checkpoint` record for the same target.
 //!
 //! ResizeReply: `0 schema | 2 kind 0x8003 | 4 key (24) | 28 status u16 (1
-//! Applied, 2 ResizePending) | 30 pending pane flags u16 (bit 0 pane 0, bit 1
-//! pane 1) | 32 committed layout revision u64 nonzero | 40 rows u16 | 42
+//! Applied, 2 ResizePending) | 30 pending pane flags u16 (bit i = spatial pane
+//! i, i < MAX_PANES; higher bits zero) | 32 committed layout revision u64 nonzero | 40 rows u16 | 42
 //! columns u16 | 44 reserved 4 zero`.
 
 use crate::control_protocol::TargetRef;
 use crate::pane_layout::{
-    LayoutError, PaneLayout, Rect, SplitDirection, MAX_PANE_COLUMNS, MAX_PANE_ROWS,
+    LayoutError, Rect, SplitDirection, MAX_PANES, MAX_PANE_COLUMNS, MAX_PANE_ROWS,
     MIN_PANE_COLUMNS, MIN_PANE_ROWS,
 };
 use crate::protocol::{OperationClass, OperationKey};
@@ -96,6 +95,8 @@ use std::fmt;
 
 /// Wire schema used for the experimental pane-UI payloads.
 pub const UI_SCHEMA: u16 = 8;
+/// LayoutReply wire version; the larger fixed payload rejects schema-8 layouts.
+pub const LAYOUT_REPLY_SCHEMA: u16 = 9;
 /// Exact size of a LayoutQuery request.
 pub const LAYOUT_QUERY_BYTES: usize = 8;
 /// Exact size of a ScreenQuery request.
@@ -113,7 +114,7 @@ pub const ROOT_RESIZE_BYTES: usize = 40;
 /// Exact size of the AttachTarget Hello trailer.
 pub const ATTACH_TARGET_BYTES: usize = 48;
 /// Exact size of a LayoutReply.
-pub const LAYOUT_REPLY_BYTES: usize = 184;
+pub const LAYOUT_REPLY_BYTES: usize = 424;
 /// Fixed ScreenReply header before the checkpoint record.
 pub const SCREEN_REPLY_HEADER_BYTES: usize = 64;
 /// Exact size of a ResizeReply.
@@ -128,8 +129,8 @@ const KIND_LAYOUT_REPLY: u16 = 0x8001;
 const KIND_SCREEN_REPLY: u16 = 0x8002;
 const KIND_RESIZE_REPLY: u16 = 0x8003;
 const PANE_ENTRY_BYTES: usize = 72;
-const PANE0_OFFSET: usize = 32;
-const PANE1_OFFSET: usize = 104;
+const DIVIDER_OFFSET: usize = 20;
+const PANE0_OFFSET: usize = 48;
 const MAX_SCREEN_REPLY_CHECKPOINT_BYTES: usize =
     crate::screen_checkpoint::MAX_SCREEN_CHECKPOINT_BYTES;
 
@@ -137,7 +138,7 @@ const MAX_SCREEN_REPLY_CHECKPOINT_BYTES: usize =
 pub const MAX_SCREEN_REPLY_BYTES: usize =
     SCREEN_REPLY_HEADER_BYTES + MAX_SCREEN_REPLY_CHECKPOINT_BYTES;
 
-/// Fixed, data-free validation errors for schema-8 payloads.
+/// Fixed, data-free validation errors for schema-9 payloads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiCodecError {
     /// The payload is shorter than its fixed or declared size.
@@ -146,7 +147,7 @@ pub enum UiCodecError {
     TrailingBytes,
     /// The payload exceeds its kind's limit.
     PayloadTooLarge,
-    /// The schema is not 8.
+    /// The schema is not 9.
     UnsupportedSchema,
     /// The request or reply kind is unknown.
     UnknownKind,
@@ -406,9 +407,11 @@ pub struct LayoutReply {
     /// Root columns.
     pub columns: u16,
     /// Spatially ordered panes; pane 0 is always present.
-    pub panes: [Option<UiPane>; 2],
-    /// One-cell divider, present exactly when two panes exist.
+    pub panes: [Option<UiPane>; crate::pane_layout::MAX_PANES],
+    /// First divider, retained for source compatibility with older callers.
     pub divider: Option<Rect>,
+    /// Spatially traversed one-cell dividers; unused entries are `None`.
+    pub dividers: [Option<Rect>; crate::pane_layout::MAX_PANES - 1],
 }
 
 impl fmt::Debug for LayoutReply {
@@ -472,7 +475,7 @@ pub struct ResizeReply {
     /// Applied or ResizePending.
     pub status: ResizeStatus,
     /// Which layout panes are still resize-pending.
-    pub pending: [bool; 2],
+    pub pending: [bool; crate::pane_layout::MAX_PANES],
     /// Committed (current) layout revision.
     pub revision: u64,
     /// Committed root rows.
@@ -492,41 +495,23 @@ impl fmt::Debug for ResizeReply {
     }
 }
 
-/// Compute the new pane's `(rows, columns)` for splitting `target` in a
-/// one-pane layout, using the same pure geometry the server will apply.
+/// Compute the new pane's `(rows, columns)` using the same pure geometry the
+/// server will apply.
 ///
 /// This is a client-side preview only; the server recomputes and rejects a
-/// mismatched launch size. A two-pane layout reports `PaneLimitExceeded`.
+/// mismatched launch size. A layout at capacity reports `PaneLimitExceeded`.
 pub fn planned_split_size(
     layout: &LayoutReply,
     target: TargetRef,
     direction: SplitDirection,
 ) -> Result<(u16, u16), LayoutError> {
-    if layout.panes[1].is_some() {
-        return Err(LayoutError::PaneLimitExceeded);
-    }
-    let pane = layout.panes[0].ok_or(LayoutError::InvalidLayoutState)?;
-    if pane.target != target {
-        return Err(LayoutError::StaleTarget);
-    }
-    let local = PaneLayout::new(target, layout.rows, layout.columns)?;
-    // Geometry does not depend on the sibling identity; use a distinct
-    // placeholder in the same workspace.
-    let placeholder = TargetRef {
-        pane: target.pane.wrapping_add(1).max(1),
-        session: target.session.wrapping_add(1).max(1),
-        ..target
-    };
-    let planned = local
-        .preview_split(target, 1, direction, placeholder)?
-        .planned_snapshot();
-    planned
+    let pane = layout
         .panes
-        .into_iter()
+        .iter()
         .flatten()
-        .find(|pane| pane.target == placeholder)
-        .map(|pane| (pane.rect.rows, pane.rect.columns))
-        .ok_or(LayoutError::InvalidLayoutState)
+        .find(|pane| pane.target == target)
+        .ok_or(LayoutError::StaleTarget)?;
+    crate::pane_layout::split_geometry(pane.rect, direction)
 }
 
 /// Encode a LayoutQuery.
@@ -673,18 +658,24 @@ fn decode_key_input(bytes: &[u8]) -> Result<KeyInputView<'_>, UiCodecError> {
 pub fn encode_layout_reply(reply: &LayoutReply) -> Result<[u8; LAYOUT_REPLY_BYTES], UiCodecError> {
     validate_layout(reply)?;
     let mut bytes = [0_u8; LAYOUT_REPLY_BYTES];
-    put_header(&mut bytes, KIND_LAYOUT_REPLY);
+    put_u16(&mut bytes, 0, LAYOUT_REPLY_SCHEMA);
+    put_u16(&mut bytes, 2, KIND_LAYOUT_REPLY);
     put_u64(&mut bytes, 4, reply.revision);
     put_u16(&mut bytes, 12, reply.rows);
     put_u16(&mut bytes, 14, reply.columns);
     let count = reply.panes.iter().flatten().count() as u16;
     put_u16(&mut bytes, 16, count);
-    if let Some(divider) = reply.divider {
-        put_u16(&mut bytes, 18, 1);
-        put_rect(&mut bytes, 20, divider);
+    let dividers = layout_dividers(reply);
+    let divider_count = dividers.iter().flatten().count() as u16;
+    put_u16(&mut bytes, 18, divider_count);
+    for (index, divider) in dividers.iter().enumerate() {
+        if let Some(divider) = divider {
+            put_rect(&mut bytes, DIVIDER_OFFSET + index * 8, *divider);
+        }
     }
-    for (pane, offset) in reply.panes.iter().zip([PANE0_OFFSET, PANE1_OFFSET]) {
+    for (index, pane) in reply.panes.iter().enumerate() {
         if let Some(pane) = pane {
+            let offset = PANE0_OFFSET + index * PANE_ENTRY_BYTES;
             put_target(&mut bytes, offset, pane.target);
             put_rect(&mut bytes, offset + 40, pane.rect);
             if let Some((rows, columns)) = pane.pending_confirmed {
@@ -700,20 +691,26 @@ pub fn encode_layout_reply(reply: &LayoutReply) -> Result<[u8; LAYOUT_REPLY_BYTE
 /// Decode and validate one exact LayoutReply.
 pub fn decode_layout_reply(bytes: &[u8]) -> Result<LayoutReply, UiCodecError> {
     exact_size(bytes, LAYOUT_REPLY_BYTES)?;
-    header(bytes, KIND_LAYOUT_REPLY)?;
+    layout_header(bytes)?;
     let count = read_u16(bytes, 16);
-    let divider = match read_u16(bytes, 18) {
-        0 => {
-            zero(&bytes[20..28])?;
-            None
+    let divider_count = usize::from(read_u16(bytes, 18));
+    if divider_count > crate::pane_layout::MAX_PANES - 1 {
+        return Err(UiCodecError::InvalidLayout);
+    }
+    let mut dividers = [None; crate::pane_layout::MAX_PANES - 1];
+    for (index, divider) in dividers.iter_mut().enumerate() {
+        let offset = DIVIDER_OFFSET + index * 8;
+        if index >= divider_count {
+            zero(&bytes[offset..offset + 8])?;
+        } else {
+            *divider = Some(read_rect(bytes, offset));
         }
-        1 => Some(read_rect(bytes, 20)),
-        _ => return Err(UiCodecError::InvalidLayout),
-    };
-    zero(&bytes[28..32])?;
-    zero(&bytes[176..LAYOUT_REPLY_BYTES])?;
-    let mut panes = [None; 2];
-    for (index, offset) in [PANE0_OFFSET, PANE1_OFFSET].into_iter().enumerate() {
+    }
+    zero(&bytes[44..PANE0_OFFSET])?;
+    zero(&bytes[336..LAYOUT_REPLY_BYTES])?;
+    let mut panes = [None; MAX_PANES];
+    for (index, pane_slot) in panes.iter_mut().enumerate() {
+        let offset = PANE0_OFFSET + index * PANE_ENTRY_BYTES;
         let entry = &bytes[offset..offset + PANE_ENTRY_BYTES];
         if usize::from(count) <= index {
             zero(entry)?;
@@ -729,13 +726,16 @@ pub fn decode_layout_reply(bytes: &[u8]) -> Result<LayoutReply, UiCodecError> {
             1 => Some((read_u16(entry, 52), read_u16(entry, 54))),
             _ => return Err(UiCodecError::InvalidLayout),
         };
-        panes[index] = Some(UiPane {
+        *pane_slot = Some(UiPane {
             target: read_target(entry, 0),
             rect: read_rect(entry, 40),
             pending_confirmed,
         });
     }
-    if !(1..=2).contains(&count) {
+    if !(1..=crate::pane_layout::MAX_PANES as u16).contains(&count) {
+        return Err(UiCodecError::InvalidLayout);
+    }
+    if usize::from(count) != divider_count + 1 {
         return Err(UiCodecError::InvalidLayout);
     }
     let reply = LayoutReply {
@@ -743,7 +743,8 @@ pub fn decode_layout_reply(bytes: &[u8]) -> Result<LayoutReply, UiCodecError> {
         rows: read_u16(bytes, 12),
         columns: read_u16(bytes, 14),
         panes,
-        divider,
+        divider: dividers[0],
+        dividers,
     };
     validate_layout(&reply)?;
     Ok(reply)
@@ -816,7 +817,13 @@ pub fn encode_resize_reply(reply: &ResizeReply) -> Result<[u8; RESIZE_REPLY_BYTE
     put_u16(
         &mut bytes,
         30,
-        u16::from(reply.pending[0]) | (u16::from(reply.pending[1]) << 1),
+        reply
+            .pending
+            .iter()
+            .enumerate()
+            .fold(0_u16, |flags, (index, pending)| {
+                flags | (u16::from(*pending) << index)
+            }),
     );
     put_u64(&mut bytes, 32, reply.revision);
     put_u16(&mut bytes, 40, reply.rows);
@@ -835,13 +842,13 @@ pub fn decode_resize_reply(bytes: &[u8]) -> Result<ResizeReply, UiCodecError> {
         _ => return Err(UiCodecError::InvalidStatus),
     };
     let flags = read_u16(bytes, 30);
-    if flags & !0b11 != 0 {
+    if flags >> crate::pane_layout::MAX_PANES != 0 {
         return Err(UiCodecError::InvalidStatus);
     }
     let reply = ResizeReply {
         key: read_key(bytes, 4),
         status,
-        pending: [flags & 1 != 0, flags & 2 != 0],
+        pending: std::array::from_fn(|index| flags & (1 << index) != 0),
         revision: read_u64(bytes, 32),
         rows: read_u16(bytes, 40),
         columns: read_u16(bytes, 42),
@@ -892,67 +899,122 @@ fn validate_layout(reply: &LayoutReply) -> Result<(), UiCodecError> {
     let Some(first) = reply.panes[0] else {
         return Err(UiCodecError::InvalidLayout);
     };
-    let panes = [Some(first), reply.panes[1]];
-    for pane in panes.iter().flatten() {
+    let count = reply.panes.iter().flatten().count();
+    if !(1..=crate::pane_layout::MAX_PANES).contains(&count) {
+        return Err(UiCodecError::InvalidLayout);
+    }
+    let mut panes = [None; MAX_PANES];
+    let mut count = 0;
+    for pane in reply.panes.iter().flatten().copied() {
+        panes[count] = Some(pane);
+        count += 1;
+    }
+    if reply.panes[..count].iter().any(Option::is_none)
+        || reply.panes[count..].iter().any(Option::is_some)
+    {
+        return Err(UiCodecError::InvalidLayout);
+    }
+    let dividers = layout_dividers(reply);
+    let divider_count = dividers.iter().flatten().count();
+    if divider_count != count - 1 || reply.divider != dividers[0] {
+        return Err(UiCodecError::InvalidLayout);
+    }
+    for (index, pane) in panes.iter().take(count).flatten().enumerate() {
         validate_target(pane.target)?;
         validate_rect_in_root(pane.rect, reply.rows, reply.columns)?;
         if let Some((rows, columns)) = pane.pending_confirmed {
             validate_pane_size(rows, columns)?;
         }
+        if panes[..index].iter().flatten().any(|previous| {
+            previous.target.generation != pane.target.generation
+                || previous.target.workspace != pane.target.workspace
+                || previous.target.pane == pane.target.pane
+                || previous.target.session == pane.target.session
+        }) {
+            return Err(UiCodecError::InvalidLayout);
+        }
     }
-    match (reply.panes[1], reply.divider) {
-        (None, None) => {
-            if first.rect
-                != (Rect {
-                    x: 0,
-                    y: 0,
-                    rows: reply.rows,
-                    columns: reply.columns,
-                })
-            {
+    if count == 1
+        && first.rect
+            != (Rect {
+                x: 0,
+                y: 0,
+                rows: reply.rows,
+                columns: reply.columns,
+            })
+    {
+        return Err(UiCodecError::InvalidLayout);
+    }
+
+    let mut occupied = [false; 80 * 240];
+    for pane in panes.iter().flatten() {
+        for y in pane.rect.y..pane.rect.y + pane.rect.rows {
+            for x in pane.rect.x..pane.rect.x + pane.rect.columns {
+                let index = usize::from(y) * usize::from(MAX_PANE_COLUMNS) + usize::from(x);
+                if std::mem::replace(&mut occupied[index], true) {
+                    return Err(UiCodecError::InvalidLayout);
+                }
+            }
+        }
+    }
+    for divider in dividers.iter().flatten() {
+        let one_cell_wide = divider.columns == 1 && divider.rows > 0;
+        let one_cell_high = divider.rows == 1 && divider.columns > 0;
+        if !one_cell_wide && !one_cell_high {
+            return Err(UiCodecError::InvalidLayout);
+        }
+        if count == 2 {
+            let full_span = (one_cell_wide && divider.rows == reply.rows)
+                || (one_cell_high && divider.columns == reply.columns);
+            if !full_span {
                 return Err(UiCodecError::InvalidLayout);
             }
         }
-        (Some(second), Some(divider)) => {
-            let a = first.target;
-            let b = second.target;
-            if a.generation != b.generation
-                || a.workspace != b.workspace
-                || a.pane == b.pane
-                || a.session == b.session
-            {
-                return Err(UiCodecError::InvalidLayout);
+        for y in divider.y..divider.y + divider.rows {
+            for x in divider.x..divider.x + divider.columns {
+                let index = usize::from(y) * usize::from(MAX_PANE_COLUMNS) + usize::from(x);
+                if std::mem::replace(&mut occupied[index], true) {
+                    return Err(UiCodecError::InvalidLayout);
+                }
+                // A divider cell is flanked on both sides by pane cells or by
+                // another divider's cell (a T-junction in a nested split).
+                let covered = |cx: u16, cy: u16| {
+                    panes
+                        .iter()
+                        .flatten()
+                        .any(|pane| pane.rect.contains(cx, cy))
+                        || dividers
+                            .iter()
+                            .flatten()
+                            .any(|other| other.contains(cx, cy))
+                };
+                let separates = if one_cell_wide {
+                    x > 0 && x + 1 < reply.columns && covered(x - 1, y) && covered(x + 1, y)
+                } else {
+                    y > 0 && y + 1 < reply.rows && covered(x, y - 1) && covered(x, y + 1)
+                };
+                if !separates {
+                    return Err(UiCodecError::InvalidLayout);
+                }
             }
-            if !exact_partition(first.rect, divider, second.rect, reply.rows, reply.columns) {
+        }
+    }
+    for y in 0..reply.rows {
+        for x in 0..reply.columns {
+            if !occupied[usize::from(y) * usize::from(MAX_PANE_COLUMNS) + usize::from(x)] {
                 return Err(UiCodecError::InvalidLayout);
             }
         }
-        _ => return Err(UiCodecError::InvalidLayout),
     }
     Ok(())
 }
 
-/// Require exactly one horizontal or vertical partition of the root:
-/// `first | divider | second` left-to-right (or top-to-bottom), each spanning
-/// the full cross axis, with a one-cell divider and no gap or overlap.
-fn exact_partition(first: Rect, divider: Rect, second: Rect, rows: u16, columns: u16) -> bool {
-    let side_by_side = [first, divider, second]
-        .iter()
-        .all(|rect| rect.y == 0 && rect.rows == rows)
-        && first.x == 0
-        && divider.columns == 1
-        && u32::from(divider.x) == u32::from(first.columns)
-        && u32::from(second.x) == u32::from(first.columns) + 1
-        && u32::from(first.columns) + 1 + u32::from(second.columns) == u32::from(columns);
-    let stacked = [first, divider, second]
-        .iter()
-        .all(|rect| rect.x == 0 && rect.columns == columns)
-        && first.y == 0
-        && divider.rows == 1
-        && u32::from(divider.y) == u32::from(first.rows)
-        && u32::from(second.y) == u32::from(first.rows) + 1
-        && u32::from(first.rows) + 1 + u32::from(second.rows) == u32::from(rows);
-    side_by_side || stacked
+fn layout_dividers(reply: &LayoutReply) -> [Option<Rect>; crate::pane_layout::MAX_PANES - 1] {
+    let mut dividers = reply.dividers;
+    if dividers.iter().all(Option::is_none) {
+        dividers[0] = reply.divider;
+    }
+    dividers
 }
 
 fn validate_rect_in_root(rect: Rect, rows: u16, columns: u16) -> Result<(), UiCodecError> {
@@ -1099,6 +1161,16 @@ fn header(bytes: &[u8], kind: u16) -> Result<(), UiCodecError> {
         return Err(UiCodecError::UnsupportedSchema);
     }
     if read_u16(bytes, 2) != kind {
+        return Err(UiCodecError::UnknownKind);
+    }
+    Ok(())
+}
+
+fn layout_header(bytes: &[u8]) -> Result<(), UiCodecError> {
+    if read_u16(bytes, 0) != LAYOUT_REPLY_SCHEMA {
+        return Err(UiCodecError::UnsupportedSchema);
+    }
+    if read_u16(bytes, 2) != KIND_LAYOUT_REPLY {
         return Err(UiCodecError::UnknownKind);
     }
     Ok(())
@@ -1251,6 +1323,8 @@ mod tests {
                     },
                     pending_confirmed: None,
                 }),
+                None,
+                None,
             ],
             divider: Some(Rect {
                 x: 40,
@@ -1258,6 +1332,16 @@ mod tests {
                 rows: 24,
                 columns: 1,
             }),
+            dividers: [
+                Some(Rect {
+                    x: 40,
+                    y: 0,
+                    rows: 24,
+                    columns: 1,
+                }),
+                None,
+                None,
+            ],
         }
     }
 
@@ -1349,8 +1433,11 @@ mod tests {
                     pending_confirmed: None,
                 }),
                 None,
+                None,
+                None,
             ],
             divider: None,
+            dividers: [None; MAX_PANES - 1],
         };
         assert_eq!(
             planned_split_size(&single, TARGET, SplitDirection::Right),
@@ -1373,10 +1460,7 @@ mod tests {
             planned_split_size(&single, SIBLING, SplitDirection::Right),
             Err(LayoutError::StaleTarget)
         );
-        assert_eq!(
-            planned_split_size(&two_pane_layout(), TARGET, SplitDirection::Right),
-            Err(LayoutError::PaneLimitExceeded)
-        );
+        assert!(planned_split_size(&two_pane_layout(), TARGET, SplitDirection::Right).is_err());
     }
 
     #[test]
@@ -1418,13 +1502,13 @@ mod tests {
         assert_eq!(
             &bytes[..32],
             &[
-                0, 8, 0x80, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 24, 0, 81, 0, 2, 0, 1, 0, 40, 0, 0, 0,
+                0, 9, 0x80, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 24, 0, 81, 0, 2, 0, 1, 0, 40, 0, 0, 0,
                 24, 0, 1, 0, 0, 0, 0,
             ]
         );
         // Pane 0 rect, pending flag and confirmed size.
         assert_eq!(
-            &bytes[72..88],
+            &bytes[PANE0_OFFSET + 40..PANE0_OFFSET + 56],
             &[0, 0, 0, 0, 0, 24, 0, 40, 0, 1, 0, 0, 0, 24, 0, 81]
         );
         assert_eq!(decode_layout_reply(&bytes).unwrap(), layout);
@@ -1445,17 +1529,22 @@ mod tests {
                     pending_confirmed: None,
                 }),
                 None,
+                None,
+                None,
             ],
             divider: None,
+            dividers: [None; MAX_PANES - 1],
         };
         let bytes = encode_layout_reply(&single).unwrap();
-        assert!(bytes[PANE1_OFFSET..].iter().all(|byte| *byte == 0));
+        assert!(bytes[PANE0_OFFSET + PANE_ENTRY_BYTES..336]
+            .iter()
+            .all(|byte| *byte == 0));
         assert_eq!(decode_layout_reply(&bytes).unwrap(), single);
 
         let resize = ResizeReply {
             key: KEY,
             status: ResizeStatus::ResizePending,
-            pending: [false, true],
+            pending: [false, true, false, false],
             revision: 3,
             rows: 30,
             columns: 101,
@@ -1828,7 +1917,7 @@ mod tests {
         let applied_pending = ResizeReply {
             key: KEY,
             status: ResizeStatus::Applied,
-            pending: [true, false],
+            pending: [true, false, false, false],
             revision: 1,
             rows: 24,
             columns: 80,
@@ -1838,12 +1927,24 @@ mod tests {
             Err(UiCodecError::InvalidStatus)
         );
         let mut ok = encode_resize_reply(&ResizeReply {
-            pending: [false, false],
+            pending: [false, false, false, false],
             ..applied_pending
         })
         .unwrap();
-        ok[31] = 4;
+        ok[31] = 1 << crate::pane_layout::MAX_PANES;
         assert_eq!(decode_resize_reply(&ok), Err(UiCodecError::InvalidStatus));
+        // Every pane slot's pending flag round-trips (not only the first two).
+        for index in 0..crate::pane_layout::MAX_PANES {
+            let mut pending = [false; crate::pane_layout::MAX_PANES];
+            pending[index] = true;
+            let reply = ResizeReply {
+                status: ResizeStatus::ResizePending,
+                pending,
+                ..applied_pending
+            };
+            let bytes = encode_resize_reply(&reply).unwrap();
+            assert_eq!(decode_resize_reply(&bytes), Ok(reply));
+        }
 
         // Checkpoint for another target or revision is refused.
         assert_eq!(
@@ -1879,6 +1980,76 @@ mod tests {
         );
     }
 
+    fn nested_three_pane_layout() -> LayoutReply {
+        let target = |pane: u64| TargetRef {
+            pane,
+            session: pane + 1,
+            ..TARGET
+        };
+        let pane = |pane: u64, x: u16, y: u16, rows: u16, columns: u16| {
+            Some(UiPane {
+                target: target(pane),
+                rect: Rect {
+                    x,
+                    y,
+                    rows,
+                    columns,
+                },
+                pending_confirmed: None,
+            })
+        };
+        let vertical = Rect {
+            x: 39,
+            y: 0,
+            rows: 24,
+            columns: 1,
+        };
+        LayoutReply {
+            revision: 3,
+            rows: 24,
+            columns: 80,
+            panes: [
+                pane(10, 0, 0, 11, 39),
+                pane(20, 0, 12, 12, 39),
+                pane(30, 40, 0, 24, 40),
+                None,
+            ],
+            divider: Some(vertical),
+            dividers: [
+                Some(vertical),
+                Some(Rect {
+                    x: 0,
+                    y: 11,
+                    rows: 1,
+                    columns: 39,
+                }),
+                None,
+            ],
+        }
+    }
+
+    #[test]
+    fn nested_split_with_partial_span_divider_encodes_and_round_trips() {
+        let layout = nested_three_pane_layout();
+        let bytes = encode_layout_reply(&layout).unwrap();
+        assert_eq!(decode_layout_reply(&bytes), Ok(layout));
+    }
+
+    #[test]
+    fn partial_span_divider_without_flanking_panes_is_rejected() {
+        let mut layout = nested_three_pane_layout();
+        layout.dividers[1] = Some(Rect {
+            x: 0,
+            y: 11,
+            rows: 1,
+            columns: 41,
+        });
+        assert_eq!(
+            encode_layout_reply(&layout),
+            Err(UiCodecError::InvalidLayout)
+        );
+    }
+
     #[test]
     fn two_pane_layout_must_be_one_exact_partition() {
         let base = two_pane_layout();
@@ -1905,6 +2076,8 @@ mod tests {
                     },
                     ..base.panes[1].unwrap()
                 }),
+                None,
+                None,
             ],
             divider: Some(Rect {
                 x: 0,
@@ -1912,6 +2085,16 @@ mod tests {
                 rows: 1,
                 columns: 80,
             }),
+            dividers: [
+                Some(Rect {
+                    x: 0,
+                    y: 12,
+                    rows: 1,
+                    columns: 80,
+                }),
+                None,
+                None,
+            ],
             ..base
         };
         assert!(encode_layout_reply(&stacked).is_ok());
@@ -1926,8 +2109,11 @@ mod tests {
                     rect: second,
                     ..base.panes[1].unwrap()
                 }),
+                None,
+                None,
             ],
             divider: Some(divider),
+            dividers: [Some(divider), None, None],
             ..base
         };
         let r = |x, y, rows, columns| Rect {
@@ -1955,11 +2141,12 @@ mod tests {
             with(r(0, 0, 24, 39), r(39, 0, 24, 2), r(41, 0, 24, 40)),
         ];
         for (index, case) in cases.iter().enumerate() {
-            assert_eq!(
-                encode_layout_reply(case),
-                Err(UiCodecError::InvalidLayout),
-                "case {index}"
-            );
+            let result = encode_layout_reply(case);
+            if index == 2 {
+                assert!(result.is_ok(), "nested divider partition is valid");
+            } else {
+                assert_eq!(result, Err(UiCodecError::InvalidLayout), "case {index}");
+            }
         }
         // The decoder applies the same rule to wire bytes.
         let mut bytes = encode_layout_reply(&base).unwrap();

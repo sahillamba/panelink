@@ -123,6 +123,18 @@ impl PtyEffects {
         self.revision
     }
 
+    /// Return a confirmed process exit code or signal, if the child was reaped.
+    pub(crate) fn exit_status(&self) -> Option<crate::multi_runtime::PaneExit> {
+        use std::os::unix::process::ExitStatusExt;
+
+        self.session.exit_status().and_then(|status| {
+            status
+                .code()
+                .map(crate::multi_runtime::PaneExit::Code)
+                .or_else(|| status.signal().map(crate::multi_runtime::PaneExit::Signal))
+        })
+    }
+
     /// Install a server-owned checkpoint writer for this exact session.
     /// Failure to save a screen never interrupts the PTY or input.
     pub fn enable_capture(

@@ -573,14 +573,17 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     assert!(!read_pane(&fixture, "one.ctx", &first).contains("ACK42"));
     client.wait_screen("ACK42 rendered", |screen| screen.contains("ACK42"));
 
-    // Keyboard fallback: Ctrl-B s opens the menu for the focused pane; Esc
-    // closes it and no byte (neither 's' nor ESC) reaches the child.
+    // Keyboard fallback: Ctrl-B s opens the menu for the focused pane (two of
+    // MAX_PANES panes, so splits are still offered); Esc closes it and no byte
+    // (neither 's' nor ESC) reaches the child.
     thread::sleep(Duration::from_millis(300));
     let before = read_pane(&fixture, "two.ctx", &second);
     client.write(b"\x02s");
-    client.wait_screen("keyboard menu", |screen| screen.contains("Pane limit"));
+    client.wait_screen("keyboard menu", |screen| {
+        screen.contains("Split Down") && screen.contains("Esc: close")
+    });
     client.write(b"\x1b");
-    client.wait_screen("menu closed", |screen| !screen.contains("Pane limit"));
+    client.wait_screen("menu closed", |screen| !screen.contains("Esc: close"));
     thread::sleep(Duration::from_millis(300));
     let after = read_pane(&fixture, "two.ctx", &second);
     assert_eq!(

@@ -2,7 +2,7 @@
 
 use panelink::control_protocol::TargetRef;
 use panelink::layout_store::LayoutSlot;
-use panelink::pane_layout::{LayoutSnapshot, PaneGeometry, Rect};
+use panelink::pane_layout::{LayoutSnapshot, PaneGeometry, PaneLayout, Rect, SplitDirection};
 use panelink::recovery_links::{LinkOutcome, LinkStore};
 use panelink::saved_layout::LayoutAxis;
 use panelink::saved_layout::{encode, LayoutMetadata, SavedLayout};
@@ -108,7 +108,16 @@ impl Fixture {
             .mode(0o600)
             .open(directory.join(name))
             .unwrap();
-        file.write_all(&encode(layout)).unwrap();
+        let mut record = encode(layout);
+        if layout.pane_count() > 2 {
+            record[53] = 3;
+        }
+        assert_eq!(
+            panelink::saved_layout::decode(&record),
+            Ok(*layout),
+            "fixture must be a valid current-format PLLAY record"
+        );
+        file.write_all(&record).unwrap();
         file.sync_all().unwrap();
     }
 
@@ -210,8 +219,11 @@ fn one_pane(generation: u64, sequence: u64) -> SavedLayout {
                     },
                 }),
                 None,
+                None,
+                None,
             ],
             divider: None,
+            dividers: [None; panelink::pane_layout::MAX_PANES - 1],
         },
     )
     .unwrap()
@@ -240,6 +252,8 @@ fn two_pane(generation: u64, sequence: u64, axis: LayoutAxis) -> SavedLayout {
                     columns: 40,
                 },
             }),
+            None,
+            None,
         ],
         LayoutAxis::Stacked => [
             Some(PaneGeometry {
@@ -260,6 +274,8 @@ fn two_pane(generation: u64, sequence: u64, axis: LayoutAxis) -> SavedLayout {
                     columns,
                 },
             }),
+            None,
+            None,
         ],
         LayoutAxis::Single => unreachable!(),
     };
@@ -286,9 +302,64 @@ fn two_pane(generation: u64, sequence: u64, axis: LayoutAxis) -> SavedLayout {
             columns,
             panes,
             divider: Some(divider),
+            dividers: [Some(divider), None, None],
         },
     )
     .unwrap()
+}
+
+/// Build a saved layout by replaying real splits through the production
+/// `PaneLayout` model so the fixture is always a valid tree snapshot.
+fn tree_layout(
+    generation: u64,
+    sequence: u64,
+    splits: &[(usize, SplitDirection, u64, u64)],
+) -> SavedLayout {
+    let mut layout = PaneLayout::new(target(generation, 1, 7, 9), 24, 80).unwrap();
+    for (source, direction, pane, session) in splits {
+        let snapshot = layout.snapshot();
+        let source = snapshot.panes[*source].unwrap().target;
+        let preview = layout
+            .preview_split(
+                source,
+                snapshot.revision,
+                *direction,
+                target(generation, 1, *pane, *session),
+            )
+            .unwrap();
+        layout.commit_split(preview).unwrap();
+    }
+    let snapshot = layout.snapshot();
+    let revision = snapshot.revision;
+    let metadata =
+        LayoutMetadata::new(generation, 1, sequence, revision, 10_000 + sequence).unwrap();
+    let saved = SavedLayout::from_snapshot(metadata, &snapshot).unwrap();
+    assert_eq!(panelink::saved_layout::decode(&encode(&saved)), Ok(saved));
+    saved
+}
+
+/// Right split, then the left half split down: left column stacked, right full.
+fn three_pane(generation: u64, sequence: u64) -> SavedLayout {
+    tree_layout(
+        generation,
+        sequence,
+        &[
+            (0, SplitDirection::Right, 8, 10),
+            (0, SplitDirection::Down, 9, 11),
+        ],
+    )
+}
+
+/// Right split, then each half split down: a 2x2 grid with T-junctions.
+fn four_pane(generation: u64, sequence: u64) -> SavedLayout {
+    let three = [
+        (0, SplitDirection::Right, 8, 10),
+        (0, SplitDirection::Down, 9, 11),
+    ];
+    // After the second split spatial order is [7 (top-left), 9 (bottom-left), 8 (right)].
+    let mut splits = three.to_vec();
+    splits.push((2, SplitDirection::Down, 10, 12));
+    tree_layout(generation, sequence, &splits)
 }
 
 fn empty(generation: u64, sequence: u64) -> SavedLayout {
@@ -473,6 +544,93 @@ fn two_pane_relaunch_preserves_both_saved_orientations_and_links_in_spatial_orde
             first[0].new_target.generation,
             second[0].new_target.generation
         );
+    }
+}
+
+#[test]
+fn three_pane_nested_layout_relaunches_and_links_in_spatial_order() {
+    let fixture = Fixture::new();
+    fixture.write_layout(LayoutSlot::Current, &three_pane(70, 13));
+    let output = relaunch_and_assert_running(&fixture, &["recovery", "relaunch"], 3);
+    let summary = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(summary.matches("(applied)").count(), 3, "{summary}");
+    for (index, pane, session) in [(1, 7, 9), (2, 9, 11), (3, 8, 10)] {
+        assert!(summary.contains(&format!(
+            "pane {index}: old 70:1:{pane}:{session}:1 -> new "
+        )));
+    }
+    let starts = fs::read_to_string(&fixture.marker).unwrap();
+    assert_eq!(starts.lines().count(), 3, "{starts:?}");
+    let pane_output = fixture.run(&["panes"]);
+    assert_eq!(pane_output.status.code(), Some(0));
+    let panes = String::from_utf8_lossy(&pane_output.stdout);
+    assert_eq!(panes.matches("target ").count(), 3, "{panes}");
+
+    let links = LinkStore::open(&fixture.server().join("links")).unwrap();
+    let mut generation = None;
+    for (pane, session) in [(7, 9), (8, 10), (9, 11)] {
+        let records = links.links_for_old(target(70, 1, pane, session)).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome, LinkOutcome::Applied);
+        match generation {
+            Some(expected) => assert_eq!(records[0].new_target.generation, expected),
+            None => generation = Some(records[0].new_target.generation),
+        }
+    }
+}
+
+#[test]
+fn four_pane_nested_layout_relaunches_all_shells_and_links_in_spatial_order() {
+    let fixture = Fixture::new();
+    fixture.write_layout(LayoutSlot::Current, &four_pane(72, 14));
+    let output = relaunch_and_assert_running(&fixture, &["recovery", "relaunch"], 4);
+    let summary = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(summary.matches("(applied)").count(), 4, "{summary}");
+    // Spatial order of the 2x2 grid: top-left, bottom-left, top-right, bottom-right.
+    for (index, pane, session) in [(1, 7, 9), (2, 9, 11), (3, 8, 10), (4, 10, 12)] {
+        assert!(
+            summary.contains(&format!(
+                "pane {index}: old 72:1:{pane}:{session}:1 -> new "
+            )),
+            "missing spatial pane {index}: {summary}"
+        );
+    }
+    let starts = fs::read_to_string(&fixture.marker).unwrap();
+    assert_eq!(starts.lines().count(), 4, "{starts:?}");
+    assert!(starts.lines().all(|line| {
+        line.starts_with(&format!("{}|{}|", fixture.client_cwd.display(), CANARY))
+    }));
+
+    let pane_output = fixture.run(&["panes"]);
+    assert_eq!(pane_output.status.code(), Some(0));
+    let panes = String::from_utf8_lossy(&pane_output.stdout);
+    assert_eq!(panes.matches("target ").count(), 4, "{panes}");
+    let positions = [
+        "at col 0, row 0",
+        "at col 0, row 12",
+        "at col 40, row 0",
+        "at col 40, row 12",
+    ];
+    let mut previous = 0;
+    for position in positions {
+        let index = panes.find(position).expect("pane appears in spatial order");
+        assert!(index >= previous, "pane output order: {panes}");
+        previous = index;
+    }
+
+    let links = LinkStore::open(&fixture.server().join("links")).unwrap();
+    let mut generation = None;
+    for (pane, session) in [(7, 9), (9, 11), (10, 12), (8, 10)] {
+        let records = links.links_for_old(target(72, 1, pane, session)).unwrap();
+        assert_eq!(records.len(), 1, "old pane {pane}");
+        assert_eq!(records[0].outcome, LinkOutcome::Applied);
+        assert_eq!(records[0].source_generation, 72);
+        assert_eq!(records[0].source_sequence, 14);
+        assert_eq!(records[0].new_target.workspace, 1);
+        match generation {
+            Some(expected) => assert_eq!(records[0].new_target.generation, expected),
+            None => generation = Some(records[0].new_target.generation),
+        }
     }
 }
 

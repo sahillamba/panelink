@@ -248,8 +248,11 @@ fn saturated_worker_does_not_hold_ctrl_x_behind_retained_keys() {
                 pending_confirmed: None,
             }),
             None,
+            None,
+            None,
         ],
         divider: None,
+        dividers: [None; panelink::pane_layout::MAX_PANES - 1],
     });
     let now = Instant::now();
     let mut decoder = Decoder::new();

@@ -40,7 +40,7 @@ pub const SPLIT_MIN_COLUMNS: u16 = 2 * MIN_PANE_COLUMNS + 1;
 /// Minimum target height for an up/down split: two minimum panes and a divider.
 pub const SPLIT_MIN_ROWS: u16 = 2 * MIN_PANE_ROWS + 1;
 /// Prototype pane capacity reported in the capacity-disabled reason.
-pub const PANE_LIMIT: u8 = 2;
+pub const PANE_LIMIT: u8 = crate::pane_layout::MAX_PANES as u8;
 /// Height of the normal bordered overlay: title border, six items, status, border.
 pub const NORMAL_ROWS: u16 = 9;
 /// Preferred width of the normal bordered overlay.
@@ -721,6 +721,7 @@ enum Hit {
 }
 
 impl OpenMenu {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         layout: &PaneLayout,
         snapshot: LayoutSnapshot,
@@ -746,7 +747,7 @@ impl OpenMenu {
         Self {
             target: pane.target,
             revision: snapshot.revision,
-            position: if index == 0 { 1 } else { 2 },
+            position: u8::try_from(index + 1).unwrap_or(u8::MAX),
             last_pane: snapshot.pane_count() <= 1,
             items,
             recovery_availability,
@@ -1246,7 +1247,7 @@ impl fmt::Write for ClipWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pane_layout::{MAX_PANE_COLUMNS, MAX_PANE_ROWS};
+    use crate::pane_layout::{MAX_PANES, MAX_PANE_COLUMNS, MAX_PANE_ROWS};
 
     fn target_a() -> TargetRef {
         TargetRef {
@@ -1395,12 +1396,34 @@ mod tests {
     }
 
     #[test]
-    fn committed_split_disables_every_item_with_pane_limit_reason() {
-        let layout = split_right(40, 81);
+    fn committed_tree_disables_items_only_when_full_or_too_small() {
+        let mut layout = split_right(40, 161);
+        let first = layout.snapshot();
+        let third = TargetRef {
+            pane: 88,
+            session: 99,
+            ..target_b()
+        };
+        let preview = layout
+            .preview_split(target_a(), first.revision, SplitDirection::Down, third)
+            .unwrap();
+        layout.commit_split(preview).unwrap();
+        let second_revision = layout.snapshot().revision;
+        let fourth = TargetRef {
+            pane: 90,
+            session: 101,
+            ..target_b()
+        };
+        let preview = layout
+            .preview_split(target_a(), second_revision, SplitDirection::Up, fourth)
+            .unwrap();
+        layout.commit_split(preview).unwrap();
         let menu = open_keyboard(&layout);
-        let limit = Availability::Disabled(DisabledReason::PaneLimit { limit: 2 });
+        let limit = Availability::Disabled(DisabledReason::PaneLimit {
+            limit: MAX_PANES as u8,
+        });
         assert_eq!(availability(&menu), [limit; ITEM_COUNT]);
-        assert_eq!(reason_text(&menu, 0), "Pane limit reached (2)");
+        assert_eq!(reason_text(&menu, 0), "Pane limit reached (4)");
         assert_eq!(menu.selected(), Some(SplitDirection::Left));
     }
 
@@ -1997,7 +2020,7 @@ mod tests {
 
     #[test]
     fn close_item_is_always_enabled_and_requests_confirmation_with_captures() {
-        // At capacity every split item is disabled but Close stays enabled.
+        // Close stays enabled for every live pane, even when splits are feasible.
         let layout = split_right(20, 81);
         let mut menu = MenuState::new();
         menu.open_at_pointer(&layout, 60, 3, 20, 81)
@@ -2005,9 +2028,8 @@ mod tests {
         // No letter reaches the close row; `x` is consumed, menu stays.
         assert_eq!(menu.handle(MenuInput::Letter('x')), MenuResponse::Consumed);
         assert_eq!(menu.handle(MenuInput::Letter('y')), MenuResponse::Consumed);
-        for _ in 0..4 {
-            assert_eq!(menu.handle(MenuInput::Down), MenuResponse::Consumed);
-        }
+        assert_eq!(menu.handle(MenuInput::End), MenuResponse::Consumed);
+        assert_eq!(menu.handle(MenuInput::Up), MenuResponse::Consumed);
         assert!(menu.close_selected());
         let status = menu.overlay_lines().as_slice()[7];
         assert!(status.text().contains("close this pane"), "{status:?}");

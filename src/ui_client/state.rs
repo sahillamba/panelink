@@ -143,7 +143,7 @@ pub(crate) struct App {
     focus_generation: u64,
     status: Option<(&'static str, Instant)>,
     host: (u16, u16),
-    screens: [ScreenSlot; 2],
+    screens: [ScreenSlot; crate::pane_layout::MAX_PANES],
     dirty: bool,
 }
 
@@ -178,7 +178,7 @@ impl App {
             focus_generation: 0,
             status: None,
             host: (host_rows, host_columns),
-            screens: [slot()?, slot()?],
+            screens: [slot()?, slot()?, slot()?, slot()?],
             dirty: true,
         })
     }
@@ -744,8 +744,8 @@ impl App {
             return;
         };
         if local.can_split(focus, direction).is_err() {
-            let label = if layout.panes.iter().flatten().count() >= 2 {
-                "split unavailable: pane limit reached (2)"
+            let label = if layout.panes.iter().flatten().count() >= crate::pane_layout::MAX_PANES {
+                "split unavailable: pane limit reached (4)"
             } else {
                 "split unavailable: pane too small for that direction"
             };
@@ -786,7 +786,7 @@ impl App {
         self.confirm.open(CloseIntent {
             target: focus,
             expected_layout_revision: layout.revision,
-            position: if index == 0 { 1 } else { 2 },
+            position: u8::try_from(index + 1).unwrap_or(u8::MAX),
             last_pane: layout.panes.iter().flatten().count() <= 1,
         });
         self.dirty = true;
@@ -857,21 +857,44 @@ impl App {
             .iter()
             .position(|pane| Some(pane.target) == self.focus)
         else {
-            self.focus = Some(panes[0].target);
+            self.set_focus(Some(panes[0].target));
             return;
         };
-        let other = panes[1 - current];
         let here = panes[current].rect;
-        let there = other.rect;
-        let allowed = match movement {
-            FocusMove::Next => true,
-            FocusMove::Left => there.x < here.x,
-            FocusMove::Right => there.x > here.x,
-            FocusMove::Up => there.y < here.y,
-            FocusMove::Down => there.y > here.y,
+        let center = |rect: Rect| {
+            (
+                u32::from(rect.x) * 2 + u32::from(rect.columns),
+                u32::from(rect.y) * 2 + u32::from(rect.rows),
+            )
         };
-        if allowed {
-            self.set_focus(Some(other.target));
+        let origin = center(here);
+        let candidate = panes
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != current)
+            .filter_map(|(index, pane)| {
+                let point = center(pane.rect);
+                let (primary, secondary) = match movement {
+                    FocusMove::Left if point.0 < origin.0 => {
+                        (origin.0 - point.0, origin.1.abs_diff(point.1))
+                    }
+                    FocusMove::Right if point.0 > origin.0 => {
+                        (point.0 - origin.0, origin.1.abs_diff(point.1))
+                    }
+                    FocusMove::Up if point.1 < origin.1 => {
+                        (origin.1 - point.1, origin.0.abs_diff(point.0))
+                    }
+                    FocusMove::Down if point.1 > origin.1 => {
+                        (point.1 - origin.1, origin.0.abs_diff(point.0))
+                    }
+                    FocusMove::Next => (index as u32, 0),
+                    _ => return None,
+                };
+                Some((primary, secondary, index))
+            })
+            .min();
+        if let Some((_, _, index)) = candidate {
+            self.set_focus(Some(panes[index].target));
         }
     }
 
@@ -1025,8 +1048,9 @@ impl App {
         now: Instant,
     ) -> io::Result<()> {
         let (host_rows, host_columns) = self.host;
-        let mut panes = [None, None];
+        let mut panes = [None; crate::pane_layout::MAX_PANES];
         let mut divider = None;
+        let mut dividers = [None; crate::pane_layout::MAX_PANES - 1];
         let mut focused = None;
         let fits = self.fits();
         if let (Some(layout), true) = (self.layout, fits) {
@@ -1056,6 +1080,7 @@ impl App {
                 }
             }
             divider = layout.divider;
+            dividers = layout.dividers;
         }
 
         let (view_rows, view_columns) = self.viewport();
@@ -1153,6 +1178,7 @@ impl App {
             host_columns,
             panes,
             divider,
+            dividers,
             focused,
             overlay: overlay.map(|(rect, count)| OverlayView {
                 rect,
@@ -1202,31 +1228,20 @@ fn compose_style(style: MenuStyle) -> OverlayStyle {
 /// from one server layout. Two-pane geometry does not depend on which pane
 /// is the original, so pane 0 is treated as the original.
 fn local_layout(reply: &LayoutReply) -> Option<PaneLayout> {
-    let first = reply.panes[0]?;
-    let mut local = PaneLayout::new(first.target, reply.rows, reply.columns).ok()?;
-    if let (Some(second), Some(divider)) = (reply.panes[1], reply.divider) {
-        let direction = if divider.columns == 1 && divider.rows != 1 {
-            SplitDirection::Right
-        } else if divider.rows == 1 && divider.columns != 1 {
-            SplitDirection::Down
-        } else if second.rect.x > first.rect.x {
-            SplitDirection::Right
-        } else {
-            SplitDirection::Down
-        };
-        let preview = local
-            .preview_split(first.target, 1, direction, second.target)
-            .ok()?;
-        local.commit_split(preview).ok()?;
-        let snapshot = local.snapshot();
-        let matches = snapshot.panes.iter().zip(reply.panes.iter()).all(|(a, b)| {
-            a.map(|pane| (pane.target, pane.rect)) == b.map(|pane| (pane.target, pane.rect))
-        });
-        if !matches {
-            return None;
-        }
-    }
-    Some(local)
+    let snapshot = crate::pane_layout::LayoutSnapshot {
+        revision: reply.revision,
+        rows: reply.rows,
+        columns: reply.columns,
+        panes: std::array::from_fn(|index| {
+            reply.panes[index].map(|pane| crate::pane_layout::PaneGeometry {
+                target: pane.target,
+                rect: pane.rect,
+            })
+        }),
+        divider: reply.divider,
+        dividers: reply.dividers,
+    };
+    PaneLayout::from_snapshot(snapshot).ok()
 }
 
 #[cfg(test)]

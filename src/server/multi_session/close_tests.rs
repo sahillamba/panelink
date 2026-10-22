@@ -603,6 +603,8 @@ fn shell_exit_with_live_sibling_collapses_automatically_in_poll() {
                 target: second,
                 rect: root()
             }),
+            None,
+            None,
             None
         ]
     );

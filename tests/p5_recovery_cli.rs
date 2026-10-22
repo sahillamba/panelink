@@ -177,8 +177,11 @@ fn one_pane(generation: u64, sequence: u64) -> SavedLayout {
                     },
                 }),
                 None,
+                None,
+                None,
             ],
             divider: None,
+            dividers: [None; panelink::pane_layout::MAX_PANES - 1],
         },
     )
     .unwrap()
@@ -212,6 +215,8 @@ fn two_pane(generation: u64, sequence: u64) -> SavedLayout {
                         columns: 41,
                     },
                 }),
+                None,
+                None,
             ],
             divider: Some(Rect {
                 x: 40,
@@ -219,6 +224,16 @@ fn two_pane(generation: u64, sequence: u64) -> SavedLayout {
                 rows,
                 columns: 1,
             }),
+            dividers: [
+                Some(Rect {
+                    x: 40,
+                    y: 0,
+                    rows,
+                    columns: 1,
+                }),
+                None,
+                None,
+            ],
         },
     )
     .unwrap()

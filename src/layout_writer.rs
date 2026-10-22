@@ -668,8 +668,11 @@ mod tests {
                     },
                 }),
                 None,
+                None,
+                None,
             ],
             divider: None,
+            dividers: [None; crate::pane_layout::MAX_PANES - 1],
         };
         SavedLayout::from_snapshot(meta, &snapshot).expect("valid one-pane saved layout")
     }

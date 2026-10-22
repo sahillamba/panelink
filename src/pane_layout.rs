@@ -1,4 +1,4 @@
-//! Pure, fixed-capacity geometry for the first two-pane split prototype.
+//! Pure, fixed-capacity geometry for a bounded four-pane split tree.
 //!
 //! This module owns no terminal, process, persistence, or identifier-allocation
 //! effects. Callers supply complete target references and decide when a
@@ -16,6 +16,9 @@ pub const MAX_PANE_ROWS: u16 = 80;
 pub const MIN_PANE_COLUMNS: u16 = 20;
 /// Largest supported terminal viewport width for one pane.
 pub const MAX_PANE_COLUMNS: u16 = 240;
+/// Maximum number of pane leaves retained in one workspace layout.
+pub const MAX_PANES: usize = 4;
+const MAX_TREE_NODES: usize = MAX_PANES * 2 - 1;
 
 /// Direction in which a new pane is placed relative to the selected pane.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,9 +87,11 @@ pub struct LayoutSnapshot {
     /// Accepted root width in columns.
     pub columns: u16,
     /// Spatially ordered panes; unused entries are `None`.
-    pub panes: [Option<PaneGeometry>; 2],
-    /// One-cell divider for a split layout, if present.
+    pub panes: [Option<PaneGeometry>; MAX_PANES],
+    /// First divider, retained for source compatibility with two-pane clients.
     pub divider: Option<Rect>,
+    /// Spatially traversed one-cell dividers; unused entries are `None`.
+    pub dividers: [Option<Rect>; MAX_PANES - 1],
 }
 
 impl LayoutSnapshot {
@@ -107,7 +112,7 @@ impl fmt::Debug for LayoutSnapshot {
     }
 }
 
-/// Fixed two-pane layout state with private mutation fields.
+/// Fixed-capacity binary split-tree layout state with private mutation fields.
 pub struct PaneLayout {
     state: LayoutState,
 }
@@ -122,15 +127,68 @@ impl PaneLayout {
             revision: 1,
             rows,
             columns,
-            panes: [Some(PaneGeometry { target, rect: root }), None],
+            panes: [Some(PaneGeometry { target, rect: root }), None, None, None],
             divider: None,
+            dividers: [None; MAX_PANES - 1],
         };
         Ok(Self {
             state: LayoutState {
                 snapshot,
-                split: None,
+                nodes: [
+                    TreeNode::Leaf(target),
+                    TreeNode::Empty,
+                    TreeNode::Empty,
+                    TreeNode::Empty,
+                    TreeNode::Empty,
+                    TreeNode::Empty,
+                    TreeNode::Empty,
+                ],
             },
         })
+    }
+
+    /// Rebuilds the deterministic split tree represented by one validated
+    /// spatial snapshot. Dividers must form a complete recursive partition.
+    pub fn from_snapshot(snapshot: LayoutSnapshot) -> Result<Self, LayoutError> {
+        validate_root_dimensions(snapshot.rows, snapshot.columns)?;
+        if snapshot.revision == 0 || snapshot.pane_count() == 0 {
+            return Err(LayoutError::InvalidLayoutState);
+        }
+        let panes: Vec<_> = snapshot.panes.iter().flatten().copied().collect();
+        let dividers = if snapshot.dividers.iter().any(Option::is_some) {
+            snapshot.dividers
+        } else {
+            let mut dividers = [None; MAX_PANES - 1];
+            dividers[0] = snapshot.divider;
+            dividers
+        };
+        let mut nodes = [TreeNode::Empty; MAX_TREE_NODES];
+        let mut next = 1;
+        let mut visited = [false; MAX_PANES - 1];
+        build_tree_from_rects(
+            root_rect(snapshot.rows, snapshot.columns),
+            &panes,
+            &dividers,
+            &mut nodes,
+            0,
+            &mut next,
+            &mut visited,
+        )?;
+        if dividers
+            .iter()
+            .enumerate()
+            .any(|(index, divider)| divider.is_some() != visited[index])
+        {
+            return Err(LayoutError::InvalidLayoutState);
+        }
+        let rebuilt = state_from_tree(nodes, snapshot.rows, snapshot.columns, snapshot.revision)?;
+        if rebuilt.snapshot.panes != snapshot.panes
+            || rebuilt.snapshot.dividers != dividers
+            || rebuilt.snapshot.divider != snapshot.divider
+        {
+            return Err(LayoutError::InvalidLayoutState);
+        }
+        Ok(Self { state: rebuilt })
     }
 
     /// Returns a copy of the current immutable layout snapshot.
@@ -147,11 +205,18 @@ impl PaneLayout {
         if !self.contains_target(target) {
             return Err(LayoutError::StaleTarget);
         }
-        if self.state.snapshot.pane_count() >= 2 {
+        if self.state.snapshot.pane_count() >= MAX_PANES {
             return Err(LayoutError::PaneLimitExceeded);
         }
-        let root = root_rect(self.state.snapshot.rows, self.state.snapshot.columns);
-        split_rectangles(root, direction)?;
+        let pane = self
+            .state
+            .snapshot
+            .panes
+            .iter()
+            .flatten()
+            .find(|pane| pane.target == target)
+            .ok_or(LayoutError::StaleTarget)?;
+        split_rectangles(pane.rect, direction)?;
         self.state
             .snapshot
             .revision
@@ -174,31 +239,75 @@ impl PaneLayout {
         if expected_revision != self.state.snapshot.revision {
             return Err(LayoutError::StaleRevision);
         }
-        if self.state.snapshot.pane_count() >= 2 {
+        if self.state.snapshot.pane_count() >= MAX_PANES {
             return Err(LayoutError::PaneLimitExceeded);
         }
-
-        let existing = self.state.snapshot.panes[0]
-            .ok_or(LayoutError::InvalidLayoutState)?
-            .target;
-        validate_new_target(existing, new_target)?;
-        let root = root_rect(self.state.snapshot.rows, self.state.snapshot.columns);
-        split_rectangles(root, direction)?;
+        validate_target(new_target)?;
+        let existing_panes = self.state.snapshot.panes;
+        if existing_panes.iter().flatten().any(|pane| {
+            pane.target.pane == new_target.pane || pane.target.session == new_target.session
+        }) {
+            return Err(LayoutError::TargetIdentityConflict);
+        }
+        let existing = self
+            .state
+            .snapshot
+            .panes
+            .iter()
+            .flatten()
+            .find(|pane| pane.target == target)
+            .copied()
+            .ok_or(LayoutError::StaleTarget)?;
+        if new_target.generation != existing.target.generation
+            || new_target.workspace != existing.target.workspace
+        {
+            return Err(LayoutError::TargetScopeMismatch);
+        }
+        let (first_rect, _, _) = split_rectangles_for_direction(existing.rect, direction)?;
+        let nodes = self.state.nodes;
+        let leaf_index = nodes
+            .iter()
+            .position(|node| matches!(node, TreeNode::Leaf(found) if *found == target))
+            .ok_or(LayoutError::InvalidLayoutState)?;
+        let mut free = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| matches!(node, TreeNode::Empty).then_some(index));
+        let first_index = free.next().ok_or(LayoutError::InvalidLayoutState)?;
+        let second_index = free.next().ok_or(LayoutError::InvalidLayoutState)?;
+        let new_is_first = matches!(direction, SplitDirection::Left | SplitDirection::Up);
+        let mut next_nodes = nodes;
+        next_nodes[first_index] = TreeNode::Leaf(if new_is_first { new_target } else { target });
+        next_nodes[second_index] = TreeNode::Leaf(if new_is_first { target } else { new_target });
+        let horizontal = matches!(direction, SplitDirection::Left | SplitDirection::Right);
+        let first_cells = if horizontal {
+            first_rect.columns
+        } else {
+            first_rect.rows
+        };
+        let total_cells = if horizontal {
+            existing.rect.columns - 1
+        } else {
+            existing.rect.rows - 1
+        };
+        next_nodes[leaf_index] = TreeNode::Split {
+            first: first_index,
+            second: second_index,
+            horizontal,
+            first_cells,
+            total_cells,
+        };
         let next_revision = self
             .state
             .snapshot
             .revision
             .checked_add(1)
             .ok_or(LayoutError::RevisionExhausted)?;
-        let after = build_split_state(
+        let after = state_from_tree(
+            next_nodes,
             self.state.snapshot.rows,
             self.state.snapshot.columns,
             next_revision,
-            SplitMeta {
-                original: existing,
-                new: new_target,
-                direction,
-            },
         )?;
 
         Ok(SplitPreview {
@@ -244,11 +353,11 @@ impl PaneLayout {
         Ok(self.state.snapshot)
     }
 
-    /// Removes one pane of a split layout; the sibling fills the whole root.
+    /// Removes any pane; its sibling subtree absorbs the removed split region.
     ///
-    /// The removed target must exactly identify one of the two current panes.
-    /// The survivor keeps its full identity, the divider disappears and the
-    /// revision advances by one. A single-pane layout cannot collapse and
+    /// The removed target must exactly identify one current pane. The sibling
+    /// subtree keeps its identities and the revision advances by one. A
+    /// single-pane layout cannot collapse and
     /// returns `InvalidLayoutState`. Every rejection leaves the layout
     /// unchanged. The survivor may then be split again with a fresh target.
     pub fn collapse(
@@ -262,42 +371,44 @@ impl PaneLayout {
         if expected_revision != self.state.snapshot.revision {
             return Err(LayoutError::StaleRevision);
         }
-        if self.state.split.is_none() || self.state.snapshot.pane_count() != 2 {
+        if self.state.snapshot.pane_count() <= 1 {
             return Err(LayoutError::InvalidLayoutState);
         }
-        let survivor = self
-            .state
-            .snapshot
-            .panes
-            .into_iter()
-            .flatten()
-            .find(|pane| pane.target != removed)
-            .ok_or(LayoutError::InvalidLayoutState)?
-            .target;
+        let nodes = self.state.nodes;
+        let removed_index = nodes
+            .iter()
+            .position(|node| matches!(node, TreeNode::Leaf(target) if *target == removed))
+            .ok_or(LayoutError::InvalidLayoutState)?;
+        let (parent_index, sibling_index) = nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, node)| match node {
+                TreeNode::Split { first, second, .. } if *first == removed_index => {
+                    Some((index, *second))
+                }
+                TreeNode::Split { first, second, .. } if *second == removed_index => {
+                    Some((index, *first))
+                }
+                _ => None,
+            })
+            .ok_or(LayoutError::InvalidLayoutState)?;
+        let mut next_nodes = nodes;
+        next_nodes[parent_index] = nodes[sibling_index];
+        next_nodes[removed_index] = TreeNode::Empty;
+        next_nodes[sibling_index] = TreeNode::Empty;
         let next_revision = self
             .state
             .snapshot
             .revision
             .checked_add(1)
             .ok_or(LayoutError::RevisionExhausted)?;
-        let rows = self.state.snapshot.rows;
-        let columns = self.state.snapshot.columns;
-        self.state = LayoutState {
-            snapshot: LayoutSnapshot {
-                revision: next_revision,
-                rows,
-                columns,
-                panes: [
-                    Some(PaneGeometry {
-                        target: survivor,
-                        rect: root_rect(rows, columns),
-                    }),
-                    None,
-                ],
-                divider: None,
-            },
-            split: None,
-        };
+        let candidate = state_from_tree(
+            next_nodes,
+            self.state.snapshot.rows,
+            self.state.snapshot.columns,
+            next_revision,
+        )?;
+        self.state = candidate;
         Ok(self.state.snapshot)
     }
 
@@ -319,6 +430,167 @@ impl PaneLayout {
             .flatten()
             .any(|pane| pane.target == target)
     }
+}
+
+/// Return the geometry of the new pane when splitting one current pane.
+pub fn split_geometry(rect: Rect, direction: SplitDirection) -> Result<(u16, u16), LayoutError> {
+    let (first, second, _) = split_rectangles(rect, direction)?;
+    let new_rect = match direction {
+        SplitDirection::Left | SplitDirection::Up => first,
+        SplitDirection::Right | SplitDirection::Down => second,
+    };
+    Ok((new_rect.rows, new_rect.columns))
+}
+
+fn split_rectangles_for_direction(
+    root: Rect,
+    direction: SplitDirection,
+) -> Result<(Rect, Rect, Rect), LayoutError> {
+    split_rectangles(root, direction)
+}
+
+fn build_tree_from_rects(
+    region: Rect,
+    panes: &[PaneGeometry],
+    dividers: &[Option<Rect>; MAX_PANES - 1],
+    nodes: &mut [TreeNode; MAX_TREE_NODES],
+    node_index: usize,
+    next: &mut usize,
+    visited: &mut [bool; MAX_PANES - 1],
+) -> Result<(), LayoutError> {
+    let contained: Vec<_> = panes
+        .iter()
+        .copied()
+        .filter(|pane| rect_contains(region, pane.rect))
+        .collect();
+    if contained.len() == 1 && contained[0].rect == region {
+        nodes[node_index] = TreeNode::Leaf(contained[0].target);
+        return Ok(());
+    }
+    for (divider_index, divider) in dividers.iter().enumerate() {
+        if visited[divider_index] {
+            continue;
+        }
+        let Some(divider) = *divider else { continue };
+        let horizontal = divider.columns == 1
+            && divider.y == region.y
+            && divider.rows == region.rows
+            && divider.x > region.x
+            && u32::from(divider.x) + 1 < u32::from(region.x) + u32::from(region.columns);
+        let vertical = divider.rows == 1
+            && divider.x == region.x
+            && divider.columns == region.columns
+            && divider.y > region.y
+            && u32::from(divider.y) + 1 < u32::from(region.y) + u32::from(region.rows);
+        if !horizontal && !vertical {
+            continue;
+        }
+        let (first_rect, second_rect, first_count, second_count, first_cells, total_cells) =
+            if horizontal {
+                let first_columns = divider.x - region.x;
+                let second_x = divider.x + 1;
+                let second_columns = region.x + region.columns - second_x;
+                let first_rect = Rect {
+                    columns: first_columns,
+                    ..region
+                };
+                let second_rect = Rect {
+                    x: second_x,
+                    columns: second_columns,
+                    ..region
+                };
+                let first_count = contained
+                    .iter()
+                    .filter(|pane| rect_contains(first_rect, pane.rect))
+                    .count();
+                let second_count = contained
+                    .iter()
+                    .filter(|pane| rect_contains(second_rect, pane.rect))
+                    .count();
+                (
+                    first_rect,
+                    second_rect,
+                    first_count,
+                    second_count,
+                    first_columns,
+                    region.columns - 1,
+                )
+            } else {
+                let first_rows = divider.y - region.y;
+                let second_y = divider.y + 1;
+                let second_rows = region.y + region.rows - second_y;
+                let first_rect = Rect {
+                    rows: first_rows,
+                    ..region
+                };
+                let second_rect = Rect {
+                    y: second_y,
+                    rows: second_rows,
+                    ..region
+                };
+                let first_count = contained
+                    .iter()
+                    .filter(|pane| rect_contains(first_rect, pane.rect))
+                    .count();
+                let second_count = contained
+                    .iter()
+                    .filter(|pane| rect_contains(second_rect, pane.rect))
+                    .count();
+                (
+                    first_rect,
+                    second_rect,
+                    first_count,
+                    second_count,
+                    first_rows,
+                    region.rows - 1,
+                )
+            };
+        if first_count == 0 || second_count == 0 || first_count + second_count != contained.len() {
+            continue;
+        }
+        let first_index = *next;
+        let second_index = first_index + 1;
+        if second_index >= MAX_TREE_NODES {
+            return Err(LayoutError::InvalidLayoutState);
+        }
+        *next += 2;
+        visited[divider_index] = true;
+        nodes[node_index] = TreeNode::Split {
+            first: first_index,
+            second: second_index,
+            horizontal,
+            first_cells,
+            total_cells,
+        };
+        build_tree_from_rects(
+            first_rect,
+            panes,
+            dividers,
+            nodes,
+            first_index,
+            next,
+            visited,
+        )?;
+        build_tree_from_rects(
+            second_rect,
+            panes,
+            dividers,
+            nodes,
+            second_index,
+            next,
+            visited,
+        )?;
+        return Ok(());
+    }
+    Err(LayoutError::InvalidLayoutState)
+}
+
+fn rect_contains(outer: Rect, inner: Rect) -> bool {
+    inner.x >= outer.x
+        && inner.y >= outer.y
+        && u32::from(inner.x) + u32::from(inner.columns)
+            <= u32::from(outer.x) + u32::from(outer.columns)
+        && u32::from(inner.y) + u32::from(inner.rows) <= u32::from(outer.y) + u32::from(outer.rows)
 }
 
 impl fmt::Debug for PaneLayout {
@@ -396,7 +668,7 @@ impl fmt::Display for LayoutError {
             }
             Self::LayoutTooSmall => "one or more panes would be too small",
             Self::LayoutTooLarge => "one or more panes would exceed supported bounds",
-            Self::PaneLimitExceeded => "the two-pane prototype capacity is full",
+            Self::PaneLimitExceeded => "the four-pane workspace capacity is full",
             Self::RevisionExhausted => "layout revision cannot be incremented",
             Self::PreviewStale => "split preview no longer matches the layout",
             Self::InvalidLayoutState => "layout state is invalid",
@@ -410,14 +682,20 @@ impl Error for LayoutError {}
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct LayoutState {
     snapshot: LayoutSnapshot,
-    split: Option<SplitMeta>,
+    nodes: [TreeNode; MAX_TREE_NODES],
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-struct SplitMeta {
-    original: TargetRef,
-    new: TargetRef,
-    direction: SplitDirection,
+enum TreeNode {
+    Empty,
+    Leaf(TargetRef),
+    Split {
+        first: usize,
+        second: usize,
+        horizontal: bool,
+        first_cells: u16,
+        total_cells: u16,
+    },
 }
 
 fn validate_target(target: TargetRef) -> Result<(), LayoutError> {
@@ -431,17 +709,6 @@ fn validate_target(target: TargetRef) -> Result<(), LayoutError> {
     .contains(&0)
     {
         return Err(LayoutError::InvalidTarget);
-    }
-    Ok(())
-}
-
-fn validate_new_target(existing: TargetRef, new: TargetRef) -> Result<(), LayoutError> {
-    validate_target(new)?;
-    if new.generation != existing.generation || new.workspace != existing.workspace {
-        return Err(LayoutError::TargetScopeMismatch);
-    }
-    if new.pane == existing.pane || new.session == existing.session {
-        return Err(LayoutError::TargetIdentityConflict);
     }
     Ok(())
 }
@@ -590,39 +857,131 @@ fn validate_partition_bounds(
     Ok(())
 }
 
-fn build_split_state(
+fn state_from_tree(
+    nodes: [TreeNode; MAX_TREE_NODES],
     rows: u16,
     columns: u16,
     revision: u64,
-    split: SplitMeta,
 ) -> Result<LayoutState, LayoutError> {
     validate_root_dimensions(rows, columns)?;
-    let root = root_rect(rows, columns);
-    let (first_rect, second_rect, divider) = split_rectangles(root, split.direction)?;
-    let (first_target, second_target) = match split.direction {
-        SplitDirection::Left | SplitDirection::Up => (split.new, split.original),
-        SplitDirection::Right | SplitDirection::Down => (split.original, split.new),
-    };
-    let snapshot = LayoutSnapshot {
+    let mut snapshot = LayoutSnapshot {
         revision,
         rows,
         columns,
-        panes: [
-            Some(PaneGeometry {
-                target: first_target,
-                rect: first_rect,
-            }),
-            Some(PaneGeometry {
-                target: second_target,
-                rect: second_rect,
-            }),
-        ],
-        divider: Some(divider),
+        panes: [None; MAX_PANES],
+        divider: None,
+        dividers: [None; MAX_PANES - 1],
     };
-    Ok(LayoutState {
-        snapshot,
-        split: Some(split),
-    })
+    append_geometry(&nodes, 0, root_rect(rows, columns), &mut snapshot)?;
+    if snapshot.pane_count() == 0 {
+        return Err(LayoutError::InvalidLayoutState);
+    }
+    snapshot.divider = snapshot.dividers[0];
+    Ok(LayoutState { snapshot, nodes })
+}
+
+fn append_geometry(
+    nodes: &[TreeNode; MAX_TREE_NODES],
+    index: usize,
+    rect: Rect,
+    snapshot: &mut LayoutSnapshot,
+) -> Result<(), LayoutError> {
+    match *nodes.get(index).ok_or(LayoutError::InvalidLayoutState)? {
+        TreeNode::Empty => Err(LayoutError::InvalidLayoutState),
+        TreeNode::Leaf(target) => {
+            validate_leaf(rect)?;
+            let slot = snapshot
+                .panes
+                .iter_mut()
+                .find(|slot| slot.is_none())
+                .ok_or(LayoutError::PaneLimitExceeded)?;
+            *slot = Some(PaneGeometry { target, rect });
+            Ok(())
+        }
+        TreeNode::Split {
+            first,
+            second,
+            horizontal,
+            first_cells,
+            total_cells,
+        } => {
+            if total_cells == 0 || first_cells == 0 || first_cells >= total_cells {
+                return Err(LayoutError::InvalidLayoutState);
+            }
+            let dimension = if horizontal { rect.columns } else { rect.rows };
+            let usable = dimension
+                .checked_sub(1)
+                .ok_or(LayoutError::LayoutTooSmall)?;
+            let first_dimension = u32::from(first_cells)
+                .checked_mul(u32::from(usable))
+                .ok_or(LayoutError::LayoutTooLarge)?
+                / u32::from(total_cells);
+            let first_dimension =
+                u16::try_from(first_dimension).map_err(|_| LayoutError::LayoutTooLarge)?;
+            let second_dimension = usable
+                .checked_sub(first_dimension)
+                .ok_or(LayoutError::LayoutTooSmall)?;
+            let (first_rect, second_rect, divider) = if horizontal {
+                let divider_x = rect
+                    .x
+                    .checked_add(first_dimension)
+                    .ok_or(LayoutError::LayoutTooLarge)?;
+                let second_x = divider_x
+                    .checked_add(1)
+                    .ok_or(LayoutError::LayoutTooLarge)?;
+                (
+                    Rect {
+                        columns: first_dimension,
+                        ..rect
+                    },
+                    Rect {
+                        x: second_x,
+                        columns: second_dimension,
+                        ..rect
+                    },
+                    Rect {
+                        x: divider_x,
+                        columns: 1,
+                        ..rect
+                    },
+                )
+            } else {
+                let divider_y = rect
+                    .y
+                    .checked_add(first_dimension)
+                    .ok_or(LayoutError::LayoutTooLarge)?;
+                let second_y = divider_y
+                    .checked_add(1)
+                    .ok_or(LayoutError::LayoutTooLarge)?;
+                (
+                    Rect {
+                        rows: first_dimension,
+                        ..rect
+                    },
+                    Rect {
+                        y: second_y,
+                        rows: second_dimension,
+                        ..rect
+                    },
+                    Rect {
+                        y: divider_y,
+                        rows: 1,
+                        ..rect
+                    },
+                )
+            };
+            validate_leaf(first_rect)?;
+            validate_leaf(second_rect)?;
+            let divider_slot = snapshot
+                .dividers
+                .iter_mut()
+                .find(|slot| slot.is_none())
+                .ok_or(LayoutError::InvalidLayoutState)?;
+            *divider_slot = Some(divider);
+            append_geometry(nodes, first, first_rect, snapshot)?;
+            append_geometry(nodes, second, second_rect, snapshot)
+        }
+    }
 }
 
 fn resized_state(
@@ -630,23 +989,7 @@ fn resized_state(
     rows: u16,
     columns: u16,
 ) -> Result<LayoutState, LayoutError> {
-    let Some(split) = current.split else {
-        let target = current.snapshot.panes[0]
-            .ok_or(LayoutError::InvalidLayoutState)?
-            .target;
-        let root = root_rect(rows, columns);
-        return Ok(LayoutState {
-            snapshot: LayoutSnapshot {
-                revision: current.snapshot.revision,
-                rows,
-                columns,
-                panes: [Some(PaneGeometry { target, rect: root }), None],
-                divider: None,
-            },
-            split: None,
-        });
-    };
-    build_split_state(rows, columns, current.snapshot.revision, split)
+    state_from_tree(current.nodes, rows, columns, current.snapshot.revision)
 }
 
 #[cfg(test)]
@@ -709,8 +1052,9 @@ mod tests {
                 revision: 2,
                 rows,
                 columns,
-                panes: [Some(first), Some(second)],
+                panes: [Some(first), Some(second), None, None],
                 divider: Some(divider),
+                dividers: [Some(divider), None, None],
             }
         );
     }
@@ -976,34 +1320,104 @@ mod tests {
     }
 
     #[test]
-    fn capacity_is_fixed_at_two_and_rejects_a_third_pane() {
+    fn capacity_is_four_and_rejects_a_fifth_pane() {
         let original = existing_target();
-        let mut layout = PaneLayout::new(original, 5, 61).expect("layout");
+        let mut layout = PaneLayout::new(original, 11, 121).expect("layout");
         let preview = layout
             .preview_split(original, 1, SplitDirection::Right, new_target())
             .expect("first split");
         layout.commit_split(preview).expect("commit");
+        let third = TargetRef {
+            pane: 90,
+            session: 91,
+            ..new_target()
+        };
+        let preview = layout
+            .preview_split(new_target(), 2, SplitDirection::Up, third)
+            .expect("third");
+        layout.commit_split(preview).expect("third commit");
+        let fourth = TargetRef {
+            pane: 92,
+            session: 93,
+            ..new_target()
+        };
+        let preview = layout
+            .preview_split(original, 3, SplitDirection::Down, fourth)
+            .expect("fourth");
+        layout.commit_split(preview).expect("fourth commit");
         let snapshot = layout.snapshot();
+        assert_eq!(snapshot.pane_count(), MAX_PANES);
         assert_eq!(
-            layout.can_split(new_target(), SplitDirection::Left),
+            layout.can_split(fourth, SplitDirection::Left),
             Err(LayoutError::PaneLimitExceeded)
         );
         assert_eq!(
             layout.preview_split(
-                new_target(),
-                2,
+                fourth,
+                4,
                 SplitDirection::Left,
                 TargetRef {
-                    generation: 11,
-                    workspace: 22,
                     pane: 99,
                     session: 100,
-                    occupant_revision: 1,
+                    ..new_target()
                 }
             ),
             Err(LayoutError::PaneLimitExceeded)
         );
         assert_eq!(layout.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn every_leaf_can_be_split_in_each_direction_then_any_leaf_collapses() {
+        let root_target = existing_target();
+        let mut layout = PaneLayout::new(root_target, 21, 161).expect("large enough root");
+        let mut targets = vec![root_target];
+        for index in 0..3 {
+            let split_target = targets[index];
+            let direction = [
+                SplitDirection::Right,
+                SplitDirection::Down,
+                SplitDirection::Left,
+            ][index];
+            let fresh = TargetRef {
+                pane: 100 + index as u64,
+                session: 200 + index as u64,
+                ..root_target
+            };
+            let revision = layout.snapshot().revision;
+            let preview = layout
+                .preview_split(split_target, revision, direction, fresh)
+                .expect("split below cap");
+            let snapshot = layout.commit_split(preview).expect("commit split");
+            assert_eq!(snapshot.pane_count(), index + 2);
+            targets.push(fresh);
+            for pane in snapshot.panes.iter().flatten() {
+                assert!(layout
+                    .hit_test(pane.rect.x, pane.rect.y)
+                    .is_some_and(|hit| hit.target == pane.target));
+            }
+        }
+        let before = layout.snapshot();
+        assert_eq!(before.pane_count(), MAX_PANES);
+        for direction in [
+            SplitDirection::Left,
+            SplitDirection::Right,
+            SplitDirection::Up,
+            SplitDirection::Down,
+        ] {
+            assert!(matches!(
+                layout.can_split(targets[3], direction),
+                Err(LayoutError::PaneLimitExceeded)
+            ));
+        }
+        for removed in targets {
+            let mut branch = PaneLayout::from_snapshot(before).expect("rebuild tree");
+            let collapsed = branch
+                .collapse(removed, before.revision)
+                .expect("collapse any leaf");
+            assert_eq!(collapsed.pane_count(), MAX_PANES - 1);
+            assert_eq!(collapsed.revision, before.revision + 1);
+        }
     }
 
     #[test]
@@ -1172,8 +1586,9 @@ mod tests {
                         revision: 3,
                         rows: 11,
                         columns: 82,
-                        panes: [geometry(survivor, 0, 0, 11, 82), None],
+                        panes: [geometry(survivor, 0, 0, 11, 82), None, None, None],
                         divider: None,
+                        dividers: [None; MAX_PANES - 1],
                     },
                     "{direction:?}"
                 );
@@ -1184,7 +1599,10 @@ mod tests {
                 );
                 // Resizing a collapsed layout keeps one root pane.
                 let resized = layout.resize(3, 12, 83).expect("resize");
-                assert_eq!(resized.panes, [geometry(survivor, 0, 0, 12, 83), None]);
+                assert_eq!(
+                    resized.panes,
+                    [geometry(survivor, 0, 0, 12, 83), None, None, None]
+                );
             }
         }
     }

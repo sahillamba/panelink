@@ -1,6 +1,6 @@
 //! Bounded synchronous transaction core for schema-6 managed launches.
 //!
-//! The coordinator owns two session identities and borrows the caller's one
+//! The coordinator owns four session identities and borrows the caller's one
 //! generation-wide [`Ledger`] for each operation. It has no socket, server
 //! loop, grant table, persistence policy, or automatic recovery authority.
 //! Callers must validate authentication and launch authority before invoking
@@ -140,7 +140,7 @@ struct OperationEntry {
 
 /// One generation's bounded launch transaction owner.
 ///
-/// At most two session records are retained at once, including failed and
+/// At most four session records are retained at once, including failed and
 /// exited sessions until they are explicitly retired. A successfully returned
 /// child handle is never replaced; it is only released by [`Self::retire`]
 /// after its child exited. Launch results are retained up to
@@ -172,7 +172,7 @@ impl<E> fmt::Debug for ManagedLaunchCoordinator<E> {
 }
 
 impl<E> ManagedLaunchCoordinator<E> {
-    /// Construct an empty two-session coordinator for one nonzero generation.
+    /// Construct an empty four-session coordinator for one nonzero generation.
     pub fn new(generation: u64) -> Result<Self, ManagedLaunchError> {
         let registry = SessionRegistry::new(generation).map_err(ManagedLaunchError::Registry)?;
         Ok(Self {
@@ -1371,22 +1371,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(failed.outcome, Outcome::Failed);
-        let exited = owner
-            .execute(
-                &payload(key(2), b"/bin/sh", &[]),
-                NOW,
-                &mut ledger,
-                &mut journal,
-                |_, _| Ok::<_, ()>(()),
-                |_| Ok::<_, ()>(TrackedHandle::new(&drops, true)),
-            )
-            .unwrap();
-        assert_eq!(exited.outcome, Outcome::Applied);
-        assert_eq!(owner.note_exited(result_target(exited)), Ok(()));
-        assert_eq!(owner.state(result_target(exited)), Ok(SessionState::Exited));
+        let mut last = None;
+        for sequence in 2..=crate::session_registry::SESSION_CAPACITY as u64 {
+            let exited = owner
+                .execute(
+                    &payload(key(sequence), b"/bin/sh", &[]),
+                    NOW,
+                    &mut ledger,
+                    &mut journal,
+                    |_, _| Ok::<_, ()>(()),
+                    |_| Ok::<_, ()>(TrackedHandle::new(&drops, true)),
+                )
+                .unwrap();
+            assert_eq!(exited.outcome, Outcome::Applied);
+            assert_eq!(owner.note_exited(result_target(exited)), Ok(()));
+            assert_eq!(owner.state(result_target(exited)), Ok(SessionState::Exited));
+            last = Some(exited);
+        }
+        assert_eq!(
+            last.expect("at least two retained sessions").outcome,
+            Outcome::Applied
+        );
         assert_eq!(drops.load(Ordering::SeqCst), 0);
 
-        let third = key(3);
+        let third = key(crate::session_registry::SESSION_CAPACITY as u64 + 1);
         assert!(matches!(
             owner.execute(
                 &payload(third, b"/bin/sh", &[]),
@@ -1401,9 +1409,15 @@ mod tests {
             ))
         ));
         assert_eq!(ledger.status(third, NOW), Ok(OperationStatus::NotAdmitted));
-        assert_eq!(owner.records().count(), 2);
+        assert_eq!(
+            owner.records().count(),
+            crate::session_registry::SESSION_CAPACITY
+        );
         drop(owner);
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            crate::session_registry::SESSION_CAPACITY - 1
+        );
     }
 
     #[test]
@@ -1426,10 +1440,22 @@ mod tests {
             )
         };
         let first = launch(&mut owner, &mut ledger, &mut journal, 1, true).unwrap();
-        let second = launch(&mut owner, &mut ledger, &mut journal, 2, false).unwrap();
+        let mut second = launch(&mut owner, &mut ledger, &mut journal, 2, false).unwrap();
+        for sequence in 3..=crate::session_registry::SESSION_CAPACITY as u64 {
+            second = launch(&mut owner, &mut ledger, &mut journal, sequence, false).unwrap();
+        }
         let first_target = result_target(first);
+        for sequence in 3..=crate::session_registry::SESSION_CAPACITY as u64 {
+            launch(&mut owner, &mut ledger, &mut journal, sequence, false).unwrap();
+        }
         assert!(matches!(
-            launch(&mut owner, &mut ledger, &mut journal, 3, false),
+            launch(
+                &mut owner,
+                &mut ledger,
+                &mut journal,
+                crate::session_registry::SESSION_CAPACITY as u64 + 1,
+                false
+            ),
             Err(ManagedLaunchError::Registry(RegistryError::Capacity))
         ));
         // Live and not-yet-exited sessions cannot be retired.
@@ -1465,14 +1491,33 @@ mod tests {
         assert_eq!(duplicate, first);
         assert_eq!(owner.status(key(1), NOW, &ledger).unwrap(), first);
 
-        let third = launch(&mut owner, &mut ledger, &mut journal, 4, false).unwrap();
+        let third = launch(
+            &mut owner,
+            &mut ledger,
+            &mut journal,
+            crate::session_registry::SESSION_CAPACITY as u64 + 1,
+            false,
+        )
+        .unwrap();
         let third_target = result_target(third);
         assert_eq!(third.outcome, Outcome::Applied);
-        assert_eq!(third_target.session, 3);
+        assert_eq!(
+            third_target.session,
+            crate::session_registry::SESSION_CAPACITY as u64 + 1
+        );
         assert_ne!(third_target, first_target);
-        assert_eq!(owner.records().count(), 2);
+        assert_eq!(
+            owner.records().count(),
+            crate::session_registry::SESSION_CAPACITY
+        );
         assert!(matches!(
-            launch(&mut owner, &mut ledger, &mut journal, 5, false),
+            launch(
+                &mut owner,
+                &mut ledger,
+                &mut journal,
+                crate::session_registry::SESSION_CAPACITY as u64 + 2,
+                false
+            ),
             Err(ManagedLaunchError::Registry(RegistryError::Capacity))
         ));
     }

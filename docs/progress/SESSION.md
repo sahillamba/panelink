@@ -1,6 +1,45 @@
 # Implementation session checkpoint — 2026-10-17
 
-## Phase 2 closed — 2026-10-22 (read this first)
+## Merge with origin/main + L16/L17/L18 — 2026-10-22 (read this first)
+
+Merged origin/main (Wave1 usability, Wave2 async client worker and owner-tick
+close, Herdr study, Subagents SA plan) as merge commit 095bf45. Docs
+conflicts were resolved by keeping both histories. The uncommitted four-pane
+work was then reapplied on top. Merge fixes:
+- Remote code still sized for two panes: client screen_revisions, the server
+  resize `failed`/`pending` arrays, and the ResizeReply pending bitfield. The
+  wire field now carries bit i for pane i, and a test covers all 4 slots.
+- Focus moves now use the remote's `set_focus` (focus generation).
+- Remote saved-layout contract tests were updated to the 280-byte format plus
+  a legacy-migration test. The byte-mutation contract found a real
+  non-canonical decode: the one-pane current form now requires its root rect.
+
+Three GPT-6-Luna (xhigh) workers ran in parallel:
+- L16 relaunch (stopped at its timebox; parent finished it): see
+  P3-L16-RELAUNCH4-RESULT.md. It also fixed a codec axis bug and per-pane
+  lease scoping.
+- L17 four-pane attach host test: P3-L17-ATTACH4-RESULT.md.
+- L18 exit status (pane reply schema 10): P3-L18-EXIT-STATUS-RESULT.md.
+
+Verifier 8/8; full suite 993 passed / 0 failed / 15 ignored. Not committed
+beyond the local merge commit; nothing pushed. Apple Terminal four-pane
+check still pending. Remaining Phase 3 gaps (layout events, cwd/command
+metadata, live scrollback, `pane run`, owner identity) are open.
+
+## Four panes + agent CLI integrated — 2026-10-22
+
+The previous session ended with two worker slices left uncommitted and
+unverified: L15 four-pane layout (P3-FOUR-PANES.md) and the agent pane/wait/
+events CLI (P3-AGENT-CLI.md). On resume the parent found 4 binary-test
+failures, 2 clippy errors, a consistently failing agent CLI test, a
+four-pane test that never ran, and stale capacity-2 tests. Real bugs fixed:
+nested-split divider validation, double chrome offset in the recovery view,
+the regex matcher, and send/exit-wait races. See both notes. Verifier 8/8;
+full suite 954 passed/0 failed/15 ignored. Not committed (slice, not a
+completed phase). Four-pane Apple Terminal acceptance has not been run.
+Phase 3 remains open.
+
+## Phase 2 closed — 2026-10-22
 
 User confirmed the OSC 52 clipboard-denial check in a live pane. A Haiku 5.5
 worker ran the nine operator-only outer-PTY host tests: 9/9 in three serial

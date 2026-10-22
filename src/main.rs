@@ -18,7 +18,13 @@ mod p2_probe;
 mod p3_cli;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod agent_cli;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod ui_client;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use panelink::pane_layout;
 
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 const MAX_ENVIRONMENT_VARIABLES: usize = 4_096;
@@ -130,6 +136,18 @@ where
         // `panelink` alone opens (or reattaches to) the user's workspace.
         if arguments.peek().is_none() {
             return default_open::open();
+        }
+        if arguments.peek().is_some_and(|argument| {
+            argument == "pane" || argument == "wait" || argument == "events"
+        }) {
+            let mut captured = Vec::new();
+            for argument in arguments {
+                if captured.len() >= 80 || os_str_byte_len(&argument) > 65_536 {
+                    return report_cli_error(CliError::ArgumentLimitExceeded);
+                }
+                captured.push(argument);
+            }
+            return agent_cli::run(captured);
         }
         if arguments.peek().is_some_and(|argument| argument == "stop") {
             arguments.next();
@@ -247,11 +265,11 @@ where
                 std::env::consts::OS,
                 std::env::consts::ARCH
             );
-            println!("Workspace: `panelink` opens a persistent two-pane workspace (experimental).");
+            println!("Workspace: `panelink` opens a persistent workspace of up to four panes (experimental).");
             println!(
                 "Experimental PTY probe and server/control commands: available on macOS/aarch64."
             );
-            println!("Not yet supported: more than two panes, tabs, provider session recovery.");
+            println!("Not yet supported: more than four panes, tabs, provider session recovery.");
             1
         }
         Command::PtyProbe(request) => execute_probe(request),
@@ -636,6 +654,9 @@ fn print_help() {
     println!("  panelink close <n>    close pane n: hang up its shell (SIGKILL after 1 s);");
     println!("                        the other pane fills the window; closing the last");
     println!("                        pane ends the workspace");
+    println!("  panelink pane list|read|claim|release|send|keys|interrupt|close ...");
+    println!("  panelink wait <n> --text STRING|--quiet SECS|--exit|--change --timeout SECS");
+    println!("  panelink events [--pane N] [--timeout SECS] --json");
     println!();
     println!("In the workspace: right-click a pane to split it; click a pane to focus it.");
     println!("Control-B (not Command-B) enters NAV mode: r/l/u/d split, arrows/Tab switch");
@@ -661,10 +682,10 @@ fn print_help() {
     println!();
     println!("pty-probe runs one disposable child on macOS/aarch64.");
     println!("server-probe runs a foreground one-child server; control exchanges typed commands.");
-    println!("serve runs an experimental foreground two-pane server (one split, zsh splits).");
+    println!("serve runs an experimental foreground server (up to four panes, zsh splits).");
     println!("attach is an experimental full-screen client for serve; Ctrl-X detaches.");
     println!(
-        "Experimental prototype: two panes per workspace; provider recovery is not implemented."
+        "Experimental prototype: up to four panes per workspace; provider recovery is not implemented."
     );
 }
 

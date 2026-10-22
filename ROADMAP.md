@@ -4,7 +4,7 @@
 current-phase: Phase 6 DONE for personal alpha scope (2026-10-22): idle real-OpenCode 10-session workload, build/resource measurements, release manifest + install script, license inventory + cargo-audit, security review pack. Firm approval, signing, active-agent load remain open
 last-updated: 2026-10-21
 checkpoint-commit: saved-layout slice committed by parent per phase-completion authorization; no push
-last-verified: 2026-10-22 — verifier 8/8 twice consecutively (983 passed/0 failed/15 ignored)
+last-verified: 2026-10-22 — verifier 8/8; full suite 993 passed/0 failed/15 ignored after origin/main merge (095bf45) + four-pane, agent CLI, L16 relaunch, L17 attach, L18 exit status (uncommitted)
 next-action: Remaining open gates: Phase 3 wider contracts (agent-control API, managed launch, events), Phase 4 identity (blocked upstream), Phase 5 hierarchy/mouse selection/full reboot. Ask user.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
@@ -160,6 +160,7 @@ User explicitly authorized parallel GPT-6-Luna xhigh implementation of the trans
 - [x] Review test-only atomic PTY opener spike and actual macOS evidence in P3-ATOMIC-PTY-SPIKE.md; this does not close socket/pipe/native-spawn gaps or adopt a production replacement.
 - [x] Integrate/review production atomic PTY opener and cooperative shared spawn gate for current experimental macOS/aarch64; see P3-ATOMIC-PTY-INTEGRATION.md and P3-SPAWN-GATE-RESULT.md. No release minimum-OS or arbitrary native-spawn guarantee.
 - [x] Implement full-descriptor child probe and deterministic real accepted-socket/managed-exec race fixture; run on a host permitting pathname bind/accept before enabling API launch (passed 6/6 on new Mac; see P3-ACCEPT-EXEC-RACE.md).
+- [x] Four-pane binary split tree (MAX_PANES=4) and agent-facing `panelink pane|wait|events` CLI integrated and parent-verified; see P3-FOUR-PANES.md, P3-AGENT-CLI.md. Four-pane Apple Terminal acceptance pending. L16 four-pane relaunch, L17 private-PTY four-pane attach acceptance, L18 pane exit status (schema 10) delivered 2026-10-22.
 - [ ] Complete event/watch/launch/layout contracts and implementation; event framing alone does not enable subscriptions, full snapshot queues or multi-session lifecycle.
 - [ ] Complete independent host lifetime/acceptance and remaining bounded runtime capabilities before marking Phase3 complete.
 

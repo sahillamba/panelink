@@ -292,7 +292,40 @@ fn private_pty_launch_deduplicates_exact_identity_and_retains_two_children() {
     assert!(!owner.effects(second_target).unwrap().child_exited());
     assert_eq!(owner.records().count(), 2);
 
-    let third = request_payload(generation, 3, fixture.path(), "third-agent", CHILD_SCRIPT);
+    // Fill the remaining capacity (SESSION_CAPACITY = MAX_PANES) with real
+    // children; the next new identity must then be refused before prepare.
+    let mut extra_pids = Vec::new();
+    let capacity = panelink::session_registry::SESSION_CAPACITY as u64;
+    for sequence in 3..=capacity {
+        let marker = format!("extra-agent-{sequence}");
+        let payload = request_payload(generation, sequence, fixture.path(), &marker, CHILD_SCRIPT);
+        let result = {
+            let mut journal = storage.journal().unwrap();
+            owner
+                .execute(
+                    &payload,
+                    NOW,
+                    &mut ledger,
+                    &mut journal,
+                    |request, target| prepare(request, target, fixture.path()),
+                    spawn,
+                )
+                .expect("launch real private-PTY child within capacity")
+        };
+        assert_eq!(result.outcome, Outcome::Applied);
+        let (_, pid) = wait_for_marker(&mut owner, result.target.unwrap(), &marker);
+        extra_pids.push(pid);
+    }
+    assert_eq!(owner.records().count(), capacity as usize);
+
+    let refused_sequence = capacity + 1;
+    let third = request_payload(
+        generation,
+        refused_sequence,
+        fixture.path(),
+        "over-capacity-agent",
+        CHILD_SCRIPT,
+    );
     let third_result = {
         let mut journal = storage.journal().unwrap();
         owner.execute(
@@ -312,7 +345,7 @@ fn private_pty_launch_deduplicates_exact_identity_and_retains_two_children() {
             OperationKey {
                 generation,
                 lease: LEASE,
-                sequence: 3
+                sequence: refused_sequence
             },
             NOW
         ),
@@ -325,6 +358,9 @@ fn private_pty_launch_deduplicates_exact_identity_and_retains_two_children() {
     drop(owner);
     assert_process_reaped(first_pid);
     assert_process_reaped(second_pid);
+    for pid in extra_pids {
+        assert_process_reaped(pid);
+    }
 }
 
 #[test]

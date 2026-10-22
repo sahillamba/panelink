@@ -41,7 +41,7 @@ reattach to it.
 | Reattach | `panelink` |
 | Close the workspace | `exit` in every shell, or `panelink stop` |
 
-Current limits: at most two panes, no tabs. The attach client forwards ordinary
+Current limits: at most four panes, no tabs. The attach client forwards ordinary
 Ctrl-letter keys, Alt/Meta characters when delivered by the host, F1–F12,
 Delete/Insert/Page Up/Page Down and Shift-Tab. Ctrl-B remains navigation and
 Ctrl-X detaches; Ctrl-C goes to the focused child. Modified function/navigation
@@ -241,7 +241,7 @@ pathname fixture remains a separate external acceptance check.
 
 Plain `panelink` runs these two pieces for you. Use them directly only when
 you need a server in a specific directory. `panelink serve` is a foreground
-server for up to two panes. `panelink attach` is a full-screen client for it
+server for up to four panes. `panelink attach` is a full-screen client for it
 that you run inside a terminal.
 
 Reuse the build and terminfo setup above. Then, in Terminal A:

@@ -136,8 +136,11 @@ fn saved_layout_one(generation: u64, workspace: u64, sequence: u64, revision: u6
                 },
             }),
             None,
+            None,
+            None,
         ],
         divider: None,
+        dividers: [None; panelink::pane_layout::MAX_PANES - 1],
     };
     SavedLayout::from_snapshot(meta, &snapshot).expect("valid one-pane saved layout")
 }
@@ -178,6 +181,8 @@ fn saved_layout_side_by_side(
                     columns: second_cols,
                 },
             }),
+            None,
+            None,
         ],
         divider: Some(Rect {
             x: divider_x,
@@ -185,6 +190,16 @@ fn saved_layout_side_by_side(
             rows,
             columns: 1,
         }),
+        dividers: [
+            Some(Rect {
+                x: divider_x,
+                y: 0,
+                rows,
+                columns: 1,
+            }),
+            None,
+            None,
+        ],
     };
     SavedLayout::from_snapshot(meta, &snapshot).expect("valid side-by-side saved layout")
 }
@@ -225,6 +240,8 @@ fn saved_layout_stacked(
                     columns,
                 },
             }),
+            None,
+            None,
         ],
         divider: Some(Rect {
             x: 0,
@@ -232,6 +249,16 @@ fn saved_layout_stacked(
             rows: 1,
             columns,
         }),
+        dividers: [
+            Some(Rect {
+                x: 0,
+                y: divider_y,
+                rows: 1,
+                columns,
+            }),
+            None,
+            None,
+        ],
     };
     SavedLayout::from_snapshot(meta, &snapshot).expect("valid stacked saved layout")
 }

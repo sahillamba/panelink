@@ -689,7 +689,44 @@ fn trusted_multi_owner_routes_reads_and_drops_both_real_children() {
         ResponseBody::Status(OperationStatus::NotAdmitted)
     );
 
-    let third_payload = launch_payload(generation, 3, fixture.path(), "owner-third");
+    // Fill the remaining capacity (SESSION_CAPACITY = MAX_PANES) with real
+    // children; the next new identity must then be refused before prepare.
+    let capacity = panelink::session_registry::SESSION_CAPACITY as u64;
+    let mut extra_pids = Vec::new();
+    for sequence in 3..=capacity {
+        let name = format!("owner-extra-{sequence}");
+        let payload = launch_payload(generation, sequence, fixture.path(), &name);
+        let launched = {
+            let mut journal = storage.journal().expect("open protected launch journal");
+            owner
+                .execute_launch(
+                    &payload,
+                    NOW,
+                    &mut journal,
+                    |request, target| prepare(request, target, fixture.path()),
+                    spawn,
+                )
+                .expect("launch extra child within capacity")
+        };
+        assert_eq!(launched.outcome, Outcome::Applied);
+        let extra_target = launched.target.expect("extra launch has a full target");
+        let (extra_connection, _) = owner
+            .connect(extra_target, &fresh_read_hello(100 + sequence), NOW)
+            .expect("connect a fresh read lease pinned to the extra target");
+        let extra_marker = format!("P3MO-READY-{name}");
+        let mut extra_sequence = 0;
+        let (_, extra_pid) = wait_for_marker(
+            &mut owner,
+            &extra_connection,
+            extra_target,
+            &extra_marker,
+            &first_marker,
+            &mut extra_sequence,
+        );
+        extra_pids.push(extra_pid);
+    }
+
+    let third_payload = launch_payload(generation, capacity + 1, fixture.path(), "owner-over");
     let third_result = {
         let mut journal = storage.journal().expect("open protected launch journal");
         owner.execute_launch(
@@ -705,14 +742,20 @@ fn trusted_multi_owner_routes_reads_and_drops_both_real_children() {
             third_result,
             Err(ManagedLaunchError::Registry(RegistryError::Capacity))
         ),
-        "third launch must fail at the two-target cap"
+        "launch beyond SESSION_CAPACITY must fail at the target cap"
     );
 
     assert_process_alive(first_pid);
     assert_process_alive(second_pid);
+    for pid in &extra_pids {
+        assert_process_alive(*pid);
+    }
     drop(owner);
     assert_process_reaped(first_pid);
     assert_process_reaped(second_pid);
+    for pid in &extra_pids {
+        assert_process_reaped(*pid);
+    }
     drop(storage);
 }
 

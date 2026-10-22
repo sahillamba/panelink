@@ -87,8 +87,11 @@ impl Fixture {
                     },
                 }),
                 None,
+                None,
+                None,
             ],
             divider: None,
+            dividers: [None; panelink::pane_layout::MAX_PANES - 1],
         };
         let layout = SavedLayout::from_snapshot(metadata, &snapshot).unwrap();
         let store = LayoutStore::prepare(&self.server()).unwrap();

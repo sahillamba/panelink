@@ -452,7 +452,7 @@ mod workload {
                 .ok()
                 .flatten()
                 .is_some_and(|saved| {
-                    saved.pane_count() == 2 && saved.panes() == self.targets.map(Some)
+                    saved.pane_count() == 2 && saved.panes()[..2] == self.targets.map(Some)
                 });
             Ok(())
         }
@@ -667,7 +667,8 @@ mod workload {
                     .ok()
                     .flatten()
                     .is_some_and(|saved| {
-                        saved.pane_count() == 2 && saved.panes() == [Some(target0), Some(target1)]
+                        saved.pane_count() == 2
+                            && saved.panes()[..2] == [Some(target0), Some(target1)]
                     })
                 {
                     return Ok(());
@@ -1220,7 +1221,7 @@ mod workload {
                     .and_then(|store| store.load(LayoutSlot::Current).ok().flatten())
                     .is_some_and(|saved| {
                         saved.pane_count() == 2
-                            && saved.panes()
+                            && saved.panes()[..2]
                                 == [Some(workspace.targets[0]), Some(workspace.targets[1])]
                     });
             }

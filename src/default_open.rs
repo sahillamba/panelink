@@ -32,6 +32,7 @@ use panelink::control_protocol::TargetRef;
 use panelink::history_rows;
 use panelink::history_store::HistoryStore;
 use panelink::layout_store::{LayoutSlot, LayoutStore};
+use panelink::pane_layout::{PaneGeometry, Rect, SplitDirection};
 use panelink::recovery_chooser::{self, ChooserChoice, ChooserPlan, LayoutSummary};
 use panelink::recovery_view::RecoverySlot;
 use panelink::saved_layout::{LayoutAxis, SavedLayout};
@@ -1420,13 +1421,12 @@ pub(crate) fn recovery_view(previous: bool) -> i32 {
 }
 
 /// Explicitly start a fresh default-shell workspace using only the selected
-/// saved layout's pane count and orientation.
+/// saved layout's pane count and split topology.
 pub(crate) fn recovery_relaunch(previous: bool) -> i32 {
-    use panelink::pane_layout::SplitDirection;
     use panelink::recovery_links::{LinkOutcome, LinkStore, RelaunchLink};
     use panelink::recovery_reader::{read_recovery, RecoveryReadError};
     use panelink::recovery_view::RecoverySlot;
-    use panelink::ui_protocol::{decode_layout_reply, encode_layout_query, planned_split_size};
+    use panelink::ui_protocol::planned_split_size;
 
     let state = match resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME")) {
         Ok(state) => state,
@@ -1459,6 +1459,21 @@ pub(crate) fn recovery_relaunch(previous: bool) -> i32 {
         eprintln!("panelink: saved layout has no panes");
         return 1;
     }
+    let saved_geometry = saved.pane_geometry;
+    let saved_dividers = saved.dividers;
+    let saved_topology = match relaunch_topology(
+        saved.saved_rows,
+        saved.saved_columns,
+        &saved_geometry,
+        &saved_dividers,
+    ) {
+        Some(topology) => topology,
+        None => {
+            eprintln!("panelink: saved layout invalid");
+            return 1;
+        }
+    };
+    let split_plan = relaunch_split_plan(&saved_topology);
 
     if relaunch_server_running(&state) {
         eprintln!("panelink: stop the running workspace before relaunching (panelink stop)");
@@ -1494,15 +1509,8 @@ pub(crate) fn recovery_relaunch(previous: bool) -> i32 {
             return 1;
         }
     };
-    let layout_bytes = match peer.exchange(&encode_layout_query()) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            eprintln!("panelink: could not read the relaunched workspace");
-            return 1;
-        }
-    };
-    let layout = match decode_layout_reply(&layout_bytes) {
-        Ok(layout) if layout.panes[1].is_none() => layout,
+    let mut layout = match query_relaunch_layout(&mut peer) {
+        Ok(layout) if layout.panes.iter().flatten().count() == 1 => layout,
         _ => {
             eprintln!("panelink: could not read the relaunched workspace");
             return 1;
@@ -1515,33 +1523,136 @@ pub(crate) fn recovery_relaunch(previous: bool) -> i32 {
             return 1;
         }
     };
+    let mut expected_targets = vec![None; saved.panes.len()];
+    expected_targets[0] = Some(first);
+    let mut live_saved_order = vec![0_usize];
+    let mut split_outcomes = vec![None; saved.panes.len()];
 
-    let split_status = if saved.panes.len() == 1 {
-        None
-    } else {
-        let direction = match saved.axis {
-            LayoutAxis::SideBySide => SplitDirection::Right,
-            LayoutAxis::Stacked => SplitDirection::Down,
-            LayoutAxis::Single => SplitDirection::Right,
+    for (step_index, step) in split_plan.iter().enumerate() {
+        let Some(source_index) = live_saved_order
+            .iter()
+            .position(|saved_index| *saved_index == step.source_saved_index)
+        else {
+            fill_unattempted_splits(
+                &mut split_outcomes,
+                &split_plan[step_index..],
+                RelaunchSplitStatus::Unknown,
+            );
+            break;
         };
-        match planned_split_size(&layout, first, direction) {
-            Ok(size) => Some(perform_relaunch_split(
-                &mut peer,
-                first,
-                layout.revision,
-                direction,
-                size,
-            )),
+        let source = match layout.panes.get(source_index).copied().flatten() {
+            Some(source) => source.target,
+            None => {
+                fill_unattempted_splits(
+                    &mut split_outcomes,
+                    &split_plan[step_index..],
+                    RelaunchSplitStatus::Failed,
+                );
+                break;
+            }
+        };
+        if expected_targets[step.source_saved_index] != Some(source) {
+            eprintln!("panelink: relaunched, but current panes could not be verified");
+            fill_unattempted_splits(
+                &mut split_outcomes,
+                &split_plan[step_index..],
+                RelaunchSplitStatus::Unknown,
+            );
+            break;
+        }
+        let size = match planned_split_size(&layout, source, step.direction) {
+            Ok(size) => size,
             Err(_) => {
                 eprintln!("panelink: relaunched, but split failed");
-                Some((RelaunchSplitStatus::Failed, None))
+                fill_unattempted_splits(
+                    &mut split_outcomes,
+                    &split_plan[step_index..],
+                    RelaunchSplitStatus::Failed,
+                );
+                break;
             }
+        };
+        let mut scoped_peer;
+        let split_peer = if source == first {
+            &mut peer
+        } else {
+            scoped_peer = match RelaunchPeer::connect_scoped(&state.server, Some(source)) {
+                Ok(scoped) => scoped,
+                Err(_) => {
+                    eprintln!("panelink: relaunched, but split failed");
+                    fill_unattempted_splits(
+                        &mut split_outcomes,
+                        &split_plan[step_index..],
+                        RelaunchSplitStatus::Failed,
+                    );
+                    break;
+                }
+            };
+            &mut scoped_peer
+        };
+        let (status, new_target, committed_revision) =
+            perform_relaunch_split(split_peer, source, layout.revision, step.direction, size);
+        split_outcomes[step.new_saved_index] = Some(status);
+        if status != RelaunchSplitStatus::Applied {
+            fill_unattempted_splits(&mut split_outcomes, &split_plan[step_index + 1..], status);
+            break;
         }
-    };
+        let Some(new_target) = new_target else {
+            split_outcomes[step.new_saved_index] = Some(RelaunchSplitStatus::Unknown);
+            fill_unattempted_splits(
+                &mut split_outcomes,
+                &split_plan[step_index + 1..],
+                RelaunchSplitStatus::Unknown,
+            );
+            break;
+        };
+        expected_targets[step.new_saved_index] = Some(new_target);
+        let insertion = live_saved_order
+            .iter()
+            .position(|saved_index| *saved_index > step.new_saved_index)
+            .unwrap_or(live_saved_order.len());
+        live_saved_order.insert(insertion, step.new_saved_index);
+        let observed = match query_relaunch_layout(&mut peer) {
+            Ok(observed) if Some(observed.revision) == committed_revision => observed,
+            _ => {
+                split_outcomes[step.new_saved_index] = Some(RelaunchSplitStatus::Unknown);
+                fill_unattempted_splits(
+                    &mut split_outcomes,
+                    &split_plan[step_index + 1..],
+                    RelaunchSplitStatus::Unknown,
+                );
+                break;
+            }
+        };
+        let observed_targets = observed
+            .panes
+            .iter()
+            .flatten()
+            .map(|pane| pane.target)
+            .collect::<Vec<_>>();
+        if observed_targets.len() != live_saved_order.len()
+            || live_saved_order
+                .iter()
+                .enumerate()
+                .any(|(index, saved_index)| {
+                    expected_targets[*saved_index]
+                        .is_none_or(|expected| observed_targets.get(index) != Some(&expected))
+                })
+        {
+            split_outcomes[step.new_saved_index] = Some(RelaunchSplitStatus::Unknown);
+            fill_unattempted_splits(
+                &mut split_outcomes,
+                &split_plan[step_index + 1..],
+                RelaunchSplitStatus::Unknown,
+            );
+            break;
+        }
+        layout = observed;
+    }
     drop(peer);
 
-    // Use the standard pane-status query after the one split. It is observation
-    // only; an uncertain split is never retransmitted under any key.
+    // The status query is read-only. In particular, no uncertain split is
+    // retransmitted under a fresh operation key.
     let current = match query_relaunch_panes(&state.server) {
         Ok(panes) => panes,
         Err(()) => {
@@ -1555,67 +1666,79 @@ pub(crate) fn recovery_relaunch(previous: bool) -> i32 {
         .flatten()
         .map(|pane| pane.target)
         .collect();
-    let current_matches = current_targets.len() == saved.panes.len()
+    let current_layout = query_layout_snapshot(&state.server);
+    let current_matches = current_layout.as_ref().is_some_and(|layout_reply| {
+        relaunch_tree_layout_matches(
+            layout_reply,
+            &current,
+            &saved_topology,
+            saved.panes.len(),
+            &expected_targets,
+            first,
+            saved.metadata.generation(),
+            saved.metadata.workspace(),
+        )
+    });
+    let known_targets_match = current_layout
+        .as_ref()
+        .is_some_and(|layout_reply| current.layout_revision == layout_reply.revision)
+        && current_targets.len() == expected_targets.iter().flatten().count()
+        && expected_targets
+            .iter()
+            .flatten()
+            .copied()
+            .all(|expected| current_targets.contains(&expected))
         && current_targets.iter().all(|target| {
             target.generation != saved.metadata.generation()
                 && target.workspace == saved.metadata.workspace()
-        })
-        && current.panes[0].is_some_and(|pane| pane.target == first)
-        && match saved.axis {
-            LayoutAxis::SideBySide => current.panes[1].is_some_and(|pane| {
-                current.panes[0].is_some_and(|first_pane| pane.rect.x > first_pane.rect.x)
-            }),
-            LayoutAxis::Stacked => current.panes[1].is_some_and(|pane| {
-                current.panes[0].is_some_and(|first_pane| pane.rect.y > first_pane.rect.y)
-            }),
-            LayoutAxis::Single => current.panes[1].is_none(),
-        };
+        });
 
     let mut lines = Vec::with_capacity(saved.panes.len());
-    let first_is_live = current
-        .panes
-        .iter()
-        .flatten()
-        .next()
-        .is_some_and(|pane| pane.live);
-    let first_status = if first_is_live
-        && current_targets.first() == Some(&first)
-        && first.generation != saved.metadata.generation()
-        && first.workspace == saved.metadata.workspace()
-    {
-        RelaunchPaneStatus::Applied
-    } else {
-        RelaunchPaneStatus::Unknown
-    };
-    lines.push((
-        first_status,
-        saved.panes[0].historical_target,
-        current_targets.first().copied(),
-    ));
-    if saved.panes.len() == 2 {
-        let (split_result, split_target) =
-            split_status.unwrap_or((RelaunchSplitStatus::Failed, None));
-        let pane2_entry = current.panes[1];
-        let pane2 = pane2_entry.map(|pane| pane.target);
-        let pane2_live = pane2_entry.is_some_and(|pane| pane.live);
-        let status = if current_matches && pane2.is_some() {
-            match (split_result, split_target, pane2) {
-                (RelaunchSplitStatus::Applied, Some(expected), Some(actual))
-                    if expected == actual =>
+    for index in 0..saved.panes.len() {
+        let new_target = expected_targets[index].filter(|target| {
+            current
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == *target)
+        });
+        let pane_entry = new_target.and_then(|target| {
+            current
+                .panes
+                .iter()
+                .flatten()
+                .find(|pane| pane.target == target)
+                .copied()
+        });
+        let status = if index == 0 {
+            if pane_entry.is_some_and(|pane| {
+                pane.live
+                    && Some(pane.target) == expected_targets[0]
+                    && pane.target.generation != saved.metadata.generation()
+                    && pane.target.workspace == saved.metadata.workspace()
+            }) {
+                RelaunchPaneStatus::Applied
+            } else {
+                RelaunchPaneStatus::Unknown
+            }
+        } else {
+            match split_outcomes[index].unwrap_or(RelaunchSplitStatus::Failed) {
+                RelaunchSplitStatus::Applied
+                    if (known_targets_match
+                        && (current_targets.len() < saved.panes.len() || current_matches))
+                        && pane_entry.is_some_and(|pane| {
+                            pane.live && Some(pane.target) == expected_targets[index]
+                        }) =>
                 {
                     RelaunchPaneStatus::Applied
                 }
-                (RelaunchSplitStatus::Failed, _, _) | (RelaunchSplitStatus::Unknown, _, _) => {
+                RelaunchSplitStatus::Failed => RelaunchPaneStatus::Failed,
+                RelaunchSplitStatus::Applied | RelaunchSplitStatus::Unknown => {
                     RelaunchPaneStatus::Unknown
                 }
-                _ => RelaunchPaneStatus::Unknown,
             }
-        } else if split_result == RelaunchSplitStatus::Failed && !pane2_live {
-            RelaunchPaneStatus::Failed
-        } else {
-            RelaunchPaneStatus::Unknown
         };
-        lines.push((status, saved.panes[1].historical_target, pane2));
+        lines.push((status, saved.panes[index].historical_target, new_target));
     }
 
     // The link store requires server-singleton ownership. This prototype writes
@@ -1685,6 +1808,344 @@ pub(crate) fn recovery_relaunch(previous: bool) -> i32 {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RelaunchTopology {
+    Leaf(usize),
+    Split {
+        direction: SplitDirection,
+        left: Box<RelaunchTopology>,
+        right: Box<RelaunchTopology>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RelaunchSplitStep {
+    /// Spatial index of the source pane in the then-current live layout.
+    source_index: usize,
+    /// Historical spatial index of the source pane represented by this leaf.
+    source_saved_index: usize,
+    direction: SplitDirection,
+    /// Final saved spatial index represented by the newly created pane.
+    new_saved_index: usize,
+}
+
+fn relaunch_topology(
+    rows: u16,
+    columns: u16,
+    panes: &[PaneGeometry],
+    dividers: &[Rect],
+) -> Option<RelaunchTopology> {
+    if panes.is_empty()
+        || panes.len() > panelink::pane_layout::MAX_PANES
+        || dividers.len() != panes.len().saturating_sub(1)
+    {
+        return None;
+    }
+    let root = Rect {
+        x: 0,
+        y: 0,
+        rows,
+        columns,
+    };
+    if panes.len() == 1 {
+        return (panes[0].rect == root).then_some(RelaunchTopology::Leaf(0));
+    }
+    let indices = (0..panes.len()).collect::<Vec<_>>();
+    let mut result = None;
+    for (root_divider_index, divider) in dividers.iter().enumerate() {
+        let (direction, first_region, second_region) = match split_regions(root, *divider)? {
+            Some(regions) => regions,
+            None => continue,
+        };
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        for index in &indices {
+            let rect = panes.get(*index)?.rect;
+            if rect_is_within(rect, first_region) {
+                first.push(*index);
+            } else if rect_is_within(rect, second_region) {
+                second.push(*index);
+            } else {
+                first.clear();
+                second.clear();
+                break;
+            }
+        }
+        if first.is_empty() || second.is_empty() {
+            continue;
+        }
+        if result.is_some() {
+            return None;
+        }
+        let bit = 1_u8.checked_shl(u32::try_from(root_divider_index).ok()?)?;
+        let left_tree = relaunch_topology_in_region(first_region, &first, panes, dividers, bit)?;
+        let right_tree = relaunch_topology_in_region(second_region, &second, panes, dividers, bit)?;
+        let (left, left_used) = left_tree;
+        let (right, right_used) = right_tree;
+        let used = left_used | right_used;
+        if used.count_ones() as usize != dividers.len() {
+            return None;
+        }
+        result = Some(RelaunchTopology::Split {
+            direction,
+            left: Box::new(left),
+            right: Box::new(right),
+        });
+    }
+    result
+}
+
+fn relaunch_topology_in_region(
+    region: Rect,
+    pane_indices: &[usize],
+    panes: &[PaneGeometry],
+    dividers: &[Rect],
+    used: u8,
+) -> Option<(RelaunchTopology, u8)> {
+    if pane_indices.len() == 1 {
+        let index = *pane_indices.first()?;
+        return (panes.get(index)?.rect == region).then_some((RelaunchTopology::Leaf(index), used));
+    }
+
+    let mut candidate = None;
+    for (divider_index, divider) in dividers.iter().enumerate() {
+        let bit = 1_u8.checked_shl(u32::try_from(divider_index).ok()?)?;
+        if used & bit != 0 {
+            continue;
+        }
+        let (direction, first_region, second_region) = match split_regions(region, *divider)? {
+            Some(regions) => regions,
+            None => continue,
+        };
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        for index in pane_indices {
+            let rect = panes.get(*index)?.rect;
+            if rect_is_within(rect, first_region) {
+                first.push(*index);
+            } else if rect_is_within(rect, second_region) {
+                second.push(*index);
+            } else {
+                first.clear();
+                second.clear();
+                break;
+            }
+        }
+        if first.is_empty() || second.is_empty() {
+            continue;
+        }
+        if candidate.is_some() {
+            return None;
+        }
+        candidate = Some((
+            divider_index,
+            direction,
+            first_region,
+            second_region,
+            first,
+            second,
+        ));
+    }
+    let (divider_index, direction, first_region, second_region, first, second) = candidate?;
+    let bit = 1_u8.checked_shl(u32::try_from(divider_index).ok()?)?;
+    let (left, left_used) =
+        relaunch_topology_in_region(first_region, &first, panes, dividers, used | bit)?;
+    let (right, right_used) =
+        relaunch_topology_in_region(second_region, &second, panes, dividers, used | bit)?;
+    let used = left_used | right_used;
+    Some((
+        RelaunchTopology::Split {
+            direction,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        used,
+    ))
+}
+
+fn rect_is_within(rect: Rect, outer: Rect) -> bool {
+    rect.x >= outer.x
+        && rect.y >= outer.y
+        && rect.x.checked_add(rect.columns).is_some_and(|right| {
+            outer
+                .x
+                .checked_add(outer.columns)
+                .is_some_and(|outer_right| right <= outer_right)
+        })
+        && rect.y.checked_add(rect.rows).is_some_and(|bottom| {
+            outer
+                .y
+                .checked_add(outer.rows)
+                .is_some_and(|outer_bottom| bottom <= outer_bottom)
+        })
+}
+
+fn split_regions(region: Rect, divider: Rect) -> Option<Option<(SplitDirection, Rect, Rect)>> {
+    if divider.columns == 1
+        && divider.y == region.y
+        && divider.rows == region.rows
+        && divider.x > region.x
+        && divider.x < region.x.checked_add(region.columns)?.checked_sub(1)?
+    {
+        let second_x = divider.x.checked_add(1)?;
+        return Some(Some((
+            SplitDirection::Right,
+            Rect {
+                columns: divider.x.checked_sub(region.x)?,
+                ..region
+            },
+            Rect {
+                x: second_x,
+                columns: region
+                    .x
+                    .checked_add(region.columns)?
+                    .checked_sub(second_x)?,
+                ..region
+            },
+        )));
+    }
+    if divider.rows == 1
+        && divider.x == region.x
+        && divider.columns == region.columns
+        && divider.y > region.y
+        && divider.y < region.y.checked_add(region.rows)?.checked_sub(1)?
+    {
+        let second_y = divider.y.checked_add(1)?;
+        return Some(Some((
+            SplitDirection::Down,
+            Rect {
+                rows: divider.y.checked_sub(region.y)?,
+                ..region
+            },
+            Rect {
+                y: second_y,
+                rows: region.y.checked_add(region.rows)?.checked_sub(second_y)?,
+                ..region
+            },
+        )));
+    }
+    Some(None)
+}
+
+fn relaunch_split_plan(topology: &RelaunchTopology) -> Vec<RelaunchSplitStep> {
+    fn leaf_count(topology: &RelaunchTopology) -> usize {
+        match topology {
+            RelaunchTopology::Leaf(_) => 1,
+            RelaunchTopology::Split { left, right, .. } => leaf_count(left) + leaf_count(right),
+        }
+    }
+    fn append(
+        topology: &RelaunchTopology,
+        saved_start: usize,
+        live_order: &mut Vec<usize>,
+        plan: &mut Vec<RelaunchSplitStep>,
+    ) {
+        match topology {
+            RelaunchTopology::Leaf(_) => {}
+            RelaunchTopology::Split {
+                direction,
+                left,
+                right,
+            } => {
+                let left_count = leaf_count(left);
+                let source_index = live_order
+                    .iter()
+                    .position(|saved_index| *saved_index == saved_start)
+                    .expect("split source is an extant topology leaf");
+                let new_saved_index = saved_start + left_count;
+                plan.push(RelaunchSplitStep {
+                    source_index,
+                    source_saved_index: saved_start,
+                    direction: *direction,
+                    new_saved_index,
+                });
+                live_order.insert(source_index + 1, new_saved_index);
+                append(left, saved_start, live_order, plan);
+                append(right, new_saved_index, live_order, plan);
+            }
+        }
+    }
+
+    let mut plan = Vec::with_capacity(leaf_count(topology).saturating_sub(1));
+    let mut live_order = vec![0];
+    append(topology, 0, &mut live_order, &mut plan);
+    plan
+}
+
+fn fill_unattempted_splits(
+    outcomes: &mut [Option<RelaunchSplitStatus>],
+    remaining: &[RelaunchSplitStep],
+    status: RelaunchSplitStatus,
+) {
+    for step in remaining {
+        outcomes[step.new_saved_index].get_or_insert(status);
+    }
+}
+
+fn query_relaunch_layout(
+    peer: &mut RelaunchPeer,
+) -> Result<panelink::ui_protocol::LayoutReply, ()> {
+    let bytes = peer
+        .exchange(&panelink::ui_protocol::encode_layout_query())
+        .map_err(|_| ())?;
+    panelink::ui_protocol::decode_layout_reply(&bytes).map_err(|_| ())
+}
+
+fn query_layout_snapshot(server_directory: &Path) -> Option<panelink::ui_protocol::LayoutReply> {
+    let mut peer = RelaunchPeer::connect(server_directory).ok()?;
+    query_relaunch_layout(&mut peer).ok()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn relaunch_tree_layout_matches(
+    current_layout: &panelink::ui_protocol::LayoutReply,
+    current_panes: &panelink::multi_runtime::PaneReply,
+    saved_topology: &RelaunchTopology,
+    saved_count: usize,
+    expected_targets: &[Option<TargetRef>],
+    first: TargetRef,
+    old_generation: u64,
+    workspace: u64,
+) -> bool {
+    let geometry = current_layout
+        .panes
+        .iter()
+        .flatten()
+        .map(|pane| PaneGeometry {
+            target: pane.target,
+            rect: pane.rect,
+        })
+        .collect::<Vec<_>>();
+    let dividers = current_layout
+        .dividers
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    let topology = relaunch_topology(
+        current_layout.rows,
+        current_layout.columns,
+        &geometry,
+        &dividers,
+    );
+    let targets = current_panes
+        .panes
+        .iter()
+        .flatten()
+        .map(|pane| pane.target)
+        .collect::<Vec<_>>();
+    current_panes.layout_revision == current_layout.revision
+        && targets.len() == saved_count
+        && targets.first() == Some(&first)
+        && targets
+            .iter()
+            .all(|target| target.generation != old_generation && target.workspace == workspace)
+        && expected_targets
+            .iter()
+            .zip(&targets)
+            .all(|(expected, actual)| expected.is_some_and(|expected| expected == *actual))
+        && topology.as_ref() == Some(saved_topology)
+}
 fn relaunch_server_running(state: &StateRoot) -> bool {
     server_lock_held(&state.server)
         || (endpoint_state(&state.socket_path()) == EndpointState::Socket && server_ready(state))
@@ -1712,7 +2173,7 @@ fn perform_relaunch_split(
     layout_revision: u64,
     direction: panelink::pane_layout::SplitDirection,
     (rows, columns): (u16, u16),
-) -> (RelaunchSplitStatus, Option<TargetRef>) {
+) -> (RelaunchSplitStatus, Option<TargetRef>, Option<u64>) {
     use panelink::managed_launch_protocol::LaunchRequest;
     use panelink::multi_startup::environment_entries;
     use panelink::split_protocol::{decode_split_result, encode_split_request, SplitRequest};
@@ -1722,7 +2183,7 @@ fn perform_relaunch_split(
         Ok(context) => context,
         Err(()) => {
             eprintln!("panelink: relaunched, but split failed");
-            return (RelaunchSplitStatus::Failed, None);
+            return (RelaunchSplitStatus::Failed, None, None);
         }
     };
     let key = operation_key(peer.context.context());
@@ -1753,13 +2214,13 @@ fn perform_relaunch_split(
     drop(context);
     if encoded.is_err() {
         eprintln!("panelink: relaunched, but split failed");
-        return (RelaunchSplitStatus::Failed, None);
+        return (RelaunchSplitStatus::Failed, None, None);
     }
     match peer.context.reserve() {
         Ok(reserved) if reserved == key => {}
         _ => {
             eprintln!("panelink: relaunched, but split failed");
-            return (RelaunchSplitStatus::Failed, None);
+            return (RelaunchSplitStatus::Failed, None, None);
         }
     }
     let reply = peer.exchange(&payload);
@@ -1774,9 +2235,14 @@ fn perform_relaunch_split(
                 panelink::protocol::Outcome::Failed => RelaunchSplitStatus::Failed,
                 _ => RelaunchSplitStatus::Unknown,
             };
-            (status, result.new_target)
+            (
+                status,
+                result.new_target,
+                (status == RelaunchSplitStatus::Applied)
+                    .then_some(result.committed_layout_revision),
+            )
         }
-        _ => (RelaunchSplitStatus::Unknown, None),
+        _ => (RelaunchSplitStatus::Unknown, None, None),
     }
 }
 
@@ -1809,6 +2275,184 @@ fn target_text(target: TargetRef) -> String {
         "{}:{}:{}:{}:{}",
         target.generation, target.workspace, target.pane, target.session, target.occupant_revision
     )
+}
+
+#[cfg(test)]
+mod relaunch_topology_tests {
+    use super::*;
+
+    fn rect(x: u16, y: u16, rows: u16, columns: u16) -> Rect {
+        Rect {
+            x,
+            y,
+            rows,
+            columns,
+        }
+    }
+
+    fn panes(rects: &[Rect]) -> Vec<PaneGeometry> {
+        rects
+            .iter()
+            .enumerate()
+            .map(|(index, rect)| PaneGeometry {
+                target: TargetRef {
+                    generation: 1,
+                    workspace: 1,
+                    pane: index as u64 + 1,
+                    session: index as u64 + 1,
+                    occupant_revision: 1,
+                },
+                rect: *rect,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn split_plan_covers_single_two_three_and_nested_t_junction_topologies() {
+        let single = relaunch_topology(24, 80, &panes(&[rect(0, 0, 24, 80)]), &[]).unwrap();
+        assert!(relaunch_split_plan(&single).is_empty());
+
+        let two = relaunch_topology(
+            24,
+            80,
+            &panes(&[rect(0, 0, 24, 39), rect(40, 0, 24, 40)]),
+            &[rect(39, 0, 24, 1)],
+        )
+        .unwrap();
+        assert_eq!(
+            relaunch_split_plan(&two),
+            vec![RelaunchSplitStep {
+                source_index: 0,
+                source_saved_index: 0,
+                direction: SplitDirection::Right,
+                new_saved_index: 1,
+            }]
+        );
+
+        let three = relaunch_topology(
+            24,
+            80,
+            &panes(&[
+                rect(0, 0, 24, 39),
+                rect(40, 0, 11, 40),
+                rect(40, 12, 12, 40),
+            ]),
+            &[rect(39, 0, 24, 1), rect(40, 11, 1, 40)],
+        )
+        .unwrap();
+        assert_eq!(
+            relaunch_split_plan(&three),
+            vec![
+                RelaunchSplitStep {
+                    source_index: 0,
+                    source_saved_index: 0,
+                    direction: SplitDirection::Right,
+                    new_saved_index: 1,
+                },
+                RelaunchSplitStep {
+                    source_index: 1,
+                    source_saved_index: 1,
+                    direction: SplitDirection::Down,
+                    new_saved_index: 2,
+                },
+            ]
+        );
+
+        // A nested T junction: split the root horizontally, then split only
+        // the right-hand child vertically.
+        let nested_t = relaunch_topology(
+            24,
+            80,
+            &panes(&[
+                rect(0, 0, 24, 39),
+                rect(40, 0, 11, 40),
+                rect(40, 12, 12, 40),
+            ]),
+            &[rect(39, 0, 24, 1), rect(40, 11, 1, 40)],
+        )
+        .unwrap();
+        let plan = relaunch_split_plan(&nested_t);
+        assert_eq!(
+            plan.iter()
+                .map(|step| (step.source_index, step.direction))
+                .collect::<Vec<_>>(),
+            vec![(0, SplitDirection::Right), (1, SplitDirection::Down)]
+        );
+
+        // Four leaves nested by splitting the top-left and bottom-left
+        // quadrants after the root horizontal divider.
+        let four = relaunch_topology(
+            24,
+            80,
+            &panes(&[
+                rect(0, 0, 11, 39),
+                rect(40, 0, 11, 40),
+                rect(0, 12, 12, 39),
+                rect(40, 12, 12, 40),
+            ]),
+            &[rect(0, 11, 1, 80), rect(39, 0, 11, 1), rect(39, 12, 12, 1)],
+        )
+        .unwrap();
+        let plan = relaunch_split_plan(&four);
+        assert_eq!(plan.len(), 3);
+        assert_eq!(
+            plan.iter()
+                .map(|step| (step.source_index, step.direction, step.new_saved_index))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, SplitDirection::Down, 2),
+                (0, SplitDirection::Right, 1),
+                (2, SplitDirection::Right, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn topology_comparison_ignores_split_proportions_but_preserves_tree() {
+        let saved = relaunch_topology(
+            24,
+            80,
+            &panes(&[
+                rect(0, 0, 24, 39),
+                rect(40, 0, 11, 40),
+                rect(40, 12, 12, 40),
+            ]),
+            &[rect(39, 0, 24, 1), rect(40, 11, 1, 40)],
+        )
+        .unwrap();
+        let resized_proportion = relaunch_topology(
+            24,
+            80,
+            &panes(&[
+                rect(0, 0, 24, 31),
+                rect(32, 0, 11, 48),
+                rect(32, 12, 12, 48),
+            ]),
+            &[rect(31, 0, 24, 1), rect(32, 11, 1, 48)],
+        )
+        .unwrap();
+        assert_eq!(saved, resized_proportion);
+
+        let different_topology = relaunch_topology(
+            24,
+            80,
+            &panes(&[
+                rect(0, 0, 24, 39),
+                rect(40, 0, 11, 40),
+                rect(40, 12, 12, 40),
+            ]),
+            &[rect(39, 0, 24, 1), rect(40, 11, 1, 40)],
+        )
+        .unwrap();
+        let another_topology = relaunch_topology(
+            24,
+            80,
+            &panes(&[rect(0, 0, 11, 39), rect(40, 0, 11, 40), rect(0, 12, 12, 80)]),
+            &[rect(0, 11, 1, 80), rect(39, 0, 11, 1)],
+        )
+        .unwrap();
+        assert_ne!(different_topology, another_topology);
+    }
 }
 
 fn operation_key(
@@ -1863,6 +2507,17 @@ struct RelaunchPeer {
 
 impl RelaunchPeer {
     fn connect(server_directory: &Path) -> Result<Self, &'static str> {
+        Self::connect_scoped(server_directory, None)
+    }
+
+    /// Connect with a lease scoped to `target`. The server pins every new
+    /// lease to one pane (the initial pane when no target is named), and a
+    /// split may only name the caller's own pane, so splitting a pane created
+    /// by an earlier relaunch step needs a connection scoped to that pane.
+    fn connect_scoped(
+        server_directory: &Path,
+        target: Option<TargetRef>,
+    ) -> Result<Self, &'static str> {
         use panelink::handshake_protocol::{
             validate_welcome, Hello, CAPABILITY_INPUT, CAPABILITY_READ,
         };
@@ -1887,11 +2542,16 @@ impl RelaunchPeer {
             required_capabilities: CAPABILITY_READ,
             optional_capabilities: CAPABILITY_INPUT,
         };
-        let payload = encode_session_hello(&SessionHello {
+        let mut payload = encode_session_hello(&SessionHello {
             hello,
             resume: None,
         })
         .map_err(|_| "handshake_invalid")?;
+        if let Some(target) = target {
+            let trailer = panelink::ui_protocol::encode_attach_target(target)
+                .map_err(|_| "request_invalid")?;
+            payload.extend_from_slice(&trailer);
+        }
         let frame = Frame::new(MessageKind::Hello, 0, &payload).map_err(|_| "handshake_invalid")?;
         let deadline = Instant::now() + Duration::from_secs(2);
         stream

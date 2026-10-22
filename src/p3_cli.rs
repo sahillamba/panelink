@@ -992,6 +992,14 @@ fn exchange_watch(
     stream: &mut AuthenticatedStream,
     request: WatchRequest,
 ) -> Result<(Vec<Event>, WatchEnd), &'static str> {
+    exchange_watch_with_id(stream, 1, request)
+}
+
+fn exchange_watch_with_id(
+    stream: &mut AuthenticatedStream,
+    request_id: u64,
+    request: WatchRequest,
+) -> Result<(Vec<Event>, WatchEnd), &'static str> {
     let WatchRequest::Watch {
         target,
         cursor,
@@ -1003,7 +1011,8 @@ fn exchange_watch(
     };
     let payload = encode_watch_request(&request).map_err(|_| "request_invalid")?;
     let deadline = deadline_after(CLIENT_DEADLINE);
-    let frame = Frame::new(MessageKind::Request, 1, &payload).map_err(|_| "request_invalid")?;
+    let frame =
+        Frame::new(MessageKind::Request, request_id, &payload).map_err(|_| "request_invalid")?;
     stream
         .write_frame(&frame, deadline)
         .map_err(|_| "transport_failed")?;
@@ -1027,7 +1036,7 @@ fn exchange_watch(
                 last.sequence = event.cursor;
                 events.push(event);
             }
-            (MessageKind::Response, 1) => {
+            (MessageKind::Response, id) if id == request_id => {
                 let end = decode_watch_end(frame.payload()).map_err(|_| "response_invalid")?;
                 if usize::from(end.event_count) != events.len()
                     || end.cursor.generation != cursor.generation
@@ -1043,7 +1052,7 @@ fn exchange_watch(
                 }
                 return Ok((events, end));
             }
-            (MessageKind::Error, 1) => return Err("server_rejected"),
+            (MessageKind::Error, id) if id == request_id => return Err("server_rejected"),
             _ => return Err("response_invalid"),
         }
     }
@@ -1798,7 +1807,7 @@ fn ui_split(
 /// 1 s) runs before it replies, and its worker waits up to 3.5 s.
 const CLOSE_CLIENT_DEADLINE: Duration = Duration::from_millis(4_500);
 
-/// One schema-9 pane status exchange.
+/// One schema-9 pane query and schema-10 pane status exchange.
 fn request_panes(
     stream: &mut AuthenticatedStream,
     request_id: u64,
@@ -1837,7 +1846,7 @@ fn panes_json(panes: &PaneReply) -> String {
         push_target(&mut json, pane.target);
         let _ = write!(
             json,
-            ",\"state\":\"{}\",\"live\":{},\"x\":{},\"y\":{},\"rows\":{},\"columns\":{},\"resize_pending\":{}}}",
+            ",\"state\":\"{}\",\"live\":{},\"x\":{},\"y\":{},\"rows\":{},\"columns\":{},\"resize_pending\":{},\"exit_status\":",
             session_state_name(pane.state),
             pane.live,
             pane.rect.x,
@@ -1846,9 +1855,23 @@ fn panes_json(panes: &PaneReply) -> String {
             pane.rect.columns,
             pane.resize_pending
         );
+        push_pane_exit_json(&mut json, pane.exit);
+        json.push('}');
     }
     json.push_str("]}");
     json
+}
+
+fn push_pane_exit_json(json: &mut String, exit: Option<panelink::multi_runtime::PaneExit>) {
+    match exit {
+        Some(panelink::multi_runtime::PaneExit::Code(code)) => {
+            let _ = write!(json, "{{\"code\":{code}}}");
+        }
+        Some(panelink::multi_runtime::PaneExit::Signal(signal)) => {
+            let _ = write!(json, "{{\"signal\":{signal}}}");
+        }
+        None => json.push_str("null"),
+    }
 }
 
 /// Fixed name of a close outcome and, for a rejection, its reason.
@@ -2056,18 +2079,68 @@ pub(super) enum CloseFailure {
 /// workspace generation, or its pinned pane was closed) is replaced; an
 /// operation left uncertain on such a lease is unobservable and is reported,
 /// never resent.
-pub(super) struct WorkspaceLink {
+pub(crate) struct WorkspaceLink {
     context: ContextFile,
     stream: AuthenticatedStream,
     next_request: u64,
     /// An earlier close on a now-unrecognized lease never settled.
-    pub(super) discarded_uncertain: bool,
+    pub(crate) discarded_uncertain: bool,
+    /// A prior uncertain operation was observed and cleared while opening this
+    /// invocation. This invocation may inspect state but will not substitute a
+    /// fresh operation for it.
+    pub(crate) settled_uncertain: Option<OperationStatus>,
+}
+
+/// Bounded sanitized live-screen observation returned by the control client.
+pub(crate) struct AgentScreen {
+    pub(crate) target: TargetRef,
+    pub(crate) screen_revision: u64,
+    pub(crate) truncated: bool,
+    pub(crate) text: String,
+}
+
+/// Atomic screen and process/owner observation plus its metadata cursor.
+pub(crate) struct AgentReconciliation {
+    pub(crate) info: SessionInfo,
+    pub(crate) cursor: EventCursor,
+    pub(crate) screen_revision: u64,
+    pub(crate) truncated: bool,
+    pub(crate) text: String,
 }
 
 impl WorkspaceLink {
     /// Resume (or create) the CLI context at `context_path` against the server
     /// in `directory`.
-    pub(super) fn open(directory: &Path, context_path: &Path) -> Result<Self, &'static str> {
+    pub(crate) fn open(directory: &Path, context_path: &Path) -> Result<Self, &'static str> {
+        Self::open_for_target_inner(directory, context_path, None, false)
+    }
+
+    /// Open the reusable context pinned to the exact target, creating a fresh
+    /// context with an AttachTarget trailer when needed.
+    pub(crate) fn open_for_target(
+        directory: &Path,
+        context_path: &Path,
+        target: TargetRef,
+    ) -> Result<Self, &'static str> {
+        Self::open_for_target_inner(directory, context_path, Some(target), false)
+    }
+
+    /// Event watches use the same pinned target connection; the default Hello
+    /// already negotiates Events when the runtime advertises them.
+    pub(crate) fn open_for_target_events(
+        directory: &Path,
+        context_path: &Path,
+        target: TargetRef,
+    ) -> Result<Self, &'static str> {
+        Self::open_for_target_inner(directory, context_path, Some(target), true)
+    }
+
+    fn open_for_target_inner(
+        directory: &Path,
+        context_path: &Path,
+        target: Option<TargetRef>,
+        require_events: bool,
+    ) -> Result<Self, &'static str> {
         let mut discarded_uncertain = false;
         if fs::symlink_metadata(context_path).is_ok() {
             let context = ContextFile::open_existing(
@@ -2076,15 +2149,21 @@ impl WorkspaceLink {
             )
             .map_err(|error| context_error_label(&error))?;
             let mut stream = connect_stream(directory)?;
-            match handshake(&mut stream, Some(context.context())) {
+            match handshake_mode(&mut stream, Some(context.context()), require_events) {
                 Ok(_) => {
                     let mut link = Self {
                         context,
                         stream,
                         next_request: 1,
                         discarded_uncertain,
+                        settled_uncertain: None,
                     };
-                    link.settle_uncertain()?;
+                    link.settled_uncertain = link.settle_uncertain()?;
+                    if let Some(expected) = target {
+                        if link.describe_info()?.target != expected {
+                            return Err("context_target_mismatch");
+                        }
+                    }
                     return Ok(link);
                 }
                 Err("server_rejected" | "context_mismatch") => {
@@ -2099,7 +2178,7 @@ impl WorkspaceLink {
             }
         }
         let mut stream = connect_stream(directory)?;
-        let welcome = handshake(&mut stream, None)?;
+        let welcome = handshake_full(&mut stream, None, require_events, target)?;
         let context = ContextFile::create(
             context_path,
             welcome.generation,
@@ -2112,6 +2191,7 @@ impl WorkspaceLink {
             stream,
             next_request: 1,
             discarded_uncertain,
+            settled_uncertain: None,
         })
     }
 
@@ -2149,9 +2229,378 @@ impl WorkspaceLink {
     }
 
     /// Current layout panes in spatial order.
-    pub(super) fn panes(&mut self) -> Result<PaneReply, &'static str> {
+    pub(crate) fn panes(&mut self) -> Result<PaneReply, &'static str> {
         let id = self.request_id();
         request_panes(&mut self.stream, id)
+    }
+
+    /// Read current metadata for the target pinned to this caller lease.
+    pub(crate) fn describe_info(&mut self) -> Result<SessionInfo, &'static str> {
+        let payload =
+            encode_session_request(&SessionRequest::Describe).map_err(|_| "request_invalid")?;
+        let id = self.request_id();
+        let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
+        decode_session_info(&bytes).map_err(|_| "response_invalid")
+    }
+
+    pub(crate) const fn lease(&self) -> u64 {
+        self.context.context().lease()
+    }
+
+    /// Read the decoded, sanitized live screen through the existing typed
+    /// control request. `LiveScrollback` is passed through honestly: current
+    /// PTY effects reject that source until live scrollback is implemented.
+    pub(crate) fn read_screen(
+        &mut self,
+        target: TargetRef,
+        source: ReadSource,
+        max_bytes: u32,
+        max_lines: u16,
+    ) -> Result<AgentScreen, &'static str> {
+        self.ensure_target(target)?;
+        let key = candidate_key(self.context.context());
+        let payload = encode_control(&ControlRequest {
+            key,
+            target,
+            command: ControlCommand::Read {
+                source,
+                max_bytes,
+                max_lines,
+            },
+        })?;
+        let reserved = self
+            .context
+            .reserve()
+            .map_err(|error| context_error_label(&error))?;
+        if reserved != key {
+            return Err("context_key_mismatch");
+        }
+        let id = self.request_id();
+        let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
+        let response = decode_response_payload(&bytes).map_err(|_| "response_invalid")?;
+        if response.key != reserved {
+            return Err("response_invalid");
+        }
+        match response.body {
+            ResponseBody::Read {
+                target: response_target,
+                source: response_source,
+                screen_revision,
+                truncated,
+                text,
+            } if response_target == target && response_source == source => {
+                self.context
+                    .ack(reserved)
+                    .map_err(|error| context_error_label(&error))?;
+                Ok(AgentScreen {
+                    target,
+                    screen_revision,
+                    truncated,
+                    text: text.to_owned(),
+                })
+            }
+            ResponseBody::Rejected(RejectionCode::Unsupported)
+                if source == ReadSource::LiveScrollback =>
+            {
+                self.context
+                    .ack(reserved)
+                    .map_err(|error| context_error_label(&error))?;
+                Err("live_scrollback_unavailable")
+            }
+            ResponseBody::Rejected(_) => {
+                self.context
+                    .ack(reserved)
+                    .map_err(|error| context_error_label(&error))?;
+                Err("read_rejected")
+            }
+            ResponseBody::Status(status) => {
+                self.context
+                    .ack(reserved)
+                    .map_err(|error| context_error_label(&error))?;
+                Err(match status {
+                    OperationStatus::NotAdmitted => "read_not_admitted",
+                    OperationStatus::InProgress => "read_uncertain",
+                    OperationStatus::Completed(_) => "read_result_unavailable",
+                })
+            }
+            _ => Err("response_invalid"),
+        }
+    }
+
+    /// Obtain the live screen and owner/exit state atomically with its event
+    /// cursor using the existing reconciliation primitive.
+    pub(crate) fn reconcile_target(
+        &mut self,
+        target: TargetRef,
+    ) -> Result<AgentReconciliation, &'static str> {
+        self.ensure_target(target)?;
+        let request = WatchRequest::Reconcile {
+            target,
+            max_bytes: SERVER_READ_BYTES,
+            max_lines: SERVER_READ_LINES,
+        };
+        let payload = encode_watch_request(&request).map_err(|_| "request_invalid")?;
+        let id = self.request_id();
+        let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
+        let value = decode_reconciliation(&bytes).map_err(|_| "response_invalid")?;
+        if value.info.target != target || value.cursor.generation != target.generation {
+            return Err("response_invalid");
+        }
+        Ok(AgentReconciliation {
+            info: value.info,
+            cursor: value.cursor,
+            screen_revision: value.screen_revision,
+            truncated: value.truncated,
+            text: value.text.to_owned(),
+        })
+    }
+
+    /// One finite metadata watch. The event journal contains output, owner and
+    /// exit observations only; pane layout events are polled from `panes()`.
+    pub(crate) fn watch_target(
+        &mut self,
+        target: TargetRef,
+        cursor: EventCursor,
+        limit: u16,
+        wait_ms: u16,
+    ) -> Result<(Vec<Event>, WatchEnd), &'static str> {
+        self.ensure_target(target)?;
+        let request = WatchRequest::Watch {
+            target,
+            cursor,
+            limit,
+            wait_ms,
+        };
+        let id = self.request_id();
+        exchange_watch_with_id(&mut self.stream, id, request)
+    }
+
+    /// Claim/release use the same durable owner-revision CAS and operation-key
+    /// protocol as `panelink control`; no operation is replayed on reconnect.
+    pub(crate) fn change_owner(
+        &mut self,
+        target: TargetRef,
+        expected_revision: u64,
+        claim: bool,
+    ) -> Result<OperationStatus, &'static str> {
+        self.ensure_target(target)?;
+        let key = candidate_key(self.context.context());
+        let request = if claim {
+            SessionRequest::Claim {
+                key,
+                target,
+                expected_owner_revision: expected_revision,
+                ttl_seconds: OWNER_TTL_SECONDS,
+            }
+        } else {
+            SessionRequest::Release {
+                key,
+                target,
+                expected_owner_revision: expected_revision,
+            }
+        };
+        let payload = encode_session_request(&request).map_err(|_| "request_invalid")?;
+        let reserved = self.reserve_mutation_key(key)?;
+        let id = self.request_id();
+        let bytes = match exchange_with_id(&mut self.stream, id, &payload) {
+            Ok(bytes) => bytes,
+            Err("server_rejected") => return self.reconcile_rejected_mutation(reserved),
+            Err(error) => return Err(error),
+        };
+        let response = decode_response_payload(&bytes).map_err(|_| "response_invalid")?;
+        if response.key != reserved {
+            return Err("response_invalid");
+        }
+        let status = match response.body {
+            ResponseBody::Status(status) => status,
+            ResponseBody::Rejected(code) => {
+                self.context
+                    .ack(reserved)
+                    .map_err(|error| context_error_label(&error))?;
+                return Err(owner_rejection_label(code));
+            }
+            ResponseBody::Read { .. } => return Err("response_invalid"),
+        };
+        if matches!(status, OperationStatus::InProgress) {
+            return Err("operation_uncertain");
+        }
+        self.context
+            .ack(reserved)
+            .map_err(|error| context_error_label(&error))?;
+        Ok(status)
+    }
+
+    /// Send literal text or submit it with Enter as one non-replayable input
+    /// operation. The text is never written to a context or diagnostic.
+    pub(crate) fn send_text(
+        &mut self,
+        target: TargetRef,
+        owner_revision: u64,
+        text: &str,
+        enter: bool,
+    ) -> Result<OperationStatus, &'static str> {
+        self.ensure_target(target)?;
+        let key = candidate_key(self.context.context());
+        let command = if enter {
+            ControlCommand::Submit {
+                owner_revision,
+                text,
+            }
+        } else {
+            ControlCommand::Text {
+                owner_revision,
+                text,
+            }
+        };
+        let payload = encode_control(&ControlRequest {
+            key,
+            target,
+            command,
+        })?;
+        let reserved = self.reserve_mutation_key(key)?;
+        let id = self.request_id();
+        let bytes = match exchange_with_id(&mut self.stream, id, &payload) {
+            Ok(bytes) => bytes,
+            Err("server_rejected") => return self.reconcile_rejected_mutation(reserved),
+            Err(error) => return Err(error),
+        };
+        self.decode_operation_status(reserved, &bytes, true)
+    }
+
+    /// Send a validated typed-key list as one non-replayable operation.
+    pub(crate) fn send_keys(
+        &mut self,
+        target: TargetRef,
+        owner_revision: u64,
+        keys: &[Key],
+    ) -> Result<OperationStatus, &'static str> {
+        self.ensure_target(target)?;
+        let key = candidate_key(self.context.context());
+        let payload = panelink::ui_protocol::encode_key_input(&KeyInput {
+            key,
+            target,
+            expected_owner_revision: owner_revision,
+            keys,
+        })
+        .map_err(|_| "request_invalid")?;
+        let reserved = self.reserve_mutation_key(key)?;
+        let id = self.request_id();
+        let bytes = match exchange_with_id(&mut self.stream, id, &payload) {
+            Ok(bytes) => bytes,
+            Err("server_rejected") => return self.reconcile_rejected_mutation(reserved),
+            Err(error) => return Err(error),
+        };
+        self.decode_operation_status(reserved, &bytes, true)
+    }
+
+    /// Interrupt one exact owned target. A failed acknowledgment is never
+    /// retried, consistent with the existing Signal operation class.
+    pub(crate) fn interrupt_target(
+        &mut self,
+        target: TargetRef,
+        owner_revision: u64,
+    ) -> Result<OperationStatus, &'static str> {
+        self.ensure_target(target)?;
+        let key = candidate_key(self.context.context());
+        let payload = encode_control(&ControlRequest {
+            key,
+            target,
+            command: ControlCommand::Interrupt { owner_revision },
+        })?;
+        let reserved = self.reserve_mutation_key(key)?;
+        let id = self.request_id();
+        let bytes = match exchange_with_id(&mut self.stream, id, &payload) {
+            Ok(bytes) => bytes,
+            Err("server_rejected") => return self.reconcile_rejected_mutation(reserved),
+            Err(error) => return Err(error),
+        };
+        self.decode_operation_status(reserved, &bytes, true)
+    }
+
+    fn ensure_target(&self, target: TargetRef) -> Result<(), &'static str> {
+        if self.discarded_uncertain {
+            return Err("previous_operation_unobservable");
+        }
+        if self.context.context().generation() != target.generation {
+            return Err("stale_target");
+        }
+        Ok(())
+    }
+
+    fn reserve_mutation_key(&mut self, key: OperationKey) -> Result<OperationKey, &'static str> {
+        if self.discarded_uncertain {
+            return Err("previous_operation_unobservable");
+        }
+        if self.settled_uncertain.is_some() {
+            return Err("previous_operation_settled");
+        }
+        let reserved = self
+            .context
+            .reserve()
+            .map_err(|error| context_error_label(&error))?;
+        if reserved != key {
+            return Err("context_key_mismatch");
+        }
+        Ok(reserved)
+    }
+
+    fn reconcile_rejected_mutation(
+        &mut self,
+        key: OperationKey,
+    ) -> Result<OperationStatus, &'static str> {
+        match self.settle_uncertain()? {
+            Some(OperationStatus::NotAdmitted) => Err("operation_refused"),
+            Some(OperationStatus::Completed(_)) => Err("operation_acknowledgment_lost"),
+            Some(OperationStatus::InProgress) => Err("operation_uncertain"),
+            None => {
+                let _ = key;
+                Err("operation_uncertain")
+            }
+        }
+    }
+
+    fn decode_operation_status(
+        &mut self,
+        key: OperationKey,
+        bytes: &[u8],
+        is_input: bool,
+    ) -> Result<OperationStatus, &'static str> {
+        let response = decode_response_payload(bytes).map_err(|_| "response_invalid")?;
+        if response.key != key {
+            return Err("response_invalid");
+        }
+        match response.body {
+            ResponseBody::Status(OperationStatus::InProgress) => Err("operation_uncertain"),
+            ResponseBody::Status(status) => {
+                self.context
+                    .ack(key)
+                    .map_err(|error| context_error_label(&error))?;
+                if status != OperationStatus::Completed(Outcome::Applied) {
+                    return Err(if is_input {
+                        "input_not_applied"
+                    } else {
+                        "operation_not_applied"
+                    });
+                }
+                Ok(status)
+            }
+            ResponseBody::Rejected(code) => {
+                self.context
+                    .ack(key)
+                    .map_err(|error| context_error_label(&error))?;
+                if is_input
+                    && matches!(
+                        code,
+                        RejectionCode::StaleOwner | RejectionCode::ExpiredOwner
+                    )
+                {
+                    Err("input_ownership_lost")
+                } else {
+                    Err(owner_rejection_label(code))
+                }
+            }
+            ResponseBody::Read { .. } => Err("response_invalid"),
+        }
     }
 
     /// Send exactly one close for `target` at `layout_revision`.
@@ -2191,6 +2640,21 @@ impl WorkspaceLink {
         };
         let _ = self.context.ack(key);
         Ok(result)
+    }
+
+    /// Close one exact pane from the layout revision observed by the caller.
+    pub(crate) fn close_target(
+        &mut self,
+        directory: &Path,
+        target: TargetRef,
+        layout_revision: u64,
+    ) -> Result<CloseResult, &'static str> {
+        self.close(directory, target, layout_revision)
+            .map_err(|failure| match failure {
+                CloseFailure::Refused => "close_refused",
+                CloseFailure::Unknown => "close_unknown",
+                CloseFailure::NotSent(error) => error,
+            })
     }
 
     fn observe_lost_close(
@@ -2443,7 +2907,7 @@ fn outcome_name(outcome: Outcome) -> &'static str {
     }
 }
 
-fn rejection_name(code: RejectionCode) -> &'static str {
+fn owner_rejection_label(code: RejectionCode) -> &'static str {
     match code {
         RejectionCode::Unauthorized => "unauthorized",
         RejectionCode::StaleTarget => "stale_target",
@@ -2455,6 +2919,10 @@ fn rejection_name(code: RejectionCode) -> &'static str {
         RejectionCode::InvalidRequest => "invalid_request",
         RejectionCode::UnknownContext => "unknown_context",
     }
+}
+
+fn rejection_name(code: RejectionCode) -> &'static str {
+    owner_rejection_label(code)
 }
 
 fn push_key(json: &mut String, key: OperationKey) {
@@ -2566,7 +3034,7 @@ fn fresh_nonce() -> u64 {
 fn print_help() {
     let _ = writeln!(
         io::stdout().lock(),
-        "Usage:\n  panelink server-probe --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink serve --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink control --directory DIR --context FILE init [TARGET]\n  panelink control --directory DIR --context FILE show|describe|resync|detach\n  panelink control --directory DIR --context FILE layout\n  panelink control --directory DIR --context FILE split TARGET LAYOUT_REV left|right|up|down [--cwd DIR]\n  panelink control --directory DIR --context FILE keys TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE panes\n  panelink control --directory DIR --context FILE close TARGET LAYOUT_REV\n  panelink control --directory DIR --context FILE close-status SEQUENCE\n  panelink control --directory DIR --context FILE read TARGET\n  panelink control --directory DIR --context FILE reconcile TARGET\n  panelink control --directory DIR --context FILE watch TARGET GEN:SEQ LIMIT WAIT_MS\n  panelink control --directory DIR --context FILE claim|release TARGET OWNER_REV\n  panelink control --directory DIR --context FILE handoff TARGET OWNER_REV RECIPIENT_LEASE\n  panelink control --directory DIR --context FILE text|paste|submit TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE interrupt TARGET OWNER_REV\n  panelink control --directory DIR --context FILE status SEQUENCE\n  panelink control --directory DIR --context FILE receipt THROUGH_SEQUENCE\nTARGET is generation:workspace:pane:session:occupant_revision. Use --initialize only for a new empty server directory.\nserve is an experimental two-pane server (at most one split). split launches /bin/zsh with this CLI process's own cwd (or --cwd) and environment and needs a serve started with --allow-input. init TARGET pins a new context to one serve pane; layout, split, keys, panes and close work only against serve. close stops one pane's shell (HUP, then KILL after 1 s) and exits 0 only when it exited or was escalated.\n  panelink attach --directory DIR --context-dir CONTEXT_DIR\nattach is an experimental full-screen client for serve (run it inside a terminal): one connection and one private context file per pane under CONTEXT_DIR (created 0700 if missing). Keys go to the focused pane; left-click focuses; right-click or Ctrl-B then s opens the split menu; Ctrl-X detaches (server-owned shells keep running)."
+        "Usage:\n  panelink server-probe --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink serve --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink control --directory DIR --context FILE init [TARGET]\n  panelink control --directory DIR --context FILE show|describe|resync|detach\n  panelink control --directory DIR --context FILE layout\n  panelink control --directory DIR --context FILE split TARGET LAYOUT_REV left|right|up|down [--cwd DIR]\n  panelink control --directory DIR --context FILE keys TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE panes\n  panelink control --directory DIR --context FILE close TARGET LAYOUT_REV\n  panelink control --directory DIR --context FILE close-status SEQUENCE\n  panelink control --directory DIR --context FILE read TARGET\n  panelink control --directory DIR --context FILE reconcile TARGET\n  panelink control --directory DIR --context FILE watch TARGET GEN:SEQ LIMIT WAIT_MS\n  panelink control --directory DIR --context FILE claim|release TARGET OWNER_REV\n  panelink control --directory DIR --context FILE handoff TARGET OWNER_REV RECIPIENT_LEASE\n  panelink control --directory DIR --context FILE text|paste|submit TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE interrupt TARGET OWNER_REV\n  panelink control --directory DIR --context FILE status SEQUENCE\n  panelink control --directory DIR --context FILE receipt THROUGH_SEQUENCE\nTARGET is generation:workspace:pane:session:occupant_revision. Use --initialize only for a new empty server directory.\nserve is an experimental server with up to four panes (binary splits; a split needs room for both children). split launches /bin/zsh with this CLI process's own cwd (or --cwd) and environment and needs a serve started with --allow-input. init TARGET pins a new context to one serve pane; layout, split, keys, panes and close work only against serve. close stops one pane's shell (HUP, then KILL after 1 s) and exits 0 only when it exited or was escalated.\n  panelink attach --directory DIR --context-dir CONTEXT_DIR\nattach is an experimental full-screen client for serve (run it inside a terminal): one connection and one private context file per pane under CONTEXT_DIR (created 0700 if missing). Keys go to the focused pane; left-click focuses; right-click or Ctrl-B then s opens the split menu; Ctrl-X detaches (server-owned shells keep running)."
     );
 }
 
@@ -3223,6 +3691,7 @@ mod tests {
                     state: SessionState::Applied,
                     live: true,
                     resize_pending: false,
+                    exit: None,
                 }),
                 Some(PaneEntry {
                     target: second,
@@ -3235,12 +3704,15 @@ mod tests {
                     state: SessionState::Exited,
                     live: false,
                     resize_pending: true,
+                    exit: Some(panelink::multi_runtime::PaneExit::Code(3)),
                 }),
+                None,
+                None,
             ],
         };
         assert_eq!(
             panes_json(&reply),
-            "{\"ok\":true,\"action\":\"panes\",\"layout_revision\":3,\"rows\":24,\"columns\":81,\"pane_count\":2,\"panes\":[{\"index\":1,\"target\":\"7:2:3:4:5\",\"state\":\"applied\",\"live\":true,\"x\":0,\"y\":0,\"rows\":24,\"columns\":40,\"resize_pending\":false},{\"index\":2,\"target\":\"7:2:6:6:5\",\"state\":\"exited\",\"live\":false,\"x\":41,\"y\":0,\"rows\":24,\"columns\":40,\"resize_pending\":true}]}"
+            "{\"ok\":true,\"action\":\"panes\",\"layout_revision\":3,\"rows\":24,\"columns\":81,\"pane_count\":2,\"panes\":[{\"index\":1,\"target\":\"7:2:3:4:5\",\"state\":\"applied\",\"live\":true,\"x\":0,\"y\":0,\"rows\":24,\"columns\":40,\"resize_pending\":false,\"exit_status\":null},{\"index\":2,\"target\":\"7:2:6:6:5\",\"state\":\"exited\",\"live\":false,\"x\":41,\"y\":0,\"rows\":24,\"columns\":40,\"resize_pending\":true,\"exit_status\":{\"code\":3}}]}"
         );
     }
 

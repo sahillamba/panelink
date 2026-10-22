@@ -36,8 +36,11 @@ fn one_pane(revision: u64) -> LayoutReply {
                 pending_confirmed: None,
             }),
             None,
+            None,
+            None,
         ],
         divider: None,
+        dividers: [None; panelink::pane_layout::MAX_PANES - 1],
     }
 }
 
@@ -57,8 +60,11 @@ fn two_panes() -> LayoutReply {
                 rect: rect(41, 0, 24, 40),
                 pending_confirmed: None,
             }),
+            None,
+            None,
         ],
         divider: Some(rect(40, 0, 24, 1)),
+        dividers: [Some(rect(40, 0, 24, 1)), None, None],
     }
 }
 
@@ -310,12 +316,13 @@ fn right_click_opens_menu_for_pane_under_pointer_and_menu_inputs_never_reach_pan
     feed(&mut app, &mut fake, b"\x1b[<2;5;5M");
     assert!(app.menu_open());
     assert_eq!(app.menu.captured_target(), Some(target(1)));
-    // The menu owns ordinary keys, Enter on a disabled item (capacity),
-    // paste, mouse, and arrows; detach remains globally available.
+    // Every kind of input while open is consumed: keys, Enter on a disabled
+    // item (Split Left: a 40-column pane is too narrow), paste, Ctrl-X,
+    // mouse, arrows. Home selects the first (disabled) item.
     let flow = feed(
         &mut app,
         &mut fake,
-        b"xyz\r\x1b[B\x1b[200~paste\x1b[201~\x03\x1b[<2;5;5m",
+        b"xyz\x1b[H\r\x1b[B\x1b[200~paste\x1b[201~\x18\x03\x1b[<2;5;5m",
     );
     assert_eq!(flow, Flow::Continue);
     assert!(app.menu_open(), "disabled items keep the menu open");
@@ -518,7 +525,7 @@ fn frames_build_for_one_and_two_panes_with_placeholders_and_overlays() {
     feed(&mut app, &mut fake, b"\x1b[<2;50;5M");
     let text = render_text(&app);
     assert!(text.contains("Split Right"), "{text}");
-    assert!(text.contains("Pane limit"), "{text}");
+    assert!(text.contains("Split Right"), "{text}");
 }
 
 #[test]
@@ -602,15 +609,50 @@ fn navigation_mode_direct_split_keys() {
 }
 
 #[test]
-fn navigation_mode_split_at_capacity_reports_without_effect() {
+fn navigation_mode_split_at_four_pane_capacity_reports_without_effect() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
-    app.set_layout(two_panes());
+    let layout = two_panes();
+    let mut local = super::local_layout(&layout).unwrap();
+    for (target, revision, direction, fresh) in [
+        (
+            target(1),
+            2,
+            panelink::pane_layout::SplitDirection::Down,
+            target(3),
+        ),
+        (
+            target(1),
+            3,
+            panelink::pane_layout::SplitDirection::Up,
+            target(4),
+        ),
+    ] {
+        let preview = local
+            .preview_split(target, revision, direction, fresh)
+            .unwrap();
+        local.commit_split(preview).unwrap();
+    }
+    let snapshot = local.snapshot();
+    app.set_layout(LayoutReply {
+        revision: snapshot.revision + 2,
+        rows: snapshot.rows,
+        columns: snapshot.columns,
+        panes: std::array::from_fn(|index| {
+            snapshot.panes[index].map(|pane| UiPane {
+                target: pane.target,
+                rect: pane.rect,
+                pending_confirmed: None,
+            })
+        }),
+        divider: snapshot.divider,
+        dividers: snapshot.dividers,
+    });
     feed(&mut app, &mut fake, b"\x02r");
     assert!(fake.splits.is_empty());
     assert_eq!(
         app.status.map(|s| s.0),
-        Some("split unavailable: pane limit reached (2)")
+        Some("split unavailable: pane limit reached (4)")
     );
 }
 
@@ -841,9 +883,8 @@ fn menu_close_item_uses_captured_target_and_server_revision_after_confirmation()
     // No letter shortcut reaches the close row: x is consumed.
     feed(&mut app, &mut fake, b"x");
     assert!(app.menu_open() && !app.confirm_open());
-    // Up from the first (disabled) item wraps to the recovery row; one more
-    // Up reaches "Close pane".
-    feed(&mut app, &mut fake, b"\x1b[A\x1b[A\r");
+    // End selects the last (recovery) row; one Up reaches "Close pane".
+    feed(&mut app, &mut fake, b"\x1b[F\x1b[A\r");
     assert!(!app.menu_open());
     assert!(app.confirm_open());
     assert!(fake.closes.is_empty());
@@ -979,8 +1020,11 @@ fn survivor_only() -> LayoutReply {
                 pending_confirmed: None,
             }),
             None,
+            None,
+            None,
         ],
         divider: None,
+        dividers: [None; panelink::pane_layout::MAX_PANES - 1],
     }
 }
 

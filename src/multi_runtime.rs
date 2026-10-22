@@ -68,6 +68,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+/// Confirmed child termination reported by the operating system.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneExit {
+    /// The child returned an exit code.
+    Code(i32),
+    /// The child was terminated by this signal.
+    Signal(i32),
+}
+
 /// Maximum finite watches retained between owner ticks.
 pub const MAX_PENDING_WATCHES: usize = 8;
 /// Maximum close replies retained while owner-driven stop phases progress.
@@ -323,6 +332,7 @@ const DEFAULT_WORKSPACE: u64 = 1;
 /// Desired geometry and targets only. Focus,
 /// pending PTY resize and repeated identical results never form a change.
 #[derive(Clone, Copy, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 enum LayoutCandidateKey {
     Live(LayoutSnapshot),
     Empty,
@@ -870,11 +880,12 @@ pub(crate) fn split_prepare(
 
 /// Exact size of a schema-9 pane status query.
 pub const PANE_QUERY_BYTES: usize = 8;
-/// Exact size of a schema-9 pane status reply.
-pub const PANE_REPLY_BYTES: usize = 136;
+/// Exact size of a schema-10 pane status reply.
+pub const PANE_REPLY_BYTES: usize = 24 + crate::pane_layout::MAX_PANES * 56;
 
 const PANE_QUERY_KIND: u16 = 3;
 const PANE_REPLY_KIND: u16 = 0x8003;
+const PANE_REPLY_SCHEMA: u16 = 10;
 const PANE_ENTRY_BYTES: usize = 56;
 const PANE_FLAG_PRESENT: u8 = 1;
 const PANE_FLAG_LIVE: u8 = 2;
@@ -893,6 +904,8 @@ pub struct PaneEntry {
     pub live: bool,
     /// Whether the pane's absolute PTY resize is still pending.
     pub resize_pending: bool,
+    /// Confirmed child exit code or terminating signal.
+    pub exit: Option<PaneExit>,
 }
 
 impl fmt::Debug for PaneEntry {
@@ -903,6 +916,7 @@ impl fmt::Debug for PaneEntry {
             .field("state", &self.state)
             .field("live", &self.live)
             .field("resize_pending", &self.resize_pending)
+            .field("exit", &self.exit)
             .finish()
     }
 }
@@ -917,7 +931,7 @@ pub struct PaneReply {
     /// Root columns.
     pub columns: u16,
     /// Spatially ordered panes (left/top first).
-    pub panes: [Option<PaneEntry>; 2],
+    pub panes: [Option<PaneEntry>; crate::pane_layout::MAX_PANES],
 }
 
 /// Fixed, redacted pane-status codec failure.
@@ -988,8 +1002,13 @@ pub fn encode_pane_reply(reply: &PaneReply) -> Result<[u8; PANE_REPLY_BYTES], Pa
     if (reply.layout_revision == 0) != (present == 0) {
         return Err(PaneCodecError);
     }
+    if reply.panes[..present].iter().any(Option::is_none)
+        || reply.panes[present..].iter().any(Option::is_some)
+    {
+        return Err(PaneCodecError);
+    }
     let mut bytes = [0_u8; PANE_REPLY_BYTES];
-    bytes[..2].copy_from_slice(&CLOSE_SCHEMA.to_be_bytes());
+    bytes[..2].copy_from_slice(&PANE_REPLY_SCHEMA.to_be_bytes());
     bytes[2..4].copy_from_slice(&PANE_REPLY_KIND.to_be_bytes());
     bytes[8..16].copy_from_slice(&reply.layout_revision.to_be_bytes());
     bytes[16..18].copy_from_slice(&reply.rows.to_be_bytes());
@@ -1030,6 +1049,17 @@ pub fn encode_pane_reply(reply: &PaneReply) -> Result<[u8; PANE_REPLY_BYTES], Pa
             } else {
                 0
             };
+        match entry.exit {
+            None => {}
+            Some(PaneExit::Code(code)) => {
+                bytes[base + 50] = 1;
+                bytes[base + 52..base + 56].copy_from_slice(&code.to_le_bytes());
+            }
+            Some(PaneExit::Signal(signal)) => {
+                bytes[base + 50] = 2;
+                bytes[base + 52..base + 56].copy_from_slice(&signal.to_le_bytes());
+            }
+        }
     }
     Ok(bytes)
 }
@@ -1047,14 +1077,14 @@ pub fn decode_pane_reply(bytes: &[u8]) -> Result<PaneReply, PaneCodecError> {
         field.copy_from_slice(&bytes[offset..offset + 8]);
         u64::from_be_bytes(field)
     };
-    if read_u16(0) != CLOSE_SCHEMA
+    if read_u16(0) != PANE_REPLY_SCHEMA
         || read_u16(2) != PANE_REPLY_KIND
         || bytes[4..8].iter().any(|byte| *byte != 0)
         || bytes[20..24].iter().any(|byte| *byte != 0)
     {
         return Err(PaneCodecError);
     }
-    let mut panes = [None; 2];
+    let mut panes = [None; crate::pane_layout::MAX_PANES];
     for (index, slot) in panes.iter_mut().enumerate() {
         let base = 24 + index * PANE_ENTRY_BYTES;
         let entry = &bytes[base..base + PANE_ENTRY_BYTES];
@@ -1066,10 +1096,17 @@ pub fn decode_pane_reply(bytes: &[u8]) -> Result<PaneReply, PaneCodecError> {
             continue;
         }
         if flags & !(PANE_FLAG_PRESENT | PANE_FLAG_LIVE | PANE_FLAG_RESIZE_PENDING) != 0
-            || entry[50..].iter().any(|byte| *byte != 0)
+            || entry[51] != 0
         {
             return Err(PaneCodecError);
         }
+        let exit_value = i32::from_le_bytes([entry[52], entry[53], entry[54], entry[55]]);
+        let exit = match entry[50] {
+            0 if exit_value == 0 => None,
+            1 => Some(PaneExit::Code(exit_value)),
+            2 => Some(PaneExit::Signal(exit_value)),
+            _ => return Err(PaneCodecError),
+        };
         let target = TargetRef {
             generation: read_u64(base),
             workspace: read_u64(base + 8),
@@ -1091,6 +1128,7 @@ pub fn decode_pane_reply(bytes: &[u8]) -> Result<PaneReply, PaneCodecError> {
             state: session_state_from_code(entry[48]).ok_or(PaneCodecError)?,
             live: flags & PANE_FLAG_LIVE != 0,
             resize_pending: flags & PANE_FLAG_RESIZE_PENDING != 0,
+            exit,
         });
     }
     let reply = PaneReply {
@@ -1099,7 +1137,13 @@ pub fn decode_pane_reply(bytes: &[u8]) -> Result<PaneReply, PaneCodecError> {
         columns: read_u16(18),
         panes,
     };
-    if (reply.layout_revision == 0) != reply.panes.iter().flatten().next().is_none() {
+    if (reply.layout_revision == 0) != reply.panes.iter().flatten().next().is_none()
+        || reply
+            .panes
+            .iter()
+            .position(Option::is_none)
+            .is_some_and(|empty| reply.panes[empty..].iter().any(Option::is_some))
+    {
         return Err(PaneCodecError);
     }
     Ok(reply)
@@ -1328,6 +1372,12 @@ fn dispatch_split(
 }
 
 /// Schema-9 route: explicit pane close, close status, and pane status.
+///
+/// A close runs [`MultiSessionOwner::execute_close`] synchronously on the
+/// owner thread. Its bounded stop (HUP, 1 s, KILL, 1 s) can therefore block
+/// this tick, and every other queued request, for about 2 s. This is accepted
+/// for the four-pane workspace; the closing worker waits up to
+/// [`CLOSE_REPLY_DEADLINE`] for the reply.
 fn dispatch_close(
     owner: &mut MultiSessionOwner<PtyEffects>,
     connection: &Connection,
@@ -1357,7 +1407,7 @@ fn dispatch_close(
         };
     }
     if decode_pane_query(payload).is_ok() {
-        return match owner.pane_view(connection, now) {
+        return match owner.pane_view_with_exit(connection, now) {
             Ok(statuses) => {
                 let layout = owner.layout_snapshot();
                 let reply_value = PaneReply {
@@ -1371,6 +1421,7 @@ fn dispatch_close(
                             state: status.state,
                             live: status.live,
                             resize_pending: status.resize_pending,
+                            exit: status.exit,
                         })
                     }),
                 };
@@ -1526,9 +1577,9 @@ fn dispatch_ui(
 
 fn encode_layout(
     layout: &crate::pane_layout::LayoutSnapshot,
-    pending: &[Option<crate::server::multi_session::PendingResize>; 2],
+    pending: &[Option<crate::server::multi_session::PendingResize>; crate::pane_layout::MAX_PANES],
 ) -> Option<[u8; crate::ui_protocol::LAYOUT_REPLY_BYTES]> {
-    let mut panes = [None; 2];
+    let mut panes = [None; crate::pane_layout::MAX_PANES];
     for (slot, pane) in panes.iter_mut().zip(layout.panes) {
         *slot = pane.map(|pane| crate::ui_protocol::UiPane {
             target: pane.target,
@@ -1546,6 +1597,7 @@ fn encode_layout(
         columns: layout.columns,
         panes,
         divider: layout.divider,
+        dividers: layout.dividers,
     })
     .ok()
 }
@@ -2200,6 +2252,7 @@ mod tests {
                     state: SessionState::Applied,
                     live: true,
                     resize_pending: false,
+                    exit: None,
                 }),
                 Some(PaneEntry {
                     target: TargetRef {
@@ -2216,7 +2269,10 @@ mod tests {
                     state: SessionState::Exited,
                     live: false,
                     resize_pending: true,
+                    exit: Some(PaneExit::Signal(15)),
                 }),
+                None,
+                None,
             ],
         }
     }
@@ -2467,7 +2523,7 @@ mod tests {
         assert_eq!(decode_pane_reply(&bytes), Ok(reply));
 
         let single = PaneReply {
-            panes: [reply.panes[0], None],
+            panes: [reply.panes[0], None, None, None],
             ..reply
         };
         let bytes = encode_pane_reply(&single).unwrap();
@@ -2478,7 +2534,7 @@ mod tests {
             layout_revision: 0,
             rows: 0,
             columns: 0,
-            panes: [None, None],
+            panes: [None; crate::pane_layout::MAX_PANES],
         };
         assert_eq!(
             decode_pane_reply(&encode_pane_reply(&empty).unwrap()),
@@ -2508,7 +2564,8 @@ mod tests {
             (21, 1),
             (24 + 48, 9),
             (24 + 49, 8),
-            (24 + 50, 1),
+            (24 + 50, 3),
+            (24 + 51, 1),
             (24, 0),
         ] {
             let mut bad = good;
@@ -2519,6 +2576,14 @@ mod tests {
             }
             assert!(decode_pane_reply(&bad).is_err(), "offset {offset}");
         }
+        // Kind zero must not carry a nonzero status value.
+        let mut bad = good;
+        bad[24 + 52] = 1;
+        assert!(decode_pane_reply(&bad).is_err());
+        // Old schema-9 replies fail closed instead of interpreting the tail.
+        let mut old_schema = good;
+        old_schema[..2].copy_from_slice(&9_u16.to_be_bytes());
+        assert!(decode_pane_reply(&old_schema).is_err());
         // Absent entries must be all zero.
         let mut bad = encode_pane_reply(&single).unwrap();
         bad[100] = 1;
@@ -2526,6 +2591,62 @@ mod tests {
         // Debug never prints the target identity.
         let debug = format!("{:?}", reply.panes[0].unwrap());
         assert!(debug.contains("<redacted>") && !debug.contains("generation"));
+    }
+
+    #[test]
+    fn pane_exit_codes_and_signals_round_trip_signed_i32_values() {
+        let mut reply = sample_pane_reply();
+        reply.panes[0].as_mut().unwrap().exit = Some(PaneExit::Code(-17));
+        reply.panes[1].as_mut().unwrap().exit = Some(PaneExit::Signal(1234));
+        reply.panes[2] = Some(PaneEntry {
+            target: TargetRef {
+                pane: 4,
+                session: 4,
+                ..TARGET
+            },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                rows: 1,
+                columns: 1,
+            },
+            state: SessionState::Exited,
+            live: false,
+            resize_pending: false,
+            exit: Some(PaneExit::Code(i32::MAX)),
+        });
+        reply.panes[3] = Some(PaneEntry {
+            target: TargetRef {
+                pane: 5,
+                session: 5,
+                ..TARGET
+            },
+            rect: Rect {
+                x: 1,
+                y: 0,
+                rows: 1,
+                columns: 1,
+            },
+            state: SessionState::Exited,
+            live: false,
+            resize_pending: false,
+            exit: Some(PaneExit::Signal(i32::MIN)),
+        });
+        let bytes = encode_pane_reply(&reply).unwrap();
+        assert_eq!(decode_pane_reply(&bytes), Ok(reply));
+        assert_eq!(&bytes[24 + 52..24 + 56], &(-17_i32).to_le_bytes());
+        assert_eq!(
+            &bytes[24 + PANE_ENTRY_BYTES + 52..24 + PANE_ENTRY_BYTES + 56],
+            &1234_i32.to_le_bytes()
+        );
+        assert_eq!(
+            &bytes[24 + 2 * PANE_ENTRY_BYTES + 52..24 + 2 * PANE_ENTRY_BYTES + 56],
+            &i32::MAX.to_le_bytes()
+        );
+        assert_eq!(
+            &bytes[24 + 3 * PANE_ENTRY_BYTES + 52..24 + 3 * PANE_ENTRY_BYTES + 56],
+            &i32::MIN.to_le_bytes()
+        );
     }
 
     #[test]

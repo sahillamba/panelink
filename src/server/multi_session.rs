@@ -22,6 +22,7 @@ use crate::handshake_protocol::{Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT, CA
 use crate::input_owner::{InputOwner, Owner};
 use crate::managed_launch::{LaunchJournalPort, ManagedLaunchCoordinator, ManagedLaunchError};
 use crate::managed_launch_protocol::{decode_launch_request, LaunchRequestView, LaunchResult};
+use crate::multi_runtime::PaneExit;
 use crate::pane_layout::PaneGeometry;
 use crate::pane_layout::{LayoutError, LayoutSnapshot, PaneLayout};
 use crate::protocol::{
@@ -29,6 +30,7 @@ use crate::protocol::{
 };
 use crate::response_protocol::{RejectionCode, Response, ResponseBody};
 use crate::scoped_watch_protocol::SessionCursor;
+use crate::server_pty::PtyEffects;
 use crate::session_protocol::{decode_session_request, SessionHello, SessionRequest};
 use crate::session_registry::{RegistryError, SessionState, SESSION_CAPACITY};
 use crate::split_protocol::{decode_split_request, SplitCodecError, SplitResult};
@@ -122,7 +124,7 @@ impl TargetStateSeed {
     }
 }
 
-/// One trusted owner for a generation's shared authority and two retained
+/// One trusted owner for a generation's shared authority and up to four retained
 /// process sessions. This does not authenticate callers or select launch
 /// policy; a runtime must perform those checks before using the owner.
 pub struct MultiSessionOwner<E: EffectSink> {
@@ -139,7 +141,7 @@ pub struct MultiSessionOwner<E: EffectSink> {
     active_closes: Vec<ActiveClose>,
     /// Bounded per-pane size state keyed by full target: last confirmed
     /// absolute PTY size and, while a resize is pending, the desired size.
-    pane_sizes: [Option<PaneSizeState>; 2],
+    pane_sizes: [Option<PaneSizeState>; crate::pane_layout::MAX_PANES],
 }
 
 #[derive(Clone, Copy)]
@@ -232,7 +234,7 @@ pub enum SplitFailure {
     StaleTarget,
     /// The expected layout revision is not the current revision.
     StaleLayout,
-    /// The two-session or two-pane prototype capacity is exhausted.
+    /// The four-session workspace capacity is exhausted.
     Capacity,
     /// The launch coordinator latched unhealthy and accepts no new launches.
     Unhealthy,
@@ -356,7 +358,7 @@ pub enum LayoutResizeError {
         /// Committed layout whose rectangles are the desired sizes.
         snapshot: Box<LayoutSnapshot>,
         /// Which pane sessions did not accept their absolute size.
-        failed: [bool; 2],
+        failed: [bool; crate::pane_layout::MAX_PANES],
     },
 }
 
@@ -403,7 +405,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             committed_splits: Vec::new(),
             close_results: Vec::new(),
             active_closes: Vec::new(),
-            pane_sizes: [None; 2],
+            pane_sizes: [None; crate::pane_layout::MAX_PANES],
         })
     }
 
@@ -460,10 +462,10 @@ impl<E: EffectSink> MultiSessionOwner<E> {
 
     /// Return every layout pane whose absolute PTY resize is still pending.
     ///
-    /// Entries are bounded by the two-pane prototype; unused entries are
+    /// Entries are bounded by the four-pane workspace; unused entries are
     /// `None`. A pending pane is retried by [`Self::resize_layout`], including
     /// at the current root size, without changing the layout revision.
-    pub fn pending_resizes(&self) -> [Option<PendingResize>; 2] {
+    pub fn pending_resizes(&self) -> [Option<PendingResize>; crate::pane_layout::MAX_PANES] {
         self.pane_sizes.map(|state| {
             state.and_then(|state| {
                 state.desired.map(|desired| PendingResize {
@@ -529,6 +531,8 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                             confirmed: (rows, columns),
                             desired: None,
                         }),
+                        None,
+                        None,
                         None,
                     ];
                 }
@@ -742,7 +746,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             .resize(expected_revision, rows, columns)
             .map_err(LayoutResizeError::Layout)?;
         let retry_pending_only = snapshot.revision == before;
-        let mut failed = [false; 2];
+        let mut failed = [false; crate::pane_layout::MAX_PANES];
         for (index, pane) in snapshot.panes.into_iter().enumerate() {
             let Some(pane) = pane else {
                 continue;
@@ -1250,13 +1254,10 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     pub fn poll(&mut self, now_secs: u64) -> Result<(), ServerError> {
         self.global.expire(now_secs);
 
-        let mut records = [None; SESSION_CAPACITY];
-        for (record_count, record) in self.launches.records().take(SESSION_CAPACITY).enumerate() {
-            records[record_count] = Some(record);
-        }
+        let records: Vec<_> = self.launches.records().take(SESSION_CAPACITY).collect();
 
         let mut first_error = None;
-        for record in records.into_iter().flatten() {
+        for record in records {
             if !record.has_effects {
                 continue;
             }
@@ -1292,7 +1293,10 @@ impl<E: EffectSink> MultiSessionOwner<E> {
 }
 
 /// One layout snapshot with its per-pane resize-pending state.
-pub type LayoutView = (LayoutSnapshot, [Option<PendingResize>; 2]);
+pub type LayoutView = (
+    LayoutSnapshot,
+    [Option<PendingResize>; crate::pane_layout::MAX_PANES],
+);
 
 /// Result of an authorized layout-owned root resize request.
 pub enum RootResizeReply {
@@ -1305,7 +1309,7 @@ pub enum RootResizeReply {
         /// Committed layout after this request.
         snapshot: Box<LayoutSnapshot>,
         /// Per-pane resize-pending flags, aligned with `snapshot.panes`.
-        pending: [bool; 2],
+        pending: [bool; crate::pane_layout::MAX_PANES],
     },
     /// The layout rejected the request; the key is recorded `Failed` and no
     /// PTY was resized.
@@ -1592,8 +1596,8 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             })
     }
 
-    fn pending_flags(&self, snapshot: &LayoutSnapshot) -> [bool; 2] {
-        let mut flags = [false; 2];
+    fn pending_flags(&self, snapshot: &LayoutSnapshot) -> [bool; crate::pane_layout::MAX_PANES] {
+        let mut flags = [false; crate::pane_layout::MAX_PANES];
         for (flag, pane) in flags.iter_mut().zip(snapshot.panes) {
             *flag = pane.is_some_and(|pane| self.is_resize_pending(pane.target));
         }
@@ -1676,6 +1680,8 @@ pub struct PaneStatus {
     pub live: bool,
     /// Whether the pane's absolute PTY resize is still pending.
     pub resize_pending: bool,
+    /// Confirmed child exit code or terminating signal, when available.
+    pub exit: Option<PaneExit>,
 }
 
 impl fmt::Debug for PaneStatus {
@@ -1685,7 +1691,37 @@ impl fmt::Debug for PaneStatus {
             .field("state", &self.state)
             .field("live", &self.live)
             .field("resize_pending", &self.resize_pending)
+            .field("exit", &self.exit)
             .finish()
+    }
+}
+
+impl MultiSessionOwner<PtyEffects> {
+    /// Return pane status including a confirmed PTY exit code or signal.
+    pub fn pane_statuses_with_exit(&self) -> [Option<PaneStatus>; crate::pane_layout::MAX_PANES] {
+        self.pane_statuses().map(|status| {
+            status.map(|mut status| {
+                status.exit = self
+                    .launches
+                    .effects(status.geometry.target)
+                    .ok()
+                    .and_then(|session| session.effects.exit_status());
+                status
+            })
+        })
+    }
+
+    /// Observe pane lifecycle and confirmed exit status for a live Read-capable connection.
+    pub fn pane_view_with_exit(
+        &self,
+        connection: &Connection,
+        now_secs: u64,
+    ) -> Result<[Option<PaneStatus>; crate::pane_layout::MAX_PANES], ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        if connection.selected_capabilities & CAPABILITY_READ == 0 {
+            return Err(ServerError::Unauthorized);
+        }
+        Ok(self.pane_statuses_with_exit())
     }
 }
 
@@ -2060,9 +2096,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     /// Entries follow the layout's spatial order; unused entries are `None`.
     /// A pane whose child exited but has not yet been collapsed by
     /// [`Self::poll`] is reported with `live == false`.
-    pub fn pane_statuses(&self) -> [Option<PaneStatus>; 2] {
+    pub fn pane_statuses(&self) -> [Option<PaneStatus>; crate::pane_layout::MAX_PANES] {
         let Some(layout) = self.layout_snapshot() else {
-            return [None, None];
+            return [None; crate::pane_layout::MAX_PANES];
         };
         layout.panes.map(|pane| {
             pane.map(|geometry| {
@@ -2079,6 +2115,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                     state,
                     live: !exited && !matches!(state, SessionState::Exited | SessionState::Failed),
                     resize_pending: self.is_resize_pending(geometry.target),
+                    exit: None,
                 }
             })
         })
@@ -2092,7 +2129,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         &self,
         connection: &Connection,
         now_secs: u64,
-    ) -> Result<[Option<PaneStatus>; 2], ServerError> {
+    ) -> Result<[Option<PaneStatus>; crate::pane_layout::MAX_PANES], ServerError> {
         self.global.require_live_connection(connection, now_secs)?;
         if connection.selected_capabilities & CAPABILITY_READ == 0 {
             return Err(ServerError::Unauthorized);
@@ -2163,7 +2200,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             return Ok(false);
         };
         let before = layout.snapshot();
-        if before.pane_count() < 2
+        if before.pane_count() <= 1
             || !before
                 .panes
                 .into_iter()
@@ -2181,27 +2218,36 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         // The retired handle's child already exited; dropping it releases
         // the PTY without another wait window.
         drop(self.launches.retire(target).map_err(|_| ())?);
-        let survivor = collapsed.panes[0].ok_or(())?;
-        let survivor_exited = self
-            .launches
-            .effects(survivor.target)
-            .map_or(true, |session| session.effects.child_exited());
-        if survivor_exited {
-            // Both shells ended; the survivor is the workspace's last
-            // tombstone and needs no PTY resize.
-            return Ok(false);
+        let mut resize_pending = false;
+        for pane in collapsed.panes.iter().flatten().copied() {
+            let old_rect = before
+                .panes
+                .iter()
+                .flatten()
+                .find(|old| old.target == pane.target)
+                .map(|old| old.rect);
+            if old_rect == Some(pane.rect) {
+                continue;
+            }
+            let exited = self
+                .launches
+                .effects(pane.target)
+                .map_or(true, |session| session.effects.child_exited());
+            if !exited && !self.apply_pane_size(pane.target, pane.rect, resize) {
+                resize_pending = true;
+            }
         }
-        Ok(!self.apply_pane_size(survivor.target, survivor.rect, resize))
+        Ok(resize_pending)
     }
 
     /// Collapse every exited pane that still has a sibling in the layout.
     fn collapse_exited_panes(&mut self) -> Result<(), ()> {
-        // At most one collapse is possible in the two-pane prototype.
+        // One layout revision is produced for each individual close.
         let Some(layout) = self.layout.as_ref() else {
             return Ok(());
         };
         let snapshot = layout.snapshot();
-        if snapshot.pane_count() < 2 {
+        if snapshot.pane_count() <= 1 {
             return Ok(());
         }
         let exited = snapshot.panes.into_iter().flatten().find(|pane| {
@@ -2682,13 +2728,25 @@ mod tests {
         journal.record_failure = None;
         let second = launch(&mut spawn_owner, 2, &mut journal, &events).unwrap();
         assert_eq!(second.target.unwrap().session, 2);
+        for sequence in 3..=crate::session_registry::SESSION_CAPACITY as u64 {
+            let result = launch(&mut spawn_owner, sequence, &mut journal, &events).unwrap();
+            assert_eq!(result.target.unwrap().session, sequence);
+        }
         assert!(matches!(
-            launch(&mut spawn_owner, 3, &mut journal, &events),
+            launch(
+                &mut spawn_owner,
+                crate::session_registry::SESSION_CAPACITY as u64 + 1,
+                &mut journal,
+                &events
+            ),
             Err(ManagedLaunchError::Registry(
                 crate::session_registry::RegistryError::Capacity
             ))
         ));
-        assert_eq!(spawn_owner.launches.records().count(), 2);
+        assert_eq!(
+            spawn_owner.launches.records().count(),
+            crate::session_registry::SESSION_CAPACITY
+        );
     }
 
     #[test]
@@ -4871,13 +4929,38 @@ mod split_tests {
     }
 
     fn no_effects_split(fixture: &mut Fixture, payload: &[u8]) -> Result<SplitResult, SplitError> {
+        let full = fixture
+            .owner
+            .layout_snapshot()
+            .is_some_and(|layout| layout.pane_count() >= crate::pane_layout::MAX_PANES);
         fixture.owner.execute_split(
             payload,
             NOW,
             &mut fixture.journal,
-            |_, _| -> Result<u64, ()> { panic!("must not prepare") },
-            |_| -> Result<Sink, ()> { panic!("must not spawn") },
-            |_: &mut Sink, _, _| -> Result<(), ()> { panic!("must not resize") },
+            move |_, target| {
+                if full {
+                    panic!("must not prepare")
+                } else {
+                    Ok::<u64, ()>(target.session)
+                }
+            },
+            move |session| {
+                if full {
+                    panic!("must not spawn")
+                } else {
+                    Ok::<Sink, ()>(Sink {
+                        session,
+                        log: Rc::new(RefCell::new(Vec::new())),
+                    })
+                }
+            },
+            move |_: &mut Sink, _, _| -> Result<(), ()> {
+                if full {
+                    panic!("must not resize")
+                } else {
+                    Ok(())
+                }
+            },
         )
     }
 
@@ -5031,6 +5114,27 @@ mod split_tests {
             b"env",
         );
         split(&mut fixture, &original, true, true).unwrap();
+        let third_payload = split_bytes(
+            key(3),
+            fixture.first,
+            2,
+            SplitDirection::Down,
+            (12, 40),
+            b"env",
+        );
+        split(&mut fixture, &third_payload, true, true).unwrap();
+        let third = fixture
+            .owner
+            .layout_snapshot()
+            .unwrap()
+            .panes
+            .iter()
+            .flatten()
+            .last()
+            .unwrap()
+            .target;
+        let fourth_payload = split_bytes(key(4), third, 3, SplitDirection::Down, (12, 40), b"env");
+        split(&mut fixture, &fourth_payload, true, true).unwrap();
         assert!(matches!(
             fixture.owner.launches.next_target(),
             Err(RegistryError::Capacity)
@@ -5236,12 +5340,68 @@ mod split_tests {
             (24, 40),
             b"env",
         );
-        let error = no_effects_split(&mut fixture, &payload).unwrap_err();
+        let result = split(&mut fixture, &payload, true, true).unwrap();
+        assert_eq!(result.outcome, Outcome::Applied);
+        assert_eq!(fixture.owner.launches.records().count(), 3);
+        assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 2);
+
+        let mut three = self::fixture();
+        let mut sequence = 2;
+        let mut split_leaf =
+            |fixture: &mut Fixture, target: TargetRef, direction: SplitDirection| {
+                let layout = fixture.owner.layout_snapshot().unwrap();
+                let rect = layout
+                    .panes
+                    .iter()
+                    .flatten()
+                    .find(|pane| pane.target == target)
+                    .unwrap()
+                    .rect;
+                let size = match crate::pane_layout::split_geometry(rect, direction) {
+                    Ok(size) => size,
+                    Err(_) => return target,
+                };
+                let payload = split_bytes(
+                    key(sequence),
+                    target,
+                    layout.revision,
+                    direction,
+                    size,
+                    b"env",
+                );
+                sequence += 1;
+                split(fixture, &payload, true, true)
+                    .unwrap()
+                    .new_target
+                    .unwrap()
+            };
+        let first = three.first;
+        let second = split_leaf(&mut three, first, SplitDirection::Right);
+        let _third = split_leaf(&mut three, first, SplitDirection::Down);
+        let fourth = split_leaf(&mut three, second, SplitDirection::Down);
+        let layout = three.owner.layout_snapshot().unwrap();
+        let target = layout
+            .panes
+            .iter()
+            .flatten()
+            .find(|pane| pane.target == fourth)
+            .unwrap()
+            .target;
+        let mut full = three;
+        let fifth_payload = split_bytes(
+            key(sequence),
+            target,
+            layout.revision,
+            SplitDirection::Left,
+            (5, 40),
+            b"env",
+        );
+        let error = no_effects_split(&mut full, &fifth_payload).unwrap_err();
         assert_eq!(error.failure().unwrap().0, SplitFailure::Capacity);
-        assert_eq!(error.to_string(), "pane or session capacity is exhausted");
-        assert_eq!(fixture.owner.launches.records().count(), 2);
-        assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 1);
-        assert!(fixture.log.borrow().is_empty());
+        assert_eq!(
+            full.owner.layout_snapshot().unwrap().pane_count(),
+            crate::pane_layout::MAX_PANES
+        );
 
         let mut ledger = Ledger::new(GENERATION).unwrap();
         ledger.open_lease(LEASE, 1).unwrap();
@@ -5257,7 +5417,15 @@ mod split_tests {
             first: fixture.first,
         };
         assert!(empty.owner.layout_snapshot().is_none());
-        let error = no_effects_split(&mut empty, &payload).unwrap_err();
+        let no_layout_payload = split_bytes(
+            key(2),
+            fixture.first,
+            1,
+            SplitDirection::Right,
+            (24, 40),
+            b"env",
+        );
+        let error = no_effects_split(&mut empty, &no_layout_payload).unwrap_err();
         assert_eq!(error.failure().unwrap().0, SplitFailure::NoLayout);
         assert_eq!(empty.owner.launches.records().count(), 0);
     }
@@ -5521,7 +5689,7 @@ mod split_tests {
             LayoutResizeError::ResizePending { snapshot, failed } => {
                 assert_eq!(snapshot.revision, 2);
                 // Up places the existing pane second (bottom).
-                assert_eq!(failed, [false, true]);
+                assert_eq!(failed, [false, true, false, false]);
             }
             other => panic!("expected pending resize, got {other:?}"),
         }
@@ -5556,7 +5724,7 @@ mod split_tests {
                 columns: 81
             }]
         );
-        assert_eq!(fixture.owner.pending_resizes(), [None, None]);
+        assert!(fixture.owner.pending_resizes().iter().all(Option::is_none));
         fixture.log.borrow_mut().clear();
 
         // Nothing pending: a same-size call has no PTY effect.
@@ -5605,7 +5773,7 @@ mod split_tests {
         assert!(matches!(
             error,
             LayoutResizeError::ResizePending { ref snapshot, failed }
-                if snapshot.revision == 3 && failed == [false, true]
+                if snapshot.revision == 3 && failed == [false, true, false, false]
         ));
         assert_eq!(fixture.log.borrow().len(), 2);
         let pending = fixture.owner.pending_resizes();
@@ -5622,7 +5790,7 @@ mod split_tests {
         assert!(matches!(
             error,
             LayoutResizeError::ResizePending { ref snapshot, failed }
-                if snapshot.revision == 3 && failed == [false, true]
+                if snapshot.revision == 3 && failed == [false, true, false, false]
         ));
         let only_second = [Effect::Resize {
             session: 2,
@@ -5638,7 +5806,7 @@ mod split_tests {
             .unwrap();
         assert_eq!(snapshot.revision, 3);
         assert_eq!(*fixture.log.borrow(), only_second);
-        assert_eq!(fixture.owner.pending_resizes(), [None, None]);
+        assert!(fixture.owner.pending_resizes().iter().all(Option::is_none));
         assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 3);
         assert_no_input(&fixture);
     }
@@ -5717,7 +5885,7 @@ mod split_tests {
         match error {
             LayoutResizeError::ResizePending { snapshot, failed } => {
                 assert_eq!(snapshot.revision, 4);
-                assert_eq!(failed, [false, true]);
+                assert_eq!(failed, [false, true, false, false]);
             }
             other => panic!("expected pending resize, got {other:?}"),
         }
@@ -6013,7 +6181,7 @@ mod runtime_helper_tests {
             (snapshot.revision, snapshot.rows, snapshot.columns),
             (2, 30, 100)
         );
-        assert_eq!(pending, [false, false]);
+        assert_eq!(pending, [false, false, false, false]);
         let RootResizeReply::Response(duplicate) = owner
             .handle_root_resize(&connection, request, &payload, NOW, resize)
             .unwrap()
@@ -6066,7 +6234,7 @@ mod runtime_helper_tests {
         else {
             panic!("pending");
         };
-        assert_eq!(pending, [true, false]);
+        assert_eq!(pending, [true, false, false, false]);
         let RootResizeReply::Response(again) = owner
             .handle_root_resize(&connection, grow, &payload, NOW, resize)
             .unwrap()
@@ -6184,7 +6352,7 @@ mod runtime_helper_tests {
         );
         let (layout, pending) = owner.layout_view(&connection, NOW).unwrap().unwrap();
         assert_eq!(layout.panes[0].unwrap().target, first);
-        assert_eq!(pending, [None, None]);
+        assert!(pending.iter().all(Option::is_none));
         assert_eq!(owner.first_pane_target(), Some(first));
         assert_eq!(owner.lease_target(connection.lease()), Some(first));
         assert_eq!(
