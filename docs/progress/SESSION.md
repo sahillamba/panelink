@@ -1,5 +1,19 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Phase 6 complete (personal alpha scope) — 2026-10-22 (read this first)
+
+User asked to complete Phase 6 and chose idle real-OpenCode agents (no
+model calls) and a local build + install script release path. Three Luna
+workers: L14 security review pack (clean); L13 release manifest/install
+script (clean; two independent builds produced identical SHA-256); L12
+real-OpenCode workload harness hung, parent stopped it and fixed the harness
+(readiness-query deadlock, keepalive gaps, 30 s owner-lease expiry during
+slow TUI startup, zombie-aware leak check), then ran A1/A2/B1/B2: 10 idle
+OpenCode sessions usable, Panelink overhead recorded separately. Verifier
+8/8 twice. Committed; no push. Remaining open: active-agent load, firm
+approval/signing, and earlier phase gates (P2 host clipboard, P3 wider
+contracts, P4 identity blocked upstream, P5 hierarchy/selection/reboot).
+
 ## Phase 6: robustness, ten-pane runs, audit — 2026-10-21 (read this first)
 
 User approved all three follow-ups. Parent installed cargo-audit (Homebrew,

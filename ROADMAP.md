@@ -1,11 +1,11 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: Phase 6 evidence 2026-10-21: build/size measured, license inventory, cargo-audit 0 vulns (1348 advisories), ten-pane synthetic proxy runs recorded, load-flaky tests hardened (test-only). Phase 6 OPEN (real ten-agent acceptance, release/install evidence, firm review)
+current-phase: Phase 6 DONE for personal alpha scope (2026-10-22): idle real-OpenCode 10-session workload, build/resource measurements, release manifest + install script, license inventory + cargo-audit, security review pack. Firm approval, signing, active-agent load remain open
 last-updated: 2026-10-21
 checkpoint-commit: saved-layout slice committed by parent per phase-completion authorization; no push
-last-verified: 2026-10-21 — verifier 8/8 (983/0/15) on 2 of 3 runs before final p3_detach marker-wait fix; see P6-TEST-ROBUSTNESS.md
-next-action: Choose with user: real OpenCode ten-agent workload (needs model calls / approval), release/installation packaging evidence, or firm security review pack (map R-13 criteria to architecture/data flows).
+last-verified: 2026-10-22 — verifier 8/8 twice consecutively (983 passed/0 failed/15 ignored)
+next-action: Remaining open gates: Phase 2 Apple Terminal clipboard sentinel, Phase 3 wider contracts, Phase 4 identity (blocked upstream: no keyboard switch signal in OpenCode 1.19.0), Phase 5 hierarchy/mouse selection/full reboot. Ask user which to pursue.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
@@ -272,10 +272,10 @@ open.
 - [x] Implement saved-layout codec, bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection in the reviewed order; see P5-LAYOUT-SLICE.md. No restore/relaunch.
 - [ ] Full V-HISTORY reboot/layout recovery and representative workload/throughput acceptance; see P5-SAVED-HISTORY.md and docs/SPEC.md.
 
-## Phase 6 — alpha measurements and review evidence (not started)
+## Phase 6 — alpha measurements and review evidence (DONE for personal alpha scope 2026-10-22)
 
-- [ ] Ten-agent workload and build/resource measurements on specified hardware. (2026-10-21: build/size measured on M4 Pro; ten-pane SYNTHETIC proxy recorded twice (5 workspaces x 2 panes, 30 s); see P6-MEASUREMENTS.md. Real ten-agent acceptance still open.)
-- [ ] Dependency/advisory/license inventory, installation and release evidence; firm review constraints before corporate use. (2026-10-21: license inventory + cargo-audit 0 vulnerabilities in P6-DEPENDENCY-INVENTORY.md; install/release evidence and firm review still open.)
+- [x] Ten-agent workload and build/resource measurements on specified hardware: build/size (P6-MEASUREMENTS.md), synthetic ten-pane, and real idle OpenCode 10-session runs with Panelink overhead separated (P6-OPENCODE-WORKLOAD.md). Active-agent load not measured (user chose no model calls).
+- [x] Dependency/advisory/license inventory (P6-DEPENDENCY-INVENTORY.md, cargo-audit 0 vulnerabilities), installation/upgrade/release evidence (docs/RELEASE.md, P6-RELEASE-EVIDENCE.md, release/MANIFEST.json) and security review pack (docs/SECURITY-REVIEW.md). Firm-specific criteria, approval and signing/notarization remain with the user's organization.
 
 ## Resume protocol
 

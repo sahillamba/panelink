@@ -1,6 +1,6 @@
 # Panelink: working implementation specification
 
-Revision: 0.14, 2026-10-21. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoint below records current code without converting prototype assumptions into product requirements. This revision preserves the reviewed contracts for command retries, agent identity, history semantics, child environments, and terminal clipboard requests, and records the implemented bounded saved-layout snapshot and read-only inspection without enabling recovery or relaunch.
+Revision: 0.15, 2026-10-22. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoint below records current code without converting prototype assumptions into product requirements. This revision preserves the reviewed contracts for command retries, agent identity, history semantics, child environments, and terminal clipboard requests, and records the implemented bounded saved-layout snapshot and read-only inspection without enabling recovery or relaunch.
 
 ## Purpose and requirement authority
 
@@ -600,7 +600,7 @@ runtime launch and host-input gates. Existing milestone IDs remain stable.
 | M3 | Mouse selection, copy, context menus, and history search. | Clipboard and mouse routing work in agreed hosts, including ongoing output and Unicode selection. |
 | M4 | Durable local layouts/settings/history and explicit recovery. | Partial writes, bounded scrollback/checkpoints, checkpoint gaps, search scope, server restart, and explicit reboot resume obey the defined guarantees. |
 | M5 | OpenCode status/notifications layered on the identity contract proved in M1. | Real versioned activity/permission events map truthfully; missing bridge and provider failures revoke readiness without losing the user's running terminal. |
-| M6 | Personal alpha and release preparation. | Representative 10-agent workload, resource/build measurements, installation, notices, and upgrade behavior documented. |
+| M6 | Personal alpha and release preparation. | Representative 10-agent workload, resource/build measurements, installation, notices, and upgrade behavior documented. Status 2026-10-22: delivered for the personal alpha scope — idle real-OpenCode 10-session workload (no model calls, user decision), build/size measurements, locked release manifest + install/upgrade/uninstall script, license inventory + cargo-audit, SEC-01..08 review pack; see progress/P6-*.md. Active-agent load, signing/notarization and firm approval remain open. |
 
 The validation plan should include process cleanup, terminal restoration after client failure, protocol ordering/resync, history rotation/recovery, wide-character selection, and clipboard behavior across the supported hosts. Foundation tests and disposable engine/PTY source/API probes have run as recorded in `progress/`; these broader integrated acceptance checks and representative benchmarks remain pending. No prototype check establishes the complete M1 milestone.
 

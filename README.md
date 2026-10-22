@@ -87,6 +87,14 @@ verification evidence. Selected components retain their
 - [Working implementation specification](docs/SPEC.md)
 - [First prototype preparation and requested Rust skill](docs/PREBUILD.md)
 
+## Alpha release, install and security review
+
+- [docs/RELEASE.md](docs/RELEASE.md): locked local release build with a
+  hash manifest, `scripts/install.sh install|upgrade|uninstall` (no network,
+  no sudo, keeps state on upgrade, rollback copy), unsigned/not notarized.
+- [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md): SEC-01..SEC-08
+  evidence pack for an organization's review (not an approval).
+
 ## Automated development checks
 
 Run `python3 scripts/verify_non_ui.py` for the delivered Rust/Python tests,
