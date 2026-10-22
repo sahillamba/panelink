@@ -94,11 +94,12 @@ do not repair them. Healthy targets can still be read by their explicit IDs.
 The current format validates structure and safe text, but has no checksum to
 detect every content change. See the [recovery policy](docs/progress/P5-COMMITTED-CORRUPTION.md).
 
-Panelink also saves the latest layout in two bounded 160-byte records under
+Panelink also saves the latest layout in two bounded 280-byte records under
 `server/layout/`. `panelink layout show` reads the latest saved layout;
 `panelink layout show --previous` reads the preceding saved generation.
 These commands work without starting a workspace. Layouts contain historical
 pane identities and geometry; saved rows and screens remain separate sources.
+Legacy 160-byte layouts remain readable through the supported migration.
 Background saves can lag live changes, and malformed records are refused and
 preserved. This storage slice does not establish full reboot recovery.
 

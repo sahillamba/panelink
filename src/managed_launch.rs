@@ -65,7 +65,7 @@ pub enum ManagedLaunchError {
     InProgress,
     /// The bounded coordinator retained a lifecycle invariant failure.
     Unhealthy,
-    /// Two-session capacity or checked identity allocation failed.
+    /// Session capacity or checked identity allocation failed.
     Registry(RegistryError),
     /// Journal capacity or identity preflight failed.
     JournalPreflightFailed,
