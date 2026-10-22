@@ -10,6 +10,7 @@ mod host;
 mod keys;
 mod net;
 mod state;
+mod worker;
 
 use std::path::PathBuf;
 

@@ -19,6 +19,7 @@ pub mod protocol_wire;
 pub mod provider_binding;
 pub mod provider_binding_codec;
 pub mod response_protocol;
+pub mod saved_layout;
 pub mod scoped_watch_protocol;
 pub mod server;
 pub mod session_protocol;

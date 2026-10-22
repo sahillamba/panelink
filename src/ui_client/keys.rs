@@ -23,8 +23,7 @@ pub(crate) enum KeyAction {
 /// Map one key event, mirroring `p2_probe::dispatch_key`.
 ///
 /// Ctrl-C becomes the typed interrupt key, Ctrl-X quits locally, Ctrl-B is
-/// the prototype prefix. Other control chords and function keys have no
-/// typed-key encoding in the schema-8 wire format and are dropped.
+/// the prototype prefix. Supported keys have typed schema-8 representations.
 pub(crate) fn map_key(key: KeyEvent) -> KeyAction {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return KeyAction::Ignore;
@@ -34,16 +33,31 @@ pub(crate) fn map_key(key: KeyEvent) -> KeyAction {
             KeyCode::Char('c' | 'C') => KeyAction::Forward(Key::Interrupt),
             KeyCode::Char('x' | 'X') => KeyAction::Quit,
             KeyCode::Char('b' | 'B') => KeyAction::Prefix,
+            KeyCode::Char(character @ ('a'..='z' | 'A'..='Z')) => {
+                let lower = character.to_ascii_lowercase();
+                KeyAction::Forward(Key::Control(lower as u8 - b'a' + 1))
+            }
             _ => KeyAction::Ignore,
         };
     }
     let none = key.modifiers.is_empty();
+    let alt = key.modifiers == KeyModifiers::ALT;
+    let alt_shift = key.modifiers == (KeyModifiers::ALT | KeyModifiers::SHIFT);
     let typed = match key.code {
         KeyCode::Char(character)
             if (none || key.modifiers == KeyModifiers::SHIFT) && !character.is_control() =>
         {
             Key::Char(character)
         }
+        KeyCode::Char(character) if (alt || alt_shift) && !character.is_control() => {
+            Key::AltChar(character)
+        }
+        KeyCode::F(number @ 1..=12) if none => Key::Function(number),
+        KeyCode::Delete if none => Key::Delete,
+        KeyCode::Insert if none => Key::Insert,
+        KeyCode::PageUp if none => Key::PageUp,
+        KeyCode::PageDown if none => Key::PageDown,
+        KeyCode::BackTab if key.modifiers == KeyModifiers::SHIFT => Key::BackTab,
         KeyCode::Enter if none => Key::Enter,
         KeyCode::Tab if none => Key::Tab,
         KeyCode::Backspace if none => Key::Backspace,
@@ -174,10 +188,49 @@ mod tests {
         assert_eq!(key_of(b"\x03"), KeyAction::Forward(Key::Interrupt));
         assert_eq!(key_of(b"\x18"), KeyAction::Quit);
         assert_eq!(key_of(b"\x02"), KeyAction::Prefix);
-        // Other control chords and function keys are dropped, never sent raw.
-        assert_eq!(key_of(b"\x01"), KeyAction::Ignore);
-        assert_eq!(key_of(b"\x11"), KeyAction::Ignore);
-        assert_eq!(key_of(b"\x1bOP"), KeyAction::Ignore);
+        assert_eq!(key_of(b"\x01"), KeyAction::Forward(Key::Control(1)));
+        assert_eq!(key_of(b"\x11"), KeyAction::Forward(Key::Control(17)));
+        assert_eq!(key_of(b"\x1bOP"), KeyAction::Forward(Key::Function(1)));
+        assert_eq!(key_of(b"\x1bOQ"), KeyAction::Forward(Key::Function(2)));
+        assert_eq!(key_of(b"\x1bOR"), KeyAction::Forward(Key::Function(3)));
+        assert_eq!(key_of(b"\x1bOS"), KeyAction::Forward(Key::Function(4)));
+        assert_eq!(key_of(b"\x1b[15~"), KeyAction::Forward(Key::Function(5)));
+        assert_eq!(key_of(b"\x1b[24~"), KeyAction::Forward(Key::Function(12)));
+        assert_eq!(key_of(b"\x1ba"), KeyAction::Forward(Key::AltChar('a')));
+        assert_eq!(
+            key_of(b"\x1b\xc3\xa9"),
+            KeyAction::Forward(Key::AltChar('é'))
+        );
+        assert_eq!(key_of(b"\x1b[3~"), KeyAction::Forward(Key::Delete));
+        assert_eq!(key_of(b"\x1b[2~"), KeyAction::Forward(Key::Insert));
+        assert_eq!(key_of(b"\x1b[5~"), KeyAction::Forward(Key::PageUp));
+        assert_eq!(key_of(b"\x1b[6~"), KeyAction::Forward(Key::PageDown));
+        assert_eq!(key_of(b"\x1b[Z"), KeyAction::Forward(Key::BackTab));
+    }
+
+    #[test]
+    fn releases_and_unsupported_modifier_combinations_are_ignored() {
+        let release =
+            KeyEvent::new_with_kind(KeyCode::F(1), KeyModifiers::NONE, KeyEventKind::Release);
+        assert_eq!(map_key(release), KeyAction::Ignore);
+
+        let alt_shift = KeyEvent::new_with_kind(
+            KeyCode::Char('É'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+            KeyEventKind::Press,
+        );
+        assert_eq!(map_key(alt_shift), KeyAction::Forward(Key::AltChar('É')));
+
+        let control_shift = KeyEvent::new_with_kind(
+            KeyCode::Char('A'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyEventKind::Press,
+        );
+        assert_eq!(map_key(control_shift), KeyAction::Ignore);
+
+        let alt_function =
+            KeyEvent::new_with_kind(KeyCode::F(1), KeyModifiers::ALT, KeyEventKind::Press);
+        assert_eq!(map_key(alt_function), KeyAction::Ignore);
     }
 
     #[test]

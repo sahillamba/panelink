@@ -23,6 +23,7 @@ use panelink::terminal::{Key, ScreenSnapshot, TerminalError, TerminalSize};
 use panelink::ui_protocol::{planned_split_size, LayoutReply, MAX_KEYS};
 
 use super::keys::{confirm_input, map_key, menu_input, mouse_button, KeyAction};
+use super::net::NetUpdate;
 
 /// Largest root the client requests (terminal-core and compositor bound).
 pub(crate) const MAX_ROOT_ROWS: u16 = 80;
@@ -35,8 +36,18 @@ const STATUS_TTL: Duration = Duration::from_secs(3);
 const NAV_TIMEOUT: Duration = Duration::from_secs(4);
 /// Bottom banner shown while navigation mode (after Ctrl-B) is active.
 pub(crate) const NAV_BANNER: &str =
-    " NAV  s menu | l r u d split | arrows/o focus | x close | ^X detach | Esc ";
+    " NAV  ? help | s menu | l r u d split | arrows/o focus | x close | ^X detach | Esc ";
 const TOO_SMALL: &str = "Panelink: terminal too small for the pane layout; enlarge it";
+const HELP_LINES: [&str; 8] = [
+    "Panelink help",
+    "Ctrl-B ?: help | Ctrl-B s: pane menu",
+    "Ctrl-B l/r/u/d: split | arrows/Tab/o: focus",
+    "Ctrl-B x: close pane (confirm y)",
+    "Esc: leave navigation or close help",
+    "Ctrl-X: detach; running shells continue",
+    "Run Panelink again or attach to reconnect",
+    "Press Esc or ? to close help",
+];
 
 /// One fully planned split built from a captured menu intent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,10 +81,19 @@ pub(crate) trait Effects {
     fn send_paste(&mut self, target: TargetRef, text: &str) -> Result<(), &'static str>;
     /// Submit one split on the connection pinned to `plan.target`; return the
     /// new pane after it is connected and claimed.
-    fn split(&mut self, plan: SplitPlan) -> Result<TargetRef, &'static str>;
+    fn split(
+        &mut self,
+        plan: SplitPlan,
+        request_id: u64,
+        focus_generation: u64,
+    ) -> Result<Option<TargetRef>, &'static str>;
     /// Submit one schema-9 close with a fresh operation key; return the
     /// validated server result. Never retried with another key.
-    fn close(&mut self, plan: ClosePlan) -> Result<CloseResult, &'static str>;
+    fn close(
+        &mut self,
+        plan: ClosePlan,
+        request_id: u64,
+    ) -> Result<Option<CloseResult>, &'static str>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,11 +127,19 @@ pub(crate) struct App {
     menu_revision: u64,
     /// Explicit y/n prompt before any close request is sent.
     confirm: CloseConfirm,
+    /// Persistent local help modal, independent of the NAV timeout.
+    help_open: bool,
     /// Navigation mode (entered with Ctrl-B): when it started, if active.
     prefix: Option<Instant>,
     pending: [Key; MAX_KEYS],
     pending_len: usize,
     pending_target: Option<TargetRef>,
+    pending_blocked: bool,
+    pending_split: Option<(u64, u64, TargetRef)>,
+    pending_split_focus: Option<(u64, TargetRef)>,
+    pending_close: Option<(u64, TargetRef, bool)>,
+    next_request_id: u64,
+    focus_generation: u64,
     status: Option<(&'static str, Instant)>,
     host: (u16, u16),
     screens: [ScreenSlot; 2],
@@ -136,10 +164,17 @@ impl App {
             menu: MenuState::new(),
             menu_revision: 0,
             confirm: CloseConfirm::new(),
+            help_open: false,
             prefix: None,
             pending: [Key::Enter; MAX_KEYS],
             pending_len: 0,
             pending_target: None,
+            pending_blocked: false,
+            pending_split: None,
+            pending_split_focus: None,
+            pending_close: None,
+            next_request_id: 1,
+            focus_generation: 0,
             status: None,
             host: (host_rows, host_columns),
             screens: [slot()?, slot()?],
@@ -147,6 +182,7 @@ impl App {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn layout(&self) -> Option<&LayoutReply> {
         self.layout.as_ref()
     }
@@ -163,6 +199,11 @@ impl App {
     #[cfg(test)]
     pub(crate) fn confirm_open(&self) -> bool {
         self.confirm.is_open()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn help_open(&self) -> bool {
+        self.help_open
     }
 
     pub(crate) fn take_dirty(&mut self) -> bool {
@@ -211,17 +252,36 @@ impl App {
     /// and its screen cache is released. The compositor repaints fully
     /// because pane rectangles and the divider change.
     pub(crate) fn set_layout(&mut self, reply: LayoutReply) {
+        if let Some(current) = self.layout {
+            let current_generation = current
+                .panes
+                .iter()
+                .flatten()
+                .next()
+                .map(|pane| pane.target.generation);
+            let reply_generation = reply
+                .panes
+                .iter()
+                .flatten()
+                .next()
+                .map(|pane| pane.target.generation);
+            if current_generation == reply_generation && reply.revision < current.revision {
+                return;
+            }
+        }
         if self.layout == Some(reply) {
             return;
         }
         self.local = local_layout(&reply);
         let present = |target: TargetRef| reply.panes.iter().flatten().any(|p| p.target == target);
         if !self.focus.is_some_and(present) {
-            self.focus = reply.panes[0].map(|pane| pane.target);
+            self.set_focus(reply.panes[0].map(|pane| pane.target));
         }
         if self.pending_target.is_some_and(|target| !present(target)) {
             self.pending_len = 0;
             self.pending_target = None;
+            self.pending_blocked = false;
+            self.status = Some(("pane left before queued keys were sent", Instant::now()));
         }
         if self
             .confirm
@@ -238,16 +298,162 @@ impl App {
             }
         }
         self.layout = Some(reply);
+        if let Some((generation, target)) = self.pending_split_focus {
+            let present = reply
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == target);
+            if generation != self.focus_generation {
+                self.pending_split_focus = None;
+            } else if present {
+                self.pending_split_focus = None;
+                self.focus_target(target);
+            }
+        }
         self.dirty = true;
     }
 
     /// Focus a pane locally (presentation only; no ownership change).
     pub(crate) fn focus_target(&mut self, target: TargetRef) {
-        self.focus = Some(target);
+        self.set_focus(Some(target));
         self.dirty = true;
     }
 
+    fn set_focus(&mut self, target: Option<TargetRef>) {
+        if self.focus != target {
+            self.focus = target;
+            self.focus_generation = self.focus_generation.wrapping_add(1);
+            self.pending_split_focus = None;
+        }
+    }
+
+    fn next_request_id(&mut self) -> u64 {
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        id
+    }
+
+    /// Apply one split completion on the host thread. Focus changes only when
+    /// no deliberate focus move occurred since this request was admitted.
+    pub(crate) fn complete_split(
+        &mut self,
+        request_id: u64,
+        focus_generation: u64,
+        target: TargetRef,
+        result: Result<TargetRef, &'static str>,
+        now: Instant,
+    ) {
+        let Some((active_id, admitted_focus, source)) = self.pending_split else {
+            return;
+        };
+        if active_id != request_id || admitted_focus != focus_generation || source != target {
+            return;
+        }
+        self.pending_split = None;
+        match result {
+            Ok(new_target) => {
+                if self.focus_generation == focus_generation {
+                    self.pending_split_focus = Some((focus_generation, new_target));
+                    if self.layout.is_some_and(|layout| {
+                        layout
+                            .panes
+                            .iter()
+                            .flatten()
+                            .any(|pane| pane.target == new_target)
+                    }) {
+                        self.pending_split_focus = None;
+                        self.focus_target(new_target);
+                        self.set_status("split applied; new pane focused", now);
+                    } else {
+                        self.set_status("split applied; waiting for layout", now);
+                    }
+                } else {
+                    self.set_status("split applied", now);
+                }
+            }
+            Err(label) => self.set_status(label, now),
+        }
+    }
+
+    /// Apply a close completion for the exact admitted target and request.
+    pub(crate) fn complete_close(
+        &mut self,
+        request_id: u64,
+        target: TargetRef,
+        result: Result<CloseResult, &'static str>,
+        now: Instant,
+    ) {
+        let Some((active_id, active_target, last_pane)) = self.pending_close else {
+            return;
+        };
+        if active_id != request_id || active_target != target {
+            return;
+        }
+        self.pending_close = None;
+        match result {
+            Ok(result) => {
+                if matches!(
+                    result.outcome,
+                    CloseOutcome::Stopped(StopOutcome::Exited | StopOutcome::Escalated)
+                ) {
+                    self.forget_pane(target);
+                }
+                self.set_status(close_message(&result, last_pane), now);
+            }
+            Err(label) => self.set_status(label, now),
+        }
+    }
+
+    pub(crate) fn report_worker_status(&mut self, label: &'static str, now: Instant) {
+        self.set_status(label, now);
+    }
+
+    pub(crate) fn retry_pending_keys(&self) -> bool {
+        self.pending_blocked && self.pending_len > 0
+    }
+
+    /// Explicit user exit discards only keys that were never admitted to the
+    /// worker; the host reports this after restoring the terminal.
+    pub(crate) fn abandon_pending_keys(&mut self) -> bool {
+        let abandoned = self.pending_len > 0;
+        self.pending_len = 0;
+        self.pending_target = None;
+        self.pending_blocked = false;
+        abandoned
+    }
+
+    pub(crate) fn apply_net_update(&mut self, update: NetUpdate, now: Instant) {
+        if let Some(layout) = update.layout {
+            self.set_layout(layout);
+        }
+        for screen in update.screens {
+            if self.layout.is_some_and(|layout| {
+                layout
+                    .panes
+                    .iter()
+                    .flatten()
+                    .any(|p| p.target == screen.target)
+            }) {
+                if let Ok(checkpoint) = panelink::screen_checkpoint::decode(&screen.checkpoint) {
+                    if self
+                        .load_screen(screen.target, screen.revision, &checkpoint)
+                        .is_err()
+                    {
+                        self.set_status("screen invalid", now);
+                    }
+                } else {
+                    self.set_status("screen invalid", now);
+                }
+            }
+        }
+        if let Some(status) = update.status {
+            self.set_status(status, now);
+        }
+    }
+
     /// Last loaded screen revision for one pane.
+    #[cfg(test)]
     pub(crate) fn screen_revision(&self, target: TargetRef) -> Option<u64> {
         self.screens
             .iter()
@@ -313,6 +519,38 @@ impl App {
         now: Instant,
         effects: &mut impl Effects,
     ) -> Flow {
+        if let Event::Key(key) = event {
+            if (key.is_press() || key.is_repeat()) && map_key(*key) == KeyAction::Quit {
+                self.help_open = false;
+                self.prefix = None;
+                self.flush(now, effects);
+                return Flow::Quit;
+            }
+        }
+        if self.help_open {
+            if let Event::Key(key) = event {
+                match map_key(*key) {
+                    KeyAction::Quit => {
+                        self.help_open = false;
+                        self.dirty = true;
+                        self.flush(now, effects);
+                        return Flow::Quit;
+                    }
+                    _ if key.is_press() || key.is_repeat() => {
+                        let plain =
+                            key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+                        if plain && (key.code == KeyCode::Esc || key.code == KeyCode::Char('?')) {
+                            self.help_open = false;
+                            self.dirty = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Help owns keys, paste and mouse. Resize is observed by the host
+            // loop, which updates `host` through `set_host`.
+            return Flow::Continue;
+        }
         if self.confirm.is_open() {
             // The prompt owns every event; none reaches a pane.
             self.dirty = true;
@@ -363,6 +601,10 @@ impl App {
             }
             Event::Paste(text) => {
                 self.flush(now, effects);
+                if self.pending_len != 0 {
+                    self.set_status("busy: queued keys must be sent first", now);
+                    return Flow::Continue;
+                }
                 match self.focus {
                     Some(target) => {
                         if let Err(label) = effects.send_paste(target, text) {
@@ -430,6 +672,12 @@ impl App {
             return Flow::Continue;
         }
         match code {
+            KeyCode::Char('?') if plain => {
+                self.prefix = None;
+                self.flush(now, effects);
+                self.help_open = true;
+                self.dirty = true;
+            }
             KeyCode::Char('s' | 'S') if plain => self.open_for_focused(now),
             KeyCode::Char('x' | 'X') if plain => self.confirm_close_focused(now),
             // Ctrl-X detaches, also from navigation mode.
@@ -512,21 +760,27 @@ impl App {
     /// arrives with the next layout poll.
     fn close_pane(&mut self, intent: CloseIntent, now: Instant, effects: &mut impl Effects) {
         self.flush(now, effects);
+        if self.pending_len != 0 {
+            self.set_status("busy: queued keys must be sent first", now);
+            return;
+        }
         let plan = ClosePlan {
             target: intent.target,
             expected_layout_revision: intent.expected_layout_revision,
         };
-        match effects.close(plan) {
-            Ok(result) => {
-                if matches!(
-                    result.outcome,
-                    CloseOutcome::Stopped(StopOutcome::Exited | StopOutcome::Escalated)
-                ) {
-                    self.forget_pane(intent.target);
-                }
-                self.set_status(close_message(&result, intent.last_pane), now);
+        if self.pending_close.is_some() {
+            self.set_status("close already pending", now);
+            return;
+        }
+        let request_id = self.next_request_id();
+        self.pending_close = Some((request_id, intent.target, intent.last_pane));
+        match effects.close(plan, request_id) {
+            Ok(Some(result)) => self.complete_close(request_id, intent.target, Ok(result), now),
+            Ok(None) => self.set_status("closing pane…", now),
+            Err(label) => {
+                self.pending_close = None;
+                self.set_status(label, now)
             }
-            Err(label) => self.set_status(label, now),
         }
     }
 
@@ -535,9 +789,10 @@ impl App {
         if self.pending_target == Some(target) {
             self.pending_len = 0;
             self.pending_target = None;
+            self.pending_blocked = false;
         }
         if self.focus == Some(target) {
-            self.focus = self
+            let focus = self
                 .layout
                 .and_then(|layout| {
                     layout
@@ -548,6 +803,7 @@ impl App {
                 })
                 .map(|pane| pane.target)
                 .or(Some(target));
+            self.set_focus(focus);
         }
         self.dirty = true;
     }
@@ -577,7 +833,7 @@ impl App {
             FocusMove::Down => there.y > here.y,
         };
         if allowed {
-            self.focus = Some(other.target);
+            self.set_focus(Some(other.target));
         }
     }
 
@@ -586,10 +842,18 @@ impl App {
         if self.pending_len == 0 {
             return;
         }
-        let count = std::mem::replace(&mut self.pending_len, 0);
+        let count = self.pending_len;
         if let Some(target) = self.pending_target {
-            if let Err(label) = effects.send_keys(target, &self.pending[..count]) {
-                self.set_status(label, now);
+            match effects.send_keys(target, &self.pending[..count]) {
+                Ok(()) => {
+                    self.pending_len = 0;
+                    self.pending_target = None;
+                    self.pending_blocked = false;
+                }
+                Err(label) => {
+                    self.pending_blocked = true;
+                    self.set_status(label, now);
+                }
             }
         }
     }
@@ -601,7 +865,12 @@ impl App {
         };
         if self.pending_target != Some(focus) || self.pending_len == MAX_KEYS {
             self.flush(now, effects);
+            if self.pending_len != 0 {
+                self.set_status("busy: queued keys retained for their pane", now);
+                return;
+            }
             self.pending_target = Some(focus);
+            self.pending_blocked = false;
         }
         self.pending[self.pending_len] = key;
         self.pending_len += 1;
@@ -658,6 +927,15 @@ impl App {
     /// always starts at revision 1, so the server revision captured together
     /// with the menu (`menu_revision`) replaces the mirror's revision.
     fn activate(&mut self, intent: SplitIntent, now: Instant, effects: &mut impl Effects) {
+        self.flush(now, effects);
+        if self.pending_len != 0 {
+            self.set_status("busy: queued keys must be sent first", now);
+            return;
+        }
+        if self.pending_split.is_some() {
+            self.set_status("split already pending", now);
+            return;
+        }
         let Some(layout) = self.layout else {
             self.set_status("split unavailable: no layout", now);
             return;
@@ -674,13 +952,24 @@ impl App {
             rows,
             columns,
         };
-        match effects.split(plan) {
-            Ok(new_target) => {
-                // Prototype default: focus the new pane (presentation only).
-                self.focus_target(new_target);
-                self.set_status("split applied; new pane focused", now);
+        let request_id = self.next_request_id();
+        let focus_generation = self.focus_generation;
+        self.pending_split = Some((request_id, focus_generation, plan.target));
+        match effects.split(plan, request_id, focus_generation) {
+            Ok(Some(new_target)) => {
+                self.complete_split(
+                    request_id,
+                    focus_generation,
+                    plan.target,
+                    Ok(new_target),
+                    now,
+                );
             }
-            Err(label) => self.set_status(label, now),
+            Ok(None) => self.set_status("split pending", now),
+            Err(label) => {
+                self.pending_split = None;
+                self.set_status(label, now)
+            }
         }
     }
 
@@ -732,7 +1021,37 @@ impl App {
             text: "",
             style: OverlayStyle::Normal,
         }; panelink::split_menu::MAX_OVERLAY_ROWS];
-        let overlay = if let (Some(rect), true) = (self.menu.overlay_rect(), self.menu.is_open()) {
+        let overlay = if self.help_open && view_rows > 0 && view_columns > 0 {
+            let rows = view_rows.min(HELP_LINES.len() as u16);
+            let columns = view_columns.min(72);
+            let x = view_columns.saturating_sub(columns) / 2;
+            let y = view_rows.saturating_sub(rows) / 2;
+            for (slot, text) in lines
+                .iter_mut()
+                .zip(HELP_LINES.iter())
+                .take(usize::from(rows))
+            {
+                *slot = OverlayLine {
+                    text,
+                    style: if text == &HELP_LINES[0] {
+                        OverlayStyle::Selected
+                    } else if text == &HELP_LINES[HELP_LINES.len() - 1] {
+                        OverlayStyle::Status
+                    } else {
+                        OverlayStyle::Normal
+                    },
+                };
+            }
+            Some((
+                Rect {
+                    x,
+                    y,
+                    rows,
+                    columns,
+                },
+                usize::from(rows),
+            ))
+        } else if let (Some(rect), true) = (self.menu.overlay_rect(), self.menu.is_open()) {
             for (slot, line) in lines.iter_mut().zip(menu_lines.as_slice()) {
                 *slot = OverlayLine {
                     text: line.text(),

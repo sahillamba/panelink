@@ -1,15 +1,15 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: P5 saved-layout/restart engineering design delivered (2026-10-21); parent plus independent Luna xhigh review; codec/store/runtime/recovery remain unimplemented
-last-updated: 2026-10-21
+current-phase: Wave2 scoped source integrated (2026-10-22): client IO worker, tick-driven live close and pure saved-layout codec. Parent review/checks delivered; full host/provider/phase gates remain open. See WAVE2-RESULT.md.
+last-updated: 2026-10-22
 checkpoint-commit: explicitly authorized 2026-10-21; staging blocked by .git/index.lock Operation not permitted; no commit or push. Resume commit when Git metadata is writable without re-requesting authorization. See SESSION.md.
-last-verified: 2026-10-21 — design reviewed and7 boundary issues reconciled; existing geometry filter17 and owner filter50 pass, docs174/0, component fingerprints and96 source/test/manifest +13 prior-report hashes unchanged. No new saved-layout runtime acceptance. Prior full verifier7/8 and31 integration targets86passed/17failed/11ignored remain historical known-gate evidence. See P5-SAVED-LAYOUT.md.
-next-action: Implement only pure fixed160-byte saved-layout codec/model under docs/progress/P5-SAVED-LAYOUT-CODEC-TASK.md, using Luna xhigh with parent export/review/verification. Then store+two-slot rotation, async guarded writer, lifecycle integration/shared metadata deadline and read-only CLI. No historical identity/process/effect replay, pending hierarchy/provider choices remain open.
+last-verified: 2026-10-22 — Wave2 final verifier7/8: library569pass/4ignored, binary109pass/1fail at known pathname bind EPERM; decoder39/Python45pass; strict all-target Clippy/fmt/build/component fingerprints/docs191/0 pass. Independently selected26 integration tests pass after final guard; client50pass and codec8pass independently. See WAVE2-RESULT.md. No complete host/delayed-fsync/provider/reboot acceptance.
+next-action: Follow P5-SAVED-LAYOUT.md to specify/review the bounded two-slot saved-layout store/rotation slice before guarded writer/runtime/inspection. Keep asynchronous launch/journal isolation queued as substantial architecture debt. Preserve current source and known socket/host/provider gates; no tabs/sidebar or provider adoption is implied.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
-blocked-on: Current sandbox denies pathname socket bind (EPERM/listener_permission_denied); historical parallel lock-probe failure passed isolated/serial and did not recur in current default run, but cause remains unconfirmed; host stderr diagnostic failure was previously reproduced at unchanged HEAD. Phase 2 clipboard/full Apple Terminal and Phase 4 live identity remain unproved; Phase 3 expanded pathname/host acceptance remains separate. OpenCode 1.19.0 installation was recorded earlier; this run did not recheck it. Ignored/blocked cases are not passes.
+blocked-on: Current sandbox denies pathname socket bind (EPERM/listener_permission_denied); historical parallel lock-probe failure passed isolated/serial and did not recur in current default run, but cause remains unconfirmed; host stderr diagnostic failure was previously reproduced at unchanged HEAD. Phase 2 clipboard/full Apple Terminal and Phase 4 live identity remain unproved; Phase 3 expanded pathname/host acceptance remains separate. OpenCode2.0.32 S0 preflight was recorded in SUBAGENTS-FEASIBILITY.md; readiness/worker proof remains socket-blocked. Ignored/blocked cases are not passes.
 setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1 rechecked, offline builds pass, current verifier 7/8 with socket restriction; previous full 8/8 at f82d968 remains historical evidence.
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 phase-3a: DONE — 2026-10-19 — see docs/progress/P3A-DEFAULT-OPEN.md and INTEGRATION.md
@@ -22,6 +22,8 @@ phase-p5-final-tail: DONE as bounded suffix admission — 2026-10-21 — see doc
 phase-p5-drain-metadata: DONE as timeout-only accepted-end finalization — 2026-10-21 — see docs/progress/P5-DRAIN-METADATA.md; payload loss and full Phase5 remain OPEN
 phase-p5-committed-corruption: DONE as whole-file refusal/preservation policy and acceptance — 2026-10-21 — see docs/progress/P5-COMMITTED-CORRUPTION.md; no salvage, checksum or full reboot claim
 phase-p5-saved-layout-design: DONE as reviewed engineering contract — 2026-10-21 — see docs/progress/P5-SAVED-LAYOUT.md and P5-SAVED-LAYOUT-REVIEW.md; no saved-layout implementation or phase completion
+phase-sa-feasibility: ATTEMPTED/BLOCKED — 2026-10-21 — installed OpenCode2.0.32 CLI checked; ACP/server startup blocked before readiness and independent binds return EPERM. No live child/session acceptance. See docs/progress/SUBAGENTS-FEASIBILITY.md.
+phase-usability-wave1: scoped implementation delivered2026-10-22 — three Luna high/medium owners, parent-reviewed/integrated; typed keys/help/cleanup and automated component/privatePTY evidence. Full acceptance stays open; see docs/progress/USABILITY-WAVE1-RESULT.md.
 ```
 
 ## Control commands
@@ -264,8 +266,24 @@ open.
 - [x] Committed-record corruption/partial-tail refusal policy with byte-preserving store and fresh-process CLI acceptance; see P5-COMMITTED-CORRUPTION.md. No salvage, repair or arbitrary bit-rot detection is claimed.
 - [ ] Resolve remaining unknown/unsubmitted end intent and final-payload loss within reviewed bounded scheduling; no complete-capture or performance-budget claim.
 - [x] Scoped saved-layout/restart engineering design and exact codec task, with independent review; see P5-SAVED-LAYOUT.md. No saved-layout implementation or new command is delivered by that design.
-- [ ] Implement saved-layout codec, bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection in the reviewed order.
+- [x] Pure fixed160-byte saved-layout codec with historical-only geometry and strict canonical validation; see P5-SAVED-LAYOUT-CODEC.md. Parent caught and corrected the snapshot minimum-leaf invariant; eight component tests pass. No persistence/restoration claim.
+- [ ] Implement bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection in the reviewed order.
 - [ ] Full V-HISTORY reboot/layout recovery and representative workload/throughput acceptance; see P5-SAVED-HISTORY.md and docs/SPEC.md.
+
+## Planned phase SA — Subagents visibility (not started)
+
+Planned cross-cutting phase **SA — Subagents visibility** (requested2026-10-21):
+automatically expose supported provider background/subagents in a dedicated
+Subagents tab for optional observation. See
+[SUBAGENTS-PLAN.md](docs/progress/SUBAGENTS-PLAN.md) for capability spike,
+bounded registry/observer, tab UI and live acceptance slices. Provider proof
+belongs with Phase4; tab presentation with Phase5. Scope is OpenCode and
+compatible wrappers, with read-only activity viewing proposed first. This is planned,
+not implemented, and does not reorder the queued saved-layout codec task.
+
+S0 was attempted2026-10-21: CLI preflight passes on installed OpenCode2.0.32,
+but server readiness is blocked by local socket permissions. No worker was
+launched or observed. See [feasibility evidence](docs/progress/SUBAGENTS-FEASIBILITY.md).
 
 ## Phase 6 — alpha measurements and review evidence (not started)
 

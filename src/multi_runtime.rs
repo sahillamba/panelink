@@ -66,6 +66,8 @@ use std::time::{Duration, Instant};
 
 /// Maximum finite watches retained between owner ticks.
 pub const MAX_PENDING_WATCHES: usize = 8;
+/// Maximum close replies retained while owner-driven stop phases progress.
+pub const MAX_PENDING_CLOSES: usize = MAX_CONNECTIONS;
 
 /// Write deadline for one Snapshot frame (at most about 0.9 MB).
 pub const SNAPSHOT_WRITE_DEADLINE: Duration = Duration::from_secs(2);
@@ -299,6 +301,7 @@ impl Drop for ActiveGuard {
 pub struct MultiServerDriver {
     hub: Hub,
     pending_watches: Vec<PendingWatch>,
+    pending_closes: Vec<PendingClose>,
     owner: MultiSessionOwner<PtyEffects>,
     storage: ServerStorage,
     terminfo: PathBuf,
@@ -325,8 +328,33 @@ impl Drop for MultiServerDriver {
     fn drop(&mut self) {
         self.hub.shutdown();
         self.settle_pending_watches();
+        self.settle_pending_closes();
         self.owner
             .for_each_effects_mut(|_, effects| effects.prepare_driver_shutdown());
+        let shutdown_started = Instant::now();
+        let hup_deadline = shutdown_started + Duration::from_secs(1);
+        let kill_deadline = hup_deadline + Duration::from_secs(1);
+        loop {
+            let now = Instant::now();
+            let kill = now >= hup_deadline;
+            self.owner.for_each_effects_mut(|_, effects| {
+                effects.advance_driver_shutdown(kill);
+            });
+            // Close transactions retain their own result and are advanced
+            // independently of the now-stopped worker set.
+            let _ = self.owner.poll(0);
+            let _ = self.owner.advance_closes_at(now);
+            let mut complete = true;
+            self.owner.for_each_effects_mut(|_, effects| {
+                complete &= effects.driver_shutdown_complete();
+            });
+            if complete || now >= kill_deadline {
+                break;
+            }
+            thread::sleep(
+                Duration::from_millis(10).min(kill_deadline.saturating_duration_since(now)),
+            );
+        }
         if let Some(coordinator) = self.history_capture.take() {
             let deadline = Instant::now() + MAX_SHUTDOWN_WAIT;
             lock_capture(&coordinator).begin_shutdown();
@@ -375,6 +403,7 @@ impl MultiServerDriver {
         Self {
             hub: Hub::new(),
             pending_watches: Vec::with_capacity(MAX_PENDING_WATCHES),
+            pending_closes: Vec::with_capacity(MAX_PENDING_CLOSES),
             owner,
             storage,
             terminfo,
@@ -488,7 +517,11 @@ impl MultiServerDriver {
     pub fn tick(&mut self, clock: impl Fn() -> u64) -> Result<(), ServerError> {
         self.drive_history();
         let progress = self.owner.poll(clock());
+        // Close ownership belongs to the driver, never to the bounded worker
+        // reply lifetime. Advance even when the original worker timed out.
+        let _ = self.owner.advance_closes_at(Instant::now());
         self.process_pending(&clock);
+        self.process_pending_closes(&clock);
         self.process_pending_watches(&clock);
         self.hub.reap_finished();
         self.drive_history();
@@ -526,6 +559,7 @@ impl MultiServerDriver {
         self.hub.shutdown();
         self.process_pending(&clock);
         self.settle_pending_watches();
+        self.settle_pending_closes();
     }
 
     fn process_pending(&mut self, clock: &impl Fn() -> u64) {
@@ -543,7 +577,10 @@ impl MultiServerDriver {
                 },
                 &envelope.request,
                 clock(),
-                self.pending_watches.len() < MAX_PENDING_WATCHES,
+                PendingCapacity {
+                    watches: self.pending_watches.len() < MAX_PENDING_WATCHES,
+                    closes: self.pending_closes.len() < MAX_PENDING_CLOSES,
+                },
             );
             // Detach is an observation boundary, not a process stop. Save
             // changed visible screens after the owner's request is handled.
@@ -563,6 +600,54 @@ impl MultiServerDriver {
                         deadline,
                     });
                 }
+                DispatchResult::PendingClose { key, deadline } => {
+                    self.pending_closes.push(PendingClose {
+                        envelope,
+                        key,
+                        deadline,
+                    });
+                }
+            }
+        }
+    }
+
+    fn process_pending_closes(&mut self, clock: &impl Fn() -> u64) {
+        let mut index = 0;
+        while index < self.pending_closes.len() {
+            let pending = &self.pending_closes[index];
+            let MultiRequest::Request { connection, .. } = &pending.envelope.request else {
+                let pending = self.pending_closes.swap_remove(index);
+                let _ = pending
+                    .envelope
+                    .try_reply(MultiReply::Error("invalid_close_request"));
+                continue;
+            };
+            let status = self
+                .owner
+                .close_status_state(connection, pending.key, clock());
+            let reply_value = match status {
+                Ok(crate::server::multi_session::CloseStatus::Terminal(result)) => {
+                    Some(close_reply(&result))
+                }
+                Ok(crate::server::multi_session::CloseStatus::NotAdmitted) => Some(
+                    match self.owner.close_status(connection, pending.key, clock()) {
+                        Ok(result) => close_reply(&result),
+                        Err(error) => self::error(&error),
+                    },
+                ),
+                Ok(crate::server::multi_session::CloseStatus::InProgress)
+                    if Instant::now() >= pending.deadline =>
+                {
+                    Some(reply(MultiReply::Error("close_reply_timeout")))
+                }
+                Ok(crate::server::multi_session::CloseStatus::InProgress) => None,
+                Err(error) => Some(self::error(&error)),
+            };
+            if let Some(DispatchResult::Reply(reply)) = reply_value {
+                let pending = self.pending_closes.swap_remove(index);
+                let _ = pending.envelope.try_reply(reply);
+            } else {
+                index += 1;
             }
         }
     }
@@ -582,6 +667,14 @@ impl MultiServerDriver {
 
     fn settle_pending_watches(&mut self) {
         for pending in self.pending_watches.drain(..) {
+            let _ = pending
+                .envelope
+                .try_reply(MultiReply::Error("server_stopping"));
+        }
+    }
+
+    fn settle_pending_closes(&mut self) {
+        for pending in self.pending_closes.drain(..) {
             let _ = pending
                 .envelope
                 .try_reply(MultiReply::Error("server_stopping"));
@@ -882,10 +975,20 @@ struct PendingWatch {
     deadline: Instant,
 }
 
+struct PendingClose {
+    envelope: MultiEnvelope,
+    key: OperationKey,
+    deadline: Instant,
+}
+
 enum DispatchResult {
     Reply(MultiReply),
     Pending {
         request: WatchRequest,
+        deadline: Instant,
+    },
+    PendingClose {
+        key: OperationKey,
         deadline: Instant,
     },
 }
@@ -898,6 +1001,11 @@ fn error(error: &ServerError) -> DispatchResult {
     reply(MultiReply::Error(error.code()))
 }
 
+struct PendingCapacity {
+    watches: bool,
+    closes: bool,
+}
+
 fn dispatch(
     owner: &mut MultiSessionOwner<PtyEffects>,
     storage: &mut ServerStorage,
@@ -905,7 +1013,7 @@ fn dispatch(
     history: HistoryCapture<'_>,
     request: &MultiRequest,
     now: u64,
-    pending_capacity: bool,
+    pending: PendingCapacity,
 ) -> DispatchResult {
     match request {
         MultiRequest::Hello { hello, target } => {
@@ -936,13 +1044,13 @@ fn dispatch(
             Some([0, 2]) => dispatch_session(owner, connection, payload, now),
             Some([0, 4]) => match decode_legacy_watch(payload) {
                 Some(request) => {
-                    dispatch_watch(owner, connection, request, now, pending_capacity, true)
+                    dispatch_watch(owner, connection, request, now, pending.watches, true)
                 }
                 None => reply(MultiReply::Error("invalid_watch_request")),
             },
             Some([0, 5]) => match decode_watch_request(payload) {
                 Ok(request) => {
-                    dispatch_watch(owner, connection, request, now, pending_capacity, false)
+                    dispatch_watch(owner, connection, request, now, pending.watches, false)
                 }
                 Err(_) => reply(MultiReply::Error("invalid_watch_request")),
             },
@@ -951,7 +1059,7 @@ fn dispatch(
                 dispatch_split(owner, storage, terminfo, history, connection, payload, now)
             }
             Some([0, 8]) => dispatch_ui(owner, connection, payload, now),
-            Some([0, 9]) => dispatch_close(owner, connection, payload, now),
+            Some([0, 9]) => dispatch_close(owner, connection, payload, now, pending.closes),
             _ => reply(MultiReply::Error("unsupported_request_schema")),
         },
     }
@@ -1080,21 +1188,31 @@ fn dispatch_split(
 }
 
 /// Schema-9 route: explicit pane close, close status, and pane status.
-///
-/// A close runs [`MultiSessionOwner::execute_close`] synchronously on the
-/// owner thread. Its bounded stop (HUP, 1 s, KILL, 1 s) can therefore block
-/// this tick, and every other queued request, for about 2 s. This is accepted
-/// for the two-pane prototype; the closing worker waits up to
-/// [`CLOSE_REPLY_DEADLINE`] for the reply.
 fn dispatch_close(
     owner: &mut MultiSessionOwner<PtyEffects>,
     connection: &Connection,
     payload: &[u8],
     now: u64,
+    pending_capacity: bool,
 ) -> DispatchResult {
     if let Ok(query) = decode_close_status_query(payload) {
-        return match owner.close_status(connection, query.key, now) {
-            Ok(result) => close_reply(&result),
+        return match owner.close_status_state(connection, query.key, now) {
+            Ok(crate::server::multi_session::CloseStatus::Terminal(result)) => close_reply(&result),
+            Ok(crate::server::multi_session::CloseStatus::InProgress) if pending_capacity => {
+                DispatchResult::PendingClose {
+                    key: query.key,
+                    deadline: Instant::now() + CLOSE_REPLY_DEADLINE,
+                }
+            }
+            Ok(crate::server::multi_session::CloseStatus::InProgress) => {
+                reply(MultiReply::Error("close_wait_capacity"))
+            }
+            Ok(crate::server::multi_session::CloseStatus::NotAdmitted) => {
+                match owner.close_status(connection, query.key, now) {
+                    Ok(result) => close_reply(&result),
+                    Err(error) => self::error(&error),
+                }
+            }
             Err(error) => self::error(&error),
         };
     }
@@ -1131,10 +1249,18 @@ fn dispatch_close(
     if let Err(error) = owner.authorize_close(connection, &request, now) {
         return self::error(&error);
     }
-    match owner.execute_close(payload, now, |effects: &mut PtyEffects, rows, columns| {
-        effects.resize(rows, columns)
-    }) {
-        Ok(result) => close_reply(&result),
+    if !pending_capacity {
+        return reply(MultiReply::Error("close_wait_capacity"));
+    }
+    match owner.begin_close(payload, now, Instant::now()) {
+        Ok(crate::server::multi_session::CloseStatus::Terminal(result)) => close_reply(&result),
+        Ok(crate::server::multi_session::CloseStatus::InProgress) => DispatchResult::PendingClose {
+            key: request.key,
+            deadline: Instant::now() + CLOSE_REPLY_DEADLINE,
+        },
+        Ok(crate::server::multi_session::CloseStatus::NotAdmitted) => {
+            reply(MultiReply::Error("close_failed"))
+        }
         Err(error) => reply(MultiReply::Error(close_error_label(&error))),
     }
 }
@@ -2006,6 +2132,191 @@ mod tests {
         let panes = encode_pane_reply(&sample_pane_reply()).unwrap();
         assert!(response_matches(RequestSchema::Panes, &panes));
         assert!(!response_matches(RequestSchema::Close(KEY), &panes));
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn socketpair_close_worker_disconnect_does_not_cancel_owner_transaction() {
+        use crate::close_protocol::{encode_close_request, CloseRequest};
+        use crate::handshake_protocol::{decode_welcome, Hello, CAPABILITY_READ};
+        use crate::launch::LaunchContext;
+        use crate::multi_startup::{StartedMultiServer, StartupLaunch};
+        use crate::server::multi_session::CloseStatus;
+        use crate::session_protocol::{encode_session_hello, SessionHello};
+        use crate::transport::AuthenticatedStream;
+        use std::ffi::OsString;
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc::sync_channel;
+        use std::time::{Duration, Instant};
+
+        let root = std::path::PathBuf::from("/private/tmp").join(format!(
+            "panelink-close-worker-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let _cleanup = RemoveFixture(root.clone());
+        let server_dir = root.join("server");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&server_dir)
+            .unwrap();
+        let terminfo = root.join("terminfo");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&terminfo)
+            .unwrap();
+        let context = LaunchContext {
+            working_directory: root.clone(),
+            environment: [
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                (OsString::from("HOME"), root.as_os_str().to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let arguments = vec![
+            OsString::from("-c"),
+            OsString::from("trap '' HUP; printf 'HUP-READY\\n'; while :; do /bin/sleep 10; done"),
+        ];
+        let executable = OsString::from("/bin/sh");
+        let started = StartedMultiServer::start(
+            ServerStorage::initialize(&server_dir).unwrap(),
+            &terminfo,
+            &StartupLaunch {
+                executable: &executable,
+                arguments: &arguments,
+                context: &context,
+                rows: 8,
+                columns: 60,
+            },
+            true,
+        )
+        .unwrap();
+        let target = started.startup().target.unwrap();
+        let mut driver = started.into_driver();
+        let (server_socket, client_socket) = UnixStream::pair().unwrap();
+        driver
+            .attach(AuthenticatedStream::new(server_socket).unwrap())
+            .unwrap();
+        let (welcome_send, welcome_recv) = sync_channel(1);
+        let worker_client = std::thread::spawn(move || {
+            let mut stream = AuthenticatedStream::new(client_socket).unwrap();
+            let deadline = || Instant::now() + Duration::from_secs(3);
+            let hello = encode_session_hello(&SessionHello {
+                hello: Hello {
+                    nonce: 91,
+                    required_capabilities: CAPABILITY_READ,
+                    optional_capabilities: 0,
+                },
+                resume: None,
+            })
+            .unwrap();
+            stream
+                .write_frame(
+                    &Frame::new(MessageKind::Hello, 0, &hello).unwrap(),
+                    deadline(),
+                )
+                .unwrap();
+            let welcome = stream.read_frame(deadline()).unwrap();
+            let welcome = decode_welcome(welcome.payload()).unwrap();
+            welcome_send.send(welcome).unwrap();
+            let mut payload = Vec::new();
+            encode_close_request(
+                &CloseRequest {
+                    key: OperationKey {
+                        generation: welcome.generation,
+                        lease: welcome.lease,
+                        sequence: 1,
+                    },
+                    target,
+                    expected_layout_revision: 1,
+                },
+                &mut payload,
+            )
+            .unwrap();
+            stream
+                .write_frame(
+                    &Frame::new(MessageKind::Request, 1, &payload).unwrap(),
+                    deadline(),
+                )
+                .unwrap();
+            // The owner will stop the worker while it is waiting for this
+            // terminal-only close response, dropping the reply receiver.
+            let _ = stream.read_frame(Instant::now() + Duration::from_secs(5));
+        });
+
+        let setup_deadline = Instant::now() + Duration::from_secs(3);
+        let welcome = loop {
+            driver.tick(|| 1).unwrap();
+            if let Ok(welcome) = welcome_recv.try_recv() {
+                break welcome;
+            }
+            assert!(Instant::now() < setup_deadline, "worker did not attach");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(welcome.generation, target.generation);
+        while driver.pending_closes.is_empty() {
+            driver.tick(|| 2).unwrap();
+            assert!(Instant::now() < setup_deadline, "close was not admitted");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let (connection, close_key) = {
+            let pending = &driver.pending_closes[0];
+            let MultiRequest::Request { connection, .. } = &pending.envelope.request else {
+                panic!("pending close contains a request")
+            };
+            (*connection, pending.key)
+        };
+        assert!(matches!(
+            driver
+                .owner
+                .close_status_state(&connection, close_key, 2)
+                .unwrap(),
+            CloseStatus::InProgress
+        ));
+        driver.stop_connections(|| 2);
+        worker_client.join().unwrap();
+
+        // Progress the server-owned transaction after the worker and its
+        // response receiver have gone away.
+        let start = Instant::now();
+        driver
+            .owner
+            .advance_closes_at(start + Duration::from_secs(1))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            driver.owner.poll(3).unwrap();
+            driver
+                .owner
+                .advance_closes_at(start + Duration::from_secs(1))
+                .unwrap();
+            if matches!(
+                driver
+                    .owner
+                    .close_status_state(&connection, close_key, 3)
+                    .unwrap(),
+                CloseStatus::Terminal(_)
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "close owner work was cancelled");
+            std::thread::yield_now();
+        }
+        driver.process_pending_closes(&|| 3);
+        assert!(driver.pending_closes.is_empty());
+        assert!(matches!(
+            driver
+                .owner
+                .close_status_state(&connection, close_key, 3)
+                .unwrap(),
+            CloseStatus::Terminal(_)
+        ));
     }
 
     #[test]

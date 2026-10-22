@@ -105,6 +105,35 @@ pub trait EffectSink {
         }
     }
 
+    /// Begin a live-runtime stop without waiting. Implementations used by the
+    /// multi-session server override this with a HUP-only transition. The
+    /// default never calls the legacy synchronous `stop` hook.
+    fn begin_stop(
+        &mut self,
+    ) -> Result<Option<crate::close_protocol::StopOutcome>, crate::close_protocol::StopOutcome>
+    {
+        if self.child_exited() {
+            Ok(Some(crate::close_protocol::StopOutcome::Exited))
+        } else {
+            Err(crate::close_protocol::StopOutcome::Unknown)
+        }
+    }
+
+    /// Advance a live-runtime stop using a nonblocking child-status poll.
+    /// `kill` requests the one-time escalation after the shared HUP deadline.
+    /// `None` means the stop transaction is still in progress.
+    fn advance_stop(
+        &mut self,
+        _kill: bool,
+    ) -> Result<Option<crate::close_protocol::StopOutcome>, crate::close_protocol::StopOutcome>
+    {
+        Ok(Some(if self.child_exited() {
+            crate::close_protocol::StopOutcome::Exited
+        } else {
+            crate::close_protocol::StopOutcome::Unknown
+        }))
+    }
+
     /// Apply one absolute PTY size, used when a layout change happens without
     /// a caller-supplied resize port (for example automatic pane collapse).
     ///

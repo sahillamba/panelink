@@ -1,0 +1,58 @@
+   Compiling panelink v0.1.0 (/Users/sahillamba/panelink)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.34s
+     Running unittests src/main.rs (target/debug/deps/panelink-13fed5d0f6afc6d6)
+
+running 50 tests
+test ui_client::conn::tests::context_names_round_trip_and_reject_foreign_files ... ok
+test ui_client::conn::tests::lease_renewal_is_scheduled_before_expiry_and_retried_on_failure ... ok
+test ui_client::host::tests::exit_restores_the_terminal_before_any_network_detach_work ... ok
+test ui_client::host::tests::restore_sequence_disables_every_mode_enter_enabled ... ok
+test ui_client::keys::tests::host_bytes_map_to_typed_keys_and_local_commands ... ok
+test ui_client::keys::tests::only_y_confirms_and_other_presses_cancel ... ok
+test ui_client::keys::tests::releases_and_unsupported_modifier_combinations_are_ignored ... ok
+test ui_client::keys::tests::sgr_mouse_and_menu_keys_map_to_menu_inputs ... ok
+test ui_client::net::tests::captured_context_excludes_panelink_names ... ok
+test ui_client::net::tests::close_replies_are_matched_to_the_exact_key ... ok
+test ui_client::net::tests::close_request_carries_exact_key_captured_target_and_revision ... ok
+test ui_client::net::tests::split_request_carries_captured_target_revision_direction_and_planned_size ... ok
+test ui_client::state::tests::auto_collapse_cancels_a_prompt_for_the_removed_pane ... ok
+test ui_client::state::tests::close_results_map_to_fixed_status_messages_and_never_retry ... ok
+test ui_client::state::tests::confirmation_keys_and_cancel_keys_never_reach_the_child ... ok
+test ui_client::state::tests::ctrl_b_enters_navigation_mode_with_a_visible_banner ... ok
+test ui_client::state::tests::ctrl_b_x_asks_for_confirmation_and_y_closes_the_focused_pane ... ok
+test ui_client::state::tests::ctrl_x_quits_after_flushing_and_paste_goes_to_focus ... ok
+test ui_client::state::tests::ctrl_x_quits_even_when_a_key_batch_is_retained ... ok
+test ui_client::state::tests::frames_build_for_one_and_two_panes_with_placeholders_and_overlays ... ok
+test ui_client::state::tests::help_ctrl_x_detaches_and_esc_dismisses ... ok
+test ui_client::state::tests::help_overlay_clips_on_resize_and_unchanged_frames_write_nothing ... ok
+test ui_client::state::tests::keyboard_fallback_ctrl_b_s_opens_for_focused_and_esc_closes_without_bytes ... ok
+test ui_client::state::tests::layout_shrink_repairs_focus_drops_stale_keys_and_frees_the_screen_cache ... ok
+test ui_client::state::tests::menu_close_item_uses_captured_target_and_server_revision_after_confirmation ... ok
+test ui_client::state::tests::menu_close_on_single_pane_warns_that_the_workspace_ends ... ok
+test ui_client::state::tests::navigation_help_is_modal_persistent_and_has_no_hidden_pane_effects ... ok
+test ui_client::state::tests::navigation_mode_ctrl_x_still_detaches ... ok
+test ui_client::state::tests::navigation_mode_direct_split_keys ... ok
+test ui_client::state::tests::navigation_mode_moves_focus_between_panes_and_stays_active ... ok
+test ui_client::state::tests::navigation_mode_split_at_capacity_reports_without_effect ... ok
+test ui_client::state::tests::navigation_mode_times_out ... ok
+test ui_client::state::tests::releases_do_not_cancel_the_prompt ... ok
+test ui_client::state::tests::resize_pending_flag_is_reported ... ok
+test ui_client::state::tests::retained_key_batch_stays_pinned_and_blocks_later_paste_and_mutation ... ok
+test ui_client::state::tests::right_click_opens_menu_for_pane_under_pointer_and_menu_inputs_never_reach_panes ... ok
+test ui_client::state::tests::split_completion_waits_for_newer_validated_layout_before_focusing_target ... ok
+test ui_client::state::tests::split_failure_shows_status_and_keeps_focus ... ok
+test ui_client::state::tests::split_intent_uses_captured_target_and_server_revision_waits_for_layout ... ok
+test ui_client::state::tests::split_works_again_after_a_close_shrinks_the_layout ... ok
+test ui_client::state::tests::stale_split_completion_cannot_override_focus_moved_before_layout_update ... ok
+test ui_client::state::tests::too_small_host_keeps_layout_and_shows_notice ... ok
+test ui_client::state::tests::typed_keys_batch_to_the_focused_pane_and_flush_on_focus_change ... ok
+test ui_client::worker::tests::accepted_commands_are_byte_and_count_bounded_including_in_flight_results ... ok
+test ui_client::worker::tests::dropping_handle_never_waits_and_unblocks_a_worker_result_send ... ok
+test ui_client::worker::tests::input_unknown_is_reported_once_and_never_replayed_by_the_worker ... ok
+test ui_client::worker::tests::restored_terminal_precedes_worker_detach_command ... ok
+test ui_client::worker::tests::saturated_worker_does_not_hold_ctrl_x_behind_retained_keys ... ok
+test ui_client::worker::tests::socketpair_stall_keeps_host_submission_responsive_until_peer_replies ... ok
+test ui_client::worker::tests::stalled_poll_does_not_block_host_side_effect_admission_or_result_polling ... ok
+
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 60 filtered out; finished in 0.07s
+

@@ -1,0 +1,102 @@
+   Compiling libc v0.2.191
+   Compiling bitflags v2.13.2
+   Compiling rustix v1.1.5
+   Compiling arrayvec v0.7.8
+   Compiling signal-hook v0.4.5
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling unicode-width v0.2.2
+   Compiling crossterm-input v0.29.0-panelink.1 (/Users/sahillamba/panelink/vendor/crossterm-input)
+   Compiling vte v0.15.0
+   Compiling vt100 v0.16.2-panelink.2 (/Users/sahillamba/panelink/vendor/vt100)
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling rustix-openpty v0.2.0
+   Compiling panelink v0.1.0 (/Users/sahillamba/panelink)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.29s
+     Running tests/p2_pty.rs (target/debug/deps/p2_pty-54a98b69cd92e468)
+
+running 11 tests
+test child_output_populates_separate_normal_and_alternate_screens ... ok
+test clipboard_denial_does_not_inject_reply_bytes_before_the_next_shell_input ... ok
+test final_output_larger_than_one_chunk_is_drained_after_exit ... ok
+test forged_launch_environment_arguments_and_dimensions_are_rejected_before_spawn ... ok
+test four_allowlisted_queries_are_written_back_to_the_child_pty ... ok
+test hup_ignoring_child_is_killed_reaped_and_cleanup_is_cached ... ok
+test output_flood_keeps_engine_and_snapshot_within_visible_bounds ... ok
+test paste_framing_follows_engine_bracketed_mode ... ok
+test pending_input_is_discarded_once_child_exit_is_observed ... ok
+test resize_coalesces_and_commits_only_the_newest_successful_size ... ok
+test stdio_is_a_tty_and_child_gets_only_the_explicit_environment_and_cwd ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s
+
+     Running tests/p3_multi_owner.rs (target/debug/deps/p3_multi_owner-7c051ed9b6f47c78)
+
+running 2 tests
+test public_claim_submit_routes_once_and_exact_retry_does_not_replay_input ... ok
+test trusted_multi_owner_routes_reads_and_drops_both_real_children ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests/p3_split.rs (target/debug/deps/p3_split-53c5a31673863904)
+
+running 2 tests
+test sh_split_right_creates_one_independent_real_child_and_resizes_the_original ... ok
+test zsh_split_right_creates_one_independent_real_child_and_resizes_the_original ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/p3a_runtime.rs (target/debug/deps/p3a_runtime-e37769232b1d2f86)
+
+running 1 test
+test split_ui_keys_and_resize_over_socketpairs_with_two_real_zsh_children ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+
+     Running tests/p3b_close.rs (target/debug/deps/p3b_close-5c43279bca54bb21)
+
+running 2 tests
+test sh_close_stop_collapse_and_resplit_on_real_ptys ... ok
+test zsh_close_stop_collapse_and_resplit_on_real_ptys ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.36s
+
+     Running tests/p5_live_history_driver.rs (target/debug/deps/p5_live_history_driver-17b39fe1ec86ff53)
+
+running 2 tests
+test driver_drop_stops_live_child_then_persists_final_history ... ok
+test live_driver_saves_rows_and_both_buffers_before_natural_exit ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/saved_layout_contract.rs (target/debug/deps/saved_layout_contract-5bf1a1c175673761)
+
+running 2 tests
+test every_accepted_single_byte_mutation_remains_exactly_canonical ... ok
+test independently_written_wire_fixture_decodes_without_normalization ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/usability_input_pty.rs (target/debug/deps/usability_input_pty-571885c42b6485bf)
+
+running 2 tests
+test discard_shutdown_escalates_a_ready_hup_ignoring_continuous_writer ... ok
+test extended_wire_keys_reach_a_raw_child_as_exact_terminal_bytes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+
+     Running tests/w2_server_close.rs (target/debug/deps/w2_server_close-e34b024bc9c32634)
+
+running 1 test
+test hup_ignoring_close_keeps_real_sibling_pty_readable_and_writable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/w2_server_shutdown.rs (target/debug/deps/w2_server_shutdown-c5822c276807984e)
+
+running 1 test
+test driver_drop_signals_both_children_before_shared_escalation_deadlines ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+

@@ -34,6 +34,7 @@ use crate::session_registry::{RegistryError, SessionState, SESSION_CAPACITY};
 use crate::split_protocol::{decode_split_request, SplitCodecError, SplitResult};
 use std::collections::HashMap;
 use std::fmt;
+use std::time::{Duration, Instant};
 
 /// One scoped authoritative screen and metadata snapshot.
 pub struct ScopedReconcileState {
@@ -135,9 +136,32 @@ pub struct MultiSessionOwner<E: EffectSink> {
     committed_splits: Vec<SplitResult>,
     /// Every recorded close result, retained for exact duplicates and status.
     close_results: Vec<CloseResult>,
+    active_closes: Vec<ActiveClose>,
     /// Bounded per-pane size state keyed by full target: last confirmed
     /// absolute PTY size and, while a resize is pending, the desired size.
     pane_sizes: [Option<PaneSizeState>; 2],
+}
+
+#[derive(Clone, Copy)]
+enum ActiveClosePhase {
+    Hup { deadline: Instant },
+    Kill { deadline: Instant },
+}
+
+struct ActiveClose {
+    request: CloseRequest,
+    phase: ActiveClosePhase,
+}
+
+/// State of a keyed close query while the owner advances stop work.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum CloseStatus {
+    /// No close admission exists for this key.
+    NotAdmitted,
+    /// The close was admitted and remains owner work.
+    InProgress,
+    /// The operation has one retained terminal result.
+    Terminal(CloseResult),
 }
 
 #[derive(Clone, Copy)]
@@ -181,6 +205,7 @@ impl<E: EffectSink> fmt::Debug for MultiSessionOwner<E> {
             .field("layout_established", &self.layout.is_some())
             .field("committed_splits", &self.committed_splits.len())
             .field("close_results", &self.close_results.len())
+            .field("active_closes", &self.active_closes.len())
             .field(
                 "pending_resizes",
                 &self
@@ -377,6 +402,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             layout: None,
             committed_splits: Vec::new(),
             close_results: Vec::new(),
+            active_closes: Vec::new(),
             pane_sizes: [None; 2],
         })
     }
@@ -1712,7 +1738,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 None => Err(CloseError::InternalInvariant),
             };
         }
-        if self.close_results.len() >= MAX_RETAINED_CLOSE_RESULTS {
+        if self.close_results.len() + self.active_closes.len() >= MAX_RETAINED_CLOSE_RESULTS {
             return Err(CloseError::Capacity);
         }
         match self
@@ -1728,7 +1754,16 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         }
 
         let target = request.target;
-        let result = match self.plan_close(&request) {
+        let already_closing = self
+            .active_closes
+            .iter()
+            .any(|close| close.request.target == target);
+        let plan = if already_closing {
+            Err(CloseRejection::AlreadyClosed)
+        } else {
+            self.plan_close(&request)
+        };
+        let result = match plan {
             Err(rejection) => CloseResult {
                 key,
                 outcome: CloseOutcome::Rejected(rejection),
@@ -1776,6 +1811,202 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             return Err(CloseError::InternalInvariant);
         }
         Ok(result)
+    }
+
+    /// Admit one live-runtime close and send HUP without waiting for exit.
+    pub fn begin_close(
+        &mut self,
+        payload: &[u8],
+        now_secs: u64,
+        now: Instant,
+    ) -> Result<CloseStatus, CloseError> {
+        let request = decode_close_request(payload).map_err(CloseError::InvalidPayload)?;
+        let key = request.key;
+        if key.generation != self.global.generation {
+            return Err(CloseError::GenerationMismatch);
+        }
+        if let Some(admission) = self
+            .global
+            .ledger
+            .existing_admission(key, payload, now_secs)
+            .map_err(CloseError::Ledger)?
+        {
+            if let Some(result) = self.retained_close(key) {
+                return Ok(CloseStatus::Terminal(result));
+            }
+            if matches!(admission, Admission::InProgress)
+                && self
+                    .active_closes
+                    .iter()
+                    .any(|close| close.request.key == key)
+            {
+                return Ok(CloseStatus::InProgress);
+            }
+            return Err(if matches!(admission, Admission::InProgress) {
+                CloseError::InProgress
+            } else {
+                CloseError::InternalInvariant
+            });
+        }
+        if self.close_results.len() + self.active_closes.len() >= MAX_RETAINED_CLOSE_RESULTS {
+            return Err(CloseError::Capacity);
+        }
+        match self
+            .global
+            .ledger
+            .admit(key, payload, now_secs)
+            .map_err(CloseError::Ledger)?
+        {
+            Admission::Execute => {}
+            Admission::InProgress | Admission::Completed(_) => {
+                return Err(CloseError::InternalInvariant)
+            }
+        }
+        let rejection = if self
+            .active_closes
+            .iter()
+            .any(|close| close.request.target == request.target)
+        {
+            Some(CloseRejection::AlreadyClosed)
+        } else {
+            self.plan_close(&request).err()
+        };
+        if let Some(rejection) = rejection {
+            let result = CloseResult {
+                key,
+                outcome: CloseOutcome::Rejected(rejection),
+                target: Some(request.target),
+                layout_revision: self.layout_revision(),
+                survivor_resize_pending: false,
+            };
+            self.retain_close_result(result)?;
+            return Ok(CloseStatus::Terminal(result));
+        }
+        let stop = self
+            .launches
+            .session_mut(request.target)
+            .map_err(|_| CloseError::InternalInvariant)?
+            .effects
+            .begin_stop();
+        match stop {
+            Ok(Some(outcome)) | Err(outcome) => {
+                let result = self.finish_close_result(request, outcome)?;
+                self.retain_close_result(result)?;
+                Ok(CloseStatus::Terminal(result))
+            }
+            Ok(None) => {
+                self.active_closes.push(ActiveClose {
+                    request,
+                    phase: ActiveClosePhase::Hup {
+                        deadline: now + Duration::from_secs(1),
+                    },
+                });
+                Ok(CloseStatus::InProgress)
+            }
+        }
+    }
+
+    /// Advance every active close once. This is owner work and is independent
+    /// of any worker's finite reply wait or socket lifetime.
+    pub fn advance_closes_at(&mut self, now: Instant) -> Result<(), CloseError> {
+        let mut index = 0;
+        while index < self.active_closes.len() {
+            let transaction = &self.active_closes[index];
+            let (kill, expired) = match transaction.phase {
+                ActiveClosePhase::Hup { deadline } => (now >= deadline, false),
+                ActiveClosePhase::Kill { deadline } => (false, now >= deadline),
+            };
+            let request = transaction.request;
+            let progress = self
+                .launches
+                .session_mut(request.target)
+                .map_err(|_| CloseError::InternalInvariant)?
+                .effects
+                .advance_stop(kill)
+                .unwrap_or(Some(StopOutcome::Unknown));
+            let outcome = match progress {
+                Some(outcome) => Some(outcome),
+                None if expired => Some(StopOutcome::Unknown),
+                None if kill => {
+                    self.active_closes[index].phase = ActiveClosePhase::Kill {
+                        deadline: now + Duration::from_secs(1),
+                    };
+                    None
+                }
+                None => None,
+            };
+            let Some(outcome) = outcome else {
+                index += 1;
+                continue;
+            };
+            let transaction = self.active_closes.swap_remove(index);
+            debug_assert_eq!(transaction.request, request);
+            let result = self.finish_close_result(transaction.request, outcome)?;
+            self.retain_close_result(result)?;
+        }
+        Ok(())
+    }
+
+    fn finish_close_result(
+        &mut self,
+        request: CloseRequest,
+        mut outcome: StopOutcome,
+    ) -> Result<CloseResult, CloseError> {
+        let mut pending = false;
+        if matches!(outcome, StopOutcome::Exited | StopOutcome::Escalated) {
+            match self.finish_pane_exit(request.target, &mut |effects: &mut E, rows, columns| {
+                effects.apply_size(rows, columns)
+            }) {
+                Ok(resize_pending) => pending = resize_pending,
+                Err(()) => outcome = StopOutcome::Unknown,
+            }
+        }
+        Ok(CloseResult {
+            key: request.key,
+            outcome: CloseOutcome::Stopped(outcome),
+            target: Some(request.target),
+            layout_revision: self.layout_revision(),
+            survivor_resize_pending: pending,
+        })
+    }
+
+    fn retain_close_result(&mut self, result: CloseResult) -> Result<(), CloseError> {
+        self.close_results.push(result);
+        self.global
+            .ledger
+            .complete(result.key, result.ledger_outcome())
+            .map_err(|_| CloseError::InternalInvariant)
+    }
+
+    /// Observe keyed close state without encoding an in-progress wire result.
+    pub fn close_status_state(
+        &self,
+        connection: &Connection,
+        key: OperationKey,
+        now_secs: u64,
+    ) -> Result<CloseStatus, ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        if key.lease != connection.lease || key.generation != self.global.generation {
+            return Err(ServerError::Unauthorized);
+        }
+        match self.global.ledger.status(key, now_secs)? {
+            OperationStatus::NotAdmitted => Ok(CloseStatus::NotAdmitted),
+            OperationStatus::InProgress => {
+                if self
+                    .active_closes
+                    .iter()
+                    .any(|close| close.request.key == key)
+                {
+                    Ok(CloseStatus::InProgress)
+                } else {
+                    Err(ServerError::UnknownContext)
+                }
+            }
+            OperationStatus::Completed(_) => self
+                .retained_close(key)
+                .map(CloseStatus::Terminal)
+                .ok_or(ServerError::UnknownContext),
+        }
     }
 
     /// Observe a retained close result for one of the caller's own keys.
@@ -1956,11 +2187,13 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         if snapshot.pane_count() < 2 {
             return Ok(());
         }
-        let exited = snapshot
-            .panes
-            .into_iter()
-            .flatten()
-            .find(|pane| matches!(self.launches.state(pane.target), Ok(SessionState::Exited)));
+        let exited = snapshot.panes.into_iter().flatten().find(|pane| {
+            !self
+                .active_closes
+                .iter()
+                .any(|close| close.request.target == pane.target)
+                && matches!(self.launches.state(pane.target), Ok(SessionState::Exited))
+        });
         match exited {
             Some(pane) => self
                 .finish_pane_exit(pane.target, &mut |effects: &mut E, rows, columns| {

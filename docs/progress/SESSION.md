@@ -1,5 +1,102 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Wave2 scoped implementation integrated — 2026-10-22
+
+User approved client responsiveness/high, server close progression/high and
+saved-layout codec/medium. Parent reviewed both concurrency designs before
+implementation, then reviewed/corrected source and independently verified it.
+All three Luna owners released files. Preserve all dirty Wave1/planning/source
+work; no active agent is required to resume. Ownership, parent corrections and
+exact final evidence are in [WAVE2-RESULT.md](WAVE2-RESULT.md) and
+[WAVE2-TASKS.md](WAVE2-TASKS.md).
+
+Delivered: bounded client IO worker with host-owned UI, immediate saturated
+CtrlX/restore, target-pinned input and delayed split focus; owner-tick close
+with retained ledger/child ownership across dropped waiters, closing-input/
+resize rejection, shared driver shutdown; strict historical160-byte layout
+codec. No dependencies/vendor/manifests changed. No commit/push or broad phase
+completion. Async launch/journal work, layout storage/runtime, tabs/sidebar and
+provider adoption remain outside this wave.
+
+Final verifier7/8 after last guard: library569pass/4ignored; binary109pass/1fail
+at known pathname bind EPERM; decoder39/Python45pass; strict all-target Clippy,
+fmt/build/component fingerprints/docs191/0 pass. Independent selected26
+integration tests pass, including real two-PTY sibling close, symmetric shared
+shutdown with exact ESRCH absence and legacy history-driver regressions. Parent
+client50 and codec8 tests pass. Logs are under wave2-evidence/. Root Cargo stops
+at binary failure, so selected external tests were run separately. Unrun
+delayed-fsync injection and complete host/provider/reboot acceptance remain
+explicit limits, not passes or manual tasks assigned to the user.
+
+Resume ROADMAP.md next-action: specify/review bounded two-slot layout store/
+rotation under P5-SAVED-LAYOUT.md, preserving the separate async-launch debt.
+The ms-rust skill remains unavailable. Graph discovery succeeded early, then
+parent transport returned Transport closed; direct source fallback was used.
+No final refreshed-index claim. Git metadata remains outside writable scope;
+preserve prior checkpoint authorization without attempting a push.
+
+## Usability wave 1 — 2026-10-22
+
+User requested 2–3 Luna agents high/medium on the recommendations. Parent
+assigned U1 input/high, U2 help/medium, U3 bounded cleanup/high with exclusive
+ownership; all have released files. Parent reviewed, integrated cleanup and
+added real-PTY wire/input and continuous-writer cleanup acceptance. See
+[task contract](USABILITY-WAVE1-TASKS.md) and
+[integration result](USABILITY-WAVE1-RESULT.md) for actual checks and limits.
+Input support and CtrlB-? help are implemented; larger async responsiveness,
+mouse/clipboard/selection, hierarchy/tabs and provider observation remain open.
+No dependencies/vendor/commit/push change. Parent final verifier7/8: library
+555pass/4ignored, binary98pass/1fail at socket EPERM. Strict Clippy/fmt/build,
+decoder39, Python45 and component sources pass. Independent privatePTY2 and
+corePTY11 pass; multi-runtime1/close2 pass, pathname-close-runtime5 fail before
+raw mode. Docs183/0 and whitespace pass. Source graph refreshed nonpersistent.
+Preserve previous dirty docs; no broad phase completion or manual test handoff.
+Next queued implementation remains the saved-layout codec; U3's larger async
+design and remaining usability items are separate work.
+
+## Herdr usability study — 2026-10-22
+
+User explicitly requested a Luna study of Herdr for similar usability without
+cloning. GPT-6-Luna xhigh delivered
+[nine prioritized recommendations](HERDR-USABILITY-RECOMMENDATIONS.md), followed
+by parent review/refinement. Existing two-pane splits/NAV/detach/history CLI
+are distinguished from input/help/selection/navigation/status gaps. Proposed
+delivery groups cover reliable interaction, navigation/layout/reading, then
+verified attention/Subagents. No hierarchy decision or implementation adopted;
+queued saved-layout work stays unchanged. Docs/whitespace checks passed.
+
+Herdr documentation was read before the browser restriction was relayed. User
+later opened the site in Chrome, but only tab metadata could be observed:
+saved site permission still blocks page content. No screenshot, video-frame,
+installed-app or hands-on visual review was completed. Parent independently
+verified upstream repository metadata and Panelink's current input dispatch.
+
+## Subagents feasibility attempt — 2026-10-21
+
+User authorized S0 execution. [Results](SUBAGENTS-FEASIBILITY.md) and raw startup
+JSON are preserved. Installed executable freshly reports OpenCode2.0.32;
+SHA256/tag commit recorded. Fresh temporary XDG roots enable version/help,
+but ACP initialize/private server and direct serve/stdio all fail before
+readiness. Independent loopback and Unix binds return EPERM. No model prompt,
+session creation, live worker or wrapper test ran. S0/P4 remain open; documented
+parentID listing plus experimental per-session durable log provide a candidate
+observer/reconciliation route, not runtime proof. No application code changed.
+Current saved-layout next action remains; no manual verification task assigned.
+
+## Subagents visibility planning — 2026-10-21
+
+User requested automatic visibility of provider background/subagents in a tab
+named Subagents for optional observation. Recorded R-17 and the proposed
+[Phase SA plan](SUBAGENTS-PLAN.md). OpenCode V2 official docs expose candidate
+child/session observation surfaces, but ACP's child activity stops after the
+parent prompt ends and its private server is not an observer of arbitrary TUIs.
+The spike must prove full background lifetime, exact ancestry, missed-event
+reconciliation and no duplicate execution on the selected installed version.
+User clarified scope: OpenCode and wrappers built on it; prove compatibility
+per supported version. Read-only activity viewing is the proposed first slice;
+interactive child TUI attachment needs separate proof and scope selection.
+No runtime changes or new acceptance; current saved-layout next action remains.
+
 ## Authorized checkpoint commit blocked — 2026-10-21
 
 The user explicitly requested “commit it” after the saved-layout design slice.

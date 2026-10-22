@@ -1,0 +1,25 @@
+   Compiling libc v0.2.191
+   Compiling bitflags v2.13.2
+   Compiling rustix v1.1.5
+   Compiling memchr v2.8.3
+   Compiling arrayvec v0.7.8
+   Compiling signal-hook v0.4.5
+   Compiling itoa v1.0.18
+   Compiling unicode-width v0.2.2
+   Compiling crossterm-input v0.29.0-panelink.1 (/Users/sahillamba/panelink/vendor/crossterm-input)
+   Compiling vte v0.15.0
+   Compiling vt100 v0.16.2-panelink.2 (/Users/sahillamba/panelink/vendor/vt100)
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling rustix-openpty v0.2.0
+   Compiling panelink v0.1.0 (/Users/sahillamba/panelink)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.48s
+     Running unittests src/lib.rs (target/debug/deps/panelink-1a108b5d0750bbf2)
+
+running 3 tests
+test server_pty::tests::capture_exit_retries_end_sync_and_prunes_from_first_end_time ... ok
+test server_pty::tests::checkpoint_retry_reuses_metadata_until_directory_sync_succeeds ... ok
+test server_pty::tests::direct_resize_rejects_a_pane_after_close_begins ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 570 filtered out; finished in 0.38s
+

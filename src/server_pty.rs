@@ -81,6 +81,7 @@ pub struct PtyEffects {
     last_child_exited: bool,
     failed: bool,
     stopped: bool,
+    closing: bool,
     exit_recorded: bool,
     capture: Option<Capture>,
 }
@@ -93,6 +94,7 @@ impl std::fmt::Debug for PtyEffects {
             .field("child_exited", &self.last_child_exited)
             .field("failed", &self.failed)
             .field("stopped", &self.stopped)
+            .field("closing", &self.closing)
             .finish()
     }
 }
@@ -110,6 +112,7 @@ impl PtyEffects {
             last_child_exited,
             failed: false,
             stopped: false,
+            closing: false,
             exit_recorded: false,
             capture: None,
         }
@@ -761,16 +764,18 @@ impl PtyEffects {
         self.session.discard_pending_input();
     }
 
-    /// Stop this child while history admission remains open, then prevent any
-    /// later automatic effect drop from submitting to a closed writer.
+    /// Start server teardown without consuming a per-pane wait window.
     pub(crate) fn prepare_driver_shutdown(&mut self) {
-        let _ = <Self as EffectSink>::stop(self);
-        if self.capture.is_some() && !self.exit_recorded {
-            self.exit_recorded = self.capture_exit();
-        }
-        if let Some(capture) = &mut self.capture {
-            capture.async_closed = true;
-        }
+        let _ = <Self as EffectSink>::begin_stop(self);
+    }
+
+    /// Advance one shared-deadline server shutdown observation.
+    pub(crate) fn advance_driver_shutdown(&mut self, kill: bool) -> bool {
+        matches!(<Self as EffectSink>::advance_stop(self, kill), Ok(Some(_)))
+    }
+
+    pub(crate) fn driver_shutdown_complete(&self) -> bool {
+        self.session.exit_status().is_some()
     }
 
     fn observe_shutdown_output(
@@ -967,9 +972,18 @@ impl EffectSink for PtyEffects {
                 {
                     return Err(RejectionCode::InvalidRequest);
                 }
+                if self.closing || self.stopped {
+                    return Err(RejectionCode::Unsupported);
+                }
                 self.validate_input_capacity()
             }
-            Command::Interrupt { .. } => self.validate_input_capacity(),
+            Command::Interrupt { .. } => {
+                if self.closing || self.stopped {
+                    Err(RejectionCode::Unsupported)
+                } else {
+                    self.validate_input_capacity()
+                }
+            }
         }
     }
 
@@ -986,7 +1000,11 @@ impl EffectSink for PtyEffects {
     }
 
     fn input(&mut self, command: Command<'_>) -> Outcome {
-        self.apply_input(command)
+        if self.closing || self.stopped {
+            Outcome::Failed
+        } else {
+            self.apply_input(command)
+        }
     }
 
     fn poll(&mut self) -> Result<(), Outcome> {
@@ -1030,7 +1048,50 @@ impl EffectSink for PtyEffects {
     }
 
     fn apply_size(&mut self, rows: u16, columns: u16) -> Result<(), Outcome> {
-        self.resize(rows, columns)
+        if self.closing || self.stopped {
+            Err(Outcome::Failed)
+        } else {
+            self.resize(rows, columns)
+        }
+    }
+
+    fn begin_stop(&mut self) -> Result<Option<StopOutcome>, StopOutcome> {
+        if self.closing {
+            return Err(StopOutcome::Unknown);
+        }
+        self.capture_observation(true, false);
+        let prior_final_bytes = self.session.final_output_bytes();
+        let prior_eof = self.session.pty_eof();
+        let prior_child_exited = self.session.exit_status().is_some();
+        self.closing = true;
+        match self.session.begin_nonblocking_shutdown() {
+            Ok(true) => self
+                .finish_reaped_close(prior_final_bytes, prior_eof, prior_child_exited)
+                .map(Some),
+            Ok(false) => Ok(None),
+            Err(_) => Err(StopOutcome::Unknown),
+        }
+    }
+
+    fn advance_stop(&mut self, kill: bool) -> Result<Option<StopOutcome>, StopOutcome> {
+        let prior_final_bytes = self.session.final_output_bytes();
+        let prior_eof = self.session.pty_eof();
+        let prior_child_exited = self.session.exit_status().is_some();
+        if self
+            .session
+            .poll_shutdown_exit()
+            .map_err(|_| StopOutcome::Unknown)?
+        {
+            return self
+                .finish_reaped_close(prior_final_bytes, prior_eof, prior_child_exited)
+                .map(Some);
+        }
+        if kill {
+            self.session
+                .escalate_nonblocking_shutdown()
+                .map_err(|_| StopOutcome::Unknown)?;
+        }
+        Ok(None)
     }
 
     /// Explicitly stop this child: HUP, bounded wait, KILL, bounded wait.
@@ -1042,6 +1103,7 @@ impl EffectSink for PtyEffects {
     fn stop(&mut self) -> StopOutcome {
         self.capture_observation(true, false);
         self.session.discard_pending_input();
+        self.closing = true;
         let already_exited = self.session.exit_status().is_some();
         let prior_final_bytes = self.session.final_output_bytes();
         let prior_eof = self.session.pty_eof();
@@ -1071,6 +1133,36 @@ impl EffectSink for PtyEffects {
         } else {
             StopOutcome::Exited
         }
+    }
+}
+
+impl PtyEffects {
+    fn finish_reaped_close(
+        &mut self,
+        prior_final_bytes: usize,
+        prior_eof: bool,
+        prior_child_exited: bool,
+    ) -> Result<StopOutcome, StopOutcome> {
+        let result = self
+            .session
+            .finish_reaped_shutdown()
+            .map_err(|_| StopOutcome::Unknown)?;
+        self.stopped = true;
+        let newly_parsed =
+            self.observe_shutdown_output(prior_final_bytes, prior_eof, prior_child_exited);
+        if !result || newly_parsed != 0 {
+            self.mark_final_output_gap();
+        }
+        if self.last_child_exited && !self.exit_recorded {
+            self.exit_recorded = self.capture_exit();
+        } else {
+            self.capture_observation(true, false);
+        }
+        Ok(if self.session.kill_escalated() {
+            StopOutcome::Escalated
+        } else {
+            StopOutcome::Exited
+        })
     }
 }
 
@@ -1110,11 +1202,16 @@ impl Drop for PtyEffects {
             // Orderly owner teardown stops this child even if it was still
             // running when the client/server chose shutdown. Record the end
             // time only after the core confirms that cleanup reaped it.
-            if self.session.exit_status().is_none() {
+            if self.session.exit_status().is_none() && !self.closing {
                 let _ = <Self as EffectSink>::stop(self);
             }
             if self.session.exit_status().is_some() {
                 self.exit_recorded = self.capture_exit();
+            } else if self.closing {
+                self.mark_final_output_gap();
+                if let Some(capture) = &mut self.capture {
+                    capture.async_closed = true;
+                }
             }
         }
     }
@@ -1129,7 +1226,7 @@ impl PtyEffects {
     /// accepted the size; a pump error fails this adapter closed, as `poll`
     /// does. A successful size change advances the screen revision.
     pub fn resize(&mut self, rows: u16, columns: u16) -> Result<(), Outcome> {
-        if self.failed {
+        if self.failed || self.closing {
             return Err(Outcome::Unknown);
         }
         if self.stopped {
@@ -1202,7 +1299,7 @@ impl PtyEffects {
     }
 
     fn validate_input_capacity(&self) -> Result<(), RejectionCode> {
-        if !self.is_live() {
+        if self.closing || !self.is_live() {
             return Err(RejectionCode::Unsupported);
         }
         if self.session.pending_input_bytes() != 0 {
@@ -1268,7 +1365,7 @@ mod tests {
     use super::*;
     use crate::history_store::TestFaultPoint;
     use crate::launch::{Environment, ResolvedLaunch};
-    use crate::terminal::TerminalSession;
+    use crate::terminal::{TerminalError, TerminalSession};
     use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::DirBuilderExt;
@@ -1378,6 +1475,35 @@ mod tests {
             }
             assert!(Instant::now() < deadline, "fixture output did not arrive");
             thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn direct_resize_rejects_a_pane_after_close_begins() {
+        let fixture = Fixture::new();
+        let mut effects = PtyEffects::new(shell(
+            "trap '' HUP; while :; do /bin/sleep 1; done",
+            fixture.path(),
+        ));
+        assert!(matches!(EffectSink::begin_stop(&mut effects), Ok(None)));
+        assert_eq!(effects.validate_keys(), Err(RejectionCode::Unsupported));
+        assert_eq!(effects.keys([Key::Char('x')]), Outcome::Failed);
+        assert_eq!(effects.session.pending_input_bytes(), 0);
+        assert_eq!(effects.resize(9, 80), Err(Outcome::Unknown));
+        assert_eq!(
+            effects
+                .session
+                .request_resize(TerminalSize::new(9, 80).unwrap()),
+            Err(TerminalError::SessionClosed)
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if matches!(EffectSink::advance_stop(&mut effects, true), Ok(Some(_))) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "fixture child should exit");
+            thread::yield_now();
         }
     }
 

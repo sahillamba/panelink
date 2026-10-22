@@ -1,7 +1,8 @@
 # ADR-P5-LAYOUT-01: bounded saved layout and read-only restart
 
 **Status:** Accepted as scoped prototype engineering design after parent and
-independent review. Codec/store/runtime/CLI remain unimplemented.
+independent review. The pure codec is implemented and component-tested under
+[its result note](P5-SAVED-LAYOUT-CODEC.md); store/runtime/CLI remain unimplemented.
 **Date:** 2026-10-21
 **Deciders:** Parent engineering decision within the existing two-pane prototype;
 workspace/tab hierarchy and provider/product choices remain with the user.
