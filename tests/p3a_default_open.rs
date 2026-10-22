@@ -446,6 +446,22 @@ fn in_half(client: &Client, needle: &str, left: bool) -> bool {
 fn open_client(fixture: &Fixture) -> Client {
     let mut client = Client::spawn(fixture);
     client.wait_raw_mode();
+    // A stopped workspace leaves a saved layout, so plain `panelink` now asks
+    // the recovery chooser first (user decision 2026-10-21). Enter keeps
+    // today's fresh-shell path.
+    let deadline = Instant::now() + STEP;
+    loop {
+        let screen = client.screen();
+        if screen.contains("saved layout from") {
+            client.write(b"\r");
+            break;
+        }
+        if screen.contains('%') || screen.contains('$') || Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    client.wait_raw_mode();
     client.wait_screen("shell prompt", |screen| {
         screen.contains("%") || screen.contains("$")
     });

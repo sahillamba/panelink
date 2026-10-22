@@ -1,6 +1,14 @@
 # Phase 1 integration evidence — 2026-10-17
 
-## Current saved-layout/restart design — 2026-10-21
+## Current saved-layout implementation — 2026-10-21
+
+See [P5-LAYOUT-SLICE.md](P5-LAYOUT-SLICE.md) for actual commands and counts:
+verifier 8/8, lib 626 passed/4 ignored, bin 95 passed, 35 integration
+targets 162 passed/0 failed/11 ignored, strict Clippy/fmt/build, decoder 39,
+Python, component fingerprints, docs 185/0. One earlier verifier run failed
+docs_check (worker trailing whitespace), corrected before the passing run.
+
+## Previous saved-layout/restart design — 2026-10-21
 
 Completed the queued design phase with parent architecture review and one
 independent Luna xhigh reviewer. See [ADR-P5-LAYOUT-01](P5-SAVED-LAYOUT.md),

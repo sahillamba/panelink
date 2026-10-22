@@ -1,6 +1,6 @@
 # Panelink: working implementation specification
 
-Revision: 0.15, 2026-10-22. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoints below record current code without converting prototype assumptions into product requirements. This revision records client IO isolation, tick-driven close and the pure saved-layout codec, preserving retry, identity, history, environment and clipboard contracts without enabling recovery.
+Revision: 0.15, 2026-10-22. Status: draft for product discovery and security review planning; not implementation-ready until the open decisions and feasibility gates are resolved. The bounded prototype checkpoints below record current code without converting prototype assumptions into product requirements. This revision records client IO isolation, tick-driven close, saved-layout persistence and recovery view/relaunch prototype, while preserving retry, identity, history, environment and clipboard contracts; provider resume and full reboot recovery remain unproved.
 
 ## Purpose and requirement authority
 
@@ -337,7 +337,25 @@ restoration, provider conversation resume and V-HISTORY reboot acceptance
 remain unproved; committed partial-tail refusal is specified below. No stored
 bytes are replayed.
 
-### Scoped saved-layout/restart design (codec only implemented)
+### Scoped saved-layout/restart design (bounded snapshot, read-only recovery and explicit relaunch prototype)
+
+Recovery viewer/relaunch user decisions (2026-10-21, prototype scope): plain
+`panelink` offers a chooser when a saved layout exists (non-interactive or
+Escape/timeout keeps today's fresh shell); the read-only viewer is reachable
+from that chooser, `panelink recovery view [--previous]` and an in-workspace
+Recovery menu item; a too-small terminal shows a scaled topology outline;
+explicit relaunch starts the user's default shell in every pane with fresh
+invoking-client context, is refused while a workspace runs, keeps old-to-new
+links for the 30-day history retention, and never resumes provider
+conversations (manual pick only). See [P5-RECOVERY-VIEWER.md](progress/P5-RECOVERY-VIEWER.md).
+
+Implementation status (2026-10-21): the codec, two-slot store, guarded async
+writer, owner/driver observation with freeze-before-stop and one shared
+250 ms metadata deadline, `serve` wiring and read-only
+`panelink layout show [--previous]` are implemented and tested; see
+[P5-LAYOUT-SLICE.md](progress/P5-LAYOUT-SLICE.md). No layout is restored into
+live control, no process/provider is relaunched, and machine-reboot acceptance
+remains open.
 
 [ADR-P5-LAYOUT-01](progress/P5-SAVED-LAYOUT.md) scopes a dependency-free
 historical snapshot for the current two-pane equal layout, with current and

@@ -1,15 +1,15 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: Wave2 scoped source integrated (2026-10-22): client IO worker, tick-driven live close and pure saved-layout codec. Parent review/checks delivered; full host/provider/phase gates remain open. See WAVE2-RESULT.md.
+current-phase: Recovery prototype and Wave2 client/server slices integrated (2026-10-22); full Phase3/5/6, reboot and provider acceptance remain open. See WAVE2-RESULT.md and P5-LAYOUT-SLICE.md.
 last-updated: 2026-10-22
-checkpoint-commit: explicitly authorized 2026-10-21; staging blocked by .git/index.lock Operation not permitted; no commit or push. Resume commit when Git metadata is writable without re-requesting authorization. See SESSION.md.
-last-verified: 2026-10-22 — Wave2 final verifier7/8: library569pass/4ignored, binary109pass/1fail at known pathname bind EPERM; decoder39/Python45pass; strict all-target Clippy/fmt/build/component fingerprints/docs191/0 pass. Independently selected26 integration tests pass after final guard; client50pass and codec8pass independently. See WAVE2-RESULT.md. No complete host/delayed-fsync/provider/reboot acceptance.
-next-action: Follow P5-SAVED-LAYOUT.md to specify/review the bounded two-slot saved-layout store/rotation slice before guarded writer/runtime/inspection. Keep asynchronous launch/journal isolation queued as substantial architecture debt. Preserve current source and known socket/host/provider gates; no tabs/sidebar or provider adoption is implied.
+checkpoint-commit: Wave1/Wave2 local checkpoint exists; incoming recovery work is being merged and requires post-merge verification before commit. No push authorized.
+last-verified: Prior Wave2 verifier was 7/8 with the known sandbox pathname-bind EPERM; incoming recovery verifier was 8/8 on its recorded host. Re-run checks on this merged tree before updating verification status. See WAVE2-RESULT.md and P5-LAYOUT-SLICE.md.
+next-action: Reverify the integrated tree, then resume the incoming Phase4 identity-selection proof and Phase6 workload/dependency review; keep full reboot/history acceptance open.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
-history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
-blocked-on: Current sandbox denies pathname socket bind (EPERM/listener_permission_denied); historical parallel lock-probe failure passed isolated/serial and did not recur in current default run, but cause remains unconfirmed; host stderr diagnostic failure was previously reproduced at unchanged HEAD. Phase 2 clipboard/full Apple Terminal and Phase 4 live identity remain unproved; Phase 3 expanded pathname/host acceptance remains separate. OpenCode2.0.32 S0 preflight was recorded in SUBAGENTS-FEASIBILITY.md; readiness/worker proof remains socket-blocked. Ignored/blocked cases are not passes.
+history-saved-rows: scoped P5 saved-row/checkpoint/CLI slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current work. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
+blocked-on: Full Phase2 clipboard/Apple Terminal, Phase3 expanded host/lifecycle, Phase4 live identity and Phase5 reboot/history acceptance remain unproved. The prior OpenCode2.0.32 S0 attempt was socket-permission blocked; the incoming OpenCode1.19.0 probe did not prove selected-session switching. Ignored and blocked cases are not passes.
 setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1 rechecked, offline builds pass, current verifier 7/8 with socket restriction; previous full 8/8 at f82d968 remains historical evidence.
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 phase-3a: DONE — 2026-10-19 — see docs/progress/P3A-DEFAULT-OPEN.md and INTEGRATION.md
@@ -21,9 +21,11 @@ phase-p5-history-diagnostics: DONE as fixed bounded observations — 2026-10-21 
 phase-p5-final-tail: DONE as bounded suffix admission — 2026-10-21 — see docs/progress/P5-FINAL-TAIL.md; subsequent timeout-only metadata slice below preserves canceled receipts
 phase-p5-drain-metadata: DONE as timeout-only accepted-end finalization — 2026-10-21 — see docs/progress/P5-DRAIN-METADATA.md; payload loss and full Phase5 remain OPEN
 phase-p5-committed-corruption: DONE as whole-file refusal/preservation policy and acceptance — 2026-10-21 — see docs/progress/P5-COMMITTED-CORRUPTION.md; no salvage, checksum or full reboot claim
-phase-p5-saved-layout-design: DONE as reviewed engineering contract — 2026-10-21 — see docs/progress/P5-SAVED-LAYOUT.md and P5-SAVED-LAYOUT-REVIEW.md; no saved-layout implementation or phase completion
-phase-sa-feasibility: ATTEMPTED/BLOCKED — 2026-10-21 — installed OpenCode2.0.32 CLI checked; ACP/server startup blocked before readiness and independent binds return EPERM. No live child/session acceptance. See docs/progress/SUBAGENTS-FEASIBILITY.md.
-phase-usability-wave1: scoped implementation delivered2026-10-22 — three Luna high/medium owners, parent-reviewed/integrated; typed keys/help/cleanup and automated component/privatePTY evidence. Full acceptance stays open; see docs/progress/USABILITY-WAVE1-RESULT.md.
+phase-p5-saved-layout-design: DONE as reviewed engineering contract — see docs/progress/P5-SAVED-LAYOUT.md and P5-SAVED-LAYOUT-REVIEW.md
+phase-p5-saved-layout-impl: DONE as bounded codec/store/writer/observation/read-only view — see docs/progress/P5-LAYOUT-SLICE.md; no reboot or full history claim
+phase-p5-recovery: prototype view, chooser, in-workspace menu, explicit relaunch and 30-day old-to-new links implemented; full reboot remains open
+phase-sa-feasibility: ATTEMPTED/BLOCKED — OpenCode2.0.32 ACP/server readiness blocked by local socket permissions; OpenCode1.19.0 probe did not prove selected-session switching. See SUBAGENTS-FEASIBILITY.md and P4-OPENCODE-TUI-IDENTITY.md.
+phase-usability-wave1: scoped implementation delivered 2026-10-22; typed keys/help/cleanup and automated evidence. Full acceptance remains open; see USABILITY-WAVE1-RESULT.md.
 ```
 
 ## Control commands
@@ -37,7 +39,7 @@ phase-usability-wave1: scoped implementation delivered2026-10-22 — three Luna 
 
 | Work | Model | Effort |
 | --- | --- | --- |
-| Precise bounded implementation and targeted tests | gpt-6-luna | xhigh |
+| Precise bounded implementation and targeted tests | gpt-6-luna (kimi-k2.6 per user request 2026-10-21) | xhigh |
 | Small documentation, tooling and bounded maintenance tasks | gpt-6-luna | medium |
 | Architecture, ambiguity, security review, integration | Parent orchestrator | inherited |
 | Escalation after two failed attempts at same defect | Parent orchestrator | inherited |
@@ -244,7 +246,7 @@ open.
 
 ## Phase 4 — early OpenCode identity gate (not started)
 
-- [ ] Pin installed OpenCode version; prove selected top-level identity and session changes with two agents in same project.
+- [ ] Pin installed OpenCode version; prove selected top-level identity and session changes with two agents in same project. (2026-10-21: version 1.19.0 pinned and two-session creation/server/SSE observed in an isolated probe; selected identity and switch NOT proven; see P4-OPENCODE-IDENTITY-PROBE.md. Private-PTY run: local TUI plugin loads and captures the initial route 3/3; ordered A-B-A switch not proven; see P4-OPENCODE-TUI-IDENTITY.md.)
 - [ ] Persist and acknowledge binding revisions; demonstrate or explicitly reject current-at-crash claims.
 - [ ] Implement last-confirmed/manual fallback without latest-session heuristics.
 
@@ -264,10 +266,14 @@ open.
 - [x] Preserve a newest bounded final suffix with all candidate screens under byte pressure; see P5-FINAL-TAIL.md. Prefix loss remains explicit; no quota/budget increase.
 - [x] Scoped explicit-timeout finalization of accepted known-end metadata; canceled payloads/receipts remain canceled. See P5-DRAIN-METADATA.md. Unknown/unsubmitted end intent and payload loss remain separate.
 - [x] Committed-record corruption/partial-tail refusal policy with byte-preserving store and fresh-process CLI acceptance; see P5-COMMITTED-CORRUPTION.md. No salvage, repair or arbitrary bit-rot detection is claimed.
-- [ ] Resolve remaining unknown/unsubmitted end intent and final-payload loss within reviewed bounded scheduling; no complete-capture or performance-budget claim.
+- [x] Bounded metadata-only end reservations for unsubmitted end intent; explicit unknown end time; rows salvaged before screens under final byte pressure; see P5-HISTORY-END-INTENT.md. No durable unknown-ended label, complete-capture or performance-budget claim.
+- [x] Recovery viewer + explicit relaunch mapping design; user decisions recorded 2026-10-21; see P5-RECOVERY-VIEWER.md.
+- [x] Recovery stages 1-3: view model/scaled overview, read-only reader, offline TUI + `panelink recovery view [--previous]`; see P5-RECOVERY-STAGE12.md, P5-RECOVERY-STAGE3.md. Host /dev/tty acceptance not certified.
+- [x] Recovery chooser at plain startup and in-workspace 'View saved layout' item; see P5-RECOVERY-CHOOSER.md, P5-RECOVERY-MENU.md.
+- [x] Explicit relaunch (default shell, refuse while running) and 30-day old-to-new links; see P5-RECOVERY-RELAUNCH.md, P5-RECOVERY-LINKS.md.
 - [x] Scoped saved-layout/restart engineering design and exact codec task, with independent review; see P5-SAVED-LAYOUT.md. No saved-layout implementation or new command is delivered by that design.
-- [x] Pure fixed160-byte saved-layout codec with historical-only geometry and strict canonical validation; see P5-SAVED-LAYOUT-CODEC.md. Parent caught and corrected the snapshot minimum-leaf invariant; eight component tests pass. No persistence/restoration claim.
-- [ ] Implement bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection in the reviewed order.
+- [x] Pure fixed160-byte saved-layout codec with historical-only geometry and strict canonical validation; parent corrected the minimum-leaf invariant.
+- [x] Bounded two-slot store/rotation, guarded worker, lifecycle observation and read-only inspection; see P5-LAYOUT-SLICE.md. No reboot restoration claim.
 - [ ] Full V-HISTORY reboot/layout recovery and representative workload/throughput acceptance; see P5-SAVED-HISTORY.md and docs/SPEC.md.
 
 ## Planned phase SA — Subagents visibility (not started)

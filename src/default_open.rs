@@ -26,12 +26,18 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use panelink::control_protocol::TargetRef;
 use panelink::history_rows;
 use panelink::history_store::HistoryStore;
+use panelink::layout_store::{LayoutSlot, LayoutStore};
+use panelink::recovery_chooser::{self, ChooserChoice, ChooserPlan, LayoutSummary};
+use panelink::recovery_view::RecoverySlot;
+use panelink::saved_layout::{LayoutAxis, SavedLayout};
 use panelink::transport::AuthenticatedStream;
+use rustix::fs::{Mode, OFlags};
+use rustix::termios::{isatty, tcgetattr, tcsetattr, OptionalActions, Termios};
 
 /// Terminfo source embedded at build time so the binary is self-contained.
 const TERMINFO_SOURCE: &str = include_str!("../docs/terminfo/panelink-probe.terminfo");
@@ -549,11 +555,41 @@ fn prepare() -> Result<StateRoot, OpenError> {
 
 /// `panelink` with no arguments.
 pub(crate) fn open() -> i32 {
-    let result = prepare().and_then(|state| {
+    let state = match resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME")) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("panelink: {}", error.message());
+            return 1;
+        }
+    };
+
+    // Preserve direct attachment when the server is already reachable. On a
+    // stopped root, inspect historical metadata before creating or initializing
+    // any runtime paths.
+    let live_server = observe_live_server(&state).unwrap_or(false);
+    let (current, previous) = if live_server {
+        (None, None)
+    } else {
+        inspect_saved_layouts(&state)
+    };
+    let interactive = isatty(io::stdin()) && isatty(io::stdout());
+    match recovery_chooser::plan(live_server, interactive, current, previous) {
+        ChooserPlan::AttachExisting | ChooserPlan::FreshShell => open_workspace(state),
+        ChooserPlan::Prompt { .. } => {
+            run_startup_chooser(state, current.expect("prompt has current layout"), previous)
+        }
+    }
+}
+
+/// Resume the existing plain-open path after a user selected a fresh shell or
+/// when the chooser does not apply.
+fn open_workspace(state: StateRoot) -> i32 {
+    let result: Result<StateRoot, OpenError> = (|| {
+        prepare_root(&state)?;
         ensure_terminfo(&state)?;
         ensure_server(&state)?;
         Ok(state)
-    });
+    })();
     match result {
         Ok(state) => crate::ui_client::run(state.server, state.contexts),
         Err(error) => {
@@ -561,6 +597,165 @@ pub(crate) fn open() -> i32 {
             1
         }
     }
+}
+
+/// Validate existing directories without creating them before probing an
+/// endpoint. A missing root/server is an ordinary first startup.
+fn observe_live_server(state: &StateRoot) -> Result<bool, OpenError> {
+    let uid = current_uid();
+    if ancestors_ok(&state.root, uid).is_err() {
+        return Ok(false);
+    }
+    if !existing_private_directory(&state.root, uid)?
+        || !existing_private_directory(&state.server, uid)?
+    {
+        return Ok(false);
+    }
+    Ok(server_ready(state))
+}
+
+fn existing_private_directory(path: &Path, uid: u32) -> Result<bool, OpenError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            private_dir_ok(&metadata, uid)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(OpenError::StateRootUnavailable),
+    }
+}
+
+/// Read both saved slots without creating the layout directory or printing
+/// storage errors. A missing current slot is not a chooser condition.
+fn inspect_saved_layouts(state: &StateRoot) -> (Option<LayoutSummary>, Option<LayoutSummary>) {
+    let Ok(store) = LayoutStore::open(&state.server.join("layout")) else {
+        return (None, None);
+    };
+    let Ok(Some(current)) = store.load(LayoutSlot::Current) else {
+        return (None, None);
+    };
+    let previous = store.load(LayoutSlot::Previous).ok().flatten();
+    let summary = |layout: SavedLayout| LayoutSummary {
+        pane_count: layout.pane_count(),
+        observed_at_unix_ms: layout.metadata().observed_at_unix_ms(),
+    };
+    (Some(summary(current)), previous.map(summary))
+}
+
+fn run_startup_chooser(
+    state: StateRoot,
+    current: LayoutSummary,
+    previous: Option<LayoutSummary>,
+) -> i32 {
+    loop {
+        let prompt = chooser_prompt(current, previous);
+        match read_startup_choice(prompt.as_bytes()) {
+            ChooserChoice::Fresh => return open_workspace(state),
+            ChooserChoice::Quit => return 0,
+            ChooserChoice::ViewCurrent => {
+                view_saved_layout(&state, RecoverySlot::Current);
+            }
+            ChooserChoice::ViewPrevious if previous.is_some() => {
+                view_saved_layout(&state, RecoverySlot::Previous);
+            }
+            ChooserChoice::ViewPrevious => return open_workspace(state),
+        }
+    }
+}
+
+fn chooser_prompt(current: LayoutSummary, previous: Option<LayoutSummary>) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let age = recovery_chooser::relative_age(current, now);
+    let previous_option = if previous.is_some() {
+        "  [p] view previous"
+    } else {
+        ""
+    };
+    format!(
+        "panelink: a saved layout from {age} ({} panes) exists. [Enter] fresh shell  [v] view saved layout{previous_option}  [q] quit\r\n",
+        current.pane_count
+    )
+}
+
+fn view_saved_layout(state: &StateRoot, slot: RecoverySlot) {
+    if let Ok(view) = panelink::recovery_reader::read_recovery(&state.server, slot) {
+        let _ = crate::ui_client::recovery::run(view);
+    }
+}
+
+struct ChooserTerminal {
+    tty: File,
+    original: Termios,
+    restore_needed: bool,
+}
+
+impl ChooserTerminal {
+    fn open() -> Option<Self> {
+        let fd = rustix::fs::open(
+            "/dev/tty",
+            OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?;
+        let tty = File::from(fd);
+        let original = tcgetattr(&tty).ok()?;
+        Some(Self {
+            tty,
+            original,
+            restore_needed: true,
+        })
+    }
+
+    fn read_choice(&mut self, prompt: &[u8]) -> ChooserChoice {
+        let mut raw = self.original.clone();
+        raw.make_raw();
+        // A failed tcsetattr may have changed some terminal flags, so always
+        // restore the exact captured attributes after this point.
+        if tcsetattr(&self.tty, OptionalActions::Now, &raw).is_err() {
+            return ChooserChoice::Fresh;
+        }
+        if self.tty.write_all(prompt).is_err() {
+            return ChooserChoice::Fresh;
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut byte = [0_u8; 1];
+        loop {
+            if Instant::now() >= deadline {
+                return ChooserChoice::Fresh;
+            }
+            match self.tty.read(&mut byte) {
+                Ok(1) => return recovery_chooser::choice(byte[0]),
+                Ok(_) => return ChooserChoice::Fresh,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return ChooserChoice::Fresh,
+            }
+        }
+    }
+}
+
+impl Drop for ChooserTerminal {
+    fn drop(&mut self) {
+        if self.restore_needed {
+            let _ = tcsetattr(&self.tty, OptionalActions::Now, &self.original);
+        }
+    }
+}
+
+fn read_startup_choice(prompt: &[u8]) -> ChooserChoice {
+    ChooserTerminal::open()
+        .map(|mut terminal| terminal.read_choice(prompt))
+        .unwrap_or(ChooserChoice::Fresh)
 }
 
 /// Parse `PID START` from the private identity record.
@@ -1111,6 +1306,746 @@ pub(crate) fn close(index: usize) -> i32 {
 #[cfg(test)]
 fn storage_openable(server_dir: &Path) -> bool {
     panelink::server_storage::ServerStorage::open(server_dir).is_ok()
+}
+
+/// Read-only `panelink layout show [--previous]`: display the saved layout for
+/// the requested slot, or exit with a fixed sanitized error.
+pub(crate) fn layout_show(previous: bool) -> i32 {
+    let result = layout_show_result(previous);
+    match result {
+        Ok(text) => {
+            print!("{text}");
+            0
+        }
+        Err(error) => {
+            eprintln!("panelink: {error}");
+            1
+        }
+    }
+}
+
+/// Read-only `panelink recovery view [--previous]` entry point.
+pub(crate) fn recovery_view(previous: bool) -> i32 {
+    use panelink::recovery_reader::{read_recovery, RecoveryReadError};
+    use panelink::recovery_view::RecoverySlot;
+    use std::io::IsTerminal;
+
+    let state = match resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME")) {
+        Ok(state) => state,
+        Err(_) => {
+            eprintln!("panelink: recovery storage unavailable");
+            return 1;
+        }
+    };
+    let slot = if previous {
+        RecoverySlot::Previous
+    } else {
+        RecoverySlot::Current
+    };
+    let view = match read_recovery(&state.server, slot) {
+        Ok(view) => view,
+        Err(RecoveryReadError::MissingLayout) => {
+            eprintln!("panelink: no saved layout");
+            return 1;
+        }
+        Err(RecoveryReadError::InvalidLayout) => {
+            eprintln!("panelink: saved layout invalid");
+            return 1;
+        }
+        Err(RecoveryReadError::Storage) => {
+            eprintln!("panelink: recovery storage unavailable");
+            return 1;
+        }
+    };
+
+    if !std::io::stdout().is_terminal() {
+        println!(
+            "slot: {}\ngeneration: {}\nsequence: {}\nsize: {}x{}\norientation: {:?}",
+            view.slot,
+            view.metadata.generation(),
+            view.metadata.snapshot_sequence(),
+            view.saved_rows,
+            view.saved_columns,
+            view.axis
+        );
+        if view.panes.is_empty() {
+            println!("workspace: empty");
+        }
+        for (index, pane) in view.panes.iter().enumerate() {
+            let target = pane.historical_target;
+            println!(
+                "pane {}: target {}:{}:{}:{}:{}; rows {}; normal {}; alternate {}",
+                index + 1,
+                target.generation,
+                target.workspace,
+                target.pane,
+                target.session,
+                target.occupant_revision,
+                availability_history(&pane.rows),
+                availability_checkpoint(&pane.normal),
+                availability_checkpoint(&pane.alternate)
+            );
+        }
+        return 0;
+    }
+
+    match crate::ui_client::recovery::run(view) {
+        Ok(()) => 0,
+        Err(message) => {
+            eprintln!("panelink: {message}");
+            1
+        }
+    }
+}
+
+/// Explicitly start a fresh default-shell workspace using only the selected
+/// saved layout's pane count and orientation.
+pub(crate) fn recovery_relaunch(previous: bool) -> i32 {
+    use panelink::pane_layout::SplitDirection;
+    use panelink::recovery_links::{LinkOutcome, LinkStore, RelaunchLink};
+    use panelink::recovery_reader::{read_recovery, RecoveryReadError};
+    use panelink::recovery_view::RecoverySlot;
+    use panelink::ui_protocol::{decode_layout_reply, encode_layout_query, planned_split_size};
+
+    let state = match resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME")) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("panelink: {}", error.message());
+            return 1;
+        }
+    };
+    let slot = if previous {
+        RecoverySlot::Previous
+    } else {
+        RecoverySlot::Current
+    };
+    let saved = match read_recovery(&state.server, slot) {
+        Ok(view) => view,
+        Err(RecoveryReadError::MissingLayout) => {
+            eprintln!("panelink: no saved layout");
+            return 1;
+        }
+        Err(RecoveryReadError::InvalidLayout) => {
+            eprintln!("panelink: saved layout invalid");
+            return 1;
+        }
+        Err(RecoveryReadError::Storage) => {
+            eprintln!("panelink: saved layout invalid");
+            return 1;
+        }
+    };
+    if saved.panes.is_empty() {
+        eprintln!("panelink: saved layout has no panes");
+        return 1;
+    }
+
+    if relaunch_server_running(&state) {
+        eprintln!("panelink: stop the running workspace before relaunching (panelink stop)");
+        return 1;
+    }
+
+    let _lifecycle = match lifecycle_lock(&state, START_TIMEOUT + STOP_TIMEOUT) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("panelink: {}", error.message());
+            return 1;
+        }
+    };
+    // A direct `serve` invocation does not take lifecycle.lock, so repeat the
+    // read-only check before creating or changing any runtime path.
+    if relaunch_server_running(&state) {
+        eprintln!("panelink: stop the running workspace before relaunching (panelink stop)");
+        return 1;
+    }
+    if let Err(error) = prepare_root(&state) {
+        eprintln!("panelink: {}", error.message());
+        return 1;
+    }
+    if let Err(error) = ensure_terminfo(&state).and_then(|()| ensure_relaunch_server(&state)) {
+        eprintln!("panelink: {}", error.message());
+        return 1;
+    }
+
+    let mut peer = match RelaunchPeer::connect(&state.server) {
+        Ok(peer) => peer,
+        Err(_) => {
+            eprintln!("panelink: could not read the relaunched workspace");
+            return 1;
+        }
+    };
+    let layout_bytes = match peer.exchange(&encode_layout_query()) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            eprintln!("panelink: could not read the relaunched workspace");
+            return 1;
+        }
+    };
+    let layout = match decode_layout_reply(&layout_bytes) {
+        Ok(layout) if layout.panes[1].is_none() => layout,
+        _ => {
+            eprintln!("panelink: could not read the relaunched workspace");
+            return 1;
+        }
+    };
+    let first = match layout.panes[0] {
+        Some(pane) => pane.target,
+        None => {
+            eprintln!("panelink: could not read the relaunched workspace");
+            return 1;
+        }
+    };
+
+    let split_status = if saved.panes.len() == 1 {
+        None
+    } else {
+        let direction = match saved.axis {
+            LayoutAxis::SideBySide => SplitDirection::Right,
+            LayoutAxis::Stacked => SplitDirection::Down,
+            LayoutAxis::Single => SplitDirection::Right,
+        };
+        match planned_split_size(&layout, first, direction) {
+            Ok(size) => Some(perform_relaunch_split(
+                &mut peer,
+                first,
+                layout.revision,
+                direction,
+                size,
+            )),
+            Err(_) => {
+                eprintln!("panelink: relaunched, but split failed");
+                Some((RelaunchSplitStatus::Failed, None))
+            }
+        }
+    };
+    drop(peer);
+
+    // Use the standard pane-status query after the one split. It is observation
+    // only; an uncertain split is never retransmitted under any key.
+    let current = match query_relaunch_panes(&state.server) {
+        Ok(panes) => panes,
+        Err(()) => {
+            eprintln!("panelink: relaunched, but current panes could not be verified");
+            return 1;
+        }
+    };
+    let current_targets: Vec<_> = current
+        .panes
+        .iter()
+        .flatten()
+        .map(|pane| pane.target)
+        .collect();
+    let current_matches = current_targets.len() == saved.panes.len()
+        && current_targets.iter().all(|target| {
+            target.generation != saved.metadata.generation()
+                && target.workspace == saved.metadata.workspace()
+        })
+        && current.panes[0].is_some_and(|pane| pane.target == first)
+        && match saved.axis {
+            LayoutAxis::SideBySide => current.panes[1].is_some_and(|pane| {
+                current.panes[0].is_some_and(|first_pane| pane.rect.x > first_pane.rect.x)
+            }),
+            LayoutAxis::Stacked => current.panes[1].is_some_and(|pane| {
+                current.panes[0].is_some_and(|first_pane| pane.rect.y > first_pane.rect.y)
+            }),
+            LayoutAxis::Single => current.panes[1].is_none(),
+        };
+
+    let mut lines = Vec::with_capacity(saved.panes.len());
+    let first_is_live = current
+        .panes
+        .iter()
+        .flatten()
+        .next()
+        .is_some_and(|pane| pane.live);
+    let first_status = if first_is_live
+        && current_targets.first() == Some(&first)
+        && first.generation != saved.metadata.generation()
+        && first.workspace == saved.metadata.workspace()
+    {
+        RelaunchPaneStatus::Applied
+    } else {
+        RelaunchPaneStatus::Unknown
+    };
+    lines.push((
+        first_status,
+        saved.panes[0].historical_target,
+        current_targets.first().copied(),
+    ));
+    if saved.panes.len() == 2 {
+        let (split_result, split_target) =
+            split_status.unwrap_or((RelaunchSplitStatus::Failed, None));
+        let pane2_entry = current.panes[1];
+        let pane2 = pane2_entry.map(|pane| pane.target);
+        let pane2_live = pane2_entry.is_some_and(|pane| pane.live);
+        let status = if current_matches && pane2.is_some() {
+            match (split_result, split_target, pane2) {
+                (RelaunchSplitStatus::Applied, Some(expected), Some(actual))
+                    if expected == actual =>
+                {
+                    RelaunchPaneStatus::Applied
+                }
+                (RelaunchSplitStatus::Failed, _, _) | (RelaunchSplitStatus::Unknown, _, _) => {
+                    RelaunchPaneStatus::Unknown
+                }
+                _ => RelaunchPaneStatus::Unknown,
+            }
+        } else if split_result == RelaunchSplitStatus::Failed && !pane2_live {
+            RelaunchPaneStatus::Failed
+        } else {
+            RelaunchPaneStatus::Unknown
+        };
+        lines.push((status, saved.panes[1].historical_target, pane2));
+    }
+
+    // The link store requires server-singleton ownership. This prototype writes
+    // from the CLI under the per-root lifecycle lock after server readiness;
+    // that is weaker than holding the server's singleton token and needs review.
+    let mut link_failed = false;
+    let links = lines
+        .iter()
+        .filter_map(|(status, old, new)| {
+            let Some(new) = new else {
+                return None;
+            };
+            let outcome = match status {
+                RelaunchPaneStatus::Applied => Some(LinkOutcome::Applied),
+                RelaunchPaneStatus::Unknown => Some(LinkOutcome::Unknown),
+                RelaunchPaneStatus::Failed => None,
+            };
+            let outcome = outcome?;
+            Some(RelaunchLink {
+                source_generation: saved.metadata.generation(),
+                source_sequence: saved.metadata.snapshot_sequence(),
+                old_target: *old,
+                new_target: *new,
+                outcome,
+                linked_at_unix_ms: unix_time_ms(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if !links.is_empty() {
+        if !server_lock_held(&state.server) || !server_ready(&state) {
+            link_failed = true;
+        } else if let Ok(store) = LinkStore::prepare(&state.server) {
+            for link in links {
+                if store.record(link, unix_time_ms()).is_err() {
+                    link_failed = true;
+                    break;
+                }
+            }
+        } else {
+            link_failed = true;
+        }
+    }
+
+    for (index, (status, old, new)) in lines.iter().enumerate() {
+        println!(
+            "pane {}: old {} -> new {} ({})",
+            index + 1,
+            target_text(*old),
+            new.map(target_text)
+                .unwrap_or_else(|| "unavailable".to_owned()),
+            status.label()
+        );
+    }
+    if link_failed {
+        println!("panelink: relaunched, but link not saved");
+    }
+    println!("attach with: panelink");
+    println!("provider conversations are not resumed; pick them manually");
+
+    if lines
+        .iter()
+        .all(|(status, _, _)| *status != RelaunchPaneStatus::Failed)
+    {
+        0
+    } else {
+        1
+    }
+}
+
+fn relaunch_server_running(state: &StateRoot) -> bool {
+    server_lock_held(&state.server)
+        || (endpoint_state(&state.socket_path()) == EndpointState::Socket && server_ready(state))
+}
+
+/// Caller holds the per-root lifecycle lock, and has already refused an
+/// existing live workspace.
+fn ensure_relaunch_server(state: &StateRoot) -> Result<(), OpenError> {
+    let endpoint = endpoint_state(&state.socket_path());
+    match decide_endpoint(endpoint, server_lock_held(&state.server)) {
+        EndpointAction::Refuse => return Err(OpenError::StaleEndpointUnsafe),
+        EndpointAction::UseRunning => return Err(OpenError::StopFailed),
+        EndpointAction::RemoveStaleThenStart => {
+            fs::remove_file(state.socket_path()).map_err(|_| OpenError::StaleEndpointUnsafe)?;
+        }
+        EndpointAction::Start => {}
+    }
+    let child = spawn_server(state)?;
+    wait_ready(state, Some(child))
+}
+
+fn perform_relaunch_split(
+    peer: &mut RelaunchPeer,
+    target: TargetRef,
+    layout_revision: u64,
+    direction: panelink::pane_layout::SplitDirection,
+    (rows, columns): (u16, u16),
+) -> (RelaunchSplitStatus, Option<TargetRef>) {
+    use panelink::managed_launch_protocol::LaunchRequest;
+    use panelink::multi_startup::environment_entries;
+    use panelink::split_protocol::{decode_split_result, encode_split_request, SplitRequest};
+    use std::os::unix::ffi::OsStrExt;
+
+    let context = match capture_relaunch_context() {
+        Ok(context) => context,
+        Err(()) => {
+            eprintln!("panelink: relaunched, but split failed");
+            return (RelaunchSplitStatus::Failed, None);
+        }
+    };
+    let key = operation_key(peer.context.context());
+    let cwd = context.working_directory.as_os_str().as_bytes();
+    let environment = environment_entries(&context.environment);
+    let shell = default_shell(std::env::var_os("SHELL"));
+    let launch = LaunchRequest {
+        key,
+        rows,
+        columns,
+        requested_executable: shell.as_os_str().as_bytes(),
+        requested_working_directory: cwd,
+        client_working_directory: cwd,
+        arguments: &[],
+        environment: &environment,
+    };
+    let mut payload = Vec::new();
+    let encoded = encode_split_request(
+        &SplitRequest {
+            key,
+            target,
+            expected_layout_revision: layout_revision,
+            direction,
+            launch: &launch,
+        },
+        &mut payload,
+    );
+    drop(context);
+    if encoded.is_err() {
+        eprintln!("panelink: relaunched, but split failed");
+        return (RelaunchSplitStatus::Failed, None);
+    }
+    match peer.context.reserve() {
+        Ok(reserved) if reserved == key => {}
+        _ => {
+            eprintln!("panelink: relaunched, but split failed");
+            return (RelaunchSplitStatus::Failed, None);
+        }
+    }
+    let reply = peer.exchange(&payload);
+    drop(payload);
+    match reply.and_then(|bytes| decode_split_result(&bytes).map_err(|_| "response_invalid")) {
+        Ok(result) if result.key == key && result.existing_target == target => {
+            let _ = peer.context.ack(key);
+            let status = match result.outcome {
+                panelink::protocol::Outcome::Applied if result.new_target.is_some() => {
+                    RelaunchSplitStatus::Applied
+                }
+                panelink::protocol::Outcome::Failed => RelaunchSplitStatus::Failed,
+                _ => RelaunchSplitStatus::Unknown,
+            };
+            (status, result.new_target)
+        }
+        _ => (RelaunchSplitStatus::Unknown, None),
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RelaunchSplitStatus {
+    Applied,
+    Unknown,
+    Failed,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RelaunchPaneStatus {
+    Applied,
+    Unknown,
+    Failed,
+}
+
+impl RelaunchPaneStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Unknown => "unknown",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+fn target_text(target: TargetRef) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        target.generation, target.workspace, target.pane, target.session, target.occupant_revision
+    )
+}
+
+fn operation_key(
+    context: panelink::client_context::ClientContext,
+) -> panelink::protocol::OperationKey {
+    panelink::protocol::OperationKey {
+        generation: context.generation(),
+        lease: context.lease(),
+        sequence: context.next_sequence(),
+    }
+}
+
+fn capture_relaunch_context() -> Result<panelink::launch::LaunchContext, ()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let working_directory = std::env::current_dir().map_err(|_| ())?;
+    let mut environment = panelink::launch::Environment::new();
+    let mut total_bytes = 0_usize;
+    for (name, value) in std::env::vars_os() {
+        if name.as_bytes().starts_with(b"PANELINK_") {
+            continue;
+        }
+        total_bytes = total_bytes
+            .checked_add(name.as_bytes().len())
+            .and_then(|total| total.checked_add(value.as_bytes().len()))
+            .and_then(|total| total.checked_add(6))
+            .filter(|total| *total <= 48 * 1024)
+            .ok_or(())?;
+        if environment.len() >= 1_024 {
+            return Err(());
+        }
+        environment.insert(name, value);
+    }
+    Ok(panelink::launch::LaunchContext {
+        working_directory,
+        environment,
+    })
+}
+
+fn query_relaunch_panes(server_directory: &Path) -> Result<panelink::multi_runtime::PaneReply, ()> {
+    let mut peer = RelaunchPeer::connect(server_directory).map_err(|_| ())?;
+    let payload = panelink::multi_runtime::encode_pane_query();
+    let bytes = peer.exchange(&payload).map_err(|_| ())?;
+    panelink::multi_runtime::decode_pane_reply(&bytes).map_err(|_| ())
+}
+
+struct RelaunchPeer {
+    stream: AuthenticatedStream,
+    context: panelink::client_context::ContextFile,
+    next_request: u64,
+}
+
+impl RelaunchPeer {
+    fn connect(server_directory: &Path) -> Result<Self, &'static str> {
+        use panelink::handshake_protocol::{
+            validate_welcome, Hello, CAPABILITY_INPUT, CAPABILITY_READ,
+        };
+        use panelink::protocol_wire::{Frame, MessageKind};
+        use panelink::session_protocol::{encode_session_hello, SessionHello};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::UNIX_EPOCH;
+
+        static NEXT_NONCE: AtomicU64 = AtomicU64::new(1);
+        let mut stream =
+            AuthenticatedStream::connect(server_directory, Instant::now() + Duration::from_secs(2))
+                .map_err(|_| "transport_unavailable")?;
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0);
+        let nonce = (time ^ (u64::from(std::process::id()) << 32))
+            .wrapping_add(NEXT_NONCE.fetch_add(1, Ordering::Relaxed))
+            .max(1);
+        let hello = Hello {
+            nonce,
+            required_capabilities: CAPABILITY_READ,
+            optional_capabilities: CAPABILITY_INPUT,
+        };
+        let payload = encode_session_hello(&SessionHello {
+            hello,
+            resume: None,
+        })
+        .map_err(|_| "handshake_invalid")?;
+        let frame = Frame::new(MessageKind::Hello, 0, &payload).map_err(|_| "handshake_invalid")?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        stream
+            .write_frame(&frame, deadline)
+            .map_err(|_| "transport_failed")?;
+        let reply = stream
+            .read_frame(deadline)
+            .map_err(|_| "transport_failed")?;
+        if reply.request_id() != 0 {
+            return Err("handshake_invalid");
+        }
+        if reply.kind() != MessageKind::Welcome {
+            return Err("server_rejected");
+        }
+        let welcome = panelink::handshake_protocol::decode_welcome(reply.payload())
+            .map_err(|_| "handshake_invalid")?;
+        validate_welcome(&hello, &welcome).map_err(|_| "handshake_invalid")?;
+        if welcome.selected_capabilities & CAPABILITY_INPUT == 0 {
+            return Err("split_unavailable");
+        }
+        let context_path = relaunch_context_path(welcome.generation, welcome.lease);
+        let context = panelink::client_context::ContextFile::create(
+            &context_path,
+            welcome.generation,
+            welcome.lease,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .map_err(|_| "context_storage_failed")?;
+        Ok(Self {
+            stream,
+            context,
+            next_request: 1,
+        })
+    }
+
+    fn exchange(&mut self, payload: &[u8]) -> Result<Vec<u8>, &'static str> {
+        use panelink::protocol_wire::{Frame, MessageKind};
+
+        let request_id = self.next_request;
+        self.next_request = self.next_request.checked_add(1).ok_or("request_invalid")?;
+        let frame =
+            Frame::new(MessageKind::Request, request_id, payload).map_err(|_| "request_invalid")?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        self.stream
+            .write_frame(&frame, deadline)
+            .map_err(|_| "transport_failed")?;
+        let reply = self
+            .stream
+            .read_frame(deadline)
+            .map_err(|_| "transport_failed")?;
+        if reply.request_id() != request_id {
+            return Err("response_invalid");
+        }
+        match reply.kind() {
+            MessageKind::Response => Ok(reply.payload().to_vec()),
+            MessageKind::Error => Err("server_rejected"),
+            _ => Err("response_invalid"),
+        }
+    }
+}
+
+fn relaunch_context_path(generation: u64, lease: u64) -> PathBuf {
+    static NEXT_CONTEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let unique = NEXT_CONTEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::var_os("PANELINK_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join("Library/Application Support/Panelink"))
+        })
+        .unwrap_or_default();
+    root.join("contexts").join(format!(
+        "relaunch-{}-{generation:x}-{lease:x}-{now:x}-{unique:x}.ctx",
+        std::process::id()
+    ))
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(1)
+}
+
+fn availability_history(source: &panelink::recovery_view::HistoryAvailability) -> &'static str {
+    use panelink::recovery_view::HistoryAvailability;
+    match source {
+        HistoryAvailability::Available { .. } => "available",
+        HistoryAvailability::Missing => "missing",
+        HistoryAvailability::Invalid => "invalid",
+    }
+}
+
+fn availability_checkpoint(
+    source: &panelink::recovery_view::CheckpointAvailability,
+) -> &'static str {
+    use panelink::recovery_view::CheckpointAvailability;
+    match source {
+        CheckpointAvailability::Available { .. } => "available",
+        CheckpointAvailability::Missing => "missing",
+        CheckpointAvailability::Invalid => "invalid",
+    }
+}
+
+fn layout_show_result(previous: bool) -> Result<String, &'static str> {
+    let state = resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME"))
+        .map_err(|_| "layout directory unavailable")?;
+    // Absence is "no saved layout"; an unsafe/unreadable directory is not.
+    let store = match LayoutStore::open(&state.server.join("layout")) {
+        Ok(store) => store,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Err("no saved layout"),
+        Err(_) => return Err("saved layout invalid"),
+    };
+    let slot = if previous {
+        LayoutSlot::Previous
+    } else {
+        LayoutSlot::Current
+    };
+    let layout = store.load(slot).map_err(|_| "saved layout invalid")?;
+    let layout = layout.ok_or("no saved layout")?;
+    let mut output = format_layout_output(&layout, previous);
+    output.push_str("history: rows/screens are separate read-only sources; use `panelink history show TARGET`\n");
+    Ok(output)
+}
+
+fn format_layout_output(layout: &SavedLayout, previous: bool) -> String {
+    let mut text = String::new();
+    let slot_label = if previous { "previous" } else { "current" };
+    text.push_str(&format!("saved layout: {slot_label}\n"));
+    let meta = layout.metadata();
+    text.push_str(&format!("generation: {}\n", meta.generation()));
+    text.push_str(&format!("workspace: {}\n", meta.workspace()));
+    text.push_str(&format!(
+        "snapshot sequence: {}\n",
+        meta.snapshot_sequence()
+    ));
+    text.push_str(&format!("layout revision: {}\n", meta.layout_revision()));
+    text.push_str(&format!(
+        "observed at unix ms: {}\n",
+        meta.observed_at_unix_ms()
+    ));
+    match layout.pane_count() {
+        0 => {
+            text.push_str("panes: none (empty workspace snapshot)\n");
+        }
+        _ => {
+            text.push_str(&format!("size: {}x{}\n", layout.rows(), layout.columns()));
+            let axis_label = match layout.axis() {
+                LayoutAxis::Single => "single",
+                LayoutAxis::SideBySide => "side-by-side",
+                LayoutAxis::Stacked => "stacked",
+            };
+            text.push_str(&format!("orientation: {axis_label}\n"));
+            for (index, maybe_pane) in layout.panes().iter().enumerate() {
+                if let Some(target) = maybe_pane {
+                    text.push_str(&format!(
+                        "pane {}: {}:{}:{}:{}:{}\n",
+                        index + 1,
+                        target.generation,
+                        target.workspace,
+                        target.pane,
+                        target.session,
+                        target.occupant_revision
+                    ));
+                }
+            }
+        }
+    }
+    text
 }
 
 #[cfg(test)]

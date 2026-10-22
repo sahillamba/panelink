@@ -14,8 +14,8 @@ Delivered: bounded client IO worker with host-owned UI, immediate saturated
 CtrlX/restore, target-pinned input and delayed split focus; owner-tick close
 with retained ledger/child ownership across dropped waiters, closing-input/
 resize rejection, shared driver shutdown; strict historical160-byte layout
-codec. No dependencies/vendor/manifests changed. No commit/push or broad phase
-completion. Async launch/journal work, layout storage/runtime, tabs/sidebar and
+codec. No dependencies/vendor/manifests changed. No broad phase
+completion. The Wave2 checkpoint is recorded in Git history. Async launch/journal work, layout storage/runtime, tabs/sidebar and
 provider adoption remain outside this wave.
 
 Final verifier7/8 after last guard: library569pass/4ignored; binary109pass/1fail
@@ -28,12 +28,10 @@ at binary failure, so selected external tests were run separately. Unrun
 delayed-fsync injection and complete host/provider/reboot acceptance remain
 explicit limits, not passes or manual tasks assigned to the user.
 
-Resume ROADMAP.md next-action: specify/review bounded two-slot layout store/
-rotation under P5-SAVED-LAYOUT.md, preserving the separate async-launch debt.
+At the time of this checkpoint, the next action was the bounded layout store. The incoming recovery slice has since implemented that store and the viewer/relaunch flow; the current next action is recorded in ROADMAP.md.
 The ms-rust skill remains unavailable. Graph discovery succeeded early, then
 parent transport returned Transport closed; direct source fallback was used.
-No final refreshed-index claim. Git metadata remains outside writable scope;
-preserve prior checkpoint authorization without attempting a push.
+No final refreshed-index claim. The recovery implementation arrived in the incoming branch; see the recovery sections below.
 
 ## Usability wave 1 — 2026-10-22
 
@@ -96,6 +94,67 @@ User clarified scope: OpenCode and wrappers built on it; prove compatibility
 per supported version. Read-only activity viewing is the proposed first slice;
 interactive child TUI attachment needs separate proof and scope selection.
 No runtime changes or new acceptance; current saved-layout next action remains.
+## Recovery relaunch + links — 2026-10-21 (read this first)
+
+Two GPT-6-Luna (xhigh) workers in parallel against a parent-frozen link API
+(P5-RELAUNCH-LINKS-API.md). L7 link store: clean, 14 tests. L6 relaunch:
+5 real end-to-end tests (fresh workspace, saved orientation split with the
+default shell, links, refusal while running, --previous). Parent accepted the
+CLI-side link-writer limitation (lifecycle lock; single writer), added a
+secrets assertion and fixed an outdated usage test. Verifier 8/8, 983/0/15.
+All recovery decisions 1-7 are implemented as a prototype; manual Apple
+Terminal acceptance not done. Committed; no push.
+
+## Recovery chooser + in-workspace menu — 2026-10-21 (read this first)
+
+Two GPT-6-Luna (xhigh) workers in parallel. L4 delivered the TTY-only
+startup chooser (pure model + bounded raw-key read); L5 looped on failed
+patches for ~50 min and left a non-compiling tree, so the parent stopped it
+and finished integration (dedupe, Net::server_directory, shared stop flag,
+lone-Esc guard, test path updates). Existing attach PTY suite now exercises
+the real chooser. Verifier 8/8, 964 passed/0 failed/15 ignored. Manual Apple
+Terminal check of the chooser/viewer not done. Next: explicit relaunch +
+links. Committed; no push.
+
+## Recovery viewer + P4 PTY experiment — 2026-10-21 (read this first)
+
+User answered the seven recovery questions (recorded in P5-RECOVERY-VIEWER.md
+and SPEC 0.14) and approved the P4 private-PTY experiment. Luna (xhigh)
+workers: L1 P4 TUI identity (timeboxed by parent after ~50 min; plugin loads
+from project-local `.opencode/tui.json` + `.opencode/plugins`, initial route
+captured 3/3, one of two controlled switches missed each run -> NOT proven);
+L2 recovery stages 1-2 (parent fix: absent layout dir = missing, not unsafe);
+L3 stage 3 viewer/CLI (parent exposed the attach HostGuard/Output as
+pub(crate) so the viewer reuses one terminal-restore path). Verifier 8/8,
+949 passed/0 failed/15 ignored. Host /dev/tty viewer acceptance not run.
+Next: chooser + menu item, then explicit relaunch + links. Committed; no push.
+
+## Three parallel GPT-6-sol gates — 2026-10-21 (read this first)
+
+User asked for three GPT-6-sol (medium) workers, one per gate, closely
+monitored. S1 delivered the recovery-viewer/explicit-relaunch ADR and staged
+tasks (design only; product choices left pending). S2 delivered bounded
+end-intent reservations and byte-pressure row salvage; parent fixed slot
+reuse and a pre-existing nlink-0 reader race. S3 ran an isolated live probe
+on OpenCode 1.19.0: version pinned, two sessions created via local server,
+SSE present, selected-session identity and switch NOT proven; next step is a
+private-PTY TUI plugin experiment. User also asked that launchers fall back
+to `tescode workflow custom` when opencode is not on PATH (AGENTS.md); S3 had
+not hit missing_executable in this run, but its probe now resolves
+opencode -> ~/.opencode/bin/opencode -> tescode. Committed; no push.
+
+## Saved-layout implementation slice — 2026-10-21 (read this first)
+
+User requested parent orchestration with Kimi K2.6 subagents, two parallel at
+a time, next worker launched as soon as one finished. Six Kimi tasks ran
+(codec, store, writer, CLI, lifecycle acceptance, independent review); one
+store run was interrupted by shell exit and one lifecycle run aborted on a
+provider content-filter error; both were relaunched detached. Parent owned
+exports, the layout writer claim, driver integration and all review fixes.
+Read [P5-LAYOUT-SLICE.md](P5-LAYOUT-SLICE.md). Verifier 8/8, lib 626/0/4,
+bin 95/0, all 35 integration targets 162/0/11 ignored. Committed by the
+parent under the phase-completion authorization; no push. All worker
+ownership released. Phases 3/5/6 remain open; next gate needs user choice.
 
 ## Authorized checkpoint commit blocked — 2026-10-21
 

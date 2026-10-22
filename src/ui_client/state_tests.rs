@@ -2,6 +2,7 @@ use super::*;
 use crossterm_input::Decoder;
 use panelink::protocol::OperationKey;
 use panelink::screen_checkpoint::{decode, encode, CheckpointMetadata};
+use panelink::split_menu::DisabledReason;
 use panelink::ui_protocol::UiPane;
 
 fn target(pane: u64) -> TargetRef {
@@ -72,6 +73,8 @@ struct Fake {
     reject_keys: bool,
     closes: Vec<ClosePlan>,
     close_reply: Option<Result<CloseOutcome, &'static str>>,
+    recovery_available: bool,
+    recovery_checks: usize,
 }
 
 impl Effects for Fake {
@@ -129,13 +132,52 @@ fn feed(app: &mut App, fake: &mut Fake, bytes: &[u8]) -> Flow {
     let mut flow = Flow::Continue;
     for (index, byte) in bytes.iter().enumerate() {
         if let Some(event) = decoder.advance(*byte, index + 1 < bytes.len()).unwrap() {
-            flow = app.handle_event(&event, now, fake);
+            let needs_check = app.needs_recovery_availability(&event);
+            if needs_check {
+                fake.recovery_checks += 1;
+            }
+            let availability = if needs_check && fake.recovery_available {
+                Availability::Enabled
+            } else {
+                Availability::Disabled(DisabledReason::NoPreviousLayoutSaved)
+            };
+            flow = app.handle_event(&event, now, availability, fake);
         }
     }
     if let Some(event) = decoder.finish_escape().unwrap() {
-        flow = app.handle_event(&event, now, fake);
+        let needs_check = app.needs_recovery_availability(&event);
+        if needs_check {
+            fake.recovery_checks += 1;
+        }
+        let availability = if needs_check && fake.recovery_available {
+            Availability::Enabled
+        } else {
+            Availability::Disabled(DisabledReason::NoPreviousLayoutSaved)
+        };
+        flow = app.handle_event(&event, now, availability, fake);
     }
     flow
+}
+
+fn feed_events(app: &mut App, fake: &mut Fake, bytes: &[u8]) -> Vec<Flow> {
+    let mut decoder = Decoder::new();
+    let now = Instant::now();
+    let mut flows = Vec::new();
+    for (index, byte) in bytes.iter().enumerate() {
+        if let Some(event) = decoder.advance(*byte, index + 1 < bytes.len()).unwrap() {
+            let needs_check = app.needs_recovery_availability(&event);
+            if needs_check {
+                fake.recovery_checks += 1;
+            }
+            let availability = if needs_check && fake.recovery_available {
+                Availability::Enabled
+            } else {
+                Availability::Disabled(DisabledReason::NoPreviousLayoutSaved)
+            };
+            flows.push(app.handle_event(&event, now, availability, fake));
+        }
+    }
+    flows
 }
 
 #[test]
@@ -302,7 +344,63 @@ fn right_click_opens_menu_for_pane_under_pointer_and_menu_inputs_never_reach_pan
 }
 
 #[test]
-fn split_intent_uses_captured_target_and_server_revision_waits_for_layout() {
+fn recovery_menu_and_navigation_request_viewer_without_forwarding_keys() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake {
+        recovery_available: true,
+        ..Fake::default()
+    };
+    app.set_layout(one_pane(1));
+
+    feed(&mut app, &mut fake, b"\x02s");
+    assert!(app.menu_open());
+    assert_eq!(
+        app.menu.recovery_availability(),
+        Some(Availability::Enabled)
+    );
+    let flows = feed_events(&mut app, &mut fake, b"v");
+    assert_eq!(flows, vec![Flow::ViewRecovery]);
+    assert!(!app.menu_open());
+    app.flush(Instant::now(), &mut fake);
+    assert!(fake.keys.is_empty());
+
+    let flows = feed_events(&mut app, &mut fake, b"\x02v");
+    assert_eq!(flows.last(), Some(&Flow::ViewRecovery));
+    app.flush(Instant::now(), &mut fake);
+    assert!(
+        fake.keys.is_empty(),
+        "Ctrl-B v is local and never forwarded"
+    );
+}
+
+#[test]
+fn disabled_recovery_menu_item_reports_status_and_never_forwards_bytes() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(1));
+    let flows = feed_events(&mut app, &mut fake, b"\x1b[<2;5;5M");
+    assert!(flows.iter().all(|flow| *flow == Flow::Continue));
+    assert!(app.menu_open());
+    assert_eq!(
+        app.menu.recovery_availability(),
+        Some(Availability::Disabled(
+            DisabledReason::NoPreviousLayoutSaved
+        ))
+    );
+    feed(&mut app, &mut fake, b"\x1b[B");
+    let flows = feed_events(&mut app, &mut fake, b"v");
+    assert!(flows.iter().all(|flow| *flow == Flow::Continue));
+    assert!(app.menu_open(), "disabled recovery stays in the menu");
+    assert_eq!(status(&app), Some("No previous layout saved"));
+    let flows = feed_events(&mut app, &mut fake, b"\x02v");
+    assert!(flows.last().is_some_and(|flow| *flow == Flow::Continue));
+    app.flush(Instant::now(), &mut fake);
+    assert!(fake.keys.is_empty());
+    assert!(fake.pastes.is_empty());
+}
+
+#[test]
+fn split_intent_uses_captured_target_and_server_revision_then_focuses_new_pane() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     app.set_layout(one_pane(5));
@@ -743,8 +841,9 @@ fn menu_close_item_uses_captured_target_and_server_revision_after_confirmation()
     // No letter shortcut reaches the close row: x is consumed.
     feed(&mut app, &mut fake, b"x");
     assert!(app.menu_open() && !app.confirm_open());
-    // Up from the first (disabled) item wraps to "Close pane".
-    feed(&mut app, &mut fake, b"\x1b[A\r");
+    // Up from the first (disabled) item wraps to the recovery row; one more
+    // Up reaches "Close pane".
+    feed(&mut app, &mut fake, b"\x1b[A\x1b[A\r");
     assert!(!app.menu_open());
     assert!(app.confirm_open());
     assert!(fake.closes.is_empty());
@@ -770,7 +869,8 @@ fn menu_close_on_single_pane_warns_that_the_workspace_ends() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     app.set_layout(one_pane(4));
-    feed(&mut app, &mut fake, b"\x02s\x1b[F\r");
+    // End selects the recovery row; Up reaches "Close pane".
+    feed(&mut app, &mut fake, b"\x02s\x1b[F\x1b[A\r");
     assert!(app.confirm_open());
     let text = screen_text(&app);
     assert!(text.contains("This is the last pane"), "{text}");

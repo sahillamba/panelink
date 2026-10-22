@@ -420,6 +420,23 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         any
     }
 
+    /// Owner-serialized proof that no live pane remains: true only when a
+    /// layout exists and EVERY target in it has a positively recorded
+    /// `Exited` state. Unknown, failed lookup or a live state is not proof.
+    pub fn layout_terminal_empty(&self) -> bool {
+        let Some(layout) = self.layout_snapshot() else {
+            return false;
+        };
+        let mut any = false;
+        for pane in layout.panes.into_iter().flatten() {
+            any = true;
+            if self.launches.state(pane.target) != Ok(SessionState::Exited) {
+                return false;
+            }
+        }
+        any
+    }
+
     /// Return a copy of the current pane layout, if one is established.
     pub fn layout_snapshot(&self) -> Option<LayoutSnapshot> {
         self.layout.as_ref().map(PaneLayout::snapshot)

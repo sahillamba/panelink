@@ -33,6 +33,8 @@ pub const MAX_BATCH_PAYLOAD_BYTES: usize =
     MAX_BATCH_ROWS * MAX_ROW_BYTES + 2 * MAX_SCREEN_CHECKPOINT_BYTES;
 /// Maximum time an explicit shutdown waits for the worker.
 pub const MAX_SHUTDOWN_WAIT: Duration = Duration::from_millis(250);
+/// Metadata-only slots reserved for registered capture targets.
+pub(crate) const MAX_END_RESERVATIONS: usize = 8;
 
 const RETRIES: usize = 3;
 const RETRY_DELAY: Duration = Duration::from_millis(10);
@@ -212,6 +214,30 @@ impl HistoryBatch {
         self.gap |= removed_rows > 0;
         Some((self, removed_rows, has_rows))
     }
+
+    /// If checkpoints alone cannot fit, release both and salvage complete
+    /// newest rows. The caller must record the discarded checkpoint loss.
+    pub(crate) fn retain_rows_without_screens_within(
+        mut self,
+        max_payload_bytes: usize,
+    ) -> Option<(Self, usize)> {
+        if self.screens.is_empty() || self.rows.as_ref().is_none_or(|rows| rows.is_empty()) {
+            return None;
+        }
+        self.screens = Vec::new().into_boxed_slice();
+        self.payload_bytes = self.rows.as_ref()?.iter().map(|row| row.len()).sum();
+        let (batch, removed, retained) = self.retain_newest_suffix_within(max_payload_bytes)?;
+        retained.then_some((batch, removed))
+    }
+
+    pub(crate) fn screen_bytes(&self) -> usize {
+        self.screens.iter().map(|(_, screen)| screen.len()).sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
 }
 
 /// Exact capacity boundary that rejected a history batch.
@@ -383,9 +409,20 @@ struct SharedState {
     accepting: bool,
     cancel: bool,
     finalize_canceled_ends: bool,
+    finalize_reserved_ends: bool,
     failed_closed: bool,
     batches: usize,
     payload_bytes: usize,
+    ends: Vec<EndReservation>,
+}
+
+#[derive(Clone, Copy)]
+struct EndReservation {
+    target: TargetRef,
+    epoch: u64,
+    at: Option<u64>,
+    gap: bool,
+    resolved: bool,
 }
 
 struct Shared {
@@ -395,6 +432,61 @@ struct Shared {
 }
 
 impl Shared {
+    fn reserve_end(&self, target: TargetRef, epoch: u64) -> bool {
+        let mut state = self.lock();
+        if !state.accepting {
+            return false;
+        }
+        // Reuse slots whose end metadata already committed. Without this a
+        // long-lived generation with repeated split/close would exhaust the
+        // fixed table and refuse capture for later panes.
+        if state.ends.len() >= MAX_END_RESERVATIONS {
+            state.ends.retain(|end| !end.resolved);
+        }
+        if state.ends.len() >= MAX_END_RESERVATIONS {
+            return false;
+        }
+        state.ends.push(EndReservation {
+            target,
+            epoch,
+            at: None,
+            gap: false,
+            resolved: false,
+        });
+        true
+    }
+
+    fn record_end(&self, target: TargetRef, epoch: u64, at: Option<u64>, gap: bool) {
+        let mut state = self.lock();
+        if let Some(end) = state.ends.iter_mut().find(|end| end.target == target) {
+            if epoch >= end.epoch {
+                end.epoch = epoch;
+                end.at = end.at.or(at);
+                end.gap |= gap;
+                end.resolved = false;
+            }
+        }
+    }
+
+    fn resolve_end(&self, target: TargetRef) {
+        if let Some(end) = self.lock().ends.iter_mut().find(|end| end.target == target) {
+            end.resolved = true;
+        }
+    }
+
+    fn pending_ends(&self) -> Vec<EndReservation> {
+        let state = self.lock();
+        if !state.finalize_reserved_ends {
+            return Vec::new();
+        }
+        state
+            .ends
+            .iter()
+            .copied()
+            .filter(|end| !end.resolved && (end.at.is_some() || end.gap))
+            .collect()
+    }
+
     fn lock(&self) -> MutexGuard<'_, SharedState> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
@@ -460,7 +552,9 @@ impl Shared {
     }
 
     fn stop_accepting(&self) {
-        self.lock().accepting = false;
+        let mut state = self.lock();
+        state.accepting = false;
+        state.finalize_reserved_ends = true;
     }
 
     fn request_cancel(&self) {
@@ -468,6 +562,7 @@ impl Shared {
         state.accepting = false;
         state.cancel = true;
         state.finalize_canceled_ends = false;
+        state.finalize_reserved_ends = false;
     }
 
     fn request_timeout_cancel(&self) {
@@ -628,6 +723,14 @@ impl HistoryWriter {
         self.shared.available_payload_bytes()
     }
 
+    pub(crate) fn reserve_end(&self, target: TargetRef, epoch: u64) -> bool {
+        self.shared.reserve_end(target, epoch)
+    }
+
+    pub(crate) fn record_end(&self, target: TargetRef, epoch: u64, at: Option<u64>, gap: bool) {
+        self.shared.record_end(target, epoch, at, gap);
+    }
+
     fn spawn(
         backend: Box<dyn HistoryBackend>,
         writer_guard: HistoryWriterGuard,
@@ -640,9 +743,11 @@ impl HistoryWriter {
                 accepting: true,
                 cancel: false,
                 finalize_canceled_ends: false,
+                finalize_reserved_ends: false,
                 failed_closed: false,
                 batches: 0,
                 payload_bytes: 0,
+                ends: Vec::with_capacity(MAX_END_RESERVATIONS),
             }),
             had_storage_error: AtomicBool::new(false),
             diagnostics,
@@ -930,6 +1035,7 @@ fn worker_loop(
     loop {
         if shared.canceled() {
             any_failed |= cancel_queued(backend, receiver, shared);
+            any_failed |= finalize_reserved_ends(backend, shared);
             return if any_failed || shared.failed_closed() {
                 ShutdownOutcome::Failed
             } else {
@@ -948,6 +1054,7 @@ fn worker_loop(
                         CommitStatus::Canceled,
                     );
                     any_failed |= cancel_queued(backend, receiver, shared);
+                    any_failed |= finalize_reserved_ends(backend, shared);
                     return if any_failed || shared.failed_closed() {
                         ShutdownOutcome::Failed
                     } else {
@@ -975,13 +1082,24 @@ fn worker_loop(
                     }
                 }
                 let work = current.take().expect("current batch exists");
+                let completed_end = if status == CommitStatus::Committed {
+                    work.batch
+                        .as_ref()
+                        .and_then(|batch| batch.ended_at_unix_ms.map(|_| batch.target))
+                } else {
+                    None
+                };
                 if status == CommitStatus::Failed {
                     any_failed = true;
                     shared.fail_closed();
                 }
                 finish_work(work, status);
+                if let Some(target) = completed_end {
+                    shared.resolve_end(target);
+                }
             }
             Err(_) => {
+                any_failed |= finalize_reserved_ends(backend, shared);
                 return if any_failed || shared.failed_closed() {
                     ShutdownOutcome::Failed
                 } else {
@@ -1013,6 +1131,7 @@ fn finalize_canceled_work(work: &Work, backend: &mut dyn HistoryBackend, shared:
         }));
         match result {
             Ok(Ok(())) => {
+                shared.resolve_end(batch.target);
                 shared
                     .diagnostics
                     .record(HistoryReason::CanceledEndMetadataFinalized);
@@ -1067,6 +1186,88 @@ fn cancel_queued(
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => return failed,
         }
     }
+}
+
+fn finalize_reserved_ends(backend: &mut dyn HistoryBackend, shared: &Shared) -> bool {
+    let mut failed = false;
+    for end in shared.pending_ends() {
+        if shared.failed_closed() {
+            break;
+        }
+        let mut storage_error_recorded = false;
+        let result = if let Some(at) = end.at {
+            // The helper atomically persists the conservative gap and end;
+            // it also preserves the first known timestamp on a prior end.
+            let mut result = Err(io::Error::other("end not attempted"));
+            for attempt in 0..RETRIES {
+                if attempt > 0 {
+                    thread::sleep(RETRY_DELAY);
+                }
+                result = match catch_unwind(AssertUnwindSafe(|| {
+                    backend.finalize_incomplete_end(end.target, end.epoch, at)
+                })) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        shared.worker_failure();
+                        shared.fail_closed();
+                        result = Err(io::Error::other("history end finalizer panicked"));
+                        break;
+                    }
+                };
+                if result.is_ok()
+                    || result
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == io::ErrorKind::Unsupported)
+                {
+                    break;
+                }
+                shared.storage_error();
+                storage_error_recorded = true;
+                if attempt + 1 == RETRIES {
+                    shared.diagnostics.record(HistoryReason::RetryExhausted);
+                }
+            }
+            result
+        } else {
+            // No on-disk unknown-ended representation exists. Mark only the
+            // conservative continuity gap, without inventing an exit time.
+            let saved = backend.load_rows(end.target);
+            match saved {
+                Ok(None) => backend.mark_history(end.target, end.epoch, false),
+                Ok(Some(saved))
+                    if saved.ended_at_unix_ms != 0
+                        || saved.epoch > end.epoch
+                        || saved.capture_disabled =>
+                {
+                    Err(invalid_batch())
+                }
+                Ok(Some(_)) => backend.mark_history(end.target, end.epoch, false),
+                Err(error) => Err(error),
+            }
+        };
+        match result {
+            Ok(()) => {
+                shared.resolve_end(end.target);
+                shared
+                    .diagnostics
+                    .record(HistoryReason::ReservedEndMetadataFinalized);
+            }
+            Err(error) => {
+                if error.kind() != io::ErrorKind::Unsupported
+                    && !storage_error_recorded
+                    && !shared.failed_closed()
+                {
+                    shared.storage_error();
+                }
+                shared
+                    .diagnostics
+                    .record(HistoryReason::ReservedEndMetadataFailed);
+                shared.fail_closed();
+                failed = true;
+            }
+        }
+    }
+    failed
 }
 
 fn fail_queued(receiver: &Receiver<Work>) {
@@ -1318,6 +1519,66 @@ mod tests {
     fn empty_batch(target: TargetRef, epoch: u64, token: u64) -> HistoryBatch {
         HistoryBatch::new(target, epoch, token, false, Vec::new(), Vec::new(), None)
             .expect("valid empty batch")
+    }
+
+    #[test]
+    fn resolved_end_reservations_are_reused_beyond_the_fixed_table() {
+        // Parent review regression: repeated split/close in one generation
+        // must not permanently exhaust the eight metadata-only slots.
+        let fixture = Fixture::new();
+        let (storage, store, base) = fixture.prepare();
+        let writer = HistoryWriter::start(store, &storage).unwrap();
+        for pane in 1..=MAX_END_RESERVATIONS as u64 {
+            let target = TargetRef {
+                pane,
+                session: pane,
+                ..base
+            };
+            assert!(writer.reserve_end(target, 1));
+        }
+        let extra = TargetRef {
+            pane: 100,
+            session: 100,
+            ..base
+        };
+        assert!(!writer.reserve_end(extra, 1), "unresolved table is full");
+        writer.shared.resolve_end(TargetRef {
+            pane: 1,
+            session: 1,
+            ..base
+        });
+        assert!(writer.reserve_end(extra, 1), "resolved slot is reused");
+        assert_eq!(
+            writer.shutdown(MAX_SHUTDOWN_WAIT).outcome,
+            ShutdownOutcome::Drained
+        );
+    }
+
+    #[test]
+    fn real_store_reserved_known_and_unknown_ends_are_conservative() {
+        let fixture = Fixture::new();
+        let (storage, store, known) = fixture.prepare();
+        let unknown = TargetRef {
+            pane: 4,
+            session: 4,
+            ..known
+        };
+        let writer = HistoryWriter::start(store, &storage).unwrap();
+        assert!(writer.reserve_end(known, 1));
+        assert!(writer.reserve_end(unknown, 1));
+        writer.record_end(known, 1, Some(777), true);
+        writer.record_end(unknown, 1, None, true);
+        assert_eq!(
+            writer.shutdown(MAX_SHUTDOWN_WAIT).outcome,
+            ShutdownOutcome::Drained
+        );
+        let store = HistoryStore::open(&fixture.history).unwrap();
+        let saved_known = store.load_rows(known).unwrap().unwrap();
+        assert_eq!(saved_known.ended_at_unix_ms, 777);
+        assert!(saved_known.gap);
+        let saved_unknown = store.load_rows(unknown).unwrap().unwrap();
+        assert_eq!(saved_unknown.ended_at_unix_ms, 0);
+        assert!(saved_unknown.gap);
     }
 
     fn one_row_batch(target: TargetRef, epoch: u64, token: u64) -> HistoryBatch {
@@ -2743,9 +3004,11 @@ mod tests {
                 accepting: true,
                 cancel: false,
                 finalize_canceled_ends: false,
+                finalize_reserved_ends: false,
                 failed_closed: false,
                 batches: 0,
                 payload_bytes: 0,
+                ends: Vec::new(),
             }),
             had_storage_error: AtomicBool::new(false),
             diagnostics: HistoryDiagnostics::new(),
