@@ -1,5 +1,11 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Phase 2 closed — 2026-10-22 (read this first)
+
+User confirmed the OSC 52 clipboard-denial check in a live pane. A Haiku 5.5
+worker ran the nine operator-only outer-PTY host tests: 9/9 in three serial
+runs; parent rerun 9/9. Phase 2 boxes ticked. Committed; no push.
+
 ## Phase 6 complete (personal alpha scope) — 2026-10-22 (read this first)
 
 User asked to complete Phase 6 and chose idle real-OpenCode agents (no

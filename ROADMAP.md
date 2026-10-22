@@ -5,11 +5,11 @@ current-phase: Phase 6 DONE for personal alpha scope (2026-10-22): idle real-Ope
 last-updated: 2026-10-21
 checkpoint-commit: saved-layout slice committed by parent per phase-completion authorization; no push
 last-verified: 2026-10-22 — verifier 8/8 twice consecutively (983 passed/0 failed/15 ignored)
-next-action: Remaining open gates: Phase 2 Apple Terminal clipboard sentinel, Phase 3 wider contracts, Phase 4 identity (blocked upstream: no keyboard switch signal in OpenCode 1.19.0), Phase 5 hierarchy/mouse selection/full reboot. Ask user which to pursue.
+next-action: Remaining open gates: Phase 3 wider contracts (agent-control API, managed launch, events), Phase 4 identity (blocked upstream), Phase 5 hierarchy/mouse selection/full reboot. Ask user.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
-blocked-on: Earlier sandboxes denied pathname socket bind (EPERM); the 2026-10-21 saved-layout run permitted it and all socket targets passed there; historical parallel lock-probe failure passed isolated/serial and did not recur in current default run, but cause remains unconfirmed; host stderr diagnostic failure was previously reproduced at unchanged HEAD. Phase 2 clipboard/full Apple Terminal and Phase 4 live identity remain unproved; Phase 3 expanded pathname/host acceptance remains separate. OpenCode 1.19.0 installation was recorded earlier; this run did not recheck it. Ignored/blocked cases are not passes.
+blocked-on: Phase 4 live identity is blocked upstream (OpenCode 1.19.0 publishes no keyboard session-switch signal). Phase 2 host acceptance DONE 2026-10-22.
 setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1 rechecked, offline builds pass, current verifier 7/8 with socket restriction; previous full 8/8 at f82d968 remains historical evidence.
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 phase-3a: DONE — 2026-10-19 — see docs/progress/P3A-DEFAULT-OPEN.md and INTEGRATION.md
@@ -112,7 +112,7 @@ Verify (capture actual outputs): `cargo test --lib launch`; `cargo fmt --check`.
 
 `cargo fmt --check`; `cargo test`; `cargo clippy --all-targets -- -D warnings`; `cargo run -- --help`; `cargo run -- doctor` (expected exit 1); unknown option (expected exit 2). Review no external crates, no side-effectful launcher, no credential logging. No pass claim without outputs.
 
-## Phase 2 — PTY and terminal engine feasibility (preparation underway)
+## Phase 2 — PTY and terminal engine feasibility (DONE 2026-10-22)
 
 - [x] Record exact dependency review candidates/features and preliminary PTY API assessment: docs/progress/P2-DEPENDENCIES.md.
 - [x] Specify ordered experiment, proposed checks and Apple Terminal manual checklist: docs/progress/P2-EXPERIMENT.md.
@@ -123,9 +123,9 @@ Verify (capture actual outputs): `cargo test --lib launch`; `cargo fmt --check`.
 - [x] Resolve/review the complete host-probe graph, native/build scripts and input/cleanup semantics; adopt exact host pins after review: P2-SIGNALS-REVIEW.md and P2-PROBE.md. Core/component graph review is complete; the full Crossterm IO framework remains unadopted. See docs/progress/P2-HOST-INPUT.md.
 - [x] Implement one-shot host/CLI probe with fixed buffers, bounded IO, restore-first cached cleanup and explicit launch map; see P2-PROBE-RESULT.md and P2-CLI-RESULT.md.
 - [x] Prove restore-before-child-wait with a ready HUP-ignoring child on a private PTY, for explicit cleanup and unwind Drop; see docs/progress/P2-RESTORE-ORDER.md.
-- [ ] Complete host acceptance after the incremental-rendering change: nine outer-PTY cases remain ignored locally; operator previously confirmed corrections without a fresh raw log; Apple Terminal retest/manual completion pending.
-- [ ] Build one independent PTY with engine-owned screen state on Apple Terminal; deny programmatic clipboard requests.
-- [ ] Validate shell/full-screen input, queries, resize and terminal cleanup.
+- [x] Complete host acceptance after the incremental-rendering change: nine outer-PTY host tests ran and passed 9/9 in three serial runs (Haiku 5.5 worker, 2026-10-22) and 9/9 in an independent parent run; operator Apple Terminal short checklist previously confirmed. See P2-HOST-ACCEPTANCE.md.
+- [x] Build one independent PTY with engine-owned screen state on Apple Terminal; deny programmatic clipboard requests. Operator OSC 52 write check in a live pane passed 2026-10-22 (clipboard unchanged); see P2-EXPERIMENT.md.
+- [x] Validate shell/full-screen input, queries, resize and terminal cleanup: host tests cover typed keys/paste once, resize incl. undersized restore, HUP/SIGTERM/stall cleanup and termios restore; operator confirmed redraw/Unicode/vi/resize/paste/Ctrl-C and daily use.
 
 Verify: use docs/progress/P2-EXPERIMENT.md and the explicit terminfo setup in README.md; `pty-probe` is implemented, while runtime acceptance remains pending. Source access is restored, but docs/progress/P2-SOURCE-GATE.md records failed allocation/launch/cleanup gates for the candidate set. Do not substitute a pipe, custom parser, or relaxed bound. Review viable replacements/corrections before P2B. Do not mutate parent environment or introduce an env-clearing shell wrapper. Full M1 also requires phases 3 and 4; phase 2 is not persistent-server or identity evidence.
 

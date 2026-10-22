@@ -140,3 +140,13 @@ Host cleanup restores the saved termios exactly and leaves standard-descriptor f
 ## Latest short retest feedback
 
 The user reports everything else in the short retest works, except Ctrl-Q triggers a host keyboard/window-close confirmation. This confirms the short checklist's redraw, Unicode display, vi/resize, paste and Ctrl-C behavior by operator report; no fresh version/log/timing information was supplied. It does not imply the separate clipboard sentinel or every original full-checklist case ran. Source contains no host-window-close request in the local quit path; the exact host key mapping is unverified. Ctrl-X is now the documented quit key, with Ctrl-Q kept as an alias. A decoder-through-dispatch regression verifies Ctrl-X quits locally without queuing child input, while plain x still queues normally. The new shortcut and actual return-to-shell cleanup await a final operator check.
+
+## Operator clipboard acceptance — 2026-10-22
+
+The user ran the OSC 52 clipboard-write check inside a live `panelink` pane in
+their own Apple Terminal (`printf '\e]52;c;%s\a' "$(printf HACKED | base64)";
+pbpaste`) and reported the result as good: the host clipboard was not
+replaced by child output. Operator confirmation without a raw log; the read
+and clear variants and the sentinel-across-renderer-suppression case were
+covered by automated tests, not repeated manually. This closes the Phase 2
+clipboard-denial host gate for the user's Apple Terminal.
