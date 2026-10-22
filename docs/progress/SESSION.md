@@ -39,6 +39,40 @@ full suite 954 passed/0 failed/15 ignored. Not committed (slice, not a
 completed phase). Four-pane Apple Terminal acceptance has not been run.
 Phase 3 remains open.
 
+## Phase 2 handoff: what closing did NOT prove — 2026-10-22
+
+Phase 2 is ticked in ROADMAP.md for its scoped gates. These items are still
+unproven or only partially evidenced; none blocks later phases, but do not
+describe them as passed:
+
+1. **Operator-driven host evidence is thin.** The nine outer-PTY host tests
+   ran 9/9 (three serial runs plus a parent rerun), but from worker
+   processes with no controlling terminal; they provision their own outer
+   PTY. That is not a human-operated Apple Terminal session, and three runs
+   are not a flake-rate claim (P2-HOST-ACCEPTANCE.md, "Limits").
+2. **Manual Apple Terminal checklist was never itemized.** The operator said
+   redraw, Unicode, vi, resize, paste and Ctrl-C were fine and daily use
+   works, without per-item results or a host/version record
+   (P2-OPERATOR-RUN.md). Only the OSC 52 clipboard-denial check has an
+   explicit pass (clipboard unchanged, 2026-10-22).
+3. **Ctrl-X live exit.** Ctrl-X was added as the local quit key (Ctrl-Q kept
+   as an alias, but the host maps Ctrl-Q to a window-close confirmation). The
+   decoder/dispatch tests pass; a live Ctrl-X exit with outer-shell
+   restoration has no recorded operator confirmation.
+4. **Redraw retest.** The incremental renderer replaced full-screen repaint
+   on every change. Unit and parser-replay evidence exists
+   (P2-DELTA-RESULT.md); a recorded Apple Terminal retest of the changed
+   path does not.
+5. **Restore-before-child-wait** is proven only by private-PTY tests
+   (P2-RESTORE-ORDER.md), not by a human observing a slow child on a real
+   host.
+6. **Other terminals.** Only Apple Terminal on Apple Silicon was in scope.
+   No other emulator was tried.
+
+If a human pass is wanted, the checklist is in P2-EXPERIMENT.md and the
+four-pane check (Phase 3) can be run in the same sitting. Phase 2 is not a
+persistent-server or OpenCode-identity result; those are Phases 3 and 4.
+
 ## Phase 2 closed — 2026-10-22
 
 User confirmed the OSC 52 clipboard-denial check in a live pane. A Haiku 5.5
