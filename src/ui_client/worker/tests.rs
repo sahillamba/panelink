@@ -1,5 +1,6 @@
 use super::*;
 use crossterm_input::Decoder;
+use panelink::split_menu::{Availability, DisabledReason};
 use std::io::{Read, Write};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -254,7 +255,12 @@ fn saturated_worker_does_not_hold_ctrl_x_behind_retained_keys() {
     let mut decoder = Decoder::new();
     for (index, byte) in b"a".iter().enumerate() {
         if let Some(event) = decoder.advance(*byte, index == 0).unwrap() {
-            app.handle_event(&event, now, &mut worker);
+            app.handle_event(
+                &event,
+                now,
+                Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                &mut worker,
+            );
         }
     }
     app.flush(now, &mut worker);
@@ -266,7 +272,12 @@ fn saturated_worker_does_not_hold_ctrl_x_behind_retained_keys() {
     let mut decoder = Decoder::new();
     let mut flow = Flow::Continue;
     if let Some(event) = decoder.advance(b'\x18', false).unwrap() {
-        flow = app.handle_event(&event, now, &mut worker);
+        flow = app.handle_event(
+            &event,
+            now,
+            Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+            &mut worker,
+        );
     }
     assert_eq!(flow, Flow::Quit);
     assert!(app.abandon_pending_keys());

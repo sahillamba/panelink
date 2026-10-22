@@ -3,6 +3,7 @@
 //! The host thread submits owned, pinned commands and applies typed results;
 //! this worker is the only owner of `Net` and `PaneConn` values.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -103,11 +104,19 @@ pub(crate) struct WorkerHandle {
     budget: Arc<Mutex<Budget>>,
     thread: Option<JoinHandle<()>>,
     poll_pending: bool,
+    server_directory: PathBuf,
 }
 
 impl WorkerHandle {
     pub(crate) fn start(net: Net) -> Self {
-        Self::start_with(net)
+        let directory = net.server_directory().to_path_buf();
+        let mut handle = Self::start_with(net);
+        handle.server_directory = directory;
+        handle
+    }
+
+    pub(crate) fn server_directory(&self) -> &Path {
+        &self.server_directory
     }
 
     fn start_with<B: Backend>(backend: B) -> Self {
@@ -124,6 +133,7 @@ impl WorkerHandle {
             budget,
             thread: Some(thread),
             poll_pending: false,
+            server_directory: PathBuf::new(),
         }
     }
 
