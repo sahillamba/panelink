@@ -2149,6 +2149,42 @@ pub(crate) struct WorkspaceLink {
     lease_schedule: ObserverLeaseSchedule,
 }
 
+/// Safe failure from a managed pane launch. Once a durable key is reserved,
+/// callers retain it in the error so they can report and reconcile that exact
+/// operation without inventing a replacement launch.
+#[derive(Debug)]
+pub(crate) struct RunPaneFailure {
+    pub(crate) code: &'static str,
+    pub(crate) operation: Option<OperationKey>,
+    pub(crate) observed: Option<RunPaneObservation>,
+}
+
+/// Validated creation metadata retained if local acknowledgment fails.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RunPaneObservation {
+    pub(crate) new_target: Option<TargetRef>,
+    pub(crate) committed_layout_revision: u64,
+}
+
+impl From<panelink::split_protocol::SplitResult> for RunPaneObservation {
+    fn from(result: panelink::split_protocol::SplitResult) -> Self {
+        Self {
+            new_target: result.new_target,
+            committed_layout_revision: result.committed_layout_revision,
+        }
+    }
+}
+
+impl From<&'static str> for RunPaneFailure {
+    fn from(code: &'static str) -> Self {
+        Self {
+            code,
+            operation: None,
+            observed: None,
+        }
+    }
+}
+
 const OBSERVER_LEASE_TTL: Duration = Duration::from_secs(1800);
 const OBSERVER_RENEW_MARGIN: Duration = Duration::from_secs(300);
 const OBSERVER_RENEW_RETRY: Duration = Duration::from_secs(15);
@@ -2473,6 +2509,146 @@ impl WorkspaceLink {
         let id = self.request_id();
         let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
         decode_session_info(&bytes).map_err(|_| "response_invalid")
+    }
+
+    /// Launch a new managed child beside the exact pane captured by the
+    /// caller. The request is encoded and size-checked before its durable key
+    /// is reserved, then sent exactly once. Any unvalidated reply leaves the
+    /// key uncertain so a later invocation can observe it without relaunching.
+    pub(crate) fn run_pane(
+        &mut self,
+        target: TargetRef,
+        layout_revision: u64,
+        direction: SplitDirection,
+        cwd: Option<PathBuf>,
+        executable: &OsStr,
+        arguments: &[OsString],
+    ) -> Result<panelink::split_protocol::SplitResult, RunPaneFailure> {
+        self.ensure_target(target)?;
+        if self.settled_uncertain.is_some() {
+            return Err("previous_operation_settled".into());
+        }
+        if self.context.context().uncertain().is_some() {
+            return Err("operation_uncertain".into());
+        }
+        if self.selected_capabilities & CAPABILITY_INPUT == 0 {
+            return Err("input_capability_unavailable".into());
+        }
+        if executable.is_empty()
+            || arguments
+                .len()
+                .checked_add(1)
+                .is_none_or(|count| count > 80)
+        {
+            return Err("request_invalid".into());
+        }
+        let argument_bytes = arguments
+            .iter()
+            .try_fold(executable.as_bytes().len(), |total, arg| {
+                total.checked_add(arg.as_bytes().len())
+            });
+        if argument_bytes.is_none_or(|total| total > MAX_CONTROL_ARGUMENT_BYTES) {
+            return Err("request_invalid".into());
+        }
+
+        let client_working_directory =
+            std::env::current_dir().map_err(|_| "launch_context_invalid")?;
+        if !client_working_directory.is_absolute() {
+            return Err("launch_context_invalid".into());
+        }
+        let requested_working_directory = match cwd {
+            Some(path) if path.is_absolute() => path,
+            Some(path) => client_working_directory.join(path),
+            None => client_working_directory.clone(),
+        };
+        let launch_context =
+            filtered_launch_context(requested_working_directory, std::env::vars_os())?;
+
+        // Re-read the layout on this same serialized lease. Never substitute
+        // a new target or revision if the caller's capture became stale.
+        let layout_payload = panelink::ui_protocol::encode_layout_query();
+        let layout_id = self.request_id();
+        let layout_bytes = exchange_with_id(&mut self.stream, layout_id, &layout_payload)?;
+        let layout = panelink::ui_protocol::decode_layout_reply(&layout_bytes)
+            .map_err(|_| "response_invalid")?;
+        if layout.revision != layout_revision {
+            return Err("stale_layout".into());
+        }
+        let (rows, columns) = panelink::ui_protocol::planned_split_size(&layout, target, direction)
+            .map_err(|_| "split_unavailable")?;
+
+        let key = candidate_key(self.context.context());
+        let mut payload = Vec::new();
+        {
+            let executable_bytes = executable.as_bytes();
+            let cwd_bytes = launch_context.working_directory.as_os_str().as_bytes();
+            let client_cwd_bytes = client_working_directory.as_os_str().as_bytes();
+            let argument_slices: Vec<&[u8]> = arguments.iter().map(|arg| arg.as_bytes()).collect();
+            let environment =
+                panelink::multi_startup::environment_entries(&launch_context.environment);
+            let launch = LaunchRequest {
+                key,
+                rows,
+                columns,
+                requested_executable: executable_bytes,
+                requested_working_directory: cwd_bytes,
+                client_working_directory: client_cwd_bytes,
+                arguments: &argument_slices,
+                environment: &environment,
+            };
+            encode_split_request(
+                &SplitRequest {
+                    key,
+                    target,
+                    expected_layout_revision: layout_revision,
+                    direction,
+                    launch: &launch,
+                },
+                &mut payload,
+            )
+            .map_err(|_| "request_invalid")?;
+        }
+        drop(launch_context);
+
+        let reserved = self.reserve_mutation_key(key)?;
+        let mut observed = None;
+        let result = (|| -> Result<panelink::split_protocol::SplitResult, &'static str> {
+            let request_id = self.request_id();
+            let response_bytes = match exchange_with_id(&mut self.stream, request_id, &payload) {
+                Ok(bytes) => bytes,
+                Err("server_rejected") => {
+                    drop(payload);
+                    return match self.reconcile_rejected_mutation(reserved) {
+                        Ok(_) => Err("operation_uncertain"),
+                        Err(error) => Err(error),
+                    };
+                }
+                Err(error) => {
+                    drop(payload);
+                    return Err(error);
+                }
+            };
+            // The encoded request contains caller argv and environment values.
+            drop(payload);
+
+            let result = decode_split_result(&response_bytes).map_err(|_| "response_invalid")?;
+            if result.key != reserved || result.existing_target != target {
+                return Err("response_invalid");
+            }
+            if result.outcome == Outcome::Accepted {
+                return Err("operation_uncertain");
+            }
+            observed = Some(result.into());
+            self.context
+                .ack(reserved)
+                .map_err(|error| context_error_label(&error))?;
+            Ok(result)
+        })();
+        result.map_err(|code| RunPaneFailure {
+            code,
+            operation: Some(reserved),
+            observed,
+        })
     }
 
     pub(crate) const fn lease(&self) -> u64 {
@@ -4428,6 +4604,538 @@ mod tests {
             context.reserve().unwrap();
         }
         (directory, path, context)
+    }
+
+    fn single_pane_layout(target: TargetRef, revision: u64) -> panelink::ui_protocol::LayoutReply {
+        panelink::ui_protocol::LayoutReply {
+            revision,
+            rows: 24,
+            columns: 80,
+            panes: [
+                Some(panelink::ui_protocol::UiPane {
+                    target,
+                    rect: panelink::pane_layout::Rect {
+                        x: 0,
+                        y: 0,
+                        rows: 24,
+                        columns: 80,
+                    },
+                    pending_confirmed: None,
+                }),
+                None,
+                None,
+                None,
+            ],
+            divider: None,
+            dividers: [None, None, None],
+        }
+    }
+
+    fn run_pane_test_link(
+        context: ContextFile,
+        stream: AuthenticatedStream,
+        capabilities: u64,
+    ) -> WorkspaceLink {
+        let now = Instant::now();
+        WorkspaceLink {
+            directory: PathBuf::from("/private/tmp/panelink-run-pane-test"),
+            context,
+            stream,
+            next_request: 1,
+            discarded_uncertain: false,
+            settled_uncertain: None,
+            selected_capabilities: capabilities,
+            lease_schedule: ObserverLeaseSchedule::new(now),
+        }
+    }
+
+    #[test]
+    fn run_pane_encodes_literal_argv_and_the_full_captured_target() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let server = thread::spawn(move || {
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(header.kind(), MessageKind::Request);
+            assert_eq!(header.request_id(), 1);
+            assert_eq!(payload, panelink::ui_protocol::encode_layout_query());
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                1,
+                &panelink::ui_protocol::encode_layout_reply(&single_pane_layout(target, 6))
+                    .unwrap(),
+            );
+
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(header.kind(), MessageKind::Request);
+            assert_eq!(header.request_id(), 2);
+            let split = panelink::split_protocol::decode_split_request(&payload).unwrap();
+            assert_eq!(
+                split.key(),
+                OperationKey {
+                    generation: 7,
+                    lease: 9,
+                    sequence: 1
+                }
+            );
+            assert_eq!(split.target(), target);
+            assert_eq!(split.expected_layout_revision(), 6);
+            assert_eq!(split.direction(), SplitDirection::Left);
+            let launch = split.launch();
+            assert_eq!(launch.requested_executable(), b"/bin/echo");
+            assert_eq!(launch.requested_working_directory(), b"/tmp");
+            assert_eq!(
+                launch.arguments().collect::<Vec<_>>(),
+                vec![b"two words".as_slice(), b"--as".as_slice()]
+            );
+            assert!(launch.client_working_directory().starts_with(b"/"));
+
+            let result = panelink::split_protocol::SplitResult {
+                key: split.key(),
+                outcome: Outcome::Applied,
+                committed_layout_revision: 7,
+                existing_target: target,
+                new_target: Some(TargetRef {
+                    generation: target.generation,
+                    workspace: target.workspace,
+                    pane: 10,
+                    session: 11,
+                    occupant_revision: 1,
+                }),
+            };
+            let mut bytes = Vec::new();
+            panelink::split_protocol::encode_split_result(&result, &mut bytes).unwrap();
+            write_test_frame(&mut server_socket, MessageKind::Response, 2, &bytes);
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let result = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Left,
+                Some(PathBuf::from("/tmp")),
+                OsStr::new("/bin/echo"),
+                &[OsString::from("two words"), OsString::from("--as")],
+            )
+            .unwrap();
+        assert_eq!(result.outcome, Outcome::Applied);
+        assert_eq!(result.existing_target, target);
+        assert_eq!(link.context.context().next_sequence(), 2);
+        assert_eq!(link.context.context().uncertain(), None);
+        server.join().unwrap();
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_refuses_invalid_arguments_and_missing_capability_before_reserve() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, _server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ,
+        );
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "input_capability_unavailable");
+        assert_eq!(failure.operation, None);
+        link.selected_capabilities |= CAPABILITY_INPUT;
+        let failure = link
+            .run_pane(target, 6, SplitDirection::Right, None, OsStr::new(""), &[])
+            .unwrap_err();
+        assert_eq!(failure.code, "request_invalid");
+        assert_eq!(failure.operation, None);
+        assert_eq!(link.context.context().next_sequence(), 1);
+        assert_eq!(link.context.context().uncertain(), None);
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_rejects_wrong_existing_target_without_acknowledging_key() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let server = thread::spawn(move || {
+            let (header, _) = read_test_frame(&mut server_socket);
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &panelink::ui_protocol::encode_layout_reply(&single_pane_layout(target, 6))
+                    .unwrap(),
+            );
+            let (header, payload) = read_test_frame(&mut server_socket);
+            let split = panelink::split_protocol::decode_split_request(&payload).unwrap();
+            let wrong_target = TargetRef {
+                pane: target.pane + 1,
+                ..target
+            };
+            let result = panelink::split_protocol::SplitResult {
+                key: split.key(),
+                outcome: Outcome::Applied,
+                committed_layout_revision: 7,
+                existing_target: wrong_target,
+                new_target: Some(TargetRef {
+                    pane: target.pane + 2,
+                    session: target.session + 2,
+                    ..wrong_target
+                }),
+            };
+            let mut bytes = Vec::new();
+            panelink::split_protocol::encode_split_result(&result, &mut bytes).unwrap();
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &bytes,
+            );
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "response_invalid");
+        assert_eq!(
+            failure.operation,
+            Some(OperationKey {
+                generation: 7,
+                lease: 9,
+                sequence: 1,
+            })
+        );
+        assert_eq!(link.context.context().next_sequence(), 2);
+        assert!(link.context.context().uncertain().is_some());
+        server.join().unwrap();
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_never_acknowledges_a_nonterminal_accepted_result() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let server = thread::spawn(move || {
+            let (header, _) = read_test_frame(&mut server_socket);
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &panelink::ui_protocol::encode_layout_reply(&single_pane_layout(target, 6))
+                    .unwrap(),
+            );
+            let (header, payload) = read_test_frame(&mut server_socket);
+            let split = panelink::split_protocol::decode_split_request(&payload).unwrap();
+            let result = panelink::split_protocol::SplitResult {
+                key: split.key(),
+                outcome: Outcome::Accepted,
+                committed_layout_revision: 7,
+                existing_target: target,
+                new_target: Some(TargetRef {
+                    pane: target.pane + 1,
+                    session: target.session + 1,
+                    ..target
+                }),
+            };
+            let mut bytes = Vec::new();
+            panelink::split_protocol::encode_split_result(&result, &mut bytes).unwrap();
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &bytes,
+            );
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "operation_uncertain");
+        assert_eq!(
+            failure.operation,
+            Some(OperationKey {
+                generation: 7,
+                lease: 9,
+                sequence: 1,
+            })
+        );
+        assert_eq!(link.context.context().next_sequence(), 2);
+        assert!(link.context.context().uncertain().is_some());
+        server.join().unwrap();
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_lost_ack_stays_uncertain_and_cannot_send_a_second_launch() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let server = thread::spawn(move || {
+            let (header, _) = read_test_frame(&mut server_socket);
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &panelink::ui_protocol::encode_layout_reply(&single_pane_layout(target, 6))
+                    .unwrap(),
+            );
+            let (header, _) = read_test_frame(&mut server_socket);
+            assert_eq!(header.request_id(), 2);
+            // Closing after receiving the launch models a lost acknowledgment.
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "transport_failed");
+        assert_eq!(
+            failure.operation,
+            Some(OperationKey {
+                generation: 7,
+                lease: 9,
+                sequence: 1,
+            })
+        );
+        assert!(link.context.context().uncertain().is_some());
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "operation_uncertain");
+        assert_eq!(failure.operation, None);
+        assert_eq!(link.context.context().next_sequence(), 2);
+        server.join().unwrap();
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_reopened_uncertainty_settles_without_a_replacement_launch() {
+        let (directory, path, context) = test_context(true);
+        let key = context.context().uncertain().unwrap();
+        drop(context);
+        let context = ContextFile::open_existing(&path, deadline_after(CLIENT_DEADLINE)).unwrap();
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || {
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(
+                panelink::session_protocol::decode_session_request(&payload).unwrap(),
+                SessionRequest::OperationStatus { key }
+            );
+            let mut bytes = Vec::new();
+            panelink::response_protocol::encode_response_payload(
+                &panelink::response_protocol::Response {
+                    key,
+                    body: ResponseBody::Status(OperationStatus::Completed(Outcome::Applied)),
+                },
+                &mut bytes,
+            )
+            .unwrap();
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &bytes,
+            );
+            server_socket
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        // This is the same reconciliation performed when WorkspaceLink opens
+        // a durable context on a later CLI invocation.
+        link.settled_uncertain = link.settle_uncertain().unwrap();
+        assert_eq!(link.context.context().uncertain(), None);
+        let failure = link
+            .run_pane(
+                test_target(),
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "previous_operation_settled");
+        assert_eq!(failure.operation, None);
+        assert_eq!(link.context.context().next_sequence(), 2);
+        let mut server_socket = server.join().unwrap();
+        server_socket.set_nonblocking(true).unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            server_socket.read(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_oversized_argv_never_reserves_or_sends() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let failure = link
+            .run_pane(
+                test_target(),
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[OsString::from("x".repeat(MAX_CONTROL_ARGUMENT_BYTES))],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "request_invalid");
+        assert_eq!(failure.operation, None);
+        assert_eq!(link.context.context().next_sequence(), 1);
+        assert_eq!(link.context.context().uncertain(), None);
+        server_socket.set_nonblocking(true).unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            server_socket.read(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_ack_failure_preserves_the_validated_child_identity() {
+        let (directory, path, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let child = TargetRef {
+            pane: target.pane + 1,
+            session: target.session + 1,
+            ..target
+        };
+        let server = thread::spawn(move || {
+            let (header, _) = read_test_frame(&mut server_socket);
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &panelink::ui_protocol::encode_layout_reply(&single_pane_layout(target, 6))
+                    .unwrap(),
+            );
+            let (header, payload) = read_test_frame(&mut server_socket);
+            let split = panelink::split_protocol::decode_split_request(&payload).unwrap();
+            // Force local acknowledgment failure after reservation and send,
+            // without corrupting or weakening the server's valid launch reply.
+            fs::remove_file(path).unwrap();
+            let mut bytes = Vec::new();
+            panelink::split_protocol::encode_split_result(
+                &panelink::split_protocol::SplitResult {
+                    key: split.key(),
+                    outcome: Outcome::Applied,
+                    committed_layout_revision: 7,
+                    existing_target: target,
+                    new_target: Some(child),
+                },
+                &mut bytes,
+            )
+            .unwrap();
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &bytes,
+            );
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(
+            failure.operation,
+            Some(OperationKey {
+                generation: 7,
+                lease: 9,
+                sequence: 1
+            })
+        );
+        let observed = failure
+            .observed
+            .expect("validated reply survives local ack failure");
+        assert_eq!(observed.new_target, Some(child));
+        assert_eq!(observed.committed_layout_revision, 7);
+        assert!(link.context.context().uncertain().is_some());
+        server.join().unwrap();
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     fn receipt_peer(

@@ -19,7 +19,9 @@ use crate::protocol::Outcome;
 use crate::response_protocol::RejectionCode;
 use crate::screen_checkpoint::{self, CheckpointMetadata, ScreenBuffer};
 use crate::server::{EffectSink, ReadResult};
-use crate::terminal::{Key, PumpOutcome, ScreenSnapshot, TerminalSession, TerminalSize};
+use crate::terminal::{
+    Key, PumpOutcome, ScreenSnapshot, SnapshotCell, TerminalSession, TerminalSize,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -854,6 +856,28 @@ impl PtyEffects {
         })
     }
 
+    fn read_live_scrollback(
+        &self,
+        max_text_bytes: usize,
+        max_lines: u16,
+    ) -> Result<ReadResult, Outcome> {
+        if self.failed {
+            return Err(Outcome::Unknown);
+        }
+        if max_text_bytes > MAX_READ_TEXT_BYTES || !(1..=MAX_READ_LINES).contains(&max_lines) {
+            return Err(Outcome::Failed);
+        }
+
+        let (text, truncated) =
+            live_scrollback_text(self.session.history_screen(), max_text_bytes, max_lines)
+                .map_err(|_| Outcome::Failed)?;
+        Ok(ReadResult {
+            text,
+            revision: self.revision,
+            truncated,
+        })
+    }
+
     fn apply_input(&mut self, command: Command<'_>) -> Outcome {
         if self.validate(command).is_err() {
             return Outcome::Failed;
@@ -964,13 +988,10 @@ impl EffectSink for PtyEffects {
     fn validate(&self, command: Command<'_>) -> Result<(), RejectionCode> {
         match command {
             Command::Read {
-                source,
                 max_bytes,
                 max_lines,
+                ..
             } => {
-                if source == ReadSource::LiveScrollback {
-                    return Err(RejectionCode::Unsupported);
-                }
                 if max_bytes > MAX_READ_BYTES || !(1..=MAX_READ_LINES).contains(&max_lines) {
                     return Err(RejectionCode::InvalidRequest);
                 }
@@ -1011,7 +1032,7 @@ impl EffectSink for PtyEffects {
     ) -> Result<ReadResult, Outcome> {
         match source {
             ReadSource::Screen => self.read_screen(max_text_bytes, max_lines),
-            ReadSource::LiveScrollback => Err(Outcome::Failed),
+            ReadSource::LiveScrollback => self.read_live_scrollback(max_text_bytes, max_lines),
         }
     }
 
@@ -1342,30 +1363,140 @@ fn screen_text(snapshot: &ScreenSnapshot, max_text_bytes: usize, max_lines: u16)
                 }
                 continue;
             };
-            if cell.is_wide_continuation() {
-                continue;
-            }
-            let cell_text = cell.text();
-            if cell_text.is_empty() {
-                if !push_char(&mut text, ' ', max_text_bytes) {
-                    return (text, true);
-                }
-                continue;
-            }
-            for scalar in cell_text.chars() {
-                let safe = if scalar.is_control() {
-                    '\u{fffd}'
-                } else {
-                    scalar
-                };
-                if !push_char(&mut text, safe, max_text_bytes) {
-                    return (text, true);
-                }
+            if !push_cell_text(
+                &mut text,
+                cell.text(),
+                cell.is_wide_continuation(),
+                max_text_bytes,
+            ) {
+                return (text, true);
             }
         }
     }
 
     (text, truncated)
+}
+
+fn live_scrollback_text(
+    screen: &vt100::Screen,
+    max_text_bytes: usize,
+    max_lines: u16,
+) -> Result<(String, bool), vt100::HistoryError> {
+    let current = screen.history_cursor()?;
+    let (oldest_cursor, retained_rows, evicted) = history_tail_start(screen, current)?;
+    let line_limit = retained_rows.min(usize::from(max_lines));
+    let skip = retained_rows - line_limit;
+    let mut text = String::with_capacity(max_text_bytes);
+    let truncated = evicted || retained_rows > line_limit;
+
+    for (row_index, row) in screen
+        .history_after(oldest_cursor)?
+        .skip(skip)
+        .take(line_limit)
+        .enumerate()
+    {
+        let before_separator = text.len();
+        if row_index != 0 && !push_char(&mut text, '\n', max_text_bytes) {
+            return Ok((text, true));
+        }
+        let row_text_start = text.len();
+        for column in 0..row.width {
+            let Some(cell) = row.cell(column) else {
+                if !push_char(&mut text, ' ', max_text_bytes) {
+                    if text.len() == row_text_start {
+                        text.truncate(before_separator);
+                    }
+                    return Ok((text, true));
+                }
+                continue;
+            };
+            let mut sanitized = SnapshotCell::default();
+            sanitized.set_from(cell);
+            if !push_cell_text(
+                &mut text,
+                sanitized.text(),
+                sanitized.is_wide_continuation(),
+                max_text_bytes,
+            ) {
+                if text.len() == row_text_start {
+                    text.truncate(before_separator);
+                }
+                return Ok((text, true));
+            }
+        }
+    }
+
+    Ok((text, truncated))
+}
+
+/// Locate the oldest retained row without assuming that resize preserved the
+/// engine's configured ring capacity. `history_after` is monotonic in cursor
+/// ordinal: cursors before the retained tail report `Gap`, and the first valid
+/// cursor plus one addresses the oldest row. The binary search takes at most
+/// 64 iterations for a `u64` ordinal, plus its initial and final endpoint checks.
+fn history_tail_start(
+    screen: &vt100::Screen,
+    current: vt100::HistoryCursor,
+) -> Result<(vt100::HistoryCursor, usize, bool), vt100::HistoryError> {
+    let first = vt100::HistoryCursor {
+        epoch: current.epoch,
+        ordinal: 0,
+    };
+    match screen.history_after(first) {
+        Ok(rows) => {
+            let retained_rows = rows.len();
+            let retained_u64 = u64::try_from(retained_rows).unwrap_or(u64::MAX);
+            Ok((first, retained_rows, current.ordinal > retained_u64))
+        }
+        Err(vt100::HistoryError::Gap) => {
+            let mut invalid = 0_u64;
+            let mut valid = current.ordinal;
+            while valid - invalid > 1 {
+                let probe = invalid + (valid - invalid) / 2;
+                let cursor = vt100::HistoryCursor {
+                    ordinal: probe,
+                    ..current
+                };
+                match screen.history_after(cursor) {
+                    Ok(_) => valid = probe,
+                    Err(vt100::HistoryError::Gap) => invalid = probe,
+                    Err(error) => return Err(error),
+                }
+            }
+            let oldest_cursor = vt100::HistoryCursor {
+                ordinal: valid,
+                ..current
+            };
+            let retained_rows = screen.history_after(oldest_cursor)?.len();
+            Ok((oldest_cursor, retained_rows, true))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn push_cell_text(
+    text: &mut String,
+    cell_text: &str,
+    wide_continuation: bool,
+    budget: usize,
+) -> bool {
+    if wide_continuation {
+        return true;
+    }
+    if cell_text.is_empty() {
+        return push_char(text, ' ', budget);
+    }
+    for scalar in cell_text.chars() {
+        let safe = if scalar.is_control() {
+            '\u{fffd}'
+        } else {
+            scalar
+        };
+        if !push_char(text, safe, budget) {
+            return false;
+        }
+    }
+    true
 }
 
 fn push_char(text: &mut String, scalar: char, budget: usize) -> bool {
@@ -1492,6 +1623,115 @@ mod tests {
             assert!(Instant::now() < deadline, "fixture output did not arrive");
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    fn physical_lines(text: &str) -> Vec<&str> {
+        text.split('\n').map(str::trim_end).collect()
+    }
+
+    #[test]
+    fn live_scrollback_returns_a_chronological_physical_row_tail_in_alt_mode() {
+        let mut parser = vt100::Parser::new(2, 12, 8);
+        assert_eq!(
+            live_scrollback_text(parser.screen(), 128, 8).unwrap(),
+            (String::new(), false)
+        );
+
+        parser.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let (normal_text, truncated) = live_scrollback_text(parser.screen(), 128, 2).unwrap();
+        assert_eq!(physical_lines(&normal_text), ["two", "three"]);
+        assert_eq!(normal_text.matches('\n').count(), 1);
+        assert!(truncated, "the older retained physical row was omitted");
+
+        parser.process(b"\x1b[?1049hALT-ONLY\r\nALT-ONLY\r\nALT-ONLY");
+        let (alt_text, alt_truncated) = live_scrollback_text(parser.screen(), 128, 2).unwrap();
+        assert_eq!(alt_text, normal_text);
+        assert_eq!(alt_truncated, truncated);
+        assert!(!alt_text.contains("ALT-ONLY"));
+
+        let mut wrapped = vt100::Parser::new(2, 5, 8);
+        wrapped.process(b"abcdefghijklmnopqrst");
+        let (wrapped_text, _) = live_scrollback_text(wrapped.screen(), 128, 8).unwrap();
+        assert_eq!(physical_lines(&wrapped_text), ["abcde", "fghij"]);
+        assert_eq!(wrapped_text.matches('\n').count(), 1);
+
+        let mut resized = vt100::Parser::new(2, 5, 8);
+        resized.process(b"old\r\nnew\r\nlast");
+        resized.screen_mut().set_size(2, 8);
+        let (old_width_text, _) = live_scrollback_text(resized.screen(), 128, 1).unwrap();
+        assert_eq!(old_width_text, "old  ");
+    }
+
+    #[test]
+    fn live_scrollback_sanitizes_history_cells_and_preserves_unicode_spacing() {
+        let mut parser = vt100::Parser::new(2, 24, 8);
+        parser.process(
+            "e\u{301}漢B\u{202e}C\u{2028}\u{1b}]52;c;PRIVATE\u{7}\r\nnext\r\nlast".as_bytes(),
+        );
+        let (text, _) = live_scrollback_text(parser.screen(), 256, 8).unwrap();
+        let first_row = text.lines().next().expect("first retained history row");
+        assert!(first_row.starts_with("e\u{301}漢B\u{fffd}C\u{fffd}"));
+        assert!(
+            first_row.ends_with(' '),
+            "physical-row trailing spaces are retained"
+        );
+        assert!(!text.contains('\u{202e}'));
+        assert!(!text.contains('\u{2028}'));
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains("PRIVATE"));
+        assert!(text.is_char_boundary(text.len()));
+
+        let mut control_text = String::new();
+        assert!(push_cell_text(
+            &mut control_text,
+            "A\u{1b}e\u{301}\u{1}",
+            false,
+            32
+        ));
+        assert_eq!(control_text, "A\u{fffd}e\u{301}\u{fffd}");
+    }
+
+    #[test]
+    fn live_scrollback_marks_byte_limits_eviction_and_reset_truthfully() {
+        let mut parser = vt100::Parser::new(2, 5, 8);
+        assert_eq!(
+            live_scrollback_text(parser.screen(), 0, 8).unwrap(),
+            (String::new(), false),
+            "empty history is empty and untruncated even at a zero byte budget"
+        );
+
+        parser.process("漢\r\nnext\r\nlast".as_bytes());
+        let (too_short_for_scalar, scalar_truncated) =
+            live_scrollback_text(parser.screen(), 2, 8).unwrap();
+        assert!(too_short_for_scalar.is_empty());
+        assert!(
+            scalar_truncated,
+            "a three-byte scalar is not split at a two-byte budget"
+        );
+
+        let (bounded, truncated) = live_scrollback_text(parser.screen(), 5, 8).unwrap();
+        assert_eq!(bounded, "漢  ");
+        assert!(truncated);
+        assert!(bounded.is_char_boundary(bounded.len()));
+        let (zero_bytes, zero_truncated) = live_scrollback_text(parser.screen(), 0, 8).unwrap();
+        assert!(zero_bytes.is_empty());
+        assert!(
+            zero_truncated,
+            "retained rows omitted by a zero byte budget are truncated"
+        );
+
+        let mut evicted = vt100::Parser::new(2, 10, 2);
+        evicted.process(b"a\r\nb\r\nc\r\nd\r\ne");
+        let (tail, was_truncated) = live_scrollback_text(evicted.screen(), 64, 8).unwrap();
+        assert_eq!(physical_lines(&tail), ["b", "c"]);
+        assert!(was_truncated, "rows evicted during this epoch are reported");
+
+        evicted.process(b"\x1bc");
+        assert_eq!(
+            live_scrollback_text(evicted.screen(), 64, 8).unwrap(),
+            (String::new(), false),
+            "RIS begins an empty epoch without claiming prior rows"
+        );
     }
 
     #[test]

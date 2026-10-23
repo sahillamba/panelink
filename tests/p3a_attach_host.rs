@@ -566,8 +566,16 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
 
     // Typing now goes to the newly focused pane 2 only.
     client.type_slowly(b"echo ACK$((40+2))\r");
+    let input_deadline = Instant::now() + STEP;
     wait_control("ACK42 in pane 2", || {
         let text = read_pane(&fixture, "two.ctx", &second);
+        assert!(
+            text.contains("ACK42") || Instant::now() < input_deadline,
+            "pane-2 input timeout; pane2={text:?}; pane1={:?}; client={:?}; exit={:?}",
+            read_pane(&fixture, "one.ctx", &first),
+            client.screen(),
+            client.attach_exit()
+        );
         (count(&text, "ACK42") >= 1).then_some(text)
     });
     assert!(!read_pane(&fixture, "one.ctx", &first).contains("ACK42"));

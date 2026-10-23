@@ -2,7 +2,23 @@
 
 Status: proposed design for confirmed feature R-15, 2026-10-17, with a bounded implementation checkpoint dated 2026-10-18 below. The user confirmed that agents need a simple CLI/API to discover, read, and deliberately control managed pane/process sessions. The broader interface and permission policy remain proposed; cross-workspace scope and access defaults remain open. Autonomous delegation/scheduling is not implied.
 
-## Current implementation checkpoint — 2026-10-18
+## Current Phase3 continuation — 2026-10-23
+
+The historical one-child checkpoint below is superseded for implemented scope
+by [ROADMAP.md](../ROADMAP.md) and [agent CLI](progress/P3-AGENT-CLI.md): four
+panes, bounded reads/live scrollback, explicit managed pane run, finite watches,
+workspace layout gap recovery, managed-child cwd/executable observations and
+same-lease observer renewal exist. The current owner-discovery slice exposes
+only server-issued generation:lease IDs, owner revision and raw server-clock
+deadline, with no inferred UI/agent/provider role or caller name. It uses the
+existing SessionInfo and authority checks; see
+[accepted owner contract](progress/P3-OWNER-IDENTITY-TASK.md).
+The [runtime reconciliation](progress/P3-RUNTIME-CONTRACT-AUDIT.md) maps the
+implemented scope to evidence; older pending statements below are historical
+unless explicitly retained there. The wider proposed API, hierarchy, human takeover policy, provider identity,
+per-agent isolation and full Phase3 acceptance remain separate/open.
+
+## Historical implementation checkpoint — 2026-10-18
 
 The integrated macOS/aarch64 prototype now has bounded wire and typed response/session codecs, same-UID peer authentication before handshake processing, a private-directory socket listener that refuses an existing endpoint, bounded connection workers and one `StateOwner`, durable caller contexts/input ownership, startup ledger admission, and durable lifecycle-metadata Intent before PTY spawn. The operation ledger itself is volatile. Its explicitly selected one-child PTY survives logical detach and same-generation reconnect; socketpair tests cover a lost input acknowledgment without client replay. The prototype does not implement the full R-15 API described here: workspace/layout operations, indefinite subscriptions, multiple sessions, persisted scrollback, provider identity/recovery, and per-agent isolation remain out of scope. The bounded prototype now provides negotiated metadata watches and atomic screen/owner/exit/cursor reconciliation; see [live-watch tasks](progress/P3-LIVE-WATCH-TASKS.md). See [integration evidence](progress/INTEGRATION.md) for the current verification record and [the specification checkpoint](SPEC.md#current-implementation-checkpoint--2026-10-18) for lifecycle, initialization, and acceptance limits.
 
@@ -161,17 +177,29 @@ Waits are server-bounded and have an explicit condition, starting revision/curso
 
 ## Typed schema and Phase 3 integration gates
 
-The v1.0 wire envelope and a bounded subset of typed control/response/session schemas are implemented. The current runtime uses that subset with an authenticated local socket and state owner; it does not implement the full API below. The 65,536-byte Request/Response and 2,097,152-byte Snapshot payload limits remain distinct from the 24-byte frame header. The runtime negotiates Events only with valid authoritative metadata tracking; it delivers fixed metadata Event frames within bounded watch requests. The following are remaining design boundaries and future feature contracts, not claims that the prototype implements snapshots, watches, or events:
+The v1.0 wire envelope and a bounded subset of typed control/response/session schemas are implemented. The current runtime uses that subset with an authenticated local socket and state owner; it does not implement the full API below. The 65,536-byte Request/Response and 2,097,152-byte Snapshot payload limits remain distinct from the 24-byte frame header. The runtime negotiates Events only with valid authoritative metadata tracking; it delivers fixed metadata Event frames within bounded watch requests. Finite metadata watches and pane/workspace reconciliation are implemented; indefinite subscriptions and large Snapshot-frame delivery remain deferred. The following separate implemented limits from future feature contracts:
 
 1. **Large launch environments (initial API policy selected):** the existing explicit host-probe input cap is 4,096 variables and 1 MiB of environment bytes; a typed Request payload is capped at 65,536 bytes, including its operation fields (the wire header adds 24 bytes). Sending a full 1 MiB environment in one Request cannot fit. Parent selects option(a) for the first server API prototype: the entire encoded launch request must fit65,536bytes, including all identity, argv and environment metadata; otherwise reject before admission with a clear capacity error. Do not truncate or inherit daemon values. The standalone probe retains its separate1MiB capture cap. Bounded staging is deferred until actual needs justify its extra lifetime/auth/partial-failure state. Future reviewed alternatives remain: (a) lower the API launch-environment cap to the encoded request budget and fail clearly; (b) extend the request/operation cap and re-review frame, ledger, queue, and effect-copy memory bounds; or (c) stage a bounded, volatile launch context across multiple <=65,536-byte operations, then reference it from the launch request. Option (c) can preserve the current probe cap without enlarging one Request, but adds context lifetime, cleanup, authorization, and partial-stage failure rules. Do not split or silently truncate environment values. The existing 1 MiB cap describes the probe capture bound, not a completed server API requirement.
-2. **Snapshot frame versus queue:** a maximum Snapshot is 2,097,152 payload bytes plus the 24-byte header, or 2,097,176 encoded bytes. The selected future output budget is 2,162,736 encoded bytes per writer and 17,301,888 across eight writers (one maximum Snapshot plus one maximum control reply per writer). The prototype has bounded connection/effect queues, but does not implement this snapshot/event output queue or snapshot/event delivery. Queue accounting must reserve noncoalescible replies and close/resync a slow subscriber rather than silently dropping an input acknowledgment before those features are adopted.
+2. **Snapshot frame versus queue:** a maximum Snapshot is 2,097,152 payload bytes plus the 24-byte header, or 2,097,176 encoded bytes. The selected future output budget is 2,162,736 encoded bytes per writer and 17,301,888 across eight writers (one maximum Snapshot plus one maximum control reply per writer). The prototype has bounded connection/effect queues, but does not implement this large-Snapshot output queue. Finite metadata Event delivery uses its separately bounded watch batches. Queue accounting must reserve noncoalescible replies and close/resync a slow subscriber rather than silently dropping an input acknowledgment before those features are adopted.
 3. **Unsolicited event framing (envelope implemented):** Event is numeric kind 7, request ID 0 only, with a 65,536-byte payload cap. The runtime now explicitly negotiates metadata Events for bounded watches; older private v1.0 decoders reject this kind. The initial metadata payload and bounded cursor journal are now specified and implemented in [P3-NOTIFICATIONS-TASKS.md](progress/P3-NOTIFICATIONS-TASKS.md); the bounded runtime now binds reconciliation to its cursor and delivers finite event batches; indefinite subscriptions and large snapshot queues remain unimplemented. Do not overload Response or treat request ID 0 alone as a typed event payload contract.
 4. **Input payload overhead:** the full typed target, operation key, action kind, and payload share the existing 65,536-byte Request/ledger boundary. Define the maximum user text/paste bytes after accounting for typed metadata. Validate before copying or queueing; atomic paste and submit are all-or-nothing at admission.
 5. **Current screen versus persisted data:** Snapshot is a live screen view. It is not scrollback, checkpoint, or agent conversation. Keep the terminal emulator's safe screen representation separate from raw PTY bytes and from the later storage schema.
 
-The bounded codecs, same-user socket boundary, state owner, durable storage, and one-child PTY reconnect proof are implemented and described in the current checkpoint above. The remaining proposals include the full discovery/read/watch/launch/control API, snapshots/events and resync, durable workspace/layout mutations, provider-specific commands, and their corresponding acceptance work. Add provider-specific agent commands only after M1 identity evidence. Add split-tree and other layout mutation only as the workspace/tab/pane model settles in M2; initial launch can use an advertised location slot without layout editing.
+The current bounded runtime includes four-pane discovery/read/control, finite
+pane/workspace watches and reconciliation, explicit managed `pane run`, layout
+mutation and same-generation reconnect. See the
+[runtime contract reconciliation](progress/P3-RUNTIME-CONTRACT-AUDIT.md) for
+implemented symbols, tests and scope. The older direct-launch/two-session plan
+is historical proposal evidence; direct schema6 launch requests remain disabled,
+while pane run uses schema7 split with embedded schema6 launch. No arbitrary
+launch slot or empty-workspace auto-launch is implied.
 
-## Proposed roadmap and migration tasks
+The broader API, indefinite subscriptions, large Snapshot queues, authenticated
+provider roles, per-agent isolation and cross-workspace hierarchy remain separate
+future scope. Full Phase3 host acceptance is still open. These proposals do not
+reopen already delivered bounded runtime contracts or prove broader recovery.
+
+## Historical proposed roadmap and migration tasks
 
 | Order | Task | Dependency and migration note |
 | --- | --- | --- |

@@ -5,6 +5,17 @@ scenario pass. Expanded actual CLI pathname acceptance is separately pending;
 Phase2 clipboard/zsh retest remains open. This is a one-child experimental
 server, not provider readiness/recovery or a completed multiplexer.
 
+## Acceptance update — 2026-10-23
+
+The expanded pathname CLI acceptance described as pending in this historical
+checkpoint was explicitly run by the parent on the current tree:1/1 pass in
+1.20s using the existing ignored `p3_pathname` fixture with socket access
+enabled. See [pathname evidence](P3-PATHNAME.md) and
+[current runtime reconciliation](P3-RUNTIME-CONTRACT-RESULT.md). This closes
+that bounded CLI watch/reconcile gap; it does not close broader Phase3 or
+human four-pane host acceptance. All original counts and limitations below
+remain evidence of their dated checkpoint.
+
 ## Delivered path
 
 Three GPT-6-Luna xhigh owners implemented disjoint codec, authoritative owner,

@@ -655,6 +655,7 @@ fn print_help() {
     println!("                        the other pane fills the window; closing the last");
     println!("                        pane ends the workspace");
     println!("  panelink pane list|read|claim|release|send|keys|interrupt|close ...");
+    println!("  panelink pane run [--pane N] [--direction left|right|up|down] [--cwd DIR] [--as NAME] [--json] -- COMMAND [ARG ...]");
     println!("  panelink wait <n> --text STRING|--quiet SECS|--exit|--change --timeout SECS");
     println!("  panelink events [--pane N] [--timeout SECS] --json");
     println!();

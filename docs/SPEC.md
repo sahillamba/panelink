@@ -1,6 +1,6 @@
 # Panelink: working implementation specification
 
-Revision: 0.19, 2026-10-23. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
+Revision: 0.24, 2026-10-23. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
 
 ## Purpose and requirement authority
 
@@ -26,8 +26,8 @@ Confirmed requirements come from the user's answers recorded in [discovery](PANE
 | R-12 | Develop privately before public release. | Source history and branches live in the private [sahillamba/panelink](https://github.com/sahillamba/panelink) repository. |
 | R-13 | Support review by the user's firm security audit team and similar workplaces. | Map the actual review criteria to documented architecture, dependencies, data flows, release evidence, and feature controls. Approval remains the reviewing organization's decision. |
 | R-14 | Avoid clearing and repainting the whole screen for ordinary local changes. | Unchanged frames emit no output; local cell/cursor changes update only the affected cells/cursor. First render, resize and invalidated display state may rebuild the frame. |
-| R-15 | Provide an easy scriptable API for agents to read and control other managed panes, agents and processes. | Stable targets and machine-readable CLI/local API support discovery, bounded sanitized output reads and explicit input/control operations under a documented access/ownership contract. The full API remains unimplemented; a bounded one-child prototype exposes only a subset. Detailed proposed contracts and acceptance scenarios are in [AGENT-CONTROL.md](AGENT-CONTROL.md). |
-| R-16 | Offer Split Left, Right, Up and Down from a pane's right-click menu. | Each action splits relative to the clicked pane and opens one fresh independent terminal session on the chosen side, preserving the original process/session. Use deterministic geometry, stable identity, minimum-size handling and a matching agent/CLI operation. The [layout design](PANE-LAYOUT.md) and newly prioritized [Phase3A](progress/P3A-RIGHT-CLICK-SPLITS.md) track implementation and host validation, which remain pending. |
+| R-15 | Provide an easy scriptable API for agents to read and control other managed panes, agents and processes. | Stable targets and machine-readable CLI/local API support discovery, bounded sanitized output reads and explicit input/control operations under a documented access/ownership contract. The full proposed API remains unimplemented; the bounded four-pane CLI/runtime exposes discovery, reads, deliberate input, managed pane run and finite watches/reconciliation. See the [runtime scope reconciliation](progress/P3-RUNTIME-CONTRACT-AUDIT.md). Detailed proposed contracts and acceptance scenarios are in [AGENT-CONTROL.md](AGENT-CONTROL.md). |
+| R-16 | Offer Split Left, Right, Up and Down from a pane's right-click menu. | Each action splits relative to the clicked pane and opens one fresh independent terminal session on the chosen side, preserving the original process/session. Use deterministic geometry, stable identity, minimum-size handling and a matching agent/CLI operation. The [layout design](PANE-LAYOUT.md) and [Phase3A](progress/P3A-RIGHT-CLICK-SPLITS.md) track the delivered scoped implementation; the current four-pane prototype has automated private-PTY acceptance, while distinct human four-pane host acceptance remains open. |
 
 | R-17 | Automatically expose newly started background agents/subagents from OpenCode or compatible OpenCode wrappers in a tab named Subagents, so the user can optionally switch there and observe them (requested 2026-10-21). | Exact provider parent/child identity routes each supported worker to the correct workspace; observation never duplicates its execution. See [Phase SA plan](progress/SUBAGENTS-PLAN.md) for proposed read-only UX, version/wrapper feasibility gates and acceptance. This does not settle the remaining tab/sidebar hierarchy. |
 
@@ -41,7 +41,7 @@ Tabnine is optional CLI compatibility pending an installed supported version and
 
 ## Proposed runtime and terminal ownership
 
-One executable exposes client, server, and command modes. The server owns PTYs and child lifecycles. Host closure affects the client connection; its intended effect on processes is an open lifetime choice. The recommended behavior is a persistent server with explicit stop operations. A bounded foreground one-child prototype now demonstrates server-owned PTY state during socketpair detach/reconnect; it does not settle the product server/client lifetime contract.
+One executable exposes client, server, and command modes. The server owns PTYs and child lifecycles. Host closure affects the client connection; its intended effect on processes is an open lifetime choice. The recommended behavior is a persistent server with explicit stop operations. The bounded four-pane runtime owns PTYs in the persistent server and supports explicit stop. Automated client death/reconnect and bounded server-death replacement evidence are recorded in the [closure audit](progress/P3-CLOSURE-AUDIT.md); broader product lifetime choices and host acceptance remain distinct.
 
 Use one terminal engine per managed PTY, with authoritative state in the server. A pane is a view of a stable managed session, not the identity of its child process. Moving a pane or reconnecting must not relaunch the command.
 
@@ -55,6 +55,35 @@ Represent these concepts explicitly:
 - Client attachment: server generation, event cursor, selected workspace, viewports, input/resize ownership.
 
 PID reuse cannot establish session identity. Never execute a restored title or terminal output as a command.
+
+The [killed input-client acceptance](progress/P3-INFLIGHT-CLIENT-RESULT.md)
+uses a real CLI process and a test-owned proxy holding a matching terminal
+Applied response. It verifies durable same-key status/resync and one handled
+token after SIGKILL before caller acknowledgment. This is evidence for the
+existing nonreplay contract at the post-completion/pre-ack boundary; it does
+not establish death-before-admission or owner-pending behavior.
+
+### Server-death boundary — bounded prototype contract
+
+Client detach/death and server death are separate events. Catchable shutdown
+runs the existing bounded driver teardown: signal owned process groups, poll,
+escalate and close owned resources. An uncatchable server kill runs no Rust
+cleanup or final history/layout flush. The kernel closes the server's PTY
+masters, but this does not guarantee termination of HUP-ignoring, background
+or detached descendants. No supervisor, crash-loss bound or orphan-free crash
+contract is established. Persisted PIDs alone are never cleanup authority.
+
+A later explicit default-open invocation serializes endpoint inspection,
+stale-socket removal and startup under its lifecycle lock. It requires the
+existing endpoint classification and server-storage lock checks, and starts a
+new durable generation. Direct `serve` refuses an existing endpoint; it does
+not perform default-open recovery. Old full targets and lease contexts confer
+no authority in the replacement generation. Choosing a fresh shell is an
+explicit new launch, never replay of stored input or an uncertain prior launch.
+Retained history/layout remains distinct from replacement live process state.
+The [server-death acceptance contract](progress/P3-SERVER-DEATH-TASK.md)
+scopes its child-exit assertion to a cooperative fixture shell, without
+promoting it to arbitrary descendant cleanup or reboot recovery.
 
 ### Child-process launch environment
 
@@ -153,7 +182,7 @@ scoped reads are available with healthy metadata; older grants cannot widen
 on resume. Scoped cursors bind generation, session and sequence. The running
 socket/CLI server still owns one target; no multi-session endpoint is enabled.
 
-This private-PTY proof is a separately authorized experiment while Phase 2 manual host gates remain pending. The earlier pathname CLI fixture is operator-confirmed passing outside the sandbox; expanded live-watch CLI pathname and host-terminal acceptance remain separate checks. The prototype now negotiates Events when authoritative metadata tracking is available and implements bounded metadata watches plus atomic screen/metadata/cursor reconciliation. The integrated runtime still lacks layout changes, multiple sessions, live scrollback and provider identity/recovery. A same-UID boundary does not isolate one local process or agent from another.
+This private-PTY proof is a separately authorized experiment while Phase 2 manual host gates remain pending. The earlier pathname CLI fixture is operator-confirmed passing outside the sandbox; expanded live-watch CLI pathname and host-terminal acceptance remain separate checks. The prototype now negotiates Events when authoritative metadata tracking is available and implements bounded metadata watches plus atomic screen/metadata/cursor reconciliation. That historical one-child checkpoint preceded the four-pane, workspace-event, metadata and live-scrollback slices; provider identity/recovery remains unproved. A same-UID boundary does not isolate one local process or agent from another.
 
 For this prototype, `Applied` on input means all request bytes were accepted through the PTY write interface; for interrupt it means the signal call succeeded. Neither means the child application accepted the input or completed a task. The input adapter's normal drain window is 100 ms, but a PTY hard-error cleanup can add up to two seconds, so this is not a hard 100 ms whole-call deadline. The bounded journal records only operation key, managed session ID, and lifecycle state; it does not persist launch arguments, environment values, or process identity.
 
@@ -325,6 +354,75 @@ The first protocol draft should define these operations and their failure behavi
 Represent terminal byte data losslessly; do not assume all output chunks are complete UTF-8 strings. Keep presentation updates bounded. A lagging client can lose superseded rendering deltas only if the protocol requires resync; emulator input must remain complete. Avoid unbounded queues and repeated full-history transfers.
 
 For the first release, recommend one interactive attachment owner for a workspace/session, with explicit takeover rather than two clients racing input and resize. A read-only observer can be a later capability. Ownership granularity remains a protocol decision.
+
+### Input owner discovery — bounded prototype contract, 2026-10-23
+
+`pane list` exposes each pane's server-observed owner as
+`input_owner_info:{kind,id,is_caller,revision,expires_at_server_secs}`. A vacant
+owner uses kind none with null ID/deadline and false is_caller. A client owner
+uses kind client and opaque ID generation:lease; is_caller compares the
+current-generation pane link's reusable lease. Revision and expiry come from
+the same exact-target SessionInfo observation. The deadline is on the server
+runtime's monotonic seconds clock, not wall time or a client countdown.
+Pending input can retain an owner past that deadline; readers must not infer
+permission to write or bypass server owner-revision CAS from this metadata.
+
+The older `input_owner` string remains none/you for those cases; another holder
+is now client:<lease>, replacing the unsupported agent-role label. Text output
+uses neutral client:<generation>:<lease> plus revision and raw server deadline.
+No caller name, process identity, UI/human role or provider identity is inferred
+or persisted. Same-macOS-user clients remain mutually trusted, not isolated
+agents. Pane ownership/metadata samples are point-in-time and not an atomic
+cross-pane snapshot. No wire/capability/storage/authority changes are added.
+See [accepted implementation contract](progress/P3-OWNER-IDENTITY-TASK.md).
+
+### Managed pane run — bounded prototype contract, 2026-10-23
+
+`panelink pane run [--pane N] [--direction left|right|up|down] [--cwd DIR]
+[--as NAME] [--json] -- COMMAND [ARG ...]` creates a fresh managed process via
+the existing schema7 split/embedded schema6 launch worker. The prototype
+defaults are spatial pane1 and right; this does not settle workspace hierarchy.
+The default workspace must already run. Existing INPUT negotiation and
+full-target grant rules apply; a separate input-owner claim is not required
+and no input is delivered to the anchor. Four-pane/geometry limits remain.
+
+The invoking CLI supplies raw executable/argv, cwd and filtered environment.
+Relative cwd resolves against that invocation, and unqualified executables
+resolve through its effective PATH. Panelink options end at a mandatory --;
+all later tokens are literal child argv. No implicit shell evaluation, daemon
+environment fallback, argv/env persistence or new wire/storage format. Bounds
+are 80 CLI tokens, 65,536 aggregate argv bytes, 1,024 variables/48KiB filtered
+environment and 65,536 bytes for the entire encoded request. Overflow refuses
+before key reservation. Returned operation and full target identify creation;
+Applied does not claim readiness or task success. An error after key
+reservation still returns the operation identity and an explicit uncertain
+outcome; null target/zero layout revision mean unobserved, not absence.
+Partial/Unknown may retain
+a child and must not be presented as safe-to-repeat failure.
+
+Resolve the anchor once, pin its full identity and expected layout revision,
+and validate both at server admission. Reserve the durable context key before
+send; exact server deduplication stays in force. The CLI never automatically
+resends or creates a replacement key after uncertain acknowledgment. A later
+invocation may reconcile uncertainty but stops before any new launch in that
+invocation. Contexts and journal persist identity/status metadata only.
+See [the accepted implementation contract](progress/P3-PANE-RUN-TASK.md).
+
+### Bounded live normal-history reads — 2026-10-23
+
+The existing `LiveScrollback` read source now returns the newest retained
+normal-buffer physical rows in chronological order, at most the caller's
+`max_lines` and bounded UTF-8 text budget. It excludes visible screen rows and
+alternate-screen content without changing the active screen or viewport.
+Wrapped rows remain separate; blank/wide cells and safe combining text follow
+the screen-read normalization policy. No terminal control sequences are returned.
+The engine retains at most 1,024 normal-history rows. The existing response
+`truncated` flag covers omitted rows/text and observed eviction within the
+current epoch. Reset clears history and begins a new epoch; the flag makes
+no cross-reset continuity claim. No extra retained queue, wire schema,
+capability, dependency or disk-read fallback is added. Existing same-UID,
+full-target, lease and read-capability checks remain authoritative.
+See [implementation and verification](progress/P3-LIVE-SCROLLBACK-RESULT.md).
 
 ## Proposed interaction contract
 

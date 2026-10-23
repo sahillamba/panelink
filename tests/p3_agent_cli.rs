@@ -903,3 +903,72 @@ fn pane_metadata_tracks_managed_child_cd_and_exec_without_arguments_or_environme
     );
     fixture.wait_for_server_stop();
 }
+
+#[test]
+fn pane_read_scrollback_returns_live_history_separately_from_screen() {
+    let mut fixture = Fixture::new();
+    let startup = fixture.start();
+    assert_eq!(field(&startup, "state"), Some("running"), "{startup}");
+    Fixture::assert_ok(
+        &fixture.agent(&[
+            "pane", "send", "1",
+            "i=0; while [ $i -lt 200 ]; do printf 'HIST%03d\\n' $i; i=$((i+1)); done; printf 'SCREEN-END\\n'",
+            "--enter", "--claim", "--json",
+        ]),
+        "produce live scrollback",
+    );
+    // Wait for output completion, rather than the echoed command: the final
+    // output contains the final numbered row, which is absent from the command.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let screen = Fixture::assert_ok(
+            &fixture.agent(&["pane", "read", "1", "--json"]),
+            "read current screen",
+        );
+        if screen.contains("HIST199") && screen.contains("SCREEN-END") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "output did not finish: {screen}");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let history = Fixture::assert_ok(
+        &fixture.agent(&[
+            "pane",
+            "read",
+            "1",
+            "--scrollback",
+            "--lines",
+            "4",
+            "--json",
+        ]),
+        "read live scrollback tail",
+    );
+    assert_eq!(
+        field(&history, "source"),
+        Some("live_scrollback"),
+        "{history}"
+    );
+    assert_eq!(field(&history, "truncated"), Some("true"), "{history}");
+    assert!(history.contains("HIST"), "{history}");
+    assert!(
+        !history.contains("SCREEN-END"),
+        "visible rows leaked into history: {history}"
+    );
+    assert!(!history.contains("\\u001b"), "{history}");
+    assert!(history.matches("\\n").count() == 3, "{history}");
+    let one = Fixture::assert_ok(
+        &fixture.agent(&[
+            "pane",
+            "read",
+            "1",
+            "--scrollback",
+            "--lines",
+            "1",
+            "--json",
+        ]),
+        "read one live history row",
+    );
+    assert_eq!(field(&one, "source"), Some("live_scrollback"), "{one}");
+    assert!(one.contains("HIST"), "{one}");
+    assert!(one.matches("\\n").count() == 0, "{one}");
+}

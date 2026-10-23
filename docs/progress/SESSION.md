@@ -1,5 +1,241 @@
 # Implementation session checkpoint — 2026-10-17
 
+## User-authorized Phase3 checkpoint — 2026-10-23 (read first)
+
+The user explicitly requested committing the accumulated verified work. This
+checkpoint includes live scrollback, managed pane run, neutral owner discovery,
+client/server-death acceptance, runtime contract reconciliation, and killed
+input-client recovery acceptance plus their documentation/evidence. The latest
+full serial result is1089passed/0failed/15ignored with all seven supporting
+checks passing; details and prior failures remain below. This is a checkpoint,
+not fullPhase3 completion. No push is authorized. Git history records its ID.
+Next remains bounded diagnosis of the recorded test intermittency. Preserve
+the separate original source checkout and unresolved host/provider/reboot gates.
+
+## Phase3 killed input-client acceptance delivered — 2026-10-23 (read first)
+
+A real `control submit` Child is SIGKILLed once a test-owned authenticated proxy
+holds its matching terminal Completed(Applied) response without forwarding it.
+The exact key remains uncertain on disk after death; read-only status preserves
+it, resync clears it, and repeated resync leaves generation/lease/next sequence
+unchanged. The same controlled shell/full target reports one handled token,
+confirmed by a private append record and ordered CHECK. Explicit SIGTERM reaps
+the owned serve Child and removes its socket. See [task](P3-INFLIGHT-CLIENT-TASK.md),
+[audit](P3-INFLIGHT-BARRIER-AUDIT.md), [review](P3-INFLIGHT-CLIENT-REVIEW.md)
+and [result](P3-INFLIGHT-CLIENT-RESULT.md).
+
+Complete locked/offline serial Cargo: **1089 passed/0 failed/15 ignored** in
+157.19s (library712/binary142/integration235 across53 targets). Seven supporting
+checks pass:decoder39/Python77/fmt/strict all-target Clippy/build/fingerprints/
+final docs272/0. Parent final targeted1/1 in0.84s. Worker startup denied pathname
+bind before scenario; parent fixture runs exposed newline-sensitive output
+assertion and wrong default-workspace stop usage for directly launched serve.
+These were corrected; failures and logs remain in the result note, not counted
+as passing runs. No Cargo deadline expired. Prior ACK42/history-writer
+intermittency remains unresolved despite this full pass.
+
+Only new tests/p3_inflight_client.rs changes executable test behavior this
+slice. All156 pre-existing source/test/script hashes match the turn-start
+snapshot; production policy, wire/storage, dependencies and prior dirty work
+are unchanged. This covers post-server-completion/pre-client-ack death, not
+before admission or while owner-pending, and implies no provider/reboot or
+arbitrary descendant cleanup guarantee. FullPhase3 remains open.
+
+User renewed Luna cost routing for suitable tasks. Native Luna High implemented
+the exclusive test and independently audited/reviewed it; Luna Medium drafted
+evidence. Parent specified, corrected/reviewed and verified. No cost telemetry;
+all worker ownership released; native collaboration launcher; ms-rust absent.
+Next investigate the recorded history-writer startup admission contention and
+attach-host ACK42 intermittency with bounded tasks, without changing permitted
+nonblocking semantics or asserting an unproved production fix. Keep human
+four-pane acceptance distinct; no manual chores handed to the user.
+Preserve accumulated uncommitted work on codex/p3-scrollback-integration based
+on9f3d8a0. No commit/push; original source checkout untouched. Source graph is
+ephemeral; refresh before code exploration as needed.
+
+## Phase3 runtime reconciliation and pathname acceptance delivered — 2026-10-23 (read first)
+
+Parent and two independent native Luna High source/document audits found the
+broad event/watch/launch/layout implementation checkbox stale. Accepted finite
+pane/workspace watches, reconciliation/gap recovery, four-pane lifecycle and
+managed pane run are delivered. ROADMAP now records that exact scoped closure;
+fullPhase3 remains open. Direct schema6 launch, indefinite subscriptions and
+large Snapshot queues are outside these accepted bounded contracts, not missing
+implementation inferred from an older proposal. Spec revision0.24 and
+agent-control notes distinguish current behavior from historical one-child
+text. See [audit](P3-RUNTIME-CONTRACT-AUDIT.md),
+[review](P3-RUNTIME-SCOPE-REVIEW.md) and [result](P3-RUNTIME-CONTRACT-RESULT.md).
+
+The audit identified an old pending CLI acceptance we could run directly:
+`cargo test --locked --offline --test p3_pathname pathname_server_cli_context_reuse
+-- --exact --ignored --test-threads=1` passed1/1 in1.20s with sockets enabled.
+This covers expanded reconcile/watch/context-preservation/same-child reconnect
+and socket lifecycle assertions. The standard ignore attribute remains; this
+explicit result is separate from the prior1088pass/15ignored full run below,
+not an additional combined-suite count. No source/test/script edits or full
+suite rerun this slice. Source hashes match the turn-start snapshot. Final
+document/link check:268 files/0 findings; diff whitespace check passes.
+
+Next specify deterministic client death during an in-flight input request under
+the existing admission/status/nonreplay contract. Identify an observable barrier
+and exact fixture-owned process before implementation; no timing-inferred
+outcome or input replay. Human four-pane acceptance remains a distinct gate;
+provider/reboot and arbitrary descendant cleanup remain separate. No manual
+chores are assigned to the user. Prior test intermittency remains unresolved.
+All worker ownership released; native collaboration launcher; ms-rust absent.
+Preserve accumulated uncommitted work on codex/p3-scrollback-integration based
+on9f3d8a0. No commit/push; original source checkout untouched.
+
+## Phase3 bounded server-death acceptance delivered — 2026-10-23 (read first)
+
+Strengthened the existing default-open SIGKILL test: a cooperative HUP-trapped
+zsh exits, the socket remains, explicit reopen replaces it with a new durable
+generation/full target, and the old control context is refused without changing
+its bytes. An external once-only append record stays unchanged through fresh
+input/detach; the replacement live pane has no old marker and produces its new
+marker once. Explicit replacement stop cleans up. Intentional and fixture
+failure-cleanup signals validate PID, owner and kernel start time. See
+[contract](P3-SERVER-DEATH-TASK.md), [audit](P3-SERVER-DEATH-AUDIT.md),
+[review](P3-SERVER-DEATH-REVIEW.md) and [result](P3-SERVER-DEATH-RESULT.md).
+
+Complete serial locked/offline Cargo: **1088 passed/0 failed/15 ignored** in
+153.17s (library712/binary142/integration234 across52 targets). Seven supporting
+checks pass, decoder39/Python77/final docs265/0. Formatting and strict all-target
+Clippy pass after review corrections. Parent targeted runs1/1 in3.81s and final
+reviewed1/1 in3.73s. Worker restricted startup failed before new assertions;
+its server log was removed by fixture cleanup, so the root cause is unproved.
+Record it separately; no skipped acceptance counted as pass. Prior ACK42 and
+history-writer intermittency remains unresolved, despite this full pass.
+No Cargo deadline expired.
+
+Only tests/p3a_default_open.rs changed executable test behavior this slice.
+Prior application and pane-run/scrollback/client-lifetime source hashes match.
+No production crash policy, dependency, wire/storage format or supervisor was
+added. Canonical spec revision0.23 records that SIGKILL runs no graceful
+cleanup or final flush; arbitrary descendants may survive. Cooperative-shell
+exit does not establish orphan-free crash, in-flight-request recovery, provider
+or physical reboot acceptance. Full Phase3 remains open.
+
+Native Luna High workers completed exclusive implementation and independent
+read-only audit/review. Parent specified, corrected/reviewed and verified; all
+ownership is released. Native collaboration was the launcher; ms-rust remains
+absent. Next reconcile the remaining broad Phase3 event/watch/launch/layout
+checklist with current contracts/evidence and identify a concrete unmet runtime
+requirement before new work. Human four-pane acceptance stays distinct; no
+manual chores are handed to the user. Source graph is ephemeral; refresh as
+needed before code exploration. Preserve all accumulated uncommitted work on
+codex/p3-scrollback-integration based on9f3d8a0; no phase-completion commit or
+push. Original source checkout untouched.
+
+## Phase3 owner discovery and client lifetime delivered — 2026-10-23 (read first)
+
+`pane list` exposes neutral server-issued generation:lease identity, caller
+comparison, owner revision and raw server-clock deadline from the same sample.
+No inferred agent/provider roles or authorization widening. A real private
+outer-PTY regression SIGKILLs the exact live attach process, reattaches to the
+same full target/child PID/output, checks one-shot input, then explicitly stops
+the server and verifies child cleanup. Orderly terminal restoration is asserted
+only for the second client. See [contract](P3-OWNER-IDENTITY-TASK.md),
+[owner review](P3-OWNER-IDENTITY-REVIEW.md),
+[lifetime review](P3-CLIENT-LIFETIME-REVIEW.md) and
+[final evidence](P3-OWNER-LIFETIME-RESULT.md).
+
+Complete serial locked/offline Cargo: **1088 passed/0 failed/15 ignored** in
+156.25s (library712/binary142/integration234 across52 targets). Seven supporting
+checks pass, decoder39/Python77/final docs261/0; formatting and strict all-target
+Clippy pass after the final diagnostic assertion. Prior source/test hashes for
+scrollback are unchanged. Earlier two full runs stopped at the existing
+attach-host ACK42 timeout; a third stopped at existing history-writer startup
+admission Full. Isolated and final complete reruns pass; no production fix or
+resolved intermittency is claimed. Fixture corrections and raw-log locations
+are preserved in the result note. No Cargo deadline expired.
+
+Native Luna workers completed exclusive implementation/acceptance/review tasks;
+parent reviewed, corrected fixtures and verified the combined tree. All file
+ownership is released; no worker must survive to resume. Native collaboration
+was the launcher; ms-rust remains absent. Source graph is fast/nonpersistent
+and ephemeral; verify freshness before the next code exploration.
+
+Next: specify/audit server-death cleanup and stale endpoint/context behavior,
+then add bounded automated acceptance under its documented policy. Use the
+[closure audit](P3-CLOSURE-AUDIT.md); preserve distinct human four-pane, in-flight
+request, provider identity and reboot gates. Full Phase3 remains open. All
+scrollback/pane-run/owner/lifetime work remains uncommitted on
+`codex/p3-scrollback-integration` based on9f3d8a0; no phase-completion commit or
+push. The original source checkout is untouched. Preserve this dirty tree.
+
+## Managed pane run completed — 2026-10-23 (read first)
+
+Delivered and parent-reviewed: `panelink pane run [--pane N] [--direction
+left|right|up|down] [--cwd DIR] [--as NAME] [--json] -- COMMAND [ARG ...]`.
+Raw Unix argv and invoking-client cwd/env feed the existing serialized schema7
+split/embedded launch worker; no shell input substitution, new server route,
+wire/storage format, dependency, manifest or vendor change. Exact anchor and
+layout are pinned; INPUT negotiation, four-pane/geometry bounds and the existing
+launch journal/deduplication remain authoritative. Applied means launched,
+not ready/completed. No automatic resend or replacement key after uncertainty.
+
+The independent review's two output findings were fixed: post-reservation
+errors retain the key, and ack failure retains validated new target/revision
+with unknown outcome. The error stores only compact validated metadata.
+Parent added lost-ack/context-reopen/no-send bounds and deterministic local
+ack-failure tests; strengthened real CLI geometry/context/failure/cleanup
+assertions. See [accepted contract](P3-PANE-RUN-TASK.md),
+[independent review](P3-PANE-RUN-REVIEW.md) and
+[final evidence](P3-PANE-RUN-RESULT.md).
+
+Final frozen-source full serial Cargo: **1084passed/0failed/15ignored** in148.24s
+(library712/binary140/integration232 across51 targets). Seven non-Cargo checks
+pass separately: decoder39/Python77/fingerprints/fmt/strict all-target Clippy/
+build/docs256/0. Focused transport8/8 and parser/JSON9/9 pass; real CLI3/3 is
+included in the full run. Pre-fix full runs1082 and1084 passed separately;
+intermediate Clippy6/7 at large error size and temporary API/test compile
+mismatches are preserved in the result note, not relabeled as passing runs.
+No full Cargo deadline expired.
+
+Three native GPT-6-Luna High workers had exclusive files; parent owned design,
+review/integration and final verification. All ownership is released; no live
+worker is needed to resume. Source graph refreshed fast/nonpersistent for
+worktree7060 after freeze; it is ephemeral, so verify freshness next time.
+The requested ms-rust skill remains absent. Previous scrollback source/tests
+are hash-unchanged. The main source checkout is untouched.
+
+Next: review/specify richer owner identity in discovery under existing
+lease/target authority. Full Phase3, wider host/lifetime gates, provider identity
+and physical reboot remain open. Changes remain uncommitted on
+`codex/p3-scrollback-integration` based on9f3d8a0; no phase-completion commit
+or push is claimed. Preserve all current work on continuation.
+
+## Live-scrollback integration — 2026-10-23 (read first)
+
+The integration branch `codex/p3-scrollback-integration` starts at `9f3d8a0`
+and includes the separate live normal-scrollback patch from
+`/Users/sahillamba/panelink`. That checkout's uncommitted work is preserved.
+Managed-child metadata, observer renewal and workspace notifications remain
+included. Parent reviewed the patch and a bounded GPT-6-Luna High reviewer
+reported no actionable findings; native collaboration was the launcher. All
+worker ownership is released. No dependencies, vendor source, manifest,
+wire schema, or persisted format changed. The ms-rust skill remains absent.
+
+Focused adapter tests pass 6/6; combined agent CLI/detach/workspace-event
+integration tests pass 11/11. The seven non-Cargo verifier checks pass.
+Final full serial Cargo:1064passed/0failed/15ignored in122.73s (library712,
+binary123, integration229 across50 targets). Docs253/0 after final evidence
+updates. The first full run was1063pass/1fail/15ignored: the unchanged final
+shutdown fixture missed its second HUP marker. Its isolated rerun and final
+full rerun pass without changes; cause remains unestablished, no fix claimed.
+See [the integration evidence](P3-LIVE-SCROLLBACK-RESULT.md) and
+[review](P3-LIVE-SCROLLBACK-REVIEW.md). Earlier source-checkout attach timing
+failure and 180-second Cargo timeout remain historical failed/incomplete runs.
+
+Next: specify/review managed `pane run`,
+using explicit cwd/argv/client environment, the existing launch worker and
+deduplication, and returned full targets. Do not implement this as text sent to
+an existing shell. Richer owner identity and host/lifetime gates remain open.
+Full Phase 3, provider identity and physical reboot acceptance remain open.
+The integration remains uncommitted; Phase3 is unfinished and no phase-completion
+commit is claimed. No push is authorized.
+
 ## Phase 3 managed-child metadata and observer renewal — 2026-10-23 (read first)
 
 Completed and parent-reviewed: schema12/capability16 private current managed-child

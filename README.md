@@ -66,9 +66,32 @@ Agents and scripts can use `panelink pane list --json` to discover panes and
 does not switch the stream to a replacement at that index. See the
 [agent CLI contract](docs/progress/P3-AGENT-CLI.md) for commands and limits.
 
+`pane list --json` also reports `input_owner_info`: the server-issued owner
+ID, whether it is your caller context, its revision and server-clock expiry.
+Other holders are labeled clients; names and agent roles are not inferred.
+Ownership changes still require the server's normal claim/release checks.
+
+To start a command in a new pane of an already running workspace:
+
+```sh
+panelink pane run --pane 1 --direction down --json -- /bin/zsh -f
+```
+
+The command uses your invoking shell's environment and working directory; add
+`--cwd DIR` before `--` to choose another directory. Everything after `--` is
+literal child argv. The result gives the new full pane/session target, rather
+than a permanent pane number. A successful launch does not mean the command
+has finished. The workspace still supports at most four panes.
+
 Workspace state lives in `~/Library/Application Support/Panelink` (private,
 mode 0700). Set `PANELINK_HOME` to use a different directory. The background
 server's output goes to `server.log` there.
+
+After an abrupt server kill, a later `panelink` invocation can recover its stale
+socket and start a new workspace generation. This starts fresh processes;
+saved history is separate. An uncatchable kill cannot run graceful cleanup or
+flush pending captures, and arbitrary descendants may survive it. Use
+`panelink stop` for orderly workspace shutdown.
 
 The server now saves its latest sanitized visible normal and alternate screen
 checkpoints per pane in the private `server/history/` directory (under
@@ -77,7 +100,10 @@ state or a complete transcript. An initial `serve` response reports whether
 capture started; writes run in a bounded background worker, so saved content
 can lag the live screen. A later write or shutdown failure appears in
 `server.log` while shells continue running. Normal scrollback rows are saved within a 1,024-row/8 MiB
-per-session limit. `panelink history list` lists saved target IDs;
+per-session limit. For a running pane, `panelink pane read 1 --scrollback --lines 100 --json`
+reads the live normal-buffer history tail, excluding visible screen rows.
+It reports truncation within the current emulator epoch and does not read
+saved files. `panelink history list` lists saved target IDs;
 `panelink history show TARGET` reads retained rows and latest normal/alternate
 screens; `panelink history search TARGET TEXT` searches that saved content,
 labeled by source. `TARGET` is the five-number ID printed by `history list`.

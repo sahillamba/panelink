@@ -1,6 +1,8 @@
 //! Agent-facing pane operations over the default workspace's existing control
 //! client. This module does not open a server, own a PTY, or persist input.
 
+mod pane_run;
+
 use crate::default_open::{self, StateRoot};
 use crate::p3_cli::{AgentReconciliation, WorkspaceLink};
 use panelink::close_protocol::{CloseOutcome, StopOutcome};
@@ -60,6 +62,61 @@ struct Options<'a> {
     caller: &'a str,
 }
 
+#[derive(Clone, Copy)]
+struct PaneOwner {
+    info: SessionInfo,
+    caller_lease: u64,
+}
+
+struct InputOwnerInfo {
+    kind: &'static str,
+    id: Option<String>,
+    is_caller: bool,
+    revision: u64,
+    expires_at_server_secs: Option<u64>,
+}
+
+impl PaneOwner {
+    fn legacy_label(self) -> String {
+        match self.info.owner_lease {
+            0 => "none".to_owned(),
+            lease if lease == self.caller_lease => "you".to_owned(),
+            lease => format!("client:{lease}"),
+        }
+    }
+
+    fn text_label(self) -> String {
+        match self.info.owner_lease {
+            0 => "none".to_owned(),
+            lease if lease == self.caller_lease => "you".to_owned(),
+            lease => format!("client:{}:{lease}", self.info.target.generation),
+        }
+    }
+
+    fn structured(self) -> InputOwnerInfo {
+        if self.info.owner_lease == 0 {
+            InputOwnerInfo {
+                kind: "none",
+                id: None,
+                is_caller: false,
+                revision: self.info.owner_revision,
+                expires_at_server_secs: None,
+            }
+        } else {
+            InputOwnerInfo {
+                kind: "client",
+                id: Some(format!(
+                    "{}:{}",
+                    self.info.target.generation, self.info.owner_lease
+                )),
+                is_caller: self.info.owner_lease == self.caller_lease,
+                revision: self.info.owner_revision,
+                expires_at_server_secs: Some(self.info.owner_expires_secs),
+            }
+        }
+    }
+}
+
 struct Workspace {
     state: StateRoot,
     caller_dir: PathBuf,
@@ -95,6 +152,12 @@ thread_local! {
 }
 
 fn run_inner(args: Vec<OsString>) -> Result<i32, CliError> {
+    JSON_ERRORS.with(|enabled| enabled.set(false));
+    if args.first().is_some_and(|word| word == "pane")
+        && args.get(1).is_some_and(|word| word == "run")
+    {
+        return pane_run::run(args);
+    }
     if args.is_empty() || args.len() > 80 {
         return Err(CliError::usage());
     }
@@ -347,7 +410,10 @@ fn pane_list(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
         if info.target != pane.target {
             return Err(stale_target());
         }
-        owners.push(owner_label(info, link.lease()));
+        owners.push(PaneOwner {
+            info,
+            caller_lease: link.lease(),
+        });
         let mut metadata = workspace.pane_metadata_link(pane.target)?;
         observations.push(
             metadata
@@ -370,7 +436,7 @@ fn pane_list(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
             if index != 0 {
                 json.push(',');
             }
-            push_pane_json(&mut json, index + 1, pane, owner, &observations[index]);
+            push_pane_json(&mut json, index + 1, pane, *owner, &observations[index]);
         }
         json.push_str("]}");
         write_line(&json);
@@ -382,7 +448,7 @@ fn pane_list(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
         );
         for (index, (pane, owner)) in entries.iter().zip(owners.iter()).enumerate() {
             println!(
-                "{}  {}  {}x{} at col {}, row {}  target {}  input owner {}  cwd {}  command {}",
+                "{}  {}  {}x{} at col {}, row {}  target {}  input owner {} (revision {}, expires at server {})  cwd {}  command {}",
                 index + 1,
                 if pane.live { "alive" } else { "exited" },
                 pane.rect.rows,
@@ -390,7 +456,13 @@ fn pane_list(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
                 pane.rect.x,
                 pane.rect.y,
                 target_string(pane.target),
-                owner,
+                owner.text_label(),
+                owner.info.owner_revision,
+                if owner.info.owner_lease == 0 {
+                    "none".to_owned()
+                } else {
+                    owner.info.owner_expires_secs.to_string()
+                },
                 observations[index]
                     .cwd
                     .value
@@ -411,7 +483,7 @@ fn push_pane_json(
     json: &mut String,
     index: usize,
     pane: &PaneEntry,
-    owner: &str,
+    owner: PaneOwner,
     observation: &ProcessObservation,
 ) {
     let _ = write!(json, "{{\"index\":{index},\"target\":");
@@ -429,7 +501,31 @@ fn push_pane_json(
     json.push_str(",\"exit_status\":");
     push_exit_json(json, pane.exit);
     json.push_str(",\"input_owner\":");
-    push_json_string(json, owner);
+    push_json_string(json, &owner.legacy_label());
+    json.push_str(",\"input_owner_info\":");
+    push_owner_info_json(json, owner.structured());
+    json.push('}');
+}
+
+fn push_owner_info_json(json: &mut String, owner: InputOwnerInfo) {
+    json.push_str("{\"kind\":");
+    push_json_string(json, owner.kind);
+    json.push_str(",\"id\":");
+    if let Some(id) = owner.id {
+        push_json_string(json, &id);
+    } else {
+        json.push_str("null");
+    }
+    let _ = write!(
+        json,
+        ",\"is_caller\":{},\"revision\":{},\"expires_at_server_secs\":",
+        owner.is_caller, owner.revision
+    );
+    if let Some(deadline) = owner.expires_at_server_secs {
+        let _ = write!(json, "{deadline}");
+    } else {
+        json.push_str("null");
+    }
     json.push('}');
 }
 
@@ -465,14 +561,6 @@ fn push_exit_json(json: &mut String, exit: Option<panelink::multi_runtime::PaneE
             let _ = write!(json, "{{\"signal\":{signal}}}");
         }
         None => json.push_str("null"),
-    }
-}
-
-fn owner_label(info: SessionInfo, caller_lease: u64) -> String {
-    match info.owner_lease {
-        0 => "none".to_owned(),
-        lease if lease == caller_lease => "you".to_owned(),
-        lease => format!("agent:{lease}"),
     }
 }
 
@@ -2027,7 +2115,7 @@ fn write_line(value: &str) {
 }
 
 fn print_help() {
-    println!("Agent pane commands:\n  panelink pane list [--as NAME] [--json]\n  panelink pane read N [--lines K] [--scrollback] [--json]\n  panelink pane claim|release N [--json]\n  panelink pane send N TEXT [--enter] [--claim] [--json]\n  panelink pane keys N Enter|Tab|Esc|C-c|Up|Down|Left|Right|Backspace... [--json]\n  panelink pane interrupt|close N [--json]\n  panelink wait N (--text STRING [--regex] | --quiet SECS | --exit | --change) --timeout SECS [--json]\n  panelink events [--pane N] [--timeout SECS] --json");
+    println!("Agent pane commands:\n  panelink pane list [--as NAME] [--json]\n  panelink pane run [--pane N] [--direction left|right|up|down] [--cwd DIR] [--as NAME] [--json] -- COMMAND [ARG ...]\n  panelink pane read N [--lines K] [--scrollback] [--json]\n  panelink pane claim|release N [--json]\n  panelink pane send N TEXT [--enter] [--claim] [--json]\n  panelink pane keys N Enter|Tab|Esc|C-c|Up|Down|Left|Right|Backspace... [--json]\n  panelink pane interrupt|close N [--json]\n  panelink wait N (--text STRING [--regex] | --quiet SECS | --exit | --change) --timeout SECS [--json]\n  panelink events [--pane N] [--timeout SECS] --json");
 }
 
 #[cfg(test)]
@@ -2067,5 +2155,66 @@ mod parser_tests {
             regex_matches("*bad", "text").unwrap_err().code,
             "invalid_regex"
         );
+    }
+}
+
+#[cfg(test)]
+mod owner_identity_tests {
+    use super::*;
+
+    fn observation(generation: u64, owner_lease: u64) -> PaneOwner {
+        PaneOwner {
+            info: SessionInfo {
+                target: TargetRef {
+                    generation,
+                    workspace: 3,
+                    pane: 4,
+                    session: 5,
+                    occupant_revision: 6,
+                },
+                owner_revision: 7,
+                owner_lease,
+                owner_expires_secs: if owner_lease == 0 { 0 } else { 99 },
+                child_exited: false,
+            },
+            caller_lease: 11,
+        }
+    }
+
+    #[test]
+    fn vacant_owner_keeps_revision_without_identity_or_deadline() {
+        let owner = observation(12, 0);
+        assert_eq!(owner.legacy_label(), "none");
+        assert_eq!(owner.text_label(), "none");
+        let mut json = String::new();
+        push_owner_info_json(&mut json, owner.structured());
+        assert_eq!(
+            json,
+            "{\"kind\":\"none\",\"id\":null,\"is_caller\":false,\"revision\":7,\"expires_at_server_secs\":null}"
+        );
+    }
+
+    #[test]
+    fn caller_and_other_client_labels_are_neutral_and_generation_scoped() {
+        let own = observation(12, 11);
+        assert_eq!(own.legacy_label(), "you");
+        assert_eq!(own.text_label(), "you");
+        let own_info = own.structured();
+        assert_eq!(own_info.kind, "client");
+        assert_eq!(own_info.id.as_deref(), Some("12:11"));
+        assert!(own_info.is_caller);
+        assert_eq!(own_info.revision, 7);
+        assert_eq!(own_info.expires_at_server_secs, Some(99));
+
+        let other = observation(12, 11 + 1);
+        assert_eq!(other.legacy_label(), "client:12");
+        assert_eq!(other.text_label(), "client:12:12");
+        assert!(!other.structured().is_caller);
+        assert_eq!(other.structured().id.as_deref(), Some("12:12"));
+
+        let reused_lease = observation(13, 12);
+        assert_eq!(reused_lease.legacy_label(), "client:12");
+        assert_eq!(reused_lease.text_label(), "client:13:12");
+        assert_eq!(reused_lease.structured().id.as_deref(), Some("13:12"));
     }
 }

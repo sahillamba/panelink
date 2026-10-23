@@ -4,6 +4,27 @@ Date: 2026-10-18. Scope: `tests/p3_pathname.rs` and this evidence note. The
 fixture is one explicitly ignored macOS/aarch64 acceptance test. It does not
 establish pathname listener acceptance because the local sandbox denied bind.
 
+## Current bounded CLI acceptance — 2026-10-23
+
+Parent explicitly ran the existing ignored fixture against the current
+integrated working tree with pathname sockets enabled:
+
+```sh
+cargo test --locked --offline --test p3_pathname pathname_server_cli_context_reuse -- --exact --ignored --test-threads=1
+```
+
+**1 passed/0 failed/0 ignored**,1filtered out,1.20s. This now includes the
+expanded reconciliation and finite-watch assertions: matched target/owner/
+screen/cursor; context bytes unchanged by observation; changed metadata event
+page after input; explicit timed_out status for an empty zero-wait poll;
+same generation/lease/child after detach/reconnect; singleton refusal and
+socket cleanup. No source/test edits or ignore-attribute removal were needed.
+The standard suite still reports this fixture ignored; the explicit result
+is separate evidence, not an extra pass added to its1088/15 count. Raw output:
+`/private/tmp/panelink-p3-contract-pathname.log`. Human Apple Terminal,
+provider/reboot and other ignored cases are unaffected. Historical failures
+and earlier operator confirmation below remain preserved.
+
 ## Fixture contract
 
 `pathname_server_cli_context_reuse` creates a unique fixture beneath

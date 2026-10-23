@@ -1,6 +1,6 @@
 # P3 agent-facing pane CLI
 
-Status: implementation slice in progress; not a Phase 3 completion claim.
+Status: bounded CLI, metadata/events/renewal and live-scrollback slices delivered; not a Phase 3 completion claim.
 
 This bounded CLI adds `panelink pane ...`, `panelink wait ...`, and
 `panelink events ...` over the running default workspace's existing authenticated
@@ -12,6 +12,7 @@ then use these commands from another pane or process.
 
 ```text
 panelink pane list [--as NAME] [--json]
+panelink pane run [--pane N] [--direction left|right|up|down] [--cwd DIR] [--as NAME] [--json] -- COMMAND [ARG ...]
 panelink pane read N [--lines K] [--scrollback] [--json]
 panelink pane claim N | release N [--json]
 panelink pane send N TEXT [--enter] [--claim] [--json]
@@ -40,11 +41,16 @@ never written to launch records, saved layout or diagnostic output. Capability16
 and schema12 use a dedicated per-target read-only context; older grants are not
 widened. See [the metadata contract](P3-PANE-METADATA-TASK.md).
 
-`pane read` returns bounded sanitized live screen text. `--scrollback` names the
-existing live-scrollback read source; the current PTY adapter rejects that
-source as unavailable, and the CLI reports the limitation rather than
-substituting saved history. Saved checkpoints and live terminal state remain
-separate.
+`pane read` returns bounded sanitized live screen text. `--scrollback` returns
+only the newest retained normal-buffer history rows, in chronological order,
+with at most `--lines K` physical rows. It excludes visible screen rows and
+alternate-screen output, even while the alternate screen is active. Wrapped
+rows remain separate. The response is bounded by the existing 65,536-byte wire
+budget (at most 65,446 text bytes); `truncated` reports omitted rows/text or
+normal-history eviction in the current emulator epoch. Reset begins a new
+epoch; this flag cannot certify continuity across earlier resets. Saved
+history/checkpoints are separate sources and are never substituted.
+See [live scrollback evidence](P3-LIVE-SCROLLBACK-RESULT.md).
 
 The server currently accepts printable text through `pane send`; `--enter`
 uses one atomic submit operation. The typed-key command supports the listed
@@ -57,10 +63,21 @@ An agent must claim before input, unless `pane send --claim` is used. Claim,
 release, input and interrupt use the existing compare-and-set owner revision
 and operation key protocol. If a UI or another owner wins that race, the CLI
 reports ownership loss/refusal; it does not retry input under a new key.
-Uncertain input is reconciled by status and is never retransmitted. Existing
-session-info only distinguishes an unowned pane from a client lease; `agent`
-does not identify a particular other automation client. Same-macOS-user access
-is not per-agent isolation.
+Uncertain input is reconciled by status and is never retransmitted.
+`pane list --json` adds `input_owner_info` with kind none/client, a null or
+server-issued generation:lease `id`, `is_caller`, `revision`, and nullable
+`expires_at_server_secs`. Both this object and the string `input_owner` come
+from the same SessionInfo read. None/you strings stay unchanged; other holders
+now use client:<lease> instead of the unsupported agent-role label. Text uses
+client:<generation>:<lease> and prints revision/server deadline.
+
+The expiry is a raw deadline on the server runtime's monotonic seconds clock,
+not wall time or a local countdown. Pending input can retain an owner past
+that deadline; only the server's CAS/ownership checks authorize a write.
+These are per-pane observations, not one atomic workspace snapshot. Caller
+names (`--as`) and process/provider roles are not authenticated owner identity.
+Same-macOS-user access is not per-agent isolation. See
+[owner discovery contract](P3-OWNER-IDENTITY-TASK.md).
 
 `wait` uses atomic screen/metadata reconciliation plus finite event watches.
 Text is matched against the sanitized visible screen, regex matching is a
@@ -79,8 +96,8 @@ intermediate layouts. Existing pane screen/owner/exit watches continue
 independently; their expired cursors require reconciliation before continuing.
 Servers and existing grants without capability 8 use bounded layout polling.
 `--pane N` pins the initial complete target, even after another pane occupies
-that index. Events never replay terminal effects. `pane run` remains a separate
-managed-launch extension. See [the workspace contract](P3-LAYOUT-EVENTS-TASK.md).
+that index. Events never replay terminal effects. The managed `pane run` extension is
+described below. See [the workspace contract](P3-LAYOUT-EVENTS-TASK.md).
 
 The dedicated workspace observer proactively resumes the same lease after
 25 minutes, before its 30-minute expiry, using only Read and workspace access.
@@ -89,6 +106,43 @@ retires. Transport-only renewal retries are bounded to three attempts, 15 second
 apart; expired/unknown grants, generation changes and malformed responses end
 the stream. Renewal never creates a replacement lease or replays input. See
 [renewal evidence](P3-OBSERVER-RENEWAL-RESULT.md).
+
+## Managed process launch
+
+`pane run` creates one new managed process in a split beside the selected
+spatial pane (default pane1, right). It needs a running workspace, an existing
+input-capable grant and enough room within the four-pane limit. It uses the
+invoking CLI's environment/PATH and cwd, with `PANELINK_*` replaced by the
+server. Relative `--cwd` paths resolve against the invocation's cwd. Executable
+and argv are passed directly; use an explicit shell with `-c` for evaluation.
+
+All Panelink options precede the mandatory `--`. Tokens after it, including
+`--json` and `--as`, belong to the child. Raw Unix argv/path bytes are preserved.
+The existing 80-token bound, 65,536-byte aggregate argv bound, filtered
+1,024-variable/48KiB environment cap and full 65,536-byte encoded request cap
+are enforced with refusal rather than truncation. No new wire/schema or server
+launch route is added. No input ownership is claimed and client focus stays local.
+
+The JSON result includes `action:"pane_run"`, `outcome`, the full `operation`
+key, `existing_target`, new `target` (or null), and `layout_revision`. Exit0
+means Applied launch, not process readiness or task success. Failed, Partial
+and Unknown exit1; a Partial/Unknown response can still name a retained child.
+Post-reservation errors retain these fields and the exact operation key;
+`target:null`/`layout_revision:0` mean unobserved, not proof of no child.
+If a valid reply arrived before local acknowledgment storage failed, its new
+target/revision remain in the uncertain result.
+Pre-reservation and syntax errors use the existing generic CLI error shape.
+Results do not echo argv, cwd or environment. The returned target remains the
+creation identity even if the process exits before the CLI prints its result.
+
+A dedicated private per-anchor run context serializes invocations and reserves
+the operation key before send. This client sends once; the server retains
+its exact-request deduplication. A lost/malformed acknowledgment leaves the key
+uncertain. The next invocation may settle that key by status but stops without
+issuing a substitute launch. Inspect current panes before making a fresh
+explicit request. No argv/environment is stored in the context or journal.
+See [accepted task](P3-PANE-RUN-TASK.md) and
+[completed review and verification](P3-PANE-RUN-RESULT.md).
 
 ## Parent fixes — 2026-10-22
 
@@ -112,8 +166,8 @@ the stream. Renewal never creates a replacement lease or replays input. See
 The isolated real-server integration scenario currently passes: one test covers
 private `PANELINK_HOME`, list/read, no-claim refusal, CAS claim/send/release,
 text match and timeout, quiet/change/exit waits, close-event observation, JSON
-fields, and a stale index after the workspace terminates. This does not verify
-same-generation replacement layout races, real UI human takeover, or scrollback
-because those capabilities are not exposed by current adjacent contracts.
+fields, and a stale index after the workspace terminates. This original fixture does not verify
+same-generation replacement layout races or real UI human takeover. Live-scrollback acceptance is recorded separately in
+[P3-LIVE-SCROLLBACK-RESULT.md](P3-LIVE-SCROLLBACK-RESULT.md).
 Full requested build/Clippy/fmt/document checks remain separate gates; see the
 worker status/result for actual outputs and counts.

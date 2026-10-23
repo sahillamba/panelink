@@ -1,19 +1,21 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: Phase 3 managed-child metadata, observer renewal and workspace layout notifications delivered and parent-verified; broader Phase 3 remains open. Phase 2 scoped feasibility and Phase 6 personal alpha remain DONE with documented limits.
+current-phase: Phase3 killed input-client post-completion/pre-ack acceptance delivered and parent-verified; fullPhase3 remains open.
 last-updated: 2026-10-23
-checkpoint: User-authorized scoped checkpoint on codex/p3-integration-layout-events includes prior workspace events plus managed-child metadata/renewal; use Git history for commit identity. Prior main/stash integration at 70f589c and bd84625; no unmerged entries or push.
-last-verified: Final serial Cargo1059pass/0fail/15ignored in152.92s (lib709/binary123/integration227 across50 targets); all7 non-Cargo verifier checks pass separately, decoder39/Python77/docs251/0. Initial parallel verifier7/8 had2 library timing/observation failures; preserved in P3-PANE-METADATA-RESULT.md, not relabeled. No final Cargo timeout.
+checkpoint: User-authorized verified Phase3 checkpoint: scrollback, pane run, owner discovery and client/server/killed-input-client acceptance on codex/p3-scrollback-integration based on9f3d8a0; see Git history for checkpoint ID. FullPhase3 remains open; no push. Original source checkout preserved.
+last-verified: Complete locked/offline serial Cargo1089pass/0fail/15ignored in157.19s (lib712/binary142/integration235 across53 targets); all seven supporting checks pass, decoder39/Python77/final docs272/0. Parent targeted killed-input-client1/1 in0.84s; worker startup denial and parent fixture failures preserved separately. See P3-INFLIGHT-CLIENT-RESULT.md. Prior ACK42/history-writer intermittency remains unresolved.
+prior-evidence-scrollback: Final serial Cargo1064pass/0fail/15ignored in122.73s (lib712/binary123/integration229 across50 targets); seven non-Cargo checks passed separately, decoder39/Python77/docs253/0. First full serial run1063pass/1fail/15ignored at shutdown HUP marker; isolated and full rerun pass without code changes. See P3-LIVE-SCROLLBACK-RESULT.md.
+prior-evidence-metadata: Final serial Cargo1059pass/0fail/15ignored in152.92s (lib709/binary123/integration227 across50 targets); all7 non-Cargo verifier checks pass separately, decoder39/Python77/docs251/0. Initial parallel verifier7/8 had2 library timing/observation failures; preserved in P3-PANE-METADATA-RESULT.md, not relabeled. No final Cargo timeout.
 prior-evidence-upstream: verifier 8/8; full suite 993 passed/0 failed/15 ignored after origin/main merge (095bf45) and four-pane, agent CLI, L16 relaunch, L17 attach, L18 exit status, before stash integration; not combined-tree verification.
 prior-evidence-stash: live-split slice library 641 passed/4 ignored, focused integration 73 passed/0 failed, verifier 7/8 with binary 115 passed/1 failed at pathname-bind EPERM; not combined-tree verification. See docs/progress/ASYNC-LAUNCH-RESULT.md.
-next-action: Review/integrate the separate live-scrollback checkout work without claiming it is present here; managed pane run, owner identity and wider host/lifetime contracts remain open. Phase 4 identity and Phase 5 hierarchy/selection/reboot stay open.
+next-action: Diagnose the recorded history-writer startup admission contention and attach-host ACK42 intermittency with bounded Luna tasks, preserving permitted nonblocking admission/input semantics and actual diagnostics. Stabilize only demonstrated fixture defects; no product fix claim without evidence. Keep human four-pane/provider/reboot and owner-pending/death-before-admission limits separate.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
 blocked-on: Phase 4 live identity is blocked upstream (OpenCode 1.19.0 publishes no keyboard session-switch signal). Phase 2 scoped acceptance is DONE 2026-10-22 with remaining host evidence limits in docs/progress/SESSION.md.
 merged-origin: 2026-10-22 merged origin/main (Wave1 usability, Wave2 client/server close, Herdr study, Subagents SA plan); see docs/progress/WAVE2-RESULT.md, USABILITY-WAVE1-RESULT.md, SUBAGENTS-PLAN.md
-setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1. Current source/status supersedes the historical index block in STASH-MERGE-RESULT.md. Worktree graph project: Users-sahillamba-.codex-worktrees-6730-panelink.
+setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1. Current source/status supersedes the historical index block in STASH-MERGE-RESULT.md. Worktree graph project: Users-sahillamba-.codex-worktrees-7060-panelink.
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 phase-3a: DONE — 2026-10-19 — see docs/progress/P3A-DEFAULT-OPEN.md and INTEGRATION.md
 phase-3b-stop: DONE as scoped two-pane stop slice — 2026-10-20 — checkpoint c3e207e; broader Phase 3 remains open
@@ -29,6 +31,8 @@ phase-p5-saved-layout-impl: DONE as bounded codec/store/writer/observation/read-
 phase-p3-async-launch: DONE as serialized live-split prepare/journal/spawn worker with owner adoption and bounded shutdown; initial startup and legacy direct-core calls remain synchronous. See docs/progress/ASYNC-LAUNCH-RESULT.md.
 phase-p3-workspace-events: DONE as scoped schema11/capability8 journal, atomic snapshot/cursor, finite watches and CLI gap/pinned-target acceptance — 2026-10-23; full Phase3 remains OPEN. See docs/progress/P3-LAYOUT-EVENTS-RESULT.md.
 phase-p3-metadata-renewal: DONE as scoped schema12/capability16 managed-child sample query, owner isolation/deadline, CLI status and same-lease observer renewal — 2026-10-23; full Phase3 remains OPEN. See docs/progress/P3-PANE-METADATA-RESULT.md.
+phase-p3-live-scrollback: DONE as bounded live normal-history read integration — 2026-10-23; final serial1064pass/0fail/15ignored, prior intermittent shutdown-marker failure preserved. Full Phase3 remains OPEN. See docs/progress/P3-LIVE-SCROLLBACK-RESULT.md.
+phase-p3-pane-run: DONE as bounded explicit managed process CLI over the existing serialized split launch path — 2026-10-23; exact operation/target output and nonreplay uncertainty verified, final1084pass/0fail/15ignored. Full Phase3 remains OPEN. See docs/progress/P3-PANE-RUN-RESULT.md.
 phase-p5-recovery: prototype view, chooser, in-workspace menu, explicit relaunch and 30-day old-to-new links implemented; full reboot remains open
 phase-sa-feasibility: ATTEMPTED/BLOCKED — OpenCode2.0.32 ACP/server readiness blocked by local socket permissions; OpenCode1.19.0 probe did not prove selected-session switching. See SUBAGENTS-FEASIBILITY.md and P4-OPENCODE-TUI-IDENTITY.md.
 phase-usability-wave1: scoped implementation delivered 2026-10-22; typed keys/help/cleanup and automated evidence. Full acceptance remains open; see USABILITY-WAVE1-RESULT.md.
@@ -142,9 +146,20 @@ Verify: use docs/progress/P2-EXPERIMENT.md and the explicit terminfo setup in RE
 
 Replacement checkpoint: docs/progress/P2-REPLACEMENT.md approves only the disposable core on Rust 1.99.1 / Apple Silicon macOS. VTE std must remain disabled; local engine source/patch/notices are preserved. Chosen history is 1,024 rows within the 2,000-row ceiling; capacity review includes resize/insert retention and remains toolchain-conditional. Parent independently reran nine engine and four PTY probe checks. The original complete-candidate adoption checkbox and Apple Terminal runtime checks remain unticked until host input/rendering review and actual integration. The core is now implemented and parent-verified; see P2-CORE-RESULT.md. The live Cargo registry recheck passed again with a writable CARGO_HOME. See P2-HOST-INPUT.md for the next source gate; no need to rerun rejected-candidate review. Luna saved partial follow-up fixes before a usage limit; parent finished/reviewed them. Parser-only crossterm-input is now adopted with reviewed fixed storage and no upstream IO framework; pure snapshot renderer is implemented. See P2-INPUT-REVIEW.md and P2-RENDER-RESULT.md. Prior component integration verified. Host and CLI owners have released their files. Parent source review and integrated checks passed: 66 application tests, nine explicitly ignored device-dependent tests; 39 separate decoder tests. See latest INTEGRATION.md. The harness establishes a controlling session, but independent /dev/tty open returns EPERM under the current sandbox. Do not replace the separate nonblocking open with duplicated stdio or count ignored cases as passes. Preserve the exact pins/notices; signal registrations intentionally live until process exit and must not be unregistered during bounded cleanup. Runtime output-stall/restore ordering and Apple Terminal checks remain gates before phase 3.
 
-## Phase 3 — persistent server and reconnect (four-pane prototype; contracts open)
+## Phase 3 — persistent server and reconnect (bounded runtime delivered; acceptance open)
 
-User explicitly authorized parallel GPT-6-Luna xhigh implementation of the transport, authentication, response/context/ownership, admission and reconnect list while Phase2 manual checks remain open. The parent reviewed and integrated the workers' bounded slices and a one-child private-PTY experiment. Actual authenticated socketpair reconnect is verified; pathname CLI acceptance remains separate. This is not completed host acceptance, a multi-pane product or provider recovery. If interrupted, inspect the task/evidence files and ownership before assigning work; do not assume an agent survives.
+The accepted bounded implementation now includes four-pane lifecycle,
+explicit managed pane run, finite pane/workspace watches, reconciliation and
+same-generation reconnect. The [runtime contract audit](docs/progress/P3-RUNTIME-CONTRACT-AUDIT.md)
+and [independent scope review](docs/progress/P3-RUNTIME-SCOPE-REVIEW.md) reconcile
+older one-child/proposal notes against current source. The expanded pathname
+CLI fixture was explicitly run1/1 passing on2026-10-23; see
+[the current result](docs/progress/P3-RUNTIME-CONTRACT-RESULT.md).
+Full Phase3 remains open for independent acceptance. Historical milestone
+wording below describes its original delivery scope, not a current absence
+of later implemented functionality. Indefinite subscriptions, large Snapshot
+queues and the unadopted standalone-launch proposal are separate future scope.
+Inspect current state/ownership before assigning work; no worker must survive.
 
 - [x] P3-A1: implement/verify bounded pure v1.0 wire envelope; opaque payloads only, no runtime; see docs/progress/P3-WIRE.md.
 - [x] P3-B1: global ledger bounds, expiry reclamation and volatile lease issuance integrated under P3-LEDGER-TASK.md; see P3-LEDGER.md. No durable generation/socket/server capability implied.
@@ -169,8 +184,13 @@ User explicitly authorized parallel GPT-6-Luna xhigh implementation of the trans
 - [x] Implement full-descriptor child probe and deterministic real accepted-socket/managed-exec race fixture; run on a host permitting pathname bind/accept before enabling API launch (passed 6/6 on new Mac; see P3-ACCEPT-EXEC-RACE.md).
 - [x] Four-pane binary split tree (MAX_PANES=4) and agent-facing `panelink pane|wait|events` CLI integrated and parent-verified; see P3-FOUR-PANES.md, P3-AGENT-CLI.md. Four-pane Apple Terminal acceptance pending. L16 four-pane relaunch, L17 private-PTY four-pane attach acceptance, L18 pane exit status (schema 10) delivered 2026-10-22.
 - [x] Bounded workspace layout notifications: schema 11/capability 8, 64-record journal, atomic layout/cursor, shared finite-watch budget and agent CLI target pinning. See docs/progress/P3-LAYOUT-EVENTS-RESULT.md; broader Phase 3 and its acceptance remain open.
-- [ ] Complete event/watch/launch/layout contracts and implementation; event framing alone does not enable subscriptions, full snapshot queues or multi-session lifecycle.
-- [ ] Complete independent host lifetime/acceptance and remaining bounded runtime capabilities before marking Phase3 complete.
+- [x] Bounded live normal-scrollback reads through existing control and agent CLI, with row/UTF-8 budgets, current-epoch truncation and separate screen/history sources; see P3-LIVE-SCROLLBACK-RESULT.md (2026-10-23).
+- [x] Managed `pane run` with literal raw argv, explicit client cwd/env, exact target/revision pinning, bounded split-worker launch and structured uncertainty output; see docs/progress/P3-PANE-RUN-RESULT.md (2026-10-23).
+- [x] Neutral generation-scoped owner discovery and automated post-ready attach SIGKILL/reattach acceptance, parent-reviewed and full-suite verified; see docs/progress/P3-OWNER-LIFETIME-RESULT.md (2026-10-23).
+- [x] Bounded server SIGKILL acceptance: cooperative-shell exit, stale socket replacement, full generation/target fencing, old-context refusal/preservation and no completed-input replay; see docs/progress/P3-SERVER-DEATH-RESULT.md (2026-10-23). No arbitrary descendant cleanup guarantee.
+- [x] Real input CLI SIGKILL after server Completed(Applied) but before caller acknowledgment; exact uncertain key/status/resync/sequence, same child and no token replay verified. See docs/progress/P3-INFLIGHT-CLIENT-RESULT.md (2026-10-23). Does not cover death before admission or owner-pending.
+- [x] Reconcile and close the accepted bounded event/watch/launch/layout implementation scope: finite watches/reconciliation, workspace invalidations/gap recovery, four-pane lifecycle and managed pane run. Historical umbrella warning superseded; indefinite subscriptions/large Snapshot queues/direct-launch proposal are separate future scope. See docs/progress/P3-RUNTIME-CONTRACT-RESULT.md.
+- [ ] Complete independent Phase3 host/lifetime acceptance before marking Phase3 complete: human four-pane Apple Terminal evidence remains open; preserve explicit in-flight/client/server crash observation limits. Do not infer provider/reboot acceptance or arbitrary descendant cleanup from automated prototype results.
 
 ## Phase 3A — right-click splits and new terminal sessions (DONE 2026-10-19)
 
