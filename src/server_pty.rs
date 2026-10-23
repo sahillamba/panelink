@@ -949,6 +949,10 @@ impl PtyEffects {
 }
 
 impl EffectSink for PtyEffects {
+    fn process_identity(&self) -> Option<crate::process_metadata::ProcessIdentity> {
+        self.session.process_identity()
+    }
+
     fn screen_revision(&self) -> Option<u64> {
         if self.failed {
             None

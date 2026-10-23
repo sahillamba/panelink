@@ -23,13 +23,18 @@ use crate::close_protocol::{
 use crate::control_protocol::{Command, TargetRef};
 use crate::event_journal::{EventCursor, EventJournal};
 use crate::event_protocol::Event;
-use crate::handshake_protocol::{Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT, CAPABILITY_READ};
+use crate::handshake_protocol::{
+    Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT, CAPABILITY_PANE_METADATA, CAPABILITY_READ,
+    CAPABILITY_WORKSPACE_EVENTS,
+};
 use crate::input_owner::{InputOwner, Owner};
 use crate::managed_launch::{LaunchJournalPort, ManagedLaunchCoordinator, ManagedLaunchError};
 use crate::managed_launch_protocol::{decode_launch_request, LaunchRequestView, LaunchResult};
 use crate::multi_runtime::PaneExit;
 use crate::pane_layout::PaneGeometry;
 use crate::pane_layout::{LayoutError, LayoutSnapshot, PaneLayout};
+use crate::pane_metadata_protocol::{decode_query, PathStatus};
+use crate::process_metadata::ProcessIdentity;
 use crate::protocol::{
     Admission, Ledger, OperationKey, OperationStatus, Outcome, ProtocolError, MAX_ACTIVE_LEASES,
 };
@@ -39,6 +44,12 @@ use crate::server_pty::PtyEffects;
 use crate::session_protocol::{decode_session_request, SessionHello, SessionRequest};
 use crate::session_registry::{RegistryError, SessionState, SESSION_CAPACITY};
 use crate::split_protocol::{decode_split_request, SplitCodecError, SplitResult};
+use crate::workspace_event_journal::{
+    JournalError as WorkspaceJournalError, WorkspaceEventJournal,
+};
+use crate::workspace_watch_protocol::{
+    Reconciliation as WorkspaceReconciliation, WatchReply as WorkspaceWatchReply, WorkspaceCursor,
+};
 use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -137,6 +148,9 @@ pub struct MultiSessionOwner<E: EffectSink> {
     launches: ManagedLaunchCoordinator<TargetState<E>>,
     /// Volatile layout established by the first Applied `execute_launch`.
     layout: Option<PaneLayout>,
+    workspace_events: Option<WorkspaceEventJournal>,
+    workspace_event_key: Option<(u64, bool)>,
+    workspace_events_failed: bool,
     /// Every committed split result, retained for exact-duplicate retries.
     /// Bounded by the coordinator's retained launch results, because each
     /// committed split spends one launch identity.
@@ -397,6 +411,72 @@ impl fmt::Display for LayoutResizeError {
 impl std::error::Error for LayoutResizeError {}
 
 impl<E: EffectSink> MultiSessionOwner<E> {
+    /// Authorize a schema-12 query and return the captured direct-child
+    /// identity, if the live child has one.
+    pub(crate) fn authorize_metadata_query(
+        &mut self,
+        connection: &Connection,
+        payload: &[u8],
+        now_secs: u64,
+    ) -> Result<(TargetRef, Option<ProcessIdentity>, PathStatus), ServerError> {
+        let target = decode_query(payload).map_err(|_| ServerError::TargetStale)?;
+        self.global.require_live_connection(connection, now_secs)?;
+        let required = CAPABILITY_READ | crate::pane_metadata_protocol::CAPABILITY_PANE_METADATA;
+        if connection.selected_capabilities & required != required
+            || self
+                .global
+                .grants
+                .get(&connection.lease)
+                .map(|grant| grant.target)
+                != Some(target)
+        {
+            return Err(ServerError::Unauthorized);
+        }
+        let session = self
+            .launches
+            .session_mut(target)
+            .map_err(map_connect_registry_error)?;
+        if session.effects.child_exited() {
+            return Ok((target, None, PathStatus::Exited));
+        }
+        let identity = session.effects.process_identity();
+        let status = if identity.is_some() {
+            PathStatus::Available
+        } else {
+            PathStatus::Unsupported
+        };
+        Ok((target, identity, status))
+    }
+
+    /// Revalidate authority, target, liveness, and captured identity before a
+    /// native worker completion can be published.
+    pub(crate) fn metadata_publish_allowed(
+        &mut self,
+        connection: &Connection,
+        target: TargetRef,
+        identity: ProcessIdentity,
+        now_secs: u64,
+    ) -> bool {
+        let required = CAPABILITY_READ | crate::pane_metadata_protocol::CAPABILITY_PANE_METADATA;
+        if self
+            .global
+            .require_live_connection(connection, now_secs)
+            .is_err()
+            || connection.selected_capabilities & required != required
+            || self
+                .global
+                .grants
+                .get(&connection.lease)
+                .map(|grant| grant.target)
+                != Some(target)
+        {
+            return false;
+        }
+        self.launches.session_mut(target).is_ok_and(|session| {
+            !session.effects.child_exited() && session.effects.process_identity() == Some(identity)
+        })
+    }
+
     /// Adopt a pre-opened ledger and trusted internal launch lease.
     ///
     /// The caller must open the internal lease before handing over the ledger;
@@ -420,6 +500,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             },
             launches,
             layout: None,
+            workspace_events: None,
+            workspace_event_key: None,
+            workspace_events_failed: false,
             committed_splits: Vec::new(),
             close_results: Vec::new(),
             active_closes: Vec::new(),
@@ -471,6 +554,180 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     /// Return a copy of the current pane layout, if one is established.
     pub fn layout_snapshot(&self) -> Option<LayoutSnapshot> {
         self.layout.as_ref().map(PaneLayout::snapshot)
+    }
+
+    /// Record committed topology on the owner thread. Notification failure
+    /// never rolls back a layout or changes a child/process result.
+    fn record_workspace_layout(&mut self) {
+        if self.workspace_events_failed {
+            return;
+        }
+        let Some(snapshot) = self.layout_snapshot() else {
+            return;
+        };
+        let Some(first) = snapshot.panes.iter().flatten().next() else {
+            self.workspace_events_failed = true;
+            return;
+        };
+        let workspace = first.target.workspace;
+        if snapshot.panes.iter().flatten().any(|pane| {
+            pane.target.workspace != workspace || pane.target.generation != self.global.generation
+        }) {
+            self.workspace_events_failed = true;
+            return;
+        }
+        if self.workspace_events.is_none() {
+            self.workspace_events =
+                WorkspaceEventJournal::new(self.global.generation, workspace).ok();
+        }
+        let empty = self.layout_terminal_empty();
+        let key = (snapshot.revision, empty);
+        if self.workspace_event_key == Some(key) {
+            return;
+        }
+        let Some(journal) = self.workspace_events.as_mut() else {
+            self.workspace_events_failed = true;
+            return;
+        };
+        if journal.current_cursor().workspace != workspace
+            || journal.push(snapshot.revision, empty).is_err()
+        {
+            self.workspace_events_failed = true;
+            return;
+        }
+        self.workspace_event_key = Some(key);
+    }
+
+    fn require_workspace_authority(
+        &self,
+        connection: &Connection,
+        generation: u64,
+        workspace: u64,
+        now_secs: u64,
+    ) -> Result<(), ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        let required = CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS;
+        if connection.selected_capabilities & required != required {
+            return Err(ServerError::Unauthorized);
+        }
+        if generation != self.global.generation {
+            return Err(ServerError::WrongGeneration);
+        }
+        let grant = self
+            .global
+            .grants
+            .get(&connection.lease)
+            .ok_or(ServerError::UnknownContext)?;
+        // The grant can outlive the pane it originally named. Its immutable
+        // workspace authority does not grant access to any other workspace.
+        if workspace == 0 || grant.target.workspace != workspace {
+            return Err(ServerError::Unauthorized);
+        }
+        if self.workspace_events_failed {
+            return Err(ServerError::NotificationsUnavailable);
+        }
+        let journal = self
+            .workspace_events
+            .as_ref()
+            .ok_or(ServerError::NotificationsUnavailable)?;
+        if journal.current_cursor().workspace != workspace {
+            return Err(ServerError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    /// Atomically copy the current layout and workspace event cursor. This
+    /// reads only metadata and never reserves an operation key or polls a PTY.
+    pub fn reconcile_workspace(
+        &mut self,
+        connection: &Connection,
+        generation: u64,
+        workspace: u64,
+        now_secs: u64,
+    ) -> Result<WorkspaceReconciliation, ServerError> {
+        self.require_workspace_authority(connection, generation, workspace, now_secs)?;
+        let snapshot = self.layout_snapshot().ok_or(ServerError::InvalidSnapshot)?;
+        let cursor = self
+            .workspace_events
+            .as_ref()
+            .ok_or(ServerError::NotificationsUnavailable)?
+            .current_cursor();
+        let layout = if self.layout_terminal_empty() {
+            None
+        } else {
+            let pending = self.pending_resizes();
+            Some(crate::ui_protocol::LayoutReply {
+                revision: snapshot.revision,
+                rows: snapshot.rows,
+                columns: snapshot.columns,
+                panes: snapshot.panes.map(|pane| {
+                    pane.map(|pane| crate::ui_protocol::UiPane {
+                        target: pane.target,
+                        rect: pane.rect,
+                        pending_confirmed: pending
+                            .iter()
+                            .flatten()
+                            .find(|entry| entry.target == pane.target)
+                            .map(|entry| entry.confirmed),
+                    })
+                }),
+                divider: snapshot.divider,
+                dividers: snapshot.dividers,
+            })
+        };
+        let state = WorkspaceReconciliation {
+            cursor,
+            revision: snapshot.revision,
+            layout,
+        };
+        crate::workspace_watch_protocol::encode_reconciliation(&state)
+            .map_err(|_| ServerError::InvalidSnapshot)?;
+        Ok(state)
+    }
+
+    /// Read a bounded workspace event page, independently of pane journals.
+    /// Expired cursors return a resync hint; other invalid cursors are errors.
+    pub fn read_workspace_events(
+        &mut self,
+        connection: &Connection,
+        cursor: WorkspaceCursor,
+        limit: u16,
+        now_secs: u64,
+    ) -> Result<WorkspaceWatchReply, ServerError> {
+        self.require_workspace_authority(
+            connection,
+            cursor.generation,
+            cursor.workspace,
+            now_secs,
+        )?;
+        let journal = self
+            .workspace_events
+            .as_ref()
+            .ok_or(ServerError::NotificationsUnavailable)?;
+        match journal.read_after(cursor, limit) {
+            Ok(events) => {
+                let sequence = events
+                    .last()
+                    .map_or(cursor.sequence, |event| event.sequence);
+                Ok(WorkspaceWatchReply {
+                    status: if events.is_empty() {
+                        crate::watch_protocol::WatchStatus::TimedOut
+                    } else {
+                        crate::watch_protocol::WatchStatus::Changed
+                    },
+                    cursor: WorkspaceCursor { sequence, ..cursor },
+                    events,
+                })
+            }
+            Err(WorkspaceJournalError::CursorExpired) => Ok(WorkspaceWatchReply {
+                status: crate::watch_protocol::WatchStatus::ResyncRequired,
+                cursor: journal.current_cursor(),
+                events: Vec::new(),
+            }),
+            Err(WorkspaceJournalError::FutureCursor) => Err(ServerError::CursorAhead),
+            Err(WorkspaceJournalError::ScopeMismatch) => Err(ServerError::Unauthorized),
+            Err(_) => Err(ServerError::InvalidWatchRequest),
+        }
     }
 
     /// Visit only currently retained process handles for server-owned
@@ -741,6 +998,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 return Ok(AsyncSplitAdmission::Uncertain);
             }
         };
+        self.record_workspace_layout();
         let launch = self
             .launches
             .finish_async(key, target, outcome, true, unhealthy)
@@ -896,6 +1154,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 }
             }
         }
+        self.record_workspace_layout();
         Ok(result)
     }
 
@@ -1045,6 +1304,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 return Err(SplitError::InternalInvariant);
             }
         };
+        self.record_workspace_layout();
         let existing_rect = committed
             .panes
             .into_iter()
@@ -1109,6 +1369,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         let snapshot = layout
             .resize(expected_revision, rows, columns)
             .map_err(LayoutResizeError::Layout)?;
+        self.record_workspace_layout();
         let retry_pending_only = snapshot.revision == before;
         let mut failed = [false; crate::pane_layout::MAX_PANES];
         for (index, pane) in snapshot.panes.into_iter().enumerate() {
@@ -1304,15 +1565,39 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         now_secs: u64,
     ) -> Result<(Connection, Welcome), ServerError> {
         hello.validate()?;
-        let session = self
-            .launches
-            .session_mut(target)
-            .map_err(map_connect_registry_error)?;
+        self.record_workspace_layout();
+        let workspace_capability =
+            if self.workspace_events_failed || self.workspace_events.is_none() {
+                0
+            } else {
+                CAPABILITY_WORKSPACE_EVENTS
+            };
+        let target_is_retired = self.launches.is_retired(target);
+        let session = match self.launches.session_mut(target) {
+            Ok(session) => session,
+            Err(RegistryError::InvalidTarget | RegistryError::EffectsUnavailable)
+                if target_is_retired
+                    && !self.workspace_events_failed
+                    && self.workspace_events.is_some()
+                    && self.workspace_events.as_ref().is_some_and(|journal| {
+                        journal.current_cursor().workspace == target.workspace
+                    }) =>
+            {
+                return self
+                    .global
+                    .resume_workspace_observer(target, hello, now_secs);
+            }
+            Err(error) => return Err(map_connect_registry_error(error)),
+        };
         self.global.connect_with_capability_mask(
             session,
             hello,
             now_secs,
-            CAPABILITY_READ | CAPABILITY_INPUT | CAPABILITY_EVENTS,
+            CAPABILITY_READ
+                | CAPABILITY_INPUT
+                | CAPABILITY_EVENTS
+                | CAPABILITY_PANE_METADATA
+                | workspace_capability,
         )
     }
 
@@ -1651,7 +1936,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         if self.collapse_exited_panes().is_err() {
             first_error.get_or_insert(ServerError::Internal);
         }
-
+        self.record_workspace_layout();
         first_error.map_or(Ok(()), Err)
     }
 }
@@ -2583,9 +2868,11 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 .flatten()
                 .any(|pane| pane.target == target)
         {
+            self.record_workspace_layout();
             return Ok(false);
         }
         let collapsed = layout.collapse(target, before.revision).map_err(|_| ())?;
+        self.record_workspace_layout();
         for slot in &mut self.pane_sizes {
             if slot.is_some_and(|state| state.target == target) {
                 *slot = None;
@@ -3048,6 +3335,363 @@ mod tests {
             SessionReply::Info(info) => info,
             other => panic!("expected session info, got {other:?}"),
         }
+    }
+
+    fn workspace_hello() -> SessionHello {
+        SessionHello {
+            hello: Hello {
+                required_capabilities: CAPABILITY_READ
+                    | crate::handshake_protocol::CAPABILITY_WORKSPACE_EVENTS,
+                optional_capabilities: 0,
+                ..hello().hello
+            },
+            resume: None,
+        }
+    }
+
+    #[test]
+    fn workspace_snapshot_cursor_tracks_commits_and_terminal_empty_without_effect_reads() {
+        use crate::watch_protocol::WatchStatus;
+        let mut owner = owner();
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let mut journal = Journal::new(&effects);
+        let target = launch(&mut owner, 1, &mut journal, &effects)
+            .unwrap()
+            .target
+            .unwrap();
+        let (connection, _) = owner.connect(target, &workspace_hello(), 3).unwrap();
+        let state = owner
+            .reconcile_workspace(&connection, GENERATION, target.workspace, 3)
+            .unwrap();
+        assert_eq!((state.cursor.sequence, state.revision), (1, 1));
+        assert_eq!(state.layout.unwrap().panes[0].unwrap().target, target);
+        let before = owner.launches.session_mut(target).unwrap().effects.polls;
+        owner
+            .resize_layout(1, 24, 80, |_: &mut Sink, _, _| Ok::<_, ()>(()))
+            .unwrap();
+        assert!(owner
+            .resize_layout(1, 1, 1, |_: &mut Sink, _, _| Ok::<_, ()>(()))
+            .is_err());
+        assert_eq!(
+            owner
+                .read_workspace_events(&connection, state.cursor, 64, 3)
+                .unwrap()
+                .status,
+            WatchStatus::TimedOut
+        );
+        owner
+            .resize_layout(1, 25, 80, |_: &mut Sink, _, _| Ok::<_, ()>(()))
+            .unwrap();
+        let page = owner
+            .read_workspace_events(&connection, state.cursor, 64, 3)
+            .unwrap();
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(
+            (
+                page.events[0].sequence,
+                page.events[0].revision,
+                page.events[0].empty
+            ),
+            (2, 2, false)
+        );
+        let updated = owner
+            .reconcile_workspace(&connection, GENERATION, target.workspace, 3)
+            .unwrap();
+        assert_eq!(updated.cursor, page.cursor);
+        assert_eq!(updated.layout.unwrap().revision, page.events[0].revision);
+        assert_eq!(
+            owner.launches.session_mut(target).unwrap().effects.polls,
+            before
+        );
+        assert_eq!(
+            owner.launches.session_mut(target).unwrap().effects.inputs,
+            0
+        );
+        owner.launches.session_mut(target).unwrap().effects.exited = true;
+        owner.poll(4).unwrap();
+        let terminal = owner
+            .reconcile_workspace(&connection, GENERATION, target.workspace, 4)
+            .unwrap();
+        assert!(terminal.layout.is_none());
+        assert_eq!((terminal.revision, terminal.cursor.sequence), (2, 3));
+        owner.poll(4).unwrap();
+        assert_eq!(
+            owner
+                .read_workspace_events(&connection, terminal.cursor, 64, 4)
+                .unwrap()
+                .status,
+            WatchStatus::TimedOut
+        );
+    }
+
+    #[test]
+    fn workspace_grants_are_explicit_scoped_and_resume_never_widens_them() {
+        use crate::handshake_protocol::CAPABILITY_WORKSPACE_EVENTS;
+        let mut owner = owner();
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let mut journal = Journal::new(&effects);
+        let target = launch(&mut owner, 1, &mut journal, &effects)
+            .unwrap()
+            .target
+            .unwrap();
+        let (old, _) = owner.connect(target, &hello(), 3).unwrap();
+        assert!(matches!(
+            owner.reconcile_workspace(&old, GENERATION, target.workspace, 3),
+            Err(ServerError::Unauthorized)
+        ));
+        let mut resume = hello();
+        resume.hello.optional_capabilities |= CAPABILITY_WORKSPACE_EVENTS;
+        resume.resume = Some(crate::session_protocol::LeaseRef {
+            generation: GENERATION,
+            lease: old.lease(),
+        });
+        let (_, welcome) = owner.connect(target, &resume, 4).unwrap();
+        assert_eq!(
+            welcome.selected_capabilities & CAPABILITY_WORKSPACE_EVENTS,
+            0
+        );
+        let (connection, _) = owner.connect(target, &workspace_hello(), 4).unwrap();
+        assert!(matches!(
+            owner.reconcile_workspace(&connection, GENERATION + 1, target.workspace, 4),
+            Err(ServerError::WrongGeneration)
+        ));
+        assert!(matches!(
+            owner.reconcile_workspace(&connection, GENERATION, target.workspace + 1, 4),
+            Err(ServerError::Unauthorized)
+        ));
+        assert!(matches!(
+            owner.reconcile_workspace(
+                &connection,
+                GENERATION,
+                target.workspace,
+                4 + LEASE_TTL_SECS
+            ),
+            Err(ServerError::UnknownContext)
+        ));
+    }
+
+    #[test]
+    fn retired_pane_workspace_observer_renews_same_lease_across_two_ttl_cycles() {
+        use crate::handshake_protocol::CAPABILITY_WORKSPACE_EVENTS;
+        let mut owner = owner();
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let mut journal = Journal::new(&effects);
+        let target = launch(&mut owner, 1, &mut journal, &effects)
+            .unwrap()
+            .target
+            .unwrap();
+        let (original, welcome) = owner.connect(target, &workspace_hello(), 3).unwrap();
+        assert_eq!(
+            welcome.selected_capabilities,
+            CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS
+        );
+
+        owner.launches.session_mut(target).unwrap().effects.exited = true;
+        owner.poll(4).unwrap();
+        assert!(owner.layout_terminal_empty());
+        drop(owner.launches.retire(target).unwrap());
+
+        let resume = |lease| SessionHello {
+            resume: Some(crate::session_protocol::LeaseRef {
+                generation: GENERATION,
+                lease,
+            }),
+            ..workspace_hello()
+        };
+        let (first, first_welcome) = owner
+            .connect(target, &resume(original.lease()), 1_802)
+            .unwrap();
+        assert_eq!(first.lease(), original.lease());
+        assert_eq!(
+            first.selected_capabilities(),
+            CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS
+        );
+        assert_eq!(
+            first_welcome.selected_capabilities,
+            first.selected_capabilities()
+        );
+        assert!(owner
+            .reconcile_workspace(&first, GENERATION, target.workspace, 1_802)
+            .is_ok());
+
+        let (second, second_welcome) = owner
+            .connect(target, &resume(original.lease()), 3_601)
+            .unwrap();
+        assert_eq!(second.lease(), original.lease());
+        assert_eq!(
+            second.selected_capabilities(),
+            first.selected_capabilities()
+        );
+        assert_eq!(second_welcome.lease, original.lease());
+        assert!(owner
+            .reconcile_workspace(&second, GENERATION, target.workspace, 3_601)
+            .is_ok());
+        assert_eq!(owner.lease_target(original.lease()), Some(target));
+
+        assert!(matches!(
+            owner.connect(target, &resume(original.lease()), 5_401),
+            Err(ServerError::UnknownContext)
+        ));
+        let wrong_generation = SessionHello {
+            resume: Some(crate::session_protocol::LeaseRef {
+                generation: GENERATION + 1,
+                lease: original.lease(),
+            }),
+            ..workspace_hello()
+        };
+        assert!(matches!(
+            owner.connect(target, &wrong_generation, 4_000),
+            Err(ServerError::UnknownContext)
+        ));
+        let widened = SessionHello {
+            hello: Hello {
+                optional_capabilities: crate::handshake_protocol::CAPABILITY_INPUT,
+                ..workspace_hello().hello
+            },
+            resume: Some(crate::session_protocol::LeaseRef {
+                generation: GENERATION,
+                lease: original.lease(),
+            }),
+        };
+        assert!(matches!(
+            owner.connect(target, &widened, 4_000),
+            Err(ServerError::UnknownContext)
+        ));
+    }
+
+    #[test]
+    fn metadata_query_requires_exact_read_capability_and_has_no_child_effects() {
+        use crate::handshake_protocol::CAPABILITY_PANE_METADATA;
+        let mut owner = owner();
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let mut journal = Journal::new(&effects);
+        let target = launch(&mut owner, 1, &mut journal, &effects)
+            .unwrap()
+            .target
+            .unwrap();
+        let read_only = hello();
+        let (read_connection, _) = owner.connect(target, &read_only, 3).unwrap();
+        let payload = crate::pane_metadata_protocol::encode_query(target).unwrap();
+        assert!(matches!(
+            owner.authorize_metadata_query(&read_connection, &payload, 3),
+            Err(ServerError::Unauthorized)
+        ));
+
+        let metadata_hello = SessionHello {
+            hello: Hello {
+                optional_capabilities: CAPABILITY_PANE_METADATA,
+                ..hello().hello
+            },
+            resume: None,
+        };
+        let (metadata_connection, welcome) = owner.connect(target, &metadata_hello, 4).unwrap();
+        assert_ne!(welcome.selected_capabilities & CAPABILITY_PANE_METADATA, 0);
+        let before = {
+            let sink = &owner.launches.session_mut(target).unwrap().effects;
+            (
+                sink.reads,
+                sink.inputs,
+                sink.polls,
+                sink.screen_observations.get(),
+            )
+        };
+        let (observed_target, identity, status) = owner
+            .authorize_metadata_query(&metadata_connection, &payload, 4)
+            .unwrap();
+        assert_eq!(observed_target, target);
+        assert_eq!(identity, None);
+        assert_eq!(
+            status,
+            crate::pane_metadata_protocol::PathStatus::Unsupported
+        );
+        if let Some(other_identity) = crate::process_metadata::capture_identity(std::process::id())
+        {
+            assert!(!owner.metadata_publish_allowed(
+                &metadata_connection,
+                target,
+                other_identity,
+                4,
+            ));
+        }
+
+        let mut other_target = target;
+        other_target.pane += 1;
+        let wrong_payload = crate::pane_metadata_protocol::encode_query(other_target).unwrap();
+        assert!(matches!(
+            owner.authorize_metadata_query(&metadata_connection, &wrong_payload, 4),
+            Err(ServerError::Unauthorized)
+        ));
+        let sink = &owner.launches.session_mut(target).unwrap().effects;
+        assert_eq!(
+            before,
+            (
+                sink.reads,
+                sink.inputs,
+                sink.polls,
+                sink.screen_observations.get()
+            )
+        );
+        owner.launches.session_mut(target).unwrap().effects.exited = true;
+        assert_eq!(
+            owner
+                .authorize_metadata_query(&metadata_connection, &payload, 5)
+                .unwrap()
+                .2,
+            crate::pane_metadata_protocol::PathStatus::Exited
+        );
+    }
+
+    #[test]
+    fn workspace_rollover_requires_snapshot_and_future_cursor_is_refused() {
+        use crate::watch_protocol::WatchStatus;
+        let mut owner = owner();
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let mut journal = Journal::new(&effects);
+        let target = launch(&mut owner, 1, &mut journal, &effects)
+            .unwrap()
+            .target
+            .unwrap();
+        let (connection, _) = owner.connect(target, &workspace_hello(), 3).unwrap();
+        let initial = owner
+            .reconcile_workspace(&connection, GENERATION, target.workspace, 3)
+            .unwrap();
+        for offset in 0..66 {
+            let revision = owner.layout_snapshot().unwrap().revision;
+            owner
+                .resize_layout(revision, 25 + offset % 2, 80, |_: &mut Sink, _, _| {
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+        }
+        let expired = owner
+            .read_workspace_events(&connection, initial.cursor, 64, 3)
+            .unwrap();
+        assert_eq!(expired.status, WatchStatus::ResyncRequired);
+        assert!(expired.events.is_empty());
+        let snapshot = owner
+            .reconcile_workspace(&connection, GENERATION, target.workspace, 3)
+            .unwrap();
+        assert_eq!(snapshot.cursor, expired.cursor);
+        assert_eq!(snapshot.layout.unwrap().revision, snapshot.revision);
+        let future = crate::workspace_watch_protocol::WorkspaceCursor {
+            sequence: snapshot.cursor.sequence + 1,
+            ..snapshot.cursor
+        };
+        assert!(matches!(
+            owner.read_workspace_events(&connection, future, 64, 3),
+            Err(ServerError::CursorAhead)
+        ));
+        assert!(matches!(
+            owner.read_workspace_events(&connection, snapshot.cursor, 0, 3),
+            Err(ServerError::InvalidWatchRequest)
+        ));
+        owner.workspace_events_failed = true;
+        assert!(matches!(
+            owner.reconcile_workspace(&connection, GENERATION, target.workspace, 3),
+            Err(ServerError::NotificationsUnavailable)
+        ));
+        assert!(owner.layout_view(&connection, 3).unwrap().is_some());
+        assert!(!owner.all_sessions_ended());
     }
 
     #[test]
@@ -5475,6 +6119,13 @@ mod split_tests {
         assert_eq!(resized.revision, 3);
         fixture.log.borrow_mut().clear();
 
+        let before_retry = fixture
+            .owner
+            .workspace_events
+            .as_ref()
+            .unwrap()
+            .current_cursor();
+
         let retry = no_effects_split(&mut fixture, &payload).unwrap();
         assert_eq!(retry, first);
         let mut first_bytes = Vec::new();
@@ -5485,6 +6136,15 @@ mod split_tests {
         assert!(fixture.log.borrow().is_empty());
         assert_eq!(fixture.owner.launches.records().count(), 2);
         assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 3);
+        assert_eq!(
+            fixture
+                .owner
+                .workspace_events
+                .as_ref()
+                .unwrap()
+                .current_cursor(),
+            before_retry
+        );
     }
 
     #[test]
@@ -6640,11 +7300,13 @@ mod split_tests {
         let fourth = split_leaf(&mut fixture, second, SplitDirection::Down);
         let snapshot = fixture.owner.layout_snapshot().unwrap();
         assert_eq!(snapshot.pane_count(), 4);
-        assert!([first, second, third, fourth].iter().all(|target| snapshot
-            .panes
-            .iter()
-            .flatten()
-            .any(|pane| pane.target == *target)));
+        assert!([first, second, third, fourth].iter().all(|target| {
+            snapshot
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == *target)
+        }));
         assert!(fixture.owner.pending_resizes().iter().all(Option::is_none));
     }
 
@@ -6750,6 +7412,20 @@ mod split_tests {
         assert_eq!(snapshot.panes[0].unwrap().target, target);
         assert_eq!(snapshot.revision, 5);
         assert_eq!(fixture.owner.async_split_result(split_key), Some(result));
+        let journal = fixture.owner.workspace_events.as_ref().unwrap();
+        let cursor = crate::workspace_watch_protocol::WorkspaceCursor {
+            sequence: 0,
+            ..journal.current_cursor()
+        };
+        let changes = journal.read_after(cursor, 64).unwrap();
+        assert_eq!(
+            changes
+                .iter()
+                .map(|event| event.revision)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+        assert!(changes.iter().all(|event| !event.empty));
     }
 }
 

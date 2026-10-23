@@ -4,12 +4,24 @@
 //! under a private PANELINK_HOME and uses the real `serve` workspace runtime.
 
 use std::fs;
+use std::fs::OpenOptions;
 use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use panelink::handshake_protocol::{Hello, CAPABILITY_INPUT, CAPABILITY_READ};
+use panelink::protocol::OperationKey;
+use panelink::protocol_wire::{Frame, MessageKind};
+use panelink::session_protocol::{encode_session_hello, SessionHello};
+use panelink::transport::AuthenticatedStream;
+use panelink::ui_protocol::{
+    decode_layout_reply, decode_resize_reply, encode_layout_query, encode_root_resize,
+    ResizeStatus, RootResize,
+};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
@@ -138,6 +150,26 @@ impl Fixture {
         self.command_output(args)
     }
 
+    fn wait_for_server_stop(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let exited = self
+                .server
+                .as_mut()
+                .and_then(|server| server.try_wait().ok().flatten())
+                .is_some();
+            let socket_removed = !self.state.join("server/control.sock").exists();
+            if exited && socket_removed {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server did not stop and remove its control socket"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn assert_ok(output: &Output, what: &str) -> String {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -167,6 +199,110 @@ fn field<'a>(json: &'a str, name: &str) -> Option<&'a str> {
     let rest = &json[start..];
     let end = rest.find([',', '}', ']']).unwrap_or(rest.len());
     Some(rest[..end].trim_matches('"'))
+}
+
+fn deadline_after(duration: Duration) -> Instant {
+    Instant::now() + duration
+}
+
+struct ObserverGuard(Option<Child>);
+
+impl ObserverGuard {
+    fn id(&self) -> u32 {
+        self.0.as_ref().expect("observer child").id()
+    }
+
+    fn signal(&self, signal: &str) {
+        let pid = self.id().to_string();
+        let status = Command::new("/bin/kill")
+            .args([format!("-{signal}"), pid])
+            .status()
+            .expect("signal test observer");
+        assert!(status.success(), "could not send SIG{signal} to observer");
+    }
+
+    fn wait_until(&mut self, deadline: Instant) -> std::process::ExitStatus {
+        loop {
+            let child = self.0.as_mut().expect("observer child");
+            if let Some(status) = child.try_wait().expect("poll event observer") {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "event observer missed its quiet deadline"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for ObserverGuard {
+    fn drop(&mut self) {
+        let Some(child) = self.0.as_mut() else {
+            return;
+        };
+        if child.try_wait().ok().flatten().is_none() {
+            // A stopped test child must not leak if any assertion unwinds.
+            let pid = child.id().to_string();
+            let _ = Command::new("/bin/kill").args(["-KILL", &pid]).status();
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn raw_request(
+    stream: &mut AuthenticatedStream,
+    request_id: u64,
+    payload: &[u8],
+) -> panelink::transport::OwnedFrame {
+    let frame = Frame::new(MessageKind::Request, request_id, payload).expect("request frame");
+    stream
+        .write_frame(&frame, deadline_after(Duration::from_secs(2)))
+        .expect("write raw request");
+    let response = stream
+        .read_frame(deadline_after(Duration::from_secs(2)))
+        .expect("read raw response");
+    assert_eq!(response.kind(), MessageKind::Response);
+    assert_eq!(response.request_id(), request_id);
+    response
+}
+
+fn raw_resize(
+    stream: &mut AuthenticatedStream,
+    request_id: &mut u64,
+    generation: u64,
+    lease: u64,
+    sequence: &mut u64,
+    revision: u64,
+    dimensions: (u16, u16),
+) -> u64 {
+    let key = OperationKey {
+        generation,
+        lease,
+        sequence: *sequence,
+    };
+    *sequence = sequence.checked_add(1).expect("operation sequence");
+    let payload = encode_root_resize(&RootResize {
+        key,
+        expected_layout_revision: revision,
+        rows: dimensions.0,
+        columns: dimensions.1,
+    })
+    .expect("encode root resize");
+    let response = raw_request(stream, *request_id, &payload);
+    *request_id = request_id.checked_add(1).expect("request sequence");
+    let reply = decode_resize_reply(response.payload()).expect("decode root resize reply");
+    assert_eq!(reply.key, key);
+    assert!(matches!(
+        reply.status,
+        ResizeStatus::Applied | ResizeStatus::ResizePending
+    ));
+    assert!(
+        reply.revision > revision,
+        "accepted resize must advance layout revision"
+    );
+    reply.revision
 }
 
 #[test]
@@ -391,6 +527,7 @@ fn agent_cli_list_read_claim_send_wait_events_close_and_stale_indices() {
             .any(|line| line.contains("\"event\":\"pane_closed\"")),
         "{events}"
     );
+    fixture.wait_for_server_stop();
 
     let stale = fixture.agent(&["pane", "read", "2", "--json"]);
     assert!(!stale.status.success());
@@ -402,7 +539,9 @@ fn agent_cli_list_read_claim_send_wait_events_close_and_stale_indices() {
 fn close_event_and_stale_index_remain_scoped_to_current_layout() {
     let mut fixture = Fixture::new();
     let startup = fixture.start();
-    let first_target = field(&startup, "target").unwrap().to_owned();
+    let first_target = field(&startup, "target")
+        .unwrap_or_else(|| panic!("startup lacked target: {startup}"))
+        .to_owned();
     Fixture::assert_ok(
         &fixture.control("split.ctx", &["init", &first_target]),
         "initialize split context",
@@ -445,4 +584,322 @@ fn close_event_and_stale_index_remain_scoped_to_current_layout() {
     assert!(!stale.status.success());
     let stale = String::from_utf8_lossy(&stale.stdout);
     assert_eq!(field(&stale, "error"), Some("pane_not_found"), "{stale}");
+}
+
+#[test]
+fn workspace_events_pin_filtered_pane_across_same_generation_replacement() {
+    let mut fixture = Fixture::new();
+    let startup = fixture.start();
+    let first_target = field(&startup, "target")
+        .unwrap_or_else(|| panic!("startup lacked target: {startup}"))
+        .to_owned();
+    Fixture::assert_ok(
+        &fixture.control("split.ctx", &["init", &first_target]),
+        "initialize split context",
+    );
+    let split = Fixture::assert_ok(
+        &fixture.control("split.ctx", &["split", &first_target, "1", "right"]),
+        "create replacement pane",
+    );
+    assert_eq!(field(&split, "outcome"), Some("applied"), "{split}");
+    let observer = fixture
+        .command()
+        .args([
+            "events",
+            "--pane",
+            "1",
+            "--timeout",
+            "2",
+            "--json",
+            "--as",
+            "pinned-layout-observer",
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn pinned layout event stream");
+    thread::sleep(Duration::from_millis(300));
+    let output_event = Fixture::assert_ok(
+        &fixture.agent(&[
+            "pane",
+            "send",
+            "1",
+            "printf 'LAYOUT_KEEPALIVE\\n'",
+            "--enter",
+            "--claim",
+            "--json",
+        ]),
+        "send output without changing topology",
+    );
+    assert_eq!(
+        field(&output_event, "status"),
+        Some("applied"),
+        "{output_event}"
+    );
+    thread::sleep(Duration::from_millis(100));
+    let closed = Fixture::assert_ok(
+        &fixture.agent(&["pane", "close", "1", "--json", "--as", "close-pinned-pane"]),
+        "close initially selected pane",
+    );
+    assert_eq!(field(&closed, "action"), Some("pane_close"), "{closed}");
+    let output = observer
+        .wait_with_output()
+        .expect("wait for pinned event stream");
+    assert!(output.status.success(), "events: {output:?}");
+    let lines = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        lines
+            .lines()
+            .any(|line| line.contains("\"event\":\"layout_changed\"")),
+        "{lines}"
+    );
+    assert!(
+        lines
+            .lines()
+            .any(|line| line.contains("\"event\":\"output\"")),
+        "pane output event was lost while workspace watch timed out: {lines}"
+    );
+    assert!(
+        lines
+            .lines()
+            .any(|line| line.contains("\"event\":\"pane_closed\"")),
+        "{lines}"
+    );
+    assert!(
+        !lines.contains("\"event\":\"pane_opened\""),
+        "replacement entered pinned stream: {lines}"
+    );
+    assert!(
+        lines
+            .lines()
+            .any(|line| line.contains("\"event\":\"quiet\"")),
+        "{lines}"
+    );
+}
+
+#[test]
+fn real_cli_workspace_watch_gap_recovers_after_ring_overflow() {
+    let mut fixture = Fixture::new();
+    fixture.start();
+    let server_directory = fixture.state.join("server");
+    let mut stream =
+        AuthenticatedStream::connect(&server_directory, deadline_after(Duration::from_secs(5)))
+            .expect("connect raw resize client to private server");
+    let hello = SessionHello {
+        hello: Hello {
+            nonce: 0x4750_434c_4945_4e54,
+            required_capabilities: CAPABILITY_READ | CAPABILITY_INPUT,
+            optional_capabilities: 0,
+        },
+        resume: None,
+    };
+    let payload = encode_session_hello(&hello).expect("encode read/input Hello");
+    let frame = Frame::new(MessageKind::Hello, 0, &payload).expect("Hello frame");
+    stream
+        .write_frame(&frame, deadline_after(Duration::from_secs(2)))
+        .expect("write raw Hello");
+    let welcome_frame = stream
+        .read_frame(deadline_after(Duration::from_secs(2)))
+        .expect("read raw Welcome");
+    assert_eq!(welcome_frame.kind(), MessageKind::Welcome);
+    let welcome = panelink::handshake_protocol::decode_welcome(welcome_frame.payload())
+        .expect("decode raw Welcome");
+    assert_eq!(
+        welcome.selected_capabilities & (CAPABILITY_READ | CAPABILITY_INPUT),
+        CAPABILITY_READ | CAPABILITY_INPUT
+    );
+
+    let mut request_id = 1;
+    let layout = raw_request(&mut stream, request_id, &encode_layout_query());
+    request_id += 1;
+    let mut revision = decode_layout_reply(layout.payload())
+        .expect("decode initial layout")
+        .revision;
+    let mut operation_sequence = 1;
+    let output_path = fixture.root.join("workspace-gap-events.jsonl");
+    let output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&output_path)
+        .expect("create private event output file");
+    let observer = fixture
+        .command()
+        .args([
+            "events",
+            "--timeout",
+            "10",
+            "--json",
+            "--as",
+            "gap-observer",
+        ])
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn CLI workspace observer");
+    let mut observer = ObserverGuard(Some(observer));
+
+    let mut resize_number = 0_u16;
+    let mut cursor_established = false;
+    let readiness_deadline = deadline_after(Duration::from_secs(4));
+    while Instant::now() < readiness_deadline {
+        let (rows, columns) = if resize_number.is_multiple_of(2) {
+            (36, 110)
+        } else {
+            (37, 111)
+        };
+        revision = raw_resize(
+            &mut stream,
+            &mut request_id,
+            welcome.generation,
+            welcome.lease,
+            &mut operation_sequence,
+            revision,
+            (rows, columns),
+        );
+        resize_number += 1;
+        if fs::read_to_string(&output_path)
+            .expect("read observer output while it runs")
+            .contains("\"event\":\"layout_changed\"")
+        {
+            cursor_established = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        cursor_established,
+        "CLI did not report a layout change during bounded readiness resizes"
+    );
+
+    observer.signal("STOP");
+    for _ in 0..70 {
+        let (rows, columns) = if resize_number.is_multiple_of(2) {
+            (36, 110)
+        } else {
+            (37, 111)
+        };
+        revision = raw_resize(
+            &mut stream,
+            &mut request_id,
+            welcome.generation,
+            welcome.lease,
+            &mut operation_sequence,
+            revision,
+            (rows, columns),
+        );
+        resize_number += 1;
+    }
+    assert!(
+        resize_number >= 70,
+        "not enough successful layout invalidations"
+    );
+    observer.signal("CONT");
+    let status = observer.wait_until(deadline_after(Duration::from_secs(12)));
+    assert!(status.success(), "event observer exited with {status}");
+    let events = fs::read_to_string(&output_path).expect("read complete event output");
+    assert_eq!(
+        events.matches("\"event\":\"layout_resync\"").count(),
+        1,
+        "expected one real workspace journal-gap recovery: {events}"
+    );
+    assert!(
+        events
+            .lines()
+            .any(|line| line.contains("\"event\":\"quiet\"")),
+        "observer did not finish at its quiet deadline: {events}"
+    );
+    assert!(
+        events.find("\"event\":\"layout_changed\"") < events.find("\"event\":\"layout_resync\""),
+        "readiness notification must precede the recovered gap: {events}"
+    );
+}
+
+#[test]
+fn pane_metadata_tracks_managed_child_cd_and_exec_without_arguments_or_environment() {
+    let mut fixture = Fixture::new();
+    let startup = fixture.start();
+    assert_eq!(field(&startup, "state"), Some("running"), "{startup}");
+    let listing = Fixture::assert_ok(
+        &fixture.agent(&["pane", "list", "--json"]),
+        "initial metadata",
+    );
+    assert_eq!(field(&listing, "cwd"), fixture.home.to_str(), "{listing}");
+    assert_eq!(field(&listing, "command"), Some("/bin/zsh"), "{listing}");
+    assert_eq!(field(&listing, "metadata_source"), Some("managed_child"));
+    assert_eq!(field(&listing, "cwd_status"), Some("available"));
+    assert!(field(&listing, "sampled_at_mono_ms")
+        .unwrap()
+        .parse::<u64>()
+        .is_ok());
+    Fixture::assert_ok(
+        &fixture.agent(&[
+            "pane",
+            "send",
+            "1",
+            "/bin/sleep 2",
+            "--enter",
+            "--claim",
+            "--json",
+        ]),
+        "foreground descendant",
+    );
+    let listing = Fixture::assert_ok(
+        &fixture.agent(&["pane", "list", "--json"]),
+        "descendant metadata",
+    );
+    assert_eq!(field(&listing, "command"), Some("/bin/zsh"), "{listing}");
+    let changed = fixture.home.join("changed");
+    fs::create_dir(&changed).unwrap();
+    let command = format!(
+        "cd {}; export PANELINK_METADATA_SECRET=PRIVATE_METADATA_SENTINEL",
+        changed.display()
+    );
+    Fixture::assert_ok(
+        &fixture.agent(&["pane", "send", "1", &command, "--enter", "--json"]),
+        "child cd",
+    );
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let listing =
+            Fixture::assert_ok(&fixture.agent(&["pane", "list", "--json"]), "cwd refresh");
+        assert!(!listing.contains("PRIVATE_METADATA_SENTINEL"), "{listing}");
+        assert!(!listing.contains("PANELINK_METADATA_SECRET"), "{listing}");
+        if field(&listing, "cwd") == changed.to_str() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "cwd failed to update: {listing}");
+        thread::sleep(Duration::from_millis(20));
+    }
+    Fixture::assert_ok(
+        &fixture.agent(&[
+            "pane",
+            "send",
+            "1",
+            "exec /bin/sleep 30",
+            "--enter",
+            "--json",
+        ]),
+        "direct exec",
+    );
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let listing =
+            Fixture::assert_ok(&fixture.agent(&["pane", "list", "--json"]), "exec refresh");
+        if field(&listing, "command") == Some("/bin/sleep") {
+            assert_eq!(field(&listing, "cwd"), changed.to_str(), "{listing}");
+            assert!(!listing.contains("sleep 30"), "argv leaked: {listing}");
+            assert!(!listing.contains("PRIVATE_METADATA_SENTINEL"), "{listing}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "executable failed to update: {listing}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    Fixture::assert_ok(
+        &fixture.agent(&["pane", "close", "1", "--json"]),
+        "close sampled child",
+    );
+    fixture.wait_for_server_stop();
 }

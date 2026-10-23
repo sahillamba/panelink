@@ -28,8 +28,17 @@ resolves the selected entry to its complete generation/workspace/pane/session/
 occupant target and checks the layout revision again before acting. If the
 target/index changed, the CLI reports a stale-target error and does not select
 the replacement occupant. JSON output is one object per line with stable action,
-target, status, and condition fields. Command metadata (`cwd` and executable)
-is returned as `null` because the current layout query does not expose it.
+target, status, and condition fields. `pane list` samples the direct managed child's current `cwd` and executable
+path (`command`, without arguments), separately from the unchanged layout
+reply. JSON includes `metadata_source:"managed_child"`, a generation-relative
+`sampled_at_mono_ms`, and independent `cwd_status`/`command_status` values.
+Failed or unsupported samples remain null with a fixed reason. A shell's `cd`
+and direct `exec` are reflected on refresh; a foreground descendant does not
+replace its managed shell's identity. This is a point-in-time observation, not
+an atomic cwd/executable pair. Paths are private live read metadata and are
+never written to launch records, saved layout or diagnostic output. Capability16
+and schema12 use a dedicated per-target read-only context; older grants are not
+widened. See [the metadata contract](P3-PANE-METADATA-TASK.md).
 
 `pane read` returns bounded sanitized live screen text. `--scrollback` names the
 existing live-scrollback read source; the current PTY adapter rejects that
@@ -61,12 +70,25 @@ anchors). `--quiet` measures unchanged screen revisions; `--exit` reports
 status (schema 10, L18). It falls back to `exited (status unavailable)` only
 when the exited pane collapsed out of the layout before its status was read. Timeout exits nonzero.
 
-`events` streams JSON lines until its timeout or Ctrl-C. It uses metadata
-notifications for screen/owner/exit observations and polls the layout at a
-bounded interval for pane open/close events, as the current metadata journal
-does not publish layout events. Events are observations only; they never replay
-terminal effects. `pane run` is intentionally left as a future extension point
-for a separate managed-launch command.
+`events` streams JSON lines until its timeout or Ctrl-C. A dedicated context
+optionally negotiates workspace layout notifications (capability 8/schema 11).
+It emits `layout_changed` with generation/workspace/sequence/revision/empty,
+and `layout_resync` after a journal gap; it reconciles current topology after
+these notifications. Derived pane open/close observations can coalesce
+intermediate layouts. Existing pane screen/owner/exit watches continue
+independently; their expired cursors require reconciliation before continuing.
+Servers and existing grants without capability 8 use bounded layout polling.
+`--pane N` pins the initial complete target, even after another pane occupies
+that index. Events never replay terminal effects. `pane run` remains a separate
+managed-launch extension. See [the workspace contract](P3-LAYOUT-EVENTS-TASK.md).
+
+The dedicated workspace observer proactively resumes the same lease after
+25 minutes, before its 30-minute expiry, using only Read and workspace access.
+It retains its event cursor across renewal, including after its original pane
+retires. Transport-only renewal retries are bounded to three attempts, 15 seconds
+apart; expired/unknown grants, generation changes and malformed responses end
+the stream. Renewal never creates a replacement lease or replays input. See
+[renewal evidence](P3-OBSERVER-RENEWAL-RESULT.md).
 
 ## Parent fixes — 2026-10-22
 

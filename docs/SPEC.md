@@ -1,6 +1,6 @@
 # Panelink: working implementation specification
 
-Revision: 0.17, 2026-10-22. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
+Revision: 0.19, 2026-10-23. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
 
 ## Purpose and requirement authority
 
@@ -108,9 +108,9 @@ A scoped prototype dependency/source/API review packet now exists in `progress/P
 
 The first feasibility gate must use Apple Terminal as the initial host compatibility baseline; broader terminal support follows after this baseline works. Record the tested terminal and macOS versions before claiming compatibility; the minimum supported macOS version remains undecided. Prove the engine works independently of its original GUI, can supervise a PTY correctly, and can deliver renderable snapshots to the terminal client. Also prove exact OpenCode identity capture/persistence and detect in-TUI session changes, establish environment precedence and executable resolution, and exercise lost acknowledgments and clipboard denials. Terminal queries, palette, cursor/keyboard/mouse modes, wide characters, and alternate-screen checkpoints belong in this gate. If authoritative OpenCode identity cannot be established for a supported version, advertise only manual/last-confirmed recovery for that mode; do not defer this limitation to a later status milestone.
 
-## Current implementation checkpoint — 2026-10-18
+## Historical implementation checkpoint — 2026-10-18
 
-This section records the bounded implementation status; it does not settle the broader proposed product contracts below. See [INTEGRATION.md](progress/INTEGRATION.md) for the current verification record and [ROADMAP.md](../ROADMAP.md) for phase status.
+This section retains the historical bounded checkpoint; current four-pane and workspace-watch implementation contracts are recorded under the local protocol section and in ROADMAP.md. It does not settle the broader proposed product contracts below. See [INTEGRATION.md](progress/INTEGRATION.md) for the current verification record and [ROADMAP.md](../ROADMAP.md) for phase status.
 
 The macOS/aarch64 prototype combines the bounded wire and typed response/session codecs, kernel same-UID authentication before handshake, a protected private-directory socket listener with existing-endpoint refusal, bounded connection workers and a single `StateOwner`, durable caller contexts and input ownership, and startup ledger admission plus a durable lifecycle-metadata Intent before child spawn. The operation ledger itself is volatile. An explicitly selected one-child PTY remains owned by the foreground server across logical detach and same-generation reconnect. Focused socketpair tests exercise a lost input acknowledgment and prove no client resend. The full agent-control CLI/API, workspace/layout model, and release runtime remain out of scope.
 
@@ -227,6 +227,58 @@ Events require explicit negotiation, eight pending watches maximum, at most64
 events per result and a shared250ms batch-write budget. Persistent subscriptions
 and provider/text-condition waits remain unimplemented. See [notification tasks](progress/P3-NOTIFICATIONS-TASKS.md)
 and [runtime integration boundary](progress/P3-NOTIFICATION-RUNTIME.md).
+
+Workspace layout notification contract (2026-10-23, bounded prototype):
+capability bit 8 is separately negotiated for schema-11 workspace reconciliation
+and finite watches. Existing pane Events retain their target-scoped schema.
+The owner holds a separate 64-record journal of layout revision invalidations,
+including positively confirmed terminal-empty transitions, with generation,
+workspace and sequence cursors. Layout snapshot and current cursor are copied
+in one owner turn. Invalidations carry no terminal content, launch data or
+operation receipts and never execute/retry a mutation.
+
+Read plus capability 8 and a live grant in the requested workspace are required;
+retiring that grant's original pane does not change its workspace authority.
+Resume cannot widen an existing grant. A different generation/workspace or
+future cursor is refused; eviction returns an explicit resync hint and requires
+fresh reconciliation. Checked sequence failure disables notifications without
+rolling back layout or stopping children; ordinary layout queries remain usable.
+Workspace and pane finite watches share at most eight pending requests; waits
+are at most 1,000 ms. A complete watch response contains at most 64 events /
+1,576 payload bytes, validated before output; reconciliation is 472 bytes.
+No persistent subscriber queue or dependency is added.
+
+The agent CLI uses the new path when negotiated, emits `layout_changed` and
+explicit `layout_resync` records, and reconciles current topology after changes
+or gaps. Derived pane observations can coalesce intermediate layouts; this is
+not a complete lifecycle transcript. Pane screen/owner/exit watches continue
+independently. `events --pane N` pins the initially resolved full target and
+never follows a replacement at index N. Servers/old leases without capability 8
+use the documented bounded polling fallback. See
+[the accepted contract](progress/P3-LAYOUT-EVENTS-TASK.md) for exact wire sizes,
+permissions, failure behavior and acceptance boundaries.
+
+Managed-child metadata contract (2026-10-23, bounded prototype): optional
+capability16 and schema12 expose the current direct child's cwd and executable
+path through a separate full-target Read-authorized query. Each field is
+independently sampled, has a fixed unavailable reason, and includes a shared
+generation-relative monotonic sample-start time. This does not identify a
+foreground descendant or an atomic process-state pair. No launch-path fallback,
+argv/environment query, lossy path conversion, or persistent metadata is used.
+Paths must be absolute UTF-8 without control/NUL characters, at most4095 bytes
+each; the maximum reply is8262 bytes. PID plus captured OS birth identity is
+verified before and after native sampling, and authority/full-target/liveness
+is revalidated before publication. A single bounded worker isolates libproc
+from PTY pumping; after500ms the owner reports timed_out and rejects new work
+as busy until the late query completes. No kernel cancellation is claimed.
+See [the accepted metadata contract](progress/P3-PANE-METADATA-TASK.md).
+
+The workspace observer reconnects at25 minutes to renew its same30-minute
+lease, requesting Read plus workspace events only and preserving its cursor.
+Its original pane may retire without changing workspace authority; a retired
+pane resume cannot acquire pane input/events. Three transport-only retries
+are spaced15 seconds apart; expiry, generation change or invalid grant fails
+closed, with no replacement lease or mutation replay.
 
 Each message has a protocol version, type, bounded payload, request identity when applicable, and stable domain IDs. The server has a distinct generation identity on each start. State updates are ordered within that generation; clients detect gaps and request a new snapshot.
 

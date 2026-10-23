@@ -31,8 +31,19 @@ pub const CAPABILITY_INPUT: u64 = 2;
 /// Capability bit for event delivery.
 pub const CAPABILITY_EVENTS: u64 = 4;
 
+/// Capability bit for workspace-scoped layout reconciliation and watches.
+pub const CAPABILITY_WORKSPACE_EVENTS: u64 = 8;
+
+/// Capability bit for live managed-child cwd and executable observations.
+/// Only the multi-session server may offer this capability.
+pub const CAPABILITY_PANE_METADATA: u64 = 16;
+
 /// All capability bits currently defined by this schema.
-pub const KNOWN_CAPABILITIES: u64 = CAPABILITY_READ | CAPABILITY_INPUT | CAPABILITY_EVENTS;
+pub const KNOWN_CAPABILITIES: u64 = CAPABILITY_READ
+    | CAPABILITY_INPUT
+    | CAPABILITY_EVENTS
+    | CAPABILITY_WORKSPACE_EVENTS
+    | CAPABILITY_PANE_METADATA;
 
 /// Client capability request for the v1.0 handshake.
 ///

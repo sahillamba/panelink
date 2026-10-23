@@ -1,6 +1,82 @@
 # Implementation session checkpoint — 2026-10-17
 
-## Combined-tree merge checkpoint — 2026-10-22 (read this first)
+## Phase 3 managed-child metadata and observer renewal — 2026-10-23 (read first)
+
+Completed and parent-reviewed: schema12/capability16 private current managed-child
+cwd/executable queries, bounded isolated sampler/deadline/busy recovery,
+exact-target authorization and publication revalidation, CLI sample/status
+output, and same-lease workspace renewal after original-pane retirement.
+The prior workspace-events slice is included in this checkpoint. User explicitly
+authorized committing the completed verified slice; no push is authorized.
+Branch: `codex/p3-integration-layout-events`; use Git history for commit identity.
+
+Final full serial Cargo **1059passed/0failed/15ignored** in152.92s:
+library709, binary123, integration227 across50 targets. Decoder39/Python77,
+strict all-target Clippy, fmt, build, fingerprints and docs251/0 pass separately.
+Initial default-parallel standard verifier7/8 stopped in the library at
+707pass/2fail/4ignored (existing history-writer timing admission and immediate
+post-spawn metadata sampling); this is preserved as failed evidence. The sampler
+test now waits within a finite bound; the full serial run passes both.
+See [final result](P3-PANE-METADATA-RESULT.md) and
+[parent review](P3-PANE-METADATA-REVIEW.md) for commands, raw-log paths and limits.
+All Luna ownership is released; no live agent is needed to resume.
+
+Full Phase3 remains open. Next: review/integrate the separate live-scrollback
+slice in `/Users/sahillamba/panelink`, which this continuation did not modify or
+integrate. Preserve that checkout's attach timing and180s deadline evidence.
+Managed pane run, richer owner identity, wider host/lifetime contracts, Phase4
+provider proof and broader Phase5 recovery remain open. Ignored tests, logical
+clock renewals, synthetic birth mismatch and private automated PTYs are not
+human host, physical reboot, kernel PID-reuse or representative load proof.
+
+## Historical Phase 3 baseline and layout notifications — 2026-10-23
+
+The prior index blocker is resolved by integration commits `70f589c` and
+`bd84625`. This continuation began clean on detached HEAD at `bd84625` and
+created `codex/p3-integration-layout-events`. Scoped changes below remain
+uncommitted; no push was made. The parent Phase 3 is not complete, so no
+phase-completion commit is claimed. Historical merge reports below retain
+their original failed commands, not the current index state.
+
+Delivered and parent-reviewed: schema 11/capability 8 workspace layout
+notifications, 64-record volatile journal, atomic snapshot/cursor reconciliation,
+finite watches sharing the existing eight-watch cap, and agent CLI gap recovery
+and full-target pinning. Pane screen/owner/exit events continue during quiet
+workspace watches. No dependencies or persisted history format changed.
+See [the complete result](P3-LAYOUT-EVENTS-RESULT.md),
+[accepted contract](P3-LAYOUT-EVENTS-TASK.md), and
+[independent review](P3-LAYOUT-EVENTS-REVIEW.md).
+
+Final actual combined verifier: **8/8**. Root Cargo **1,036 passed / 0 failed /
+15 ignored** (library691, binary119, integration226 across50 targets); decoder39
+and Python77 pass; strict all-target Clippy, fmt, build and component fingerprints
+pass; docs243/0. The real CLI gap test observes readiness, pauses only its test
+observer, commits70 resizes, resumes and observes exactly one `layout_resync`
+plus the quiet deadline. CLI target4/4. Four normally ignored Phase3 pathname
+peer/authentication/descriptor-race/context cases pass separately. Ignored tests
+and human Apple Terminal acceptance are not inferred passes.
+
+The original restricted sweep reproduced 989 passed / 28 failed / 15 ignored.
+Direct socket probes established EPERM only in the sandbox. All nine previously
+failing integration targets passed in the permitted context before new product
+changes:35/0/1ignored. Initial verifier compile/format failures during concurrent
+edits are preserved in the result note and superseded by the final frozen-tree
+run, not relabeled as passing executions.
+
+User-authorized GPT-6 Luna Medium/High workers had exclusive files; parent
+owned design, integration and independent verification. All ownership is
+released; no live agent is needed to resume. The worktree graph was refreshed
+fast/nonpersistent as `Users-sahillamba-.codex-worktrees-6730-panelink` after
+source/test freeze. Source/tests remain authoritative.
+
+Next: define and expose safe live pane cwd/executable metadata (currently null),
+without arguments or environment values. Broader Phase3 live scrollback,
+managed `pane run`, owner identity and host/lifetime contracts remain open.
+The dedicated workspace observer does not proactively renew its30-minute
+lease. Phase4 provider identity, Phase5 hierarchy/selection/reboot, human host
+acceptance and active-agent load are not closed by this slice.
+
+## Historical combined-tree merge checkpoint — 2026-10-22
 
 The origin/main work and local stash work are combined in the working tree.
 Parent reviewed the code/document resolutions and added core/socketpair

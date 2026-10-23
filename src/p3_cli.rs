@@ -20,12 +20,16 @@ use panelink::event_journal::EventCursor;
 use panelink::event_protocol::{decode_event, Event, EventBody};
 use panelink::handshake_protocol::{
     validate_welcome, Hello, Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT, CAPABILITY_READ,
+    CAPABILITY_WORKSPACE_EVENTS,
 };
 use panelink::launch::{Environment, LaunchContext};
 use panelink::managed_launch_protocol::LaunchRequest;
 use panelink::multi_runtime::{decode_pane_reply, encode_pane_query, PaneReply};
 use panelink::multi_startup::{StartedMultiServer, StartupLaunch};
 use panelink::pane_layout::SplitDirection;
+use panelink::pane_metadata_protocol::{
+    self as pane_metadata, Observation as ProcessObservation, PathStatus, CAPABILITY_PANE_METADATA,
+};
 use panelink::protocol::{OperationKey, OperationStatus, Outcome};
 use panelink::protocol_wire::{Frame, MessageKind};
 use panelink::response_protocol::{decode_response_payload, RejectionCode, ResponseBody};
@@ -43,6 +47,11 @@ use panelink::ui_protocol::KeyInput;
 use panelink::watch_protocol::{
     decode_reconciliation, decode_watch_end, encode_watch_request, Reconciliation, WatchEnd,
     WatchRequest, WatchStatus, MAX_WATCH_EVENTS, MAX_WATCH_WAIT_MS,
+};
+use panelink::workspace_watch_protocol::{
+    self as workspace_watch, Reconciliation as WorkspaceReconciliation,
+    Request as WorkspaceWatchRequest, WatchReply as WorkspaceWatchReply, WorkspaceCursor,
+    MAX_WORKSPACE_WATCH_EVENTS,
 };
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as FmtWrite;
@@ -856,7 +865,7 @@ fn handshake_mode(
     resume: Option<panelink::client_context::ClientContext>,
     require_events: bool,
 ) -> Result<Welcome, &'static str> {
-    handshake_full(stream, resume, require_events, None)
+    handshake_full(stream, resume, require_events, None, 0)
 }
 
 /// Fresh or resumed Hello with an optional schema-8 AttachTarget trailer.
@@ -868,7 +877,7 @@ fn handshake_attach(
     resume: Option<panelink::client_context::ClientContext>,
     target: Option<TargetRef>,
 ) -> Result<Welcome, &'static str> {
-    handshake_full(stream, resume, false, target)
+    handshake_full(stream, resume, false, target, 0)
 }
 
 fn handshake_full(
@@ -876,12 +885,18 @@ fn handshake_full(
     resume: Option<panelink::client_context::ClientContext>,
     require_events: bool,
     target: Option<TargetRef>,
+    observation_capabilities: u64,
 ) -> Result<Welcome, &'static str> {
     let hello = Hello {
         nonce: fresh_nonce(),
         required_capabilities: CAPABILITY_READ | if require_events { CAPABILITY_EVENTS } else { 0 },
-        optional_capabilities: CAPABILITY_INPUT
-            | if require_events { 0 } else { CAPABILITY_EVENTS },
+        optional_capabilities: if observation_capabilities == CAPABILITY_PANE_METADATA {
+            CAPABILITY_PANE_METADATA
+        } else {
+            CAPABILITY_INPUT
+                | if require_events { 0 } else { CAPABILITY_EVENTS }
+                | observation_capabilities
+        },
     };
     let session_hello = SessionHello {
         hello,
@@ -916,6 +931,46 @@ fn handshake_full(
         stream
             .enable_metadata_events()
             .map_err(|_| "transport_failed")?;
+    }
+    Ok(welcome)
+}
+
+/// Resume the observer's exact saved lease without an attach target. Request
+/// only its workspace read grant so retirement of the original pane cannot
+/// make pane input/events part of the renewed connection.
+fn handshake_workspace_resume(
+    stream: &mut AuthenticatedStream,
+    resume: panelink::client_context::ClientContext,
+) -> Result<Welcome, &'static str> {
+    let hello = Hello {
+        nonce: fresh_nonce(),
+        required_capabilities: CAPABILITY_READ,
+        optional_capabilities: CAPABILITY_WORKSPACE_EVENTS,
+    };
+    let session_hello = SessionHello {
+        hello,
+        resume: Some(LeaseRef {
+            generation: resume.generation(),
+            lease: resume.lease(),
+        }),
+    };
+    let payload = encode_session_hello(&session_hello).map_err(|_| "handshake_invalid")?;
+    write_frame(stream, MessageKind::Hello, 0, &payload)?;
+    let frame = read_frame(stream)?;
+    if frame.kind() == MessageKind::Error && frame.request_id() == 0 {
+        return Err("server_rejected");
+    }
+    if frame.kind() != MessageKind::Welcome || frame.request_id() != 0 {
+        return Err("handshake_invalid");
+    }
+    let welcome = panelink::handshake_protocol::decode_welcome(frame.payload())
+        .map_err(|_| "handshake_invalid")?;
+    validate_welcome(&hello, &welcome).map_err(|_| "handshake_invalid")?;
+    if welcome.generation != resume.generation() || welcome.lease != resume.lease() {
+        return Err("context_mismatch");
+    }
+    if welcome.selected_capabilities != (CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS) {
+        return Err("workspace_events_unavailable");
     }
     Ok(welcome)
 }
@@ -2080,6 +2135,7 @@ pub(super) enum CloseFailure {
 /// operation left uncertain on such a lease is unobservable and is reported,
 /// never resent.
 pub(crate) struct WorkspaceLink {
+    directory: PathBuf,
     context: ContextFile,
     stream: AuthenticatedStream,
     next_request: u64,
@@ -2089,6 +2145,48 @@ pub(crate) struct WorkspaceLink {
     /// invocation. This invocation may inspect state but will not substitute a
     /// fresh operation for it.
     pub(crate) settled_uncertain: Option<OperationStatus>,
+    selected_capabilities: u64,
+    lease_schedule: ObserverLeaseSchedule,
+}
+
+const OBSERVER_LEASE_TTL: Duration = Duration::from_secs(1800);
+const OBSERVER_RENEW_MARGIN: Duration = Duration::from_secs(300);
+const OBSERVER_RENEW_RETRY: Duration = Duration::from_secs(15);
+const OBSERVER_RENEW_ATTEMPTS: u8 = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObserverLeaseSchedule {
+    renewed_at: Instant,
+    next_attempt: Instant,
+    attempts: u8,
+}
+
+impl ObserverLeaseSchedule {
+    fn new(renewed_at: Instant) -> Self {
+        Self {
+            renewed_at,
+            next_attempt: renewed_at + (OBSERVER_LEASE_TTL - OBSERVER_RENEW_MARGIN),
+            attempts: 0,
+        }
+    }
+
+    fn due(self, now: Instant) -> bool {
+        now >= self.next_attempt
+    }
+
+    fn expired(self, now: Instant) -> bool {
+        now >= self.renewed_at + OBSERVER_LEASE_TTL
+    }
+
+    fn failed(&mut self, now: Instant) -> bool {
+        self.attempts = self.attempts.saturating_add(1);
+        self.next_attempt = now + OBSERVER_RENEW_RETRY;
+        self.attempts >= OBSERVER_RENEW_ATTEMPTS
+    }
+
+    fn renewed(&mut self, started: Instant) {
+        *self = Self::new(started);
+    }
 }
 
 /// Bounded sanitized live-screen observation returned by the control client.
@@ -2112,7 +2210,7 @@ impl WorkspaceLink {
     /// Resume (or create) the CLI context at `context_path` against the server
     /// in `directory`.
     pub(crate) fn open(directory: &Path, context_path: &Path) -> Result<Self, &'static str> {
-        Self::open_for_target_inner(directory, context_path, None, false)
+        Self::open_for_target_inner(directory, context_path, None, false, 0)
     }
 
     /// Open the reusable context pinned to the exact target, creating a fresh
@@ -2122,7 +2220,7 @@ impl WorkspaceLink {
         context_path: &Path,
         target: TargetRef,
     ) -> Result<Self, &'static str> {
-        Self::open_for_target_inner(directory, context_path, Some(target), false)
+        Self::open_for_target_inner(directory, context_path, Some(target), false, 0)
     }
 
     /// Event watches use the same pinned target connection; the default Hello
@@ -2132,7 +2230,62 @@ impl WorkspaceLink {
         context_path: &Path,
         target: TargetRef,
     ) -> Result<Self, &'static str> {
-        Self::open_for_target_inner(directory, context_path, Some(target), true)
+        Self::open_for_target_inner(directory, context_path, Some(target), true, 0)
+    }
+
+    /// Open a dedicated workspace observation lease. A fresh Hello offers
+    /// capability 8; a resumed Hello repeats the offer only so the server can
+    /// return the lease's unchanged grant, which this client validates.
+    pub(crate) fn open_workspace_events(
+        directory: &Path,
+        context_path: &Path,
+        target: TargetRef,
+    ) -> Result<Self, &'static str> {
+        Self::open_for_target_inner(
+            directory,
+            context_path,
+            Some(target),
+            false,
+            CAPABILITY_WORKSPACE_EVENTS,
+        )
+    }
+
+    /// A separate context prevents an older grant being widened implicitly.
+    pub(crate) fn open_pane_metadata(
+        directory: &Path,
+        context_path: &Path,
+        target: TargetRef,
+    ) -> Result<Self, &'static str> {
+        Self::open_for_target_inner(
+            directory,
+            context_path,
+            Some(target),
+            false,
+            CAPABILITY_PANE_METADATA,
+        )
+    }
+
+    pub(crate) fn process_observation(
+        &mut self,
+        target: TargetRef,
+    ) -> Result<ProcessObservation, &'static str> {
+        self.ensure_target(target)?;
+        if self.selected_capabilities & CAPABILITY_PANE_METADATA == 0 {
+            return Ok(ProcessObservation::unavailable(
+                target,
+                0,
+                PathStatus::Unsupported,
+            ));
+        }
+        let payload = pane_metadata::encode_query(target).map_err(|_| "request_invalid")?;
+        let id = self.request_id();
+        let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
+        let observation =
+            pane_metadata::decode_observation(&bytes).map_err(|_| "response_invalid")?;
+        if observation.target != target {
+            return Err("response_invalid");
+        }
+        Ok(observation)
     }
 
     fn open_for_target_inner(
@@ -2140,7 +2293,9 @@ impl WorkspaceLink {
         context_path: &Path,
         target: Option<TargetRef>,
         require_events: bool,
+        observation_capabilities: u64,
     ) -> Result<Self, &'static str> {
+        let workspace_events = observation_capabilities & CAPABILITY_WORKSPACE_EVENTS != 0;
         let mut discarded_uncertain = false;
         if fs::symlink_metadata(context_path).is_ok() {
             let context = ContextFile::open_existing(
@@ -2148,19 +2303,36 @@ impl WorkspaceLink {
                 deadline_after(CLOSE_CLIENT_DEADLINE + CLIENT_DEADLINE),
             )
             .map_err(|error| context_error_label(&error))?;
+            let handshake_started = Instant::now();
             let mut stream = connect_stream(directory)?;
-            match handshake_mode(&mut stream, Some(context.context()), require_events) {
-                Ok(_) => {
+            match handshake_full(
+                &mut stream,
+                Some(context.context()),
+                require_events,
+                None,
+                observation_capabilities,
+            ) {
+                Ok(welcome) => {
                     let mut link = Self {
+                        directory: directory.to_path_buf(),
                         context,
                         stream,
                         next_request: 1,
                         discarded_uncertain,
                         settled_uncertain: None,
+                        selected_capabilities: welcome.selected_capabilities,
+                        lease_schedule: ObserverLeaseSchedule::new(handshake_started),
                     };
                     link.settled_uncertain = link.settle_uncertain()?;
                     if let Some(expected) = target {
-                        if link.describe_info()?.target != expected {
+                        let observed = link.describe_info()?.target;
+                        let mismatch = if workspace_events {
+                            observed.generation != expected.generation
+                                || observed.workspace != expected.workspace
+                        } else {
+                            observed != expected
+                        };
+                        if mismatch {
                             return Err("context_target_mismatch");
                         }
                     }
@@ -2177,8 +2349,15 @@ impl WorkspaceLink {
                 Err(error) => return Err(error),
             }
         }
+        let handshake_started = Instant::now();
         let mut stream = connect_stream(directory)?;
-        let welcome = handshake_full(&mut stream, None, require_events, target)?;
+        let welcome = handshake_full(
+            &mut stream,
+            None,
+            require_events,
+            target,
+            observation_capabilities,
+        )?;
         let context = ContextFile::create(
             context_path,
             welcome.generation,
@@ -2187,11 +2366,14 @@ impl WorkspaceLink {
         )
         .map_err(|error| context_error_label(&error))?;
         Ok(Self {
+            directory: directory.to_path_buf(),
             context,
             stream,
             next_request: 1,
             discarded_uncertain,
             settled_uncertain: None,
+            selected_capabilities: welcome.selected_capabilities,
+            lease_schedule: ObserverLeaseSchedule::new(handshake_started),
         })
     }
 
@@ -2199,6 +2381,56 @@ impl WorkspaceLink {
         let id = self.next_request;
         self.next_request += 1;
         id
+    }
+
+    fn renew_workspace_lease_at(
+        &mut self,
+        now: Instant,
+        connect: impl FnOnce() -> Result<AuthenticatedStream, &'static str>,
+    ) -> Result<bool, &'static str> {
+        if !self.lease_schedule.due(now) {
+            return Ok(false);
+        }
+        if self.lease_schedule.expired(now)
+            || self.lease_schedule.attempts >= OBSERVER_RENEW_ATTEMPTS
+        {
+            return Err("lease_renewal_failed");
+        }
+
+        let started = now;
+        let renewal = (|| {
+            let mut stream = connect()?;
+            let welcome = handshake_workspace_resume(&mut stream, self.context.context())?;
+            Ok::<_, &'static str>((stream, welcome))
+        })();
+        match renewal {
+            Ok((stream, welcome)) => {
+                self.stream = stream;
+                self.next_request = 1;
+                self.selected_capabilities = welcome.selected_capabilities;
+                self.lease_schedule.renewed(started);
+                Ok(true)
+            }
+            Err(
+                "server_rejected"
+                | "context_mismatch"
+                | "handshake_invalid"
+                | "workspace_events_unavailable",
+            ) => Err("lease_renewal_failed"),
+            Err(error) if error == "transport_unavailable" || error == "transport_failed" => {
+                if self.lease_schedule.failed(now) || self.lease_schedule.expired(now) {
+                    Err("lease_renewal_failed")
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn ensure_workspace_lease(&mut self) -> Result<bool, &'static str> {
+        let directory = self.directory.clone();
+        self.renew_workspace_lease_at(Instant::now(), || connect_stream(&directory))
     }
 
     /// Settle an earlier uncertain key by schema-2 status; never resend it.
@@ -2245,6 +2477,95 @@ impl WorkspaceLink {
 
     pub(crate) const fn lease(&self) -> u64 {
         self.context.context().lease()
+    }
+
+    /// Whether this dedicated observation lease has workspace event access.
+    pub(crate) const fn has_workspace_events(&self) -> bool {
+        self.selected_capabilities & CAPABILITY_WORKSPACE_EVENTS != 0
+    }
+
+    /// Reconcile layout and its workspace cursor in one owner snapshot.
+    pub(crate) fn reconcile_workspace(
+        &mut self,
+        target: TargetRef,
+    ) -> Result<WorkspaceReconciliation, &'static str> {
+        self.ensure_workspace_lease()?;
+        self.ensure_target(target)?;
+        if !self.has_workspace_events() {
+            return Err("workspace_events_unavailable");
+        }
+        let request = WorkspaceWatchRequest::Reconcile {
+            generation: target.generation,
+            workspace: target.workspace,
+        };
+        let payload = workspace_watch::encode_request(&request).map_err(|_| "request_invalid")?;
+        let id = self.request_id();
+        let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
+        let reply =
+            workspace_watch::decode_reconciliation(&bytes).map_err(|_| "response_invalid")?;
+        if reply.cursor.generation != target.generation
+            || reply.cursor.workspace != target.workspace
+            || reply.revision == 0
+            || reply.layout.is_some_and(|layout| {
+                layout.revision != reply.revision
+                    || layout.panes.iter().flatten().any(|pane| {
+                        pane.target.generation != target.generation
+                            || pane.target.workspace != target.workspace
+                    })
+            })
+        {
+            return Err("response_invalid");
+        }
+        Ok(reply)
+    }
+
+    /// Read one complete bounded workspace watch response.
+    pub(crate) fn watch_workspace(
+        &mut self,
+        target: TargetRef,
+        cursor: WorkspaceCursor,
+        limit: u16,
+        wait_ms: u16,
+    ) -> Result<WorkspaceWatchReply, &'static str> {
+        self.ensure_workspace_lease()?;
+        self.ensure_target(target)?;
+        if !self.has_workspace_events()
+            || cursor.generation != target.generation
+            || cursor.workspace != target.workspace
+            || limit == 0
+            || limit > MAX_WORKSPACE_WATCH_EVENTS as u16
+        {
+            return Err("request_invalid");
+        }
+        let request = WorkspaceWatchRequest::Watch {
+            cursor,
+            limit,
+            wait_ms,
+        };
+        let payload = workspace_watch::encode_request(&request).map_err(|_| "request_invalid")?;
+        let id = self.request_id();
+        let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
+        let reply = workspace_watch::decode_watch_reply(&bytes).map_err(|_| "response_invalid")?;
+        let expected_end = cursor.sequence.checked_add(reply.events.len() as u64);
+        if reply.cursor.generation != target.generation
+            || reply.cursor.workspace != target.workspace
+            || reply.events.len() > limit as usize
+            || reply.events.iter().enumerate().any(|(index, event)| {
+                cursor
+                    .sequence
+                    .checked_add(index as u64 + 1)
+                    .is_none_or(|sequence| event.sequence != sequence)
+            })
+            || (reply.status == WatchStatus::Changed
+                && (expected_end != Some(reply.cursor.sequence)
+                    || reply.cursor.sequence <= cursor.sequence))
+            || (reply.status == WatchStatus::TimedOut && reply.cursor.sequence != cursor.sequence)
+            || (reply.status == WatchStatus::ResyncRequired
+                && reply.cursor.sequence < cursor.sequence)
+        {
+            return Err("response_invalid");
+        }
+        Ok(reply)
     }
 
     /// Read the decoded, sanitized live screen through the existing typed
@@ -3283,6 +3604,197 @@ mod tests {
         })
         .unwrap()
         .to_vec()
+    }
+
+    fn workspace_renewal_peer(
+        generation: u64,
+        lease: u64,
+        selected_capabilities: u64,
+    ) -> (AuthenticatedStream, thread::JoinHandle<()>) {
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || {
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(header.kind(), MessageKind::Hello);
+            assert_eq!(header.request_id(), 0);
+            let hello = panelink::session_protocol::decode_session_hello(&payload).unwrap();
+            assert_eq!(hello.hello.required_capabilities, CAPABILITY_READ);
+            assert_eq!(
+                hello.hello.optional_capabilities,
+                CAPABILITY_WORKSPACE_EVENTS
+            );
+            assert_eq!(
+                hello.resume,
+                Some(LeaseRef {
+                    generation: 7,
+                    lease: 9
+                })
+            );
+            let welcome = panelink::handshake_protocol::encode_welcome(&Welcome {
+                nonce: hello.hello.nonce,
+                generation,
+                lease,
+                selected_capabilities,
+                ttl_seconds: panelink::handshake_protocol::HANDSHAKE_LEASE_TTL_SECONDS,
+            })
+            .unwrap();
+            write_test_frame(&mut server_socket, MessageKind::Welcome, 0, &welcome);
+        });
+        (AuthenticatedStream::new(client_socket).unwrap(), server)
+    }
+
+    fn observer_link(context: ContextFile, stream: AuthenticatedStream) -> WorkspaceLink {
+        let now = Instant::now();
+        WorkspaceLink {
+            directory: PathBuf::from("/private/tmp/panelink-observer-test"),
+            context,
+            stream,
+            next_request: 4,
+            discarded_uncertain: false,
+            settled_uncertain: None,
+            selected_capabilities: CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS,
+            lease_schedule: ObserverLeaseSchedule::new(now),
+        }
+    }
+
+    #[test]
+    fn observer_lease_schedule_uses_conservative_ttl_and_finite_retries() {
+        let started = Instant::now();
+        let mut schedule = ObserverLeaseSchedule::new(started);
+        assert!(!schedule.due(started + Duration::from_secs(1499)));
+        let renewal_time = started + Duration::from_secs(1500);
+        assert!(schedule.due(renewal_time));
+        assert!(!schedule.expired(renewal_time));
+        assert!(!schedule.failed(renewal_time));
+        assert_eq!(schedule.next_attempt, renewal_time + OBSERVER_RENEW_RETRY);
+        assert!(!schedule.failed(renewal_time + OBSERVER_RENEW_RETRY));
+        assert!(schedule.failed(renewal_time + OBSERVER_RENEW_RETRY * 2));
+        assert!(schedule.expired(started + OBSERVER_LEASE_TTL));
+    }
+
+    #[test]
+    fn observer_renews_same_lease_multiple_times_over_socket_handshakes() {
+        let (directory, _, context) = test_context(false);
+        let (old_client, old_server) = UnixStream::pair().unwrap();
+        drop(old_server);
+        let mut link = observer_link(context, AuthenticatedStream::new(old_client).unwrap());
+        let base = Instant::now();
+        link.lease_schedule = ObserverLeaseSchedule::new(base);
+
+        for renewal_number in 1..=2 {
+            let now = base + Duration::from_secs(1500 * renewal_number);
+            let (stream, server) =
+                workspace_renewal_peer(7, 9, CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS);
+            assert!(link.renew_workspace_lease_at(now, || Ok(stream)).unwrap());
+            server.join().unwrap();
+            assert_eq!(link.lease(), 9);
+            assert_eq!(link.next_request, 1);
+            assert_eq!(link.lease_schedule.renewed_at, now);
+        }
+        drop(link);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn observer_renewal_refuses_generation_change_or_capability_escalation() {
+        let (directory, _, context) = test_context(false);
+        let (old_client, old_server) = UnixStream::pair().unwrap();
+        drop(old_server);
+        let mut link = observer_link(context, AuthenticatedStream::new(old_client).unwrap());
+        let now = link.lease_schedule.renewed_at + Duration::from_secs(1500);
+        let (stream, server) =
+            workspace_renewal_peer(8, 9, CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS);
+        assert_eq!(
+            link.renew_workspace_lease_at(now, || Ok(stream)),
+            Err("lease_renewal_failed")
+        );
+        server.join().unwrap();
+
+        let (stream, server) = workspace_renewal_peer(
+            7,
+            9,
+            CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS | CAPABILITY_INPUT,
+        );
+        assert_eq!(
+            link.renew_workspace_lease_at(now, || Ok(stream)),
+            Err("lease_renewal_failed")
+        );
+        server.join().unwrap();
+        drop(link);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn observer_watch_preserves_cursor_across_renewal_for_server_gap_detection() {
+        let (directory, _, context) = test_context(false);
+        let (old_client, old_server) = UnixStream::pair().unwrap();
+        drop(old_server);
+        let mut link = observer_link(context, AuthenticatedStream::new(old_client).unwrap());
+        let base = Instant::now();
+        link.lease_schedule = ObserverLeaseSchedule::new(base);
+        let now = base + Duration::from_secs(1500);
+        let cursor = WorkspaceCursor {
+            generation: 7,
+            workspace: 2,
+            sequence: 3,
+        };
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || {
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(header.kind(), MessageKind::Hello);
+            let hello = panelink::session_protocol::decode_session_hello(&payload).unwrap();
+            assert_eq!(
+                hello.resume,
+                Some(LeaseRef {
+                    generation: 7,
+                    lease: 9
+                })
+            );
+            let welcome = panelink::handshake_protocol::encode_welcome(&Welcome {
+                nonce: hello.hello.nonce,
+                generation: 7,
+                lease: 9,
+                selected_capabilities: CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS,
+                ttl_seconds: panelink::handshake_protocol::HANDSHAKE_LEASE_TTL_SECONDS,
+            })
+            .unwrap();
+            write_test_frame(&mut server_socket, MessageKind::Welcome, 0, &welcome);
+
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(header.kind(), MessageKind::Request);
+            assert_eq!(header.request_id(), 1);
+            assert_eq!(
+                workspace_watch::decode_request(&payload),
+                Ok(WorkspaceWatchRequest::Watch {
+                    cursor,
+                    limit: 8,
+                    wait_ms: 10,
+                })
+            );
+            let response = workspace_watch::encode_watch_reply(&WorkspaceWatchReply {
+                status: WatchStatus::ResyncRequired,
+                cursor: WorkspaceCursor {
+                    sequence: 5,
+                    ..cursor
+                },
+                events: vec![],
+            })
+            .unwrap();
+            write_test_frame(&mut server_socket, MessageKind::Response, 1, &response);
+        });
+        assert!(link
+            .renew_workspace_lease_at(now, || {
+                Ok(AuthenticatedStream::new(client_socket).unwrap())
+            })
+            .unwrap());
+        assert_eq!(
+            link.watch_workspace(test_target(), cursor, 8, 10)
+                .unwrap()
+                .status,
+            WatchStatus::ResyncRequired
+        );
+        server.join().unwrap();
+        drop(link);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

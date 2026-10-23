@@ -84,6 +84,12 @@ pub trait EffectSink {
     /// Report whether the managed child has exited.
     fn child_exited(&self) -> bool;
 
+    /// Return the opaque identity captured for this direct managed child.
+    /// Sinks without process metadata remain compatible and report none.
+    fn process_identity(&self) -> Option<crate::process_metadata::ProcessIdentity> {
+        None
+    }
+
     /// Return the current nonzero screen revision when metadata tracking works.
     /// Existing sinks default to no event capability.
     fn screen_revision(&self) -> Option<u64> {
@@ -765,7 +771,13 @@ impl GlobalAuthority {
         let expires_secs = now_secs
             .checked_add(LEASE_TTL_SECS)
             .ok_or(ServerError::Protocol(ProtocolError::TimeOverflow))?;
-        let available = self.available_capabilities(session) & capability_mask;
+        // Only the multi-session owner includes the workspace bit in its
+        // mask. Workspace observations have an independent journal and do
+        // not depend on a particular pane's notification health.
+        let workspace = capability_mask & crate::handshake_protocol::CAPABILITY_WORKSPACE_EVENTS;
+        let pane_metadata = capability_mask & crate::handshake_protocol::CAPABILITY_PANE_METADATA;
+        let available =
+            (self.available_capabilities(session) | workspace | pane_metadata) & capability_mask;
 
         let (lease, capabilities) = match hello.resume {
             Some(resume) => {
@@ -819,6 +831,65 @@ impl GlobalAuthority {
             Connection {
                 generation: self.generation,
                 lease,
+                selected_capabilities: welcome.selected_capabilities,
+            },
+            welcome,
+        ))
+    }
+
+    /// Resume an existing lease solely for its original workspace observer
+    /// after the pane that issued it has retired. This cannot mint authority
+    /// or change the grant's target or capability set.
+    pub(crate) fn resume_workspace_observer(
+        &mut self,
+        target: TargetRef,
+        hello: &SessionHello,
+        now_secs: u64,
+    ) -> Result<(Connection, Welcome), ServerError> {
+        hello.validate()?;
+        let requested = hello.hello.required_capabilities | hello.hello.optional_capabilities;
+        let workspace_only =
+            CAPABILITY_READ | crate::handshake_protocol::CAPABILITY_WORKSPACE_EVENTS;
+        if requested != workspace_only {
+            return Err(ServerError::UnknownContext);
+        }
+        let resume = hello.resume.ok_or(ServerError::UnknownContext)?;
+        if resume.generation != self.generation {
+            return Err(ServerError::UnknownContext);
+        }
+        let grant = self
+            .grants
+            .get(&resume.lease)
+            .copied()
+            .ok_or(ServerError::UnknownContext)?;
+        if now_secs >= grant.expires_secs
+            || grant.target != target
+            || grant.capabilities & workspace_only != workspace_only
+        {
+            return Err(ServerError::UnknownContext);
+        }
+        let welcome = negotiate(
+            &hello.hello,
+            grant.capabilities & workspace_only,
+            self.generation,
+            resume.lease,
+        )?;
+        let expires_secs = now_secs
+            .checked_add(LEASE_TTL_SECS)
+            .ok_or(ServerError::Protocol(ProtocolError::TimeOverflow))?;
+        self.ledger.renew_lease(resume.lease, now_secs)?;
+        self.grants.insert(
+            resume.lease,
+            LeaseGrant {
+                capabilities: grant.capabilities,
+                target: grant.target,
+                expires_secs,
+            },
+        );
+        Ok((
+            Connection {
+                generation: self.generation,
+                lease: resume.lease,
                 selected_capabilities: welcome.selected_capabilities,
             },
             welcome,
@@ -1251,13 +1322,13 @@ impl<'a, E: EffectSink> SessionHandler<'a, E> {
         match self.global.ledger.admit(request.key, payload, now_secs) {
             Ok(Admission::Execute) => {}
             Ok(Admission::InProgress) => {
-                return self.status_response(request.key, OperationStatus::InProgress)
+                return self.status_response(request.key, OperationStatus::InProgress);
             }
             Ok(Admission::Completed(outcome)) => {
-                return self.status_response(request.key, OperationStatus::Completed(outcome))
+                return self.status_response(request.key, OperationStatus::Completed(outcome));
             }
             Err(error) if is_capacity_error(&error) => {
-                return self.rejected(request.key, RejectionCode::Capacity)
+                return self.rejected(request.key, RejectionCode::Capacity);
             }
             Err(error) => return Err(ServerError::Protocol(error)),
         }
@@ -1327,13 +1398,13 @@ impl<'a, E: EffectSink> SessionHandler<'a, E> {
         match self.global.ledger.admit(request.key, payload, now_secs) {
             Ok(Admission::Execute) => {}
             Ok(Admission::InProgress) => {
-                return self.status_response(request.key, OperationStatus::InProgress)
+                return self.status_response(request.key, OperationStatus::InProgress);
             }
             Ok(Admission::Completed(outcome)) => {
-                return self.status_response(request.key, OperationStatus::Completed(outcome))
+                return self.status_response(request.key, OperationStatus::Completed(outcome));
             }
             Err(error) if is_capacity_error(&error) => {
-                return self.rejected(request.key, RejectionCode::Capacity)
+                return self.rejected(request.key, RejectionCode::Capacity);
             }
             Err(error) => return Err(ServerError::Protocol(error)),
         }
@@ -1435,17 +1506,17 @@ impl<'a, E: EffectSink> SessionHandler<'a, E> {
             Ok(Admission::InProgress) => {
                 return self
                     .status_response(key, OperationStatus::InProgress)
-                    .map(SessionReply::Payload)
+                    .map(SessionReply::Payload);
             }
             Ok(Admission::Completed(outcome)) => {
                 return self
                     .status_response(key, OperationStatus::Completed(outcome))
-                    .map(SessionReply::Payload)
+                    .map(SessionReply::Payload);
             }
             Err(error) if is_capacity_error(&error) => {
                 return self
                     .rejected(key, RejectionCode::Capacity)
-                    .map(SessionReply::Payload)
+                    .map(SessionReply::Payload);
             }
             Err(error) => return Err(ServerError::Protocol(error)),
         }

@@ -16,6 +16,9 @@ pub mod launch;
 mod launch_worker;
 pub mod managed_launch_protocol;
 pub mod pane_layout;
+pub mod pane_metadata_protocol;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod process_metadata;
 pub mod protocol;
 pub mod protocol_wire;
 pub mod provider_binding;
@@ -31,6 +34,11 @@ pub mod session_registry;
 pub mod split_menu;
 pub mod split_protocol;
 pub mod watch_protocol;
+
+#[cfg(unix)]
+pub mod workspace_event_journal;
+#[cfg(unix)]
+pub mod workspace_watch_protocol;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod spawn_gate;

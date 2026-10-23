@@ -8,10 +8,14 @@ use panelink::control_protocol::ReadSource;
 use panelink::control_protocol::TargetRef;
 use panelink::event_protocol::{Event, EventBody};
 use panelink::multi_runtime::{PaneEntry, PaneReply};
+use panelink::pane_metadata_protocol::{Observation as ProcessObservation, PathStatus};
 use panelink::protocol::{OperationStatus, Outcome};
 use panelink::session_protocol::SessionInfo;
 use panelink::terminal::Key;
-use panelink::watch_protocol::{WatchStatus, MAX_WATCH_EVENTS, MAX_WATCH_WAIT_MS};
+use panelink::watch_protocol::{
+    WatchStatus, WatchStatus as WorkspaceWatchStatus, MAX_WATCH_EVENTS, MAX_WATCH_WAIT_MS,
+};
+use panelink::workspace_watch_protocol::MAX_WORKSPACE_WATCH_EVENTS;
 use std::ffi::OsString;
 use std::fmt::Write as FmtWrite;
 use std::fs;
@@ -262,10 +266,25 @@ impl Workspace {
         WorkspaceLink::open_for_target(&self.state.server, &path, target).map_err(link_error)
     }
 
+    fn pane_metadata_link(&self, target: TargetRef) -> Result<WorkspaceLink, CliError> {
+        let path = self
+            .caller_dir
+            .join(format!("{}-metadata.ctx", target_name(target)));
+        WorkspaceLink::open_pane_metadata(&self.state.server, &path, target).map_err(link_error)
+    }
+
     fn pane_events_link(&self, target: TargetRef) -> Result<WorkspaceLink, CliError> {
         let name = format!("{}-watch", target_name(target));
         let path = self.caller_dir.join(format!("{name}.ctx"));
         WorkspaceLink::open_for_target_events(&self.state.server, &path, target).map_err(link_error)
+    }
+
+    fn workspace_events_link(&self, target: TargetRef) -> Result<WorkspaceLink, CliError> {
+        let path = self.caller_dir.join(format!(
+            "workspace-{}-{}-events.ctx",
+            target.generation, target.workspace
+        ));
+        WorkspaceLink::open_workspace_events(&self.state.server, &path, target).map_err(link_error)
     }
 }
 
@@ -321,6 +340,7 @@ fn pane_list(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
     let expected_revision = panes.layout_revision;
     let entries = panes.panes.iter().flatten().copied().collect::<Vec<_>>();
     let mut owners = Vec::with_capacity(entries.len());
+    let mut observations = Vec::with_capacity(entries.len());
     for pane in &entries {
         let mut link = workspace.pane_link(pane.target)?;
         let info = link.describe_info().map_err(link_error)?;
@@ -328,6 +348,12 @@ fn pane_list(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
             return Err(stale_target());
         }
         owners.push(owner_label(info, link.lease()));
+        let mut metadata = workspace.pane_metadata_link(pane.target)?;
+        observations.push(
+            metadata
+                .process_observation(pane.target)
+                .map_err(link_error)?,
+        );
     }
     if all_panes(workspace)?.layout_revision != expected_revision {
         return Err(stale_target());
@@ -344,7 +370,7 @@ fn pane_list(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
             if index != 0 {
                 json.push(',');
             }
-            push_pane_json(&mut json, index + 1, pane, owner);
+            push_pane_json(&mut json, index + 1, pane, owner, &observations[index]);
         }
         json.push_str("]}");
         write_line(&json);
@@ -356,7 +382,7 @@ fn pane_list(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
         );
         for (index, (pane, owner)) in entries.iter().zip(owners.iter()).enumerate() {
             println!(
-                "{}  {}  {}x{} at col {}, row {}  target {}  input owner {}",
+                "{}  {}  {}x{} at col {}, row {}  target {}  input owner {}  cwd {}  command {}",
                 index + 1,
                 if pane.live { "alive" } else { "exited" },
                 pane.rect.rows,
@@ -364,19 +390,40 @@ fn pane_list(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
                 pane.rect.x,
                 pane.rect.y,
                 target_string(pane.target),
-                owner
+                owner,
+                observations[index]
+                    .cwd
+                    .value
+                    .as_deref()
+                    .unwrap_or("unavailable"),
+                observations[index]
+                    .executable
+                    .value
+                    .as_deref()
+                    .unwrap_or("unavailable")
             );
         }
     }
     Ok(0)
 }
 
-fn push_pane_json(json: &mut String, index: usize, pane: &PaneEntry, owner: &str) {
+fn push_pane_json(
+    json: &mut String,
+    index: usize,
+    pane: &PaneEntry,
+    owner: &str,
+    observation: &ProcessObservation,
+) {
     let _ = write!(json, "{{\"index\":{index},\"target\":");
     push_json_string(json, &target_string(pane.target));
+    json.push_str(",\"cwd\":");
+    push_optional_path(json, observation.cwd.value.as_deref());
+    json.push_str(",\"command\":");
+    push_optional_path(json, observation.executable.value.as_deref());
+    let _ = write!(json, ",\"metadata_source\":\"managed_child\",\"sampled_at_mono_ms\":{},\"cwd_status\":\"{}\",\"command_status\":\"{}\"", observation.sampled_at_mono_ms, path_status(observation.cwd.status), path_status(observation.executable.status));
     let _ = write!(
         json,
-        ",\"cwd\":null,\"command\":null,\"size\":{{\"rows\":{},\"columns\":{},\"x\":{},\"y\":{}}},\"alive\":{},\"exited\":{}",
+        ",\"size\":{{\"rows\":{},\"columns\":{},\"x\":{},\"y\":{}}},\"alive\":{},\"exited\":{}",
         pane.rect.rows, pane.rect.columns, pane.rect.x, pane.rect.y, pane.live, !pane.live
     );
     json.push_str(",\"exit_status\":");
@@ -384,6 +431,29 @@ fn push_pane_json(json: &mut String, index: usize, pane: &PaneEntry, owner: &str
     json.push_str(",\"input_owner\":");
     push_json_string(json, owner);
     json.push('}');
+}
+
+fn push_optional_path(json: &mut String, path: Option<&str>) {
+    if let Some(path) = path {
+        push_json_string(json, path);
+    } else {
+        json.push_str("null");
+    }
+}
+
+fn path_status(status: PathStatus) -> &'static str {
+    match status {
+        PathStatus::Available => "available",
+        PathStatus::Exited => "exited",
+        PathStatus::PermissionDenied => "permission_denied",
+        PathStatus::ProcessGone => "process_gone",
+        PathStatus::InvalidPath => "invalid_path",
+        PathStatus::QueryFailed => "query_failed",
+        PathStatus::TimedOut => "timed_out",
+        PathStatus::Unsupported => "unsupported",
+        PathStatus::IdentityMismatch => "identity_mismatch",
+        PathStatus::Busy => "busy",
+    }
 }
 
 fn push_exit_json(json: &mut String, exit: Option<panelink::multi_runtime::PaneExit>) {
@@ -1308,7 +1378,7 @@ fn run_events(args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
         .enumerate()
         .map(|(index, entry)| (entry.target, index + 1, entry.live))
         .collect::<Vec<_>>();
-    let mut all_known = known.clone();
+    let mut all_known;
     if let Some(index) = pane {
         if index > known.len() {
             return Err(CliError::new(
@@ -1319,21 +1389,211 @@ fn run_events(args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
         let target = known[index - 1].0;
         known = vec![(target, index, known[index - 1].2)];
     }
+    all_known = known.clone();
+    let pinned_target = pane.map(|_| known[0].0);
     let mut cursors = Vec::new();
-    for (target, index, live) in &known {
-        if !live {
-            continue;
-        }
-        let mut link = workspace.pane_events_link(*target)?;
-        let state = link.reconcile_target(*target).map_err(link_error)?;
-        cursors.push((*target, *index, state.cursor));
-    }
+    let mut exited_targets = Vec::new();
     if timeout == Some(0) {
         return Err(CliError::usage());
     }
     let started = Instant::now();
     let deadline = timeout.map(|seconds| started + Duration::from_secs(seconds));
-    let mut exited_targets = Vec::new();
+    if let Some(target) = known
+        .iter()
+        .find(|(_, _, live)| *live)
+        .map(|(target, _, _)| *target)
+    {
+        let mut workspace_link = workspace.workspace_events_link(target)?;
+        if workspace_link.has_workspace_events() {
+            let snapshot = workspace_link
+                .reconcile_workspace(target)
+                .map_err(link_error)?;
+            if snapshot.layout.is_none() {
+                return Ok(0);
+            }
+            let mut workspace_cursor = snapshot.cursor;
+            known = snapshot
+                .layout
+                .into_iter()
+                .flat_map(|layout| layout.panes)
+                .flatten()
+                .enumerate()
+                .map(|(index, entry)| (entry.target, index + 1, true))
+                .filter(|(current_target, _, _)| {
+                    pinned_target.is_none_or(|pinned| *current_target == pinned)
+                })
+                .collect();
+            all_known = known.clone();
+            for (current, index, _) in &known {
+                let mut link = workspace.pane_events_link(*current)?;
+                let state = link.reconcile_target(*current).map_err(link_error)?;
+                cursors.push((*current, *index, state.cursor));
+            }
+            loop {
+                if deadline.is_some_and(|end| Instant::now() >= end) {
+                    emit_event(
+                        options,
+                        "quiet",
+                        pane.unwrap_or(0),
+                        empty_target(),
+                        Some(started.elapsed().as_secs()),
+                    );
+                    return Ok(0);
+                }
+                let wait_ms = deadline.map_or(POLL_WAIT_MS, |end| {
+                    end.saturating_duration_since(Instant::now())
+                        .as_millis()
+                        .clamp(1, POLL_WAIT_MS.into()) as u16
+                });
+                let response = workspace_link
+                    .watch_workspace(
+                        target,
+                        workspace_cursor,
+                        MAX_WORKSPACE_WATCH_EVENTS as u16,
+                        wait_ms,
+                    )
+                    .map_err(link_error)?;
+                let reconcile = response.status != WorkspaceWatchStatus::TimedOut;
+                match response.status {
+                    WorkspaceWatchStatus::TimedOut => {}
+                    WorkspaceWatchStatus::Changed => {
+                        for event in &response.events {
+                            emit_layout_changed(
+                                options,
+                                response.cursor.generation,
+                                response.cursor.workspace,
+                                event.sequence,
+                                event.revision,
+                                event.empty,
+                            );
+                        }
+                        // Keep the page cursor. Reconciliation can observe a
+                        // later journal tail; adopting it here would skip those
+                        // not-yet-emitted invalidations.
+                        workspace_cursor = response.cursor;
+                    }
+                    WorkspaceWatchStatus::ResyncRequired => {
+                        emit_layout_resync(
+                            options,
+                            response.cursor.generation,
+                            response.cursor.workspace,
+                        );
+                    }
+                }
+                if reconcile {
+                    let snapshot = match workspace_link.reconcile_workspace(target) {
+                        Ok(snapshot) => snapshot,
+                        Err(_)
+                            if response.status == WorkspaceWatchStatus::Changed
+                                && response.events.last().is_some_and(|event| event.empty) =>
+                        {
+                            // The final observed notification positively marks
+                            // the workspace empty. A runtime may retire its
+                            // query route immediately after that transition.
+                            for (old_target, old_index, was_live) in &all_known {
+                                if *was_live {
+                                    emit_event(
+                                        options,
+                                        "pane_closed",
+                                        *old_index,
+                                        *old_target,
+                                        None,
+                                    );
+                                }
+                            }
+                            return Ok(0);
+                        }
+                        Err(error) => return Err(link_error(error)),
+                    };
+                    let terminal_empty = snapshot.layout.is_none();
+                    if response.status == WorkspaceWatchStatus::ResyncRequired {
+                        workspace_cursor = snapshot.cursor;
+                    }
+                    let current_targets = snapshot
+                        .layout
+                        .into_iter()
+                        .flat_map(|layout| layout.panes)
+                        .flatten()
+                        .enumerate()
+                        .map(|(index, entry)| (entry.target, index + 1, true))
+                        .filter(|(current_target, _, _)| {
+                            pinned_target.is_none_or(|pinned| *current_target == pinned)
+                        })
+                        .collect::<Vec<_>>();
+                    let mut next = Vec::new();
+                    for (current_target, index, live) in &current_targets {
+                        if *live
+                            && !all_known
+                                .iter()
+                                .any(|(old, _, was_live)| old == current_target && *was_live)
+                        {
+                            emit_event(options, "pane_opened", *index, *current_target, None);
+                        }
+                        if *live {
+                            next.push((*current_target, *index, true));
+                        }
+                    }
+                    for (old_target, old_index, was_live) in &all_known {
+                        if *was_live
+                            && !next
+                                .iter()
+                                .any(|(current_target, _, _)| current_target == old_target)
+                        {
+                            emit_event(options, "pane_closed", *old_index, *old_target, None);
+                        }
+                    }
+                    all_known = next;
+                    known = all_known.clone();
+                    if terminal_empty {
+                        return Ok(0);
+                    }
+                    cursors
+                        .retain(|(old, _, _)| known.iter().any(|(current, _, _)| old == current));
+                    for (target, index, _) in &mut cursors {
+                        if let Some((_, current_index, _)) =
+                            known.iter().find(|(current, _, _)| current == target)
+                        {
+                            *index = *current_index;
+                        }
+                    }
+                    for (current, index, _) in &known {
+                        if !cursors.iter().any(|(old, _, _)| old == current) {
+                            let mut link = workspace.pane_events_link(*current)?;
+                            let state = link.reconcile_target(*current).map_err(link_error)?;
+                            cursors.push((*current, *index, state.cursor));
+                        }
+                    }
+                }
+                for (current, index, cursor_value) in &mut cursors {
+                    let mut link = match workspace.pane_events_link(*current) {
+                        Ok(link) => link,
+                        Err(_) => continue,
+                    };
+                    if let Ok((events, end)) =
+                        link.watch_target(*current, *cursor_value, MAX_WATCH_EVENTS, 0)
+                    {
+                        if end.status == WatchStatus::ResyncRequired {
+                            *cursor_value =
+                                link.reconcile_target(*current).map_err(link_error)?.cursor;
+                            continue;
+                        }
+                        *cursor_value = end.cursor;
+                        for event in events {
+                            emit_metadata_event(options, *index, event);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (current, index, live) in &known {
+        if !live {
+            continue;
+        }
+        let mut link = workspace.pane_events_link(*current)?;
+        let state = link.reconcile_target(*current).map_err(link_error)?;
+        cursors.push((*current, *index, state.cursor));
+    }
     loop {
         let current = match all_panes(&workspace) {
             Ok(current) => current,
@@ -1361,7 +1621,7 @@ fn run_events(args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
             .map(|(index, entry)| (entry.target, index + 1, entry.live))
             .collect::<Vec<_>>();
         for (target, index, live) in &all_current_targets {
-            let matches_filter = pane.is_none_or(|filter| filter == *index);
+            let matches_filter = pinned_target.is_none_or(|pinned| pinned == *target);
             if matches_filter && *live && !all_known.iter().any(|(old, _, _)| old == target) {
                 emit_event(options, "pane_opened", *index, *target, None);
                 let mut link = workspace.pane_events_link(*target)?;
@@ -1370,7 +1630,7 @@ fn run_events(args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
             }
         }
         for (target, index, was_live) in &all_known {
-            if pane.is_none_or(|filter| filter == *index)
+            if pinned_target.is_none_or(|pinned| pinned == *target)
                 && (*was_live || !all_current_targets.iter().any(|(now, _, _)| now == target))
                 && !all_current_targets
                     .iter()
@@ -1386,13 +1646,23 @@ fn run_events(args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
         });
         known = all_current_targets
             .into_iter()
-            .filter(|(_, index, _)| pane.is_none_or(|filter| filter == *index))
+            .filter(|(target, _, _)| pinned_target.is_none_or(|pinned| pinned == *target))
             .collect();
+        // Only current panes can still need a later positive-exit fallback.
+        // Do not retain every exited target over an unbounded stream lifetime.
+        exited_targets.retain(|(_, target)| known.iter().any(|(current, _, _)| current == target));
         cursors.retain(|(target, _, _)| {
             known
                 .iter()
                 .any(|(current, _, live)| *live && current == target)
         });
+        for (target, index, _) in &mut cursors {
+            if let Some((_, current_index, _)) =
+                known.iter().find(|(current, _, _)| current == target)
+            {
+                *index = *current_index;
+            }
+        }
         for (target, index, live) in &known {
             if *live && !cursors.iter().any(|(current, _, _)| current == target) {
                 let mut link = workspace.pane_events_link(*target)?;
@@ -1410,6 +1680,11 @@ fn run_events(args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
                 link.watch_target(*target, *cursor_value, MAX_WATCH_EVENTS, POLL_WAIT_MS)
             {
                 did_watch = true;
+                if end.status == WatchStatus::ResyncRequired {
+                    let state = link.reconcile_target(*target).map_err(link_error)?;
+                    *cursor_value = state.cursor;
+                    continue;
+                }
                 *cursor_value = end.cursor;
                 for event in events {
                     if matches!(event.body, EventBody::ChildExited)
@@ -1447,6 +1722,35 @@ fn emit_metadata_event(options: Options<'_>, index: usize, event: Event) {
         EventBody::ChildExited => "exited",
     };
     emit_event(options, kind, index, event.target, Some(event.cursor));
+}
+
+fn emit_layout_changed(
+    options: Options<'_>,
+    generation: u64,
+    workspace: u64,
+    sequence: u64,
+    revision: u64,
+    empty: bool,
+) {
+    if options.json {
+        let _ = writeln!(
+            io::stdout().lock(),
+            "{{\"event\":\"layout_changed\",\"generation\":{generation},\"workspace\":{workspace},\"sequence\":{sequence},\"revision\":{revision},\"empty\":{empty}}}"
+        );
+    } else {
+        println!("workspace layout changed at revision {revision}");
+    }
+}
+
+fn emit_layout_resync(options: Options<'_>, generation: u64, workspace: u64) {
+    if options.json {
+        let _ = writeln!(
+            io::stdout().lock(),
+            "{{\"event\":\"layout_resync\",\"generation\":{generation},\"workspace\":{workspace}}}"
+        );
+    } else {
+        println!("workspace layout resynchronized");
+    }
 }
 
 fn emit_event(

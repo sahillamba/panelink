@@ -60,6 +60,12 @@ resize and close may report busy until the pending split finishes. A launch
 storage failure leaves existing shells running and prevents further launches
 until the workspace is restarted.
 
+Agents and scripts can use `panelink pane list --json` to discover panes and
+`panelink events --json --timeout 30` to watch activity and layout changes.
+`events --pane N` follows the pane selected when the command starts; closing it
+does not switch the stream to a replacement at that index. See the
+[agent CLI contract](docs/progress/P3-AGENT-CLI.md) for commands and limits.
+
 Workspace state lives in `~/Library/Application Support/Panelink` (private,
 mode 0700). Set `PANELINK_HOME` to use a different directory. The background
 server's output goes to `server.log` there.
@@ -251,6 +257,12 @@ initialized caller context explicitly if Events are needed; the CLI never
 replaces an old context silently. Input remains separately opt-in on the server.
 Socketpair/private-PTY live-watch checks pass locally; the expanded actual CLI
 pathname fixture remains a separate external acceptance check.
+
+`panelink pane list --json` includes current managed-child cwd and executable
+path (`command` excludes arguments), sample time and per-field availability.
+Refresh reflects shell `cd` and direct `exec`; foreground descendants are not
+inferred. Workspace event observers renew their existing lease before expiry
+and keep their event cursor. See [the agent CLI notes](docs/progress/P3-AGENT-CLI.md).
 
 ## Low-level split panes (`serve` + `attach`)
 

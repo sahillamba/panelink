@@ -848,6 +848,8 @@ pub struct PumpOutcome {
 pub struct TerminalSession {
     master: Option<File>,
     child: Option<Child>,
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    process_identity: Option<crate::process_metadata::ProcessIdentity>,
     process_group: Pid,
     parser: Parser<CoreCallbacks>,
     size: TerminalSize,
@@ -932,15 +934,23 @@ impl TerminalSession {
             });
         }
         let child = command.spawn().map_err(|e| io_error("spawn child", e))?;
+        // Spawning is complete; native identity sampling must not serialize
+        // unrelated PTY launches behind this child.
+        drop(spawn_guard);
+        // Capture immediately while the PID is known to belong to this child.
+        // Failure is metadata unavailability and must never fail the launch.
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let process_identity = crate::process_metadata::capture_identity(child.id());
         // The status-pipe and PTY creation windows are finished. Service and
         // cleanup of this owned child must not hold the descriptor gate.
-        drop(spawn_guard);
         drop(command);
         drop(pty.user);
         let process_group = Pid::from_child(&child);
         Ok(Self {
             master: Some(File::from(pty.controller)),
             child: Some(child),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            process_identity,
             process_group,
             parser,
             size,
@@ -957,6 +967,16 @@ impl TerminalSession {
             final_output_complete: false,
             final_output_bytes: 0,
         })
+    }
+
+    /// Return this direct child's captured process identity while it is live.
+    /// The identity is opaque and intentionally excluded from diagnostics.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub fn process_identity(&self) -> Option<crate::process_metadata::ProcessIdentity> {
+        self.exit_status
+            .is_none()
+            .then_some(self.process_identity)
+            .flatten()
     }
 
     /// Queue a typed key, without accepting raw host escape sequences.
