@@ -1,5 +1,10 @@
 # Panelink implementation roadmap
 
+CI setup (2026-10-24): standard GitHub-hosted Apple Silicon validation and
+weekly dependency-update proposals are configured locally. Hosted execution
+and required-check activation remain pending publication; see
+[CI.md](docs/CI.md). This does not change the product phase gates below.
+
 ```text
 current-phase: Phase 6 DONE for personal alpha scope (2026-10-22); Phase 2 DONE for scoped feasibility gates (2026-10-22); four-pane, agent CLI, relaunch/attach/exit-status, recovery, Wave2 and serialized live-split launch work are integrated locally. See STASH-MERGE-RESULT.md for current combined-tree checks and limits.
 last-updated: 2026-10-22

@@ -122,6 +122,10 @@ verification evidence. Selected components retain their
 
 ## Automated development checks
 
+GitHub Actions runs these checks on standard Apple Silicon macOS runners for
+pull requests and changes to `main`. See [CI.md](docs/CI.md) for caching,
+failure evidence, local reproduction, and acceptance limits.
+
 Run `python3 scripts/verify_non_ui.py` for the delivered Rust/Python tests,
 including the vendored input decoder suite, formatting, strict Clippy, build,
 component source fingerprints, and documentation checks. It uses offline
