@@ -1,5 +1,472 @@
 # Implementation session checkpoint — 2026-10-17
 
+## PAUSED by user — 2026-10-24 (read first)
+
+User requested a pause and durable handoff. All active agents were stopped.
+Read [P4-PAUSED-HANDOFF-2026-10-24.md](P4-PAUSED-HANDOFF-2026-10-24.md)
+for the exact stopping point and next bounded slice. Do not resume until asked.
+Latest full serial Rust **1231pass/0fail/15ignored** and strict all-target Clippy
+pass. Native explicit recovery and bridge-failure acceptance both pass Luna plus
+independent parent runs. Managed normal UI transitions remain open: the native
+Ctrl-X leader collides with attach's detach key; the test's Ctrl-O/P session-list
+assumption was wrong. The user subsequently requested a checkpoint commit of
+the accumulated work; this is not phase completion or permission to resume.
+No push or live activation. The historical in-progress
+section below records the preceding work and is superseded by this pause note.
+
+
+
+## Phase 4 continuous completion in progress — 2026-10-24 (read first)
+
+User requested continued Luna slices until the phase is complete. See
+[P4-CONTINUOUS-TASK.md](P4-CONTINUOUS-TASK.md). Do not stop after two slices.
+Parent integrates and reviews; workers own bounded exclusive modules. No new
+commit or push. Existing dirty Phase3/Phase4 work and active binary are retained.
+
+Implemented since the previous full1157 baseline: the fresh challenge-bound
+bridge, pinned plugin/private launch configuration, asynchronous joint
+managed/provider store, scoped historical CLI and explicit prepare/resume/status
+flow. The owner validates before prepare, saves a one-shot choice, requires a
+separate resume, durably spends before navigation, and confirms only after a
+fresh selected snapshot and joint mapping save. No automatic recovery/replay or
+current-at-crash claim.
+
+Current verification snapshot: full locked/offline serial Rust1230passed,
+0failed,15ignored; all seven supporting checks pass, decoder39, Python196
+with one intentionally opt-in live test skipped, docs316/0. Endpoint drop/gate
+and runtime receipt-clock review corrections have additional focused checks;
+final source freeze verification remains required. Active binary SHA remains
+`3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e`.
+
+Native managed manual acceptance now passes both Luna and an independent
+parent run: missing/deleted classification, prepare preserves A, explicit
+resume selects/saves B, replay refusal, historical joint record, imported
+nonempty fork-root acceptance, foreign-project and linked-child refusal. The
+binary used was `1497ac732020573d633df85d38fdd594a92b31d7f1b8ee29d06e0087e52ec9ee`.
+The native bridge-failure fixture also passes Luna: an exactly verified owned
+TUI PID is paused, owner readiness revokes, PTY/serve remain alive, source A
+stays at revision1, preparation is refused before and after SIGCONT, and no
+implicit source recovery occurs. Parent independent failure run is underway.
+
+Managed native keyboard acceptance remains open. Earlier incidental heading
+predicates were too weak; do not count their A-B-A observations as safe keyboard
+acceptance. The current stricter guard withholds title/Enter until a real native
+modal is established. Luna is diagnosing key/query/terminal behavior. New/fork/
+project transitions through normal provider UI remain distinct from the passing
+explicit manual-recovery route. Standalone native cases passed independently;
+these do not close managed UI acceptance.
+
+See [native recovery](P4-NATIVE-MANUAL-RECOVERY.md),
+[native failure](P4-NATIVE-BRIDGE-FAILURE.md),
+[managed bridge](P4-MANAGED-BRIDGE.md) and
+[operator flow](P4-MANUAL-RECOVERY.md). Preserve separate Phase3 human host gate.
+
+
+## Phase 4 bridge wire/channel verified — 2026-10-24 (read first)
+
+Two GPT-6 Luna High owners delivered the independent wire codec and grant-scoped
+Unix endpoints. Parent review, Frame accessors, combined tests and full serial
+verification are complete. **1157 Rust tests passed,0 failed,15 ignored** in
+188.292s; library762, main binary148, integration247. Focused bridge31/0 and
+new combined IPC target2/0 pass. All seven supporting checks pass: strict
+all-target Clippy, formatting, build, decoder39, source fingerprints, Python160
+(no skips,8.182s) and docs299/0. See
+[result](P4-BRIDGE-TRANSPORT-RESULT.md),
+[task](P4-BRIDGE-TRANSPORT-TASK.md), [wire](P4-BRIDGE-WIRE.md) and
+[channel](P4-BRIDGE-CHANNEL.md).
+
+The `PLBRDG01` envelope is separate from the existing control protocol, with a
+32-byte header and4388-byte total bound. Exact lengths/tags/metadata are checked
+before bounded body allocation. Both Unix endpoints check kernel peer UID
+before bytes, then match a one-use issuer grant for full target/project/exact
+provider version/source instance. OS-random grants now have an explicit typed
+Hello provisioning method. Streams stay private and nonblocking; one absolute
+deadline spans each whole message, and errors permanently poison/shut down.
+This is possession plus same-user authentication, not provider executable
+attestation, hostile same-UID isolation or a global replay/revocation service.
+
+The parent private0700/0600 pathname fixture passes handshake → A/B admission
+→ synchronized binding saves → Home invalidation, followed by stale reopen.
+A second fixture deliberately fragments valid metadata then sends an oversized
+header; rejection precedes body read, the channel remains poisoned and explicit
+owner-side failure handling preserves the last saved binding while marking the
+receiver unavailable. Actual different-UID process acceptance was not added;
+the existing peer-credential unit mismatch gate is separate evidence.
+
+Initial module/compile/test/lint/format failures and parent corrections are
+preserved in the notes/result. All final Rust source was present before the
+passing serial run. No dependencies or lockfile changes. The full Cargo command
+ran separately with a360s deadline and supporting checks separately; not an
+unmodified combined-verifier8/8 claim. Cache/build isolation remains
+`/private/tmp/panelink-p4-cargo-home` and
+`/private/tmp/panelink-p4-bridge-store-target`. The activated binary hash stays
+`3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e`.
+No live provider/workspace/launcher/configuration changed.
+
+Next: opt-in owner/worker wiring, trusted grant delivery/revocation and explicit
+fresh-snapshot reconciliation, bounded queues and ordered durable completions.
+The channel proves receipt and grant scope, not when a provider observed a route;
+buffered metadata is not a fresh-reconciliation or selection barrier. Keep
+slow IO outside the owner. Production heartbeat policy, managed-session atomic
+linkage, cross-generation/manual recovery and remaining identity cases stay
+open, along with the separate human Phase3 host gate. No automatic resume or
+current-at-crash guarantee. Preserve accumulated dirty work. No commit or push.
+
+
+## Phase 4 bridge/store components verified — 2026-10-24 (read first)
+
+Two GPT-6 Luna High owners delivered `provider_bridge` and
+`provider_binding_store` with exclusive ownership; the parent reviewed,
+integrated and verified them. Full serial locked/offline Rust:
+**1136 passed,0 failed,15 ignored**,191.629s including isolated compilation.
+Final focused provider library37/0 and combined integration4/0 pass. All seven
+supporting checks pass: Clippy, formatting, build, decoder39, source fingerprints,
+Python160 (no skips,8.287s) and docs295/0. See
+[result](P4-BRIDGE-STORE-RESULT.md), [task](P4-BRIDGE-STORE-TASK.md),
+[bridge contract](P4-BRIDGE-CONTRACT.md) and [store](P4-BINDING-STORE.md).
+
+The typed protocol-v1 receiver owns the binding core and gates exact pinned
+provider identity on target/project/instance, contiguous source sequence,
+monotonic receipt expiry and explicit fresh reconciliation. Duplicates do not
+renew. Child/Home/unknown/rejected identity cannot confirm. The host supplies
+a separate verification Unix timestamp and must tick idle receivers and check
+freshness after blocking IO. Source authentication, transport and production
+heartbeat policy remain future integration work.
+
+The store uses existing bounded codec bytes, one private caller-selected
+per-target directory, lifetime exclusive lock and inode checks. File sync →
+rename → directory sync precedes success. Ambiguous sync failure latches the
+store until reopen; unsafe/corrupt files are preserved, and interrupted temps
+are never promoted. The parent proved that a save failure blocks confirmation
+and expired pending state cannot invoke the writer.
+
+Actual subprocess SIGKILL tests cover before storage, after storage/before
+acknowledgment and after acknowledgment, with ready handshakes and reaping.
+Before-write reopen sees old revision; both later cases see the new record.
+All restore stale. This exposes lost-ack uncertainty and proves neither the
+provider's current-at-crash identity nor full machine/power-loss recovery.
+No joint managed-session transaction is implemented.
+
+The old P2 Cargo cache was empty. The parent copied only the installed registry
+into `/private/tmp/panelink-p4-cargo-home`; builds use
+`/private/tmp/panelink-p4-bridge-store-target`. Initial compile/lint/format
+failures and final corrections are recorded in the result. Full Cargo ran
+separately under a360s deadline; seven supporting checks ran separately, not an
+unmodified combined verifier8/8. The activated `target/debug/panelink` hash
+remains `3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e`.
+No live provider/workspace/launcher/configuration changed; prior private live
+identity fixtures remain separate evidence.
+
+Next: bounded bridge wire encoding/handshake and source/target authentication,
+then opt-in owner/worker wiring with ordered storage completion and visible
+expiry/reconciliation/failure states. Cross-generation linkage, last-confirmed
+manual recovery and remaining provider identity cases stay open, along with
+the separate Phase3 human host gate. No automatic resume/current-at-crash
+claim. Preserve all accumulated dirty work. No commit or push.
+
+
+## Phase 4 linked-child and project isolation verified — 2026-10-24 (read first)
+
+The next two slices were implemented by two GPT-6 Luna High owners, integrated
+and independently verified by the parent. **Both pass3/3 fresh live runs** on
+pinned native OpenCode2.0.32 with loopback-only sandboxing. Full Python suite:
+**160 passed**, no failures/skips, in8.269s. Eight changed Python modules
+compile and whitespace passes. See [result](P4-V2-ISOLATION-RESULT.md) and
+[task](P4-V2-ISOLATION-TASK.md). No Rust/build changes; the separate1111/0/15
+ignored baseline was not rerun for this tooling work.
+
+A third TUI selects a linked child, reports it as non-top-level, then returns
+to its exact parent through the keyboard picker. Original observer streams
+advance and preserve their identities. An empty-parent copied-history fork
+returns400; linked creation does not prove a nonempty history fork. The other
+slice attaches a third TUI to a second private directory, verifies exact
+identity there, and rejects those rows in the original directory's scope.
+This is separate-client directory isolation, not same-client project switching
+or distinct Git repository identity. Every final run verifies empty user
+messages and all three TUI/PTY plus server cleanup. No prompts or user state.
+
+Parent review corrected draining/freshness, warm-up and invalid records,
+ownership checks and late failure downgrades. Two failed child diagnostics are
+preserved: canonicalizing the provider query path returned an empty list.
+Queries now retain the created fixture's path spelling; identity comparisons
+remain canonical. A symlink-alias lifecycle regression passes. Current result
+contains the timings, receipts and exact scope. Documentation verification:291 Markdown files checked, zero findings.
+
+Next: version and integrate the opt-in bridge for supported top-level
+observations with ordering/expiry/reconciliation, then durable last-confirmed
+store/acknowledgment and crash tests against the existing core/codec. New
+conversation ID, nonempty fork, same-client project switch and current-at-crash
+remain open. Preserve unsupported-state/manual fallback and the separate
+Phase3 human host gate. Activated worktree/binary and all accumulated dirty
+work are retained. No commit or push.
+
+
+## Phase 4 next two Luna slices verified — 2026-10-24 (read first)
+
+Opposite-client/new-route outcome and observer-health slices pass **3/3 fresh
+runs each** on pinned native OpenCode2.0.32. Two Luna High owners implemented
+disjoint files; parent review/integration and permitted live runs verified the
+results. Parent full Python suite: **143 passed**, no skips, in8.403s; focused
+suite61/0; changed Python compiles. No Rust/build input changes. See
+[P4-V2-EXTENDED-RESULT.md](P4-V2-EXTENDED-RESULT.md) and
+[task](P4-V2-EXTENDED-TASK.md). Docs287/0; tracked whitespace and ten
+affected/untracked files pass. The in-memory graph was refreshed without an
+artifact.
+
+Physical TUI2 switches B-A-B with TUI1 fresh on A. Ctrl-X N then produces
+Home with no selected session ID; this does not prove allocation timing or
+new-conversation identity. Both sessions have empty user-message reads and all
+process groups/PTYs/server receive cleanup receipts. The health case pauses
+only plugin record delivery: both TUIs/server stay alive, passive B stays fresh,
+active receipt expires, and transport resume alone cannot revive eligibility.
+A further row after explicit reconciliation restores only in-memory observed
+identity; durability stays false. The1s threshold is diagnostic policy only.
+
+Parent corrected precreated empty control files, runtime caps while paused,
+batched/late receipt handling, unknown identity inside batches and fail-closed
+new-control checks. Failed diagnostic evidence is retained. No prompt, user
+account, implicit background service, live Panelink pane or launcher was changed.
+Preserve the activated worktree/binary and all accumulated uncommitted work.
+
+Next: remaining new-ID/fork/child/project cases, then the versioned real bridge
+and durable binding/store acknowledgment work, retaining last-confirmed/manual
+fallback and pre/post-ack crash tests. Full Phase4 and the separate Phase3 human
+host gate remain open. No commit or push.
+
+
+## Phase 4 selected-route/two-client gate passes — 2026-10-24 (read first)
+
+Two Luna High owners built the V2 fixture/harness. Parent review and live
+integration corrected a direct-file loader assumption, a mistaken legacy-config
+hypothesis, warm-up parsing and the picker background-header guard. The final
+pinned2.0.32 gate passes **3/3 fresh runs**: two simultaneous TUIs in the same
+private project, initial A/B identities, keyboard A-B-A in the first while the
+second stays fresh on B, zero missed/extra/rejected observations, verified empty
+user messages and both cleanup receipts. No provider account/model work or live
+Panelink pane input. See [results](P4-V2-TUI-RESULT.md) and [task](P4-V2-TUI-TASK.md).
+
+Parent verification: **121 Python tests pass**, no skips, in6.962s; focused39/0.
+Compilation and tracked/untracked whitespace pass; docs285/0. The in-memory
+code graph was refreshed without writing an artifact.
+No Rust/build changes; prior Phase3 source baseline remains1111/0/15 ignored.
+The earlier approval-service usage failure resolved through normal review after
+its stated retry time; no live test remains blocked by it.
+
+Actual current CLI config uses plural `plugins` pointing to a directory with a
+`tui` entry. Direct files are skipped. Singular `plugin` is legacy migration,
+not the current schema. Do not repeat either failed configuration. Valid startup
+rows can have unknown project/cache fields; they do not count as identity proof.
+Require strict observations after initial identity is ready. Raw output, IDs,
+paths, bodies and secrets are absent from reports. Polling remains no crash
+barrier; this is development-fixture proof, not a production provider bridge.
+
+Next: opposite-client/new/fork/child isolation and bridge-loss/staleness gates,
+then live bridge integration and durable binding acknowledgments using the
+existing pure core/codec. Preserve last-confirmed/manual fallback. Full Phase4
+and the separate Phase3 human host gate remain open. No commit/push.
+
+
+## Phase 4 V2 identity gate — 2026-10-24 (read first)
+
+The user requested Phase 4. Two GPT-6 Luna High owners delivered an old-probe
+correlation correction and a separate exact 2.0.32 bootstrap preflight. Parent
+review and independent verification: **95 Python tests pass**; changed Python
+modules compile. No Rust/build changes were made in this slice. Current result:
+[P4-V2-IDENTITY-RESULT.md](P4-V2-IDENTITY-RESULT.md).
+
+The current installed binary hash/version are pinned. Initial anonymous access
+returned HTTP401. A bounded source audit found the supported fixture-local
+Basic-auth mechanism; the final parent run **passed authenticated bootstrap**
+in 587.354ms: exact owned child PID/version, two empty top-level sessions
+created/listed and cleanup completed under enforced loopback-only sandboxing.
+Zero prompts; no user/provider credentials. The probe refuses redirects and
+sends its fresh credential only after listener ownership verification. Exit2
+remains intentional because selected TUI identity is not proven. No TUI adapter
+or identity-switch proof is claimed.
+
+Next gate: implement and validate the selected-route adapter on this verified
+fixture-local transport, including ordered keyboard A-B-A and two concurrent
+agents in the same project. Existing binding core/codec are pure
+components, not runtime persistence/resume. Preserve current-at-crash/manual
+fallback boundaries, the activated workspace and all accumulated dirty work.
+Full Phase 4 and the separate Phase3 human host gate remain open. No commit/push.
+
+
+## Verified build activated — 2026-10-24 (read first)
+
+The user explicitly selected **Activate and restart workspace**. The parent
+verified the accepted binary hash, atomically switched `~/.local/bin/panelink`
+to this worktree's launcher, and ran supported `panelink stop` (exit0,
+workspace stopped). A fresh default workspace is now running on the worktree
+binary (observed PID95331). Read-only pane list/read both pass with the explicit
+private `.panelink-agent-contexts` root and permitted socket access. No pane
+input was sent. The noninteractive open's UI exit1 is not an interactive attach
+pass. See [activation evidence](P3-USABILITY-FIXES-RESULT.md).
+
+Keep worktree7060 and its built binary in place: the PATH launcher now resolves
+here. Activation is complete; earlier pending-choice and old-PATH observations
+below are historical. Existing history remains; ended processes/provider
+conversations were not resumed. Final source verification remains1111/0/15
+ignored plus seven supporting checks. Full Phase3 human four-pane host
+acceptance remains open. No commit or push.
+
+
+## Phase3 continuation preflight — 2026-10-24 (read first)
+
+The user requested Phase3 continuation after the usability result. The parent
+rechecked current Git history/status and index (no unmerged entries), verified
+that the built binary hash still matches the accepted 1111/0/15-ignored tree,
+and confirmed PATH still targets the separate main checkout. Read-only pane
+discovery currently sees one live pane. No new source edit, commit, push,
+input or process stop was performed.
+
+The accepted Phase3 code scope is delivered. Activation is prepared; a concise
+restart choice is pending because stopping the live workspace ends its pane
+processes. Preserve it while that answer is absent. Human four-pane Apple
+Terminal acceptance remains open and cannot be replaced with the passing
+private outer-PTY tests. The remaining-gates audit now marks its older test
+counts/line references as historical and points to the usability result.
+
+## User-reported pane usability repairs — 2026-10-24 (read first)
+
+The user supplied a real three-pane screenshot and reported agent access failing
+with `context_directory_unavailable`, nonworking scrolling, and cramped pane
+edges. This reopens usability implementation; the older 1091-test baseline
+below predates these changes. Three bounded GPT-6 Luna High workers implemented
+and cross-reviewed private agent-context selection, typed scroll/history paths,
+and one-cell pane padding. Parent integration verification passed:
+**1111 passed/0 failed/15 ignored in164.34s**, plus all seven supporting
+checks (decoder39/Python77/docs281/0). Actual private outer-PTY tests cover
+normal wheel history and alternate-screen app mouse input with inset coordinates.
+The parent fixed startup output loss by launching directly at the content size,
+and an observed rotation fixture race by waiting for drained writer shutdown.
+See [result](P3-USABILITY-FIXES-RESULT.md) and [task](P3-USABILITY-FIXES-TASK.md).
+All ownership is released. Full Phase3 remains open; no commit or push.
+
+A read-only live check using this worktree's binary and an explicit private
+context root successfully listed three panes and read pane 2 with permitted
+local-socket access. The same calls in the restricted sandbox could not connect;
+the context override does not bypass socket permissions. No pane input was sent. A final refresh saw one current pane, correctly refused
+now-absent pane2, and successfully read pane1; terminal contents were not printed.
+
+The PATH launcher still points to `/Users/sahillamba/panelink/bin/panelink`,
+not this checkout. The running workspace uses older server code. No user server
+or child has been stopped or restarted; new scrolling/padding need a server
+running the new build. Native Terminal computer-use controls are unavailable
+in this session. The user's screenshot is partial host feedback, not a complete
+four-pane acceptance record. Preserve all dirty work; no commit or push.
+
+
+## Phase3 Luna orchestration and integrated verification — 2026-10-24 (read first)
+
+Three native GPT-6 Luna High workers audited the remaining required gates,
+reviewed PTY interruption semantics, and independently reviewed accumulated
+source/test changes. No actionable source findings or additional required
+production task were identified. A proposed fake waiter-disconnect test was
+removed because its test-created channel did not exercise the production
+waiter. The existing internal validation barrier and real-CLI pre-delivery
+regressions are preserved with their limited claims. All worker ownership is
+released; native collaboration launcher, no cost telemetry.
+
+Parent frozen-source verification: complete locked/offline serial Cargo
+**1091 passed/0 failed/15 ignored in182.72s** (library713/binary142/
+integration236 across53 targets). All seven supporting checks pass:
+decoder39/Python77/fingerprints/package fmt/strict all-target Clippy/build/docs279/0.
+No timeout or failed check in this run; ignored cases remain separate from
+acceptance. See [result](P3-ORCHESTRATION-RESULT.md),
+[remaining gates](P3-REMAINING-GATES-2026-10-24.md) and
+[PTY audit](P3-PTY-INTERRUPTION-AUDIT.md).
+
+The sole explicit remaining Phase3 gate is human four-pane Apple Terminal
+evidence, unavailable in this run. No manual chore is assigned and no automated
+proxy is promoted to human acceptance. The accepted bounded implementation is
+delivered; do not schedule more optional synthetic input windows as required
+Phase3 work. Review actual host evidence if it becomes available before full
+phase closure. Provider/reboot/Phase4/Phase5 and crash observation limits remain
+separate. Preserve the dirty tree based on checkpoint8ad9bd6; no commit/push.
+
+## Phase3 handler-boundary validation test delivered — 2026-10-23 (read first)
+
+Added `server::tests::submit_validation_barrier_precedes_admission_and_duplicate_does_not_replay`
+using a test-only blocking `EffectSink::validate`. It observes the Submit
+revision/text at the deterministic barrier, confirms input count zero before
+release, then verifies one `Completed(Applied)` effect and no replay for an
+exact duplicate. Parent focused rerun: 1 passed/0 failed, 716 filtered out.
+This tests internal handler ordering only: no socket ingress, real CLI death,
+or admitted owner-pending/PTy interruption. See
+[feasibility and result](P3-POST-DISPATCH-FEASIBILITY.md).
+
+The subsequent admitted owner-pending/PTy audit is complete and recorded above.
+It identified an observation limit, not an additional required Phase3 task.
+Do not infer client cancellation or add production hooks. Preserve separate
+real-CLI pre-delivery, human four-pane, provider and reboot evidence.
+
+## Phase3 post-dispatch barrier feasibility audited — 2026-10-23 (read first)
+
+The real-CLI integration fixture cannot deterministically stop inside server
+validation before ledger admission: it launches the production server as a
+separate process, while the proxy boundary is either before upstream delivery
+or after the server reply. Forwarding Submit and killing by timing would not
+establish dispatch. An in-crate fake `EffectSink::validate` can block the
+`StateOwner` handler at that internal point, but does not prove socket ingress
+or real CLI death. No production hook is justified by this coverage gap. See
+[P3-POST-DISPATCH-FEASIBILITY.md](P3-POST-DISPATCH-FEASIBILITY.md).
+
+The narrow deterministic handler-boundary test is delivered above and is
+labeled as internal dispatch/admission evidence only. Keep the real-CLI
+pre-delivery test as the separate process-death evidence. All existing dirty
+work remains intact and uncommitted.
+
+## Phase3 pre-delivery client-death acceptance delivered — 2026-10-23 (read first)
+
+The new real-CLI regression pauses the exact decoded Submit at the private
+authenticated proxy before forwarding it to the production server. It SIGKILLs
+and reaps the exact submitting Child, then verifies durable uncertain-key
+state, server `NotAdmitted`, same-context resync without sending the request,
+zero controlled-shell effect, unchanged target/PID and explicit server cleanup.
+See [task](P3-PRE-ADMISSION-CLIENT-DEATH-TASK.md) and
+[result](P3-PRE-ADMISSION-CLIENT-DEATH-RESULT.md).
+
+Parent reran the full focused target serially: 2 passed/0 failed/0 ignored in
+1.21s, including the existing post-completion/pre-ack case. Rustfmt check,
+diff whitespace and docs check pass (274 Markdown files/0 findings). Luna's
+initial fixture readiness-marker mismatch was corrected before its passing
+focused rerun. No full Cargo suite was run for this test-only change. No
+production code or input policy changed; full Phase3 remains open.
+
+The pre-delivery client-death acceptance remains distinct. Post-dispatch test
+feasibility and the next narrow handler-boundary test are recorded above. Keep
+admitted owner-pending/PTy interruption, human four-pane, provider and reboot
+gates separate.
+
+## Phase3 intermittent acceptance stabilization delivered — 2026-10-23 (read first)
+
+The recorded history-writer admission and attach-host ACK42 flakes are
+stabilized with bounded, test-only admission retry on the exact `Contended`
+reason and an attach-client focus acknowledgment before ACK42 is typed. The
+client now changes its status from “waiting for layout” to “new pane focused”
+when a later layout completes a pending split focus. No production admission,
+input routing, replay, wire or storage policy changed. See
+[result](P3-INTERMITTENT-ACCEPTANCE-RESULT.md).
+
+The history panic case passed20/20 serial repetitions; the delayed-layout focus
+unit test passed1/1; the ACK42 attach-host case passed1/1, then10/10 serial
+repetitions. Complete locked/offline serial Cargo passed 1089/0/15 ignored in
+179.27s across 53 integration targets. All seven supporting checks passed in
+the permitted environment (decoder39/Python77/docs273/0). An initial restricted
+support run lacked offline crate-index entries and loopback binding; it is not
+counted as passing. Earlier failures and raw logs are preserved in the result
+note. Repeated success is not a timing guarantee.
+
+Two GPT-6-Luna High read-only audits identified the acceptance assumptions;
+parent reviewed and implemented the bounded repairs. No cost telemetry is
+available. FullPhase3 remains open. The pre-delivery client-death acceptance
+is recorded above. Next, determine whether a post-dispatch/pre-admission barrier
+can be tested in-process without a production hook. Do not claim current
+owner-pending or PTY interruption coverage or change production input/retry
+policy. Human four-pane/provider/reboot gates remain separate.
+No commit or push; the existing `8ad9bd6` checkpoint remains the base.
+
 ## User-authorized Phase3 checkpoint — 2026-10-23 (read first)
 
 The user explicitly requested committing the accumulated verified work. This
@@ -9,8 +476,9 @@ input-client recovery acceptance plus their documentation/evidence. The latest
 full serial result is1089passed/0failed/15ignored with all seven supporting
 checks passing; details and prior failures remain below. This is a checkpoint,
 not fullPhase3 completion. No push is authorized. Git history records its ID.
-Next remains bounded diagnosis of the recorded test intermittency. Preserve
-the separate original source checkout and unresolved host/provider/reboot gates.
+This checkpoint predates the intermittent-acceptance stabilization recorded
+above. Preserve the separate original source checkout and unresolved
+host/provider/reboot gates.
 
 ## Phase3 killed input-client acceptance delivered — 2026-10-23 (read first)
 
@@ -31,8 +499,9 @@ final docs272/0. Parent final targeted1/1 in0.84s. Worker startup denied pathnam
 bind before scenario; parent fixture runs exposed newline-sensitive output
 assertion and wrong default-workspace stop usage for directly launched serve.
 These were corrected; failures and logs remain in the result note, not counted
-as passing runs. No Cargo deadline expired. Prior ACK42/history-writer
-intermittency remains unresolved despite this full pass.
+as passing runs. No Cargo deadline expired. At that checkpoint, ACK42 and
+history-writer intermittency remained unresolved; the later investigation and
+stabilization are recorded above.
 
 Only new tests/p3_inflight_client.rs changes executable test behavior this
 slice. All156 pre-existing source/test/script hashes match the turn-start
@@ -716,7 +1185,7 @@ All these are design/acceptance requirements, not current application behavior.
 
 This turn ran existing geometry filter17 and owner filter50:67passed/0failed/
 0ignored. Component fingerprints match, docs174files/0findings and diff checks
-pass;96 baseline Rust/test/manifest files and13 reports have unchanged hashes.
+pass;96 baseline Rust/test/manifest files and 13 reports have unchanged hashes.
 The first independent-note docs check found one trailing-whitespace line; it
 was corrected before the final check. Full verifier/integration was not rerun
 for docs-only work; previous7/8 and86passed/17failed/11ignored retain their
@@ -756,7 +1225,7 @@ eleven cannot start the server before raw mode, and one is the known host stderr
 assertion. Strict Clippy/fmt/build/rustdoc, Python45, decoder39, fingerprints,
 doctest command(0cases), diff and docs171/0 pass. Fixture development corrections
 are recorded in the parent/owner results. All65 baseline source/manifest files
-and13 prior raw/provenance reports have unchanged hashes. No new workload run.
+and 13 prior raw/provenance reports have unchanged hashes. No new workload run.
 
 Next: design bounded saved-layout/restart metadata for the current two-pane
 prototype; preserve pending hierarchy and provider decisions. Full machine

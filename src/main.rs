@@ -21,6 +21,9 @@ mod p3_cli;
 mod agent_cli;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod provider_cli;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod ui_client;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -134,6 +137,14 @@ where
             };
         }
         // `panelink` alone opens (or reattaches to) the user's workspace.
+        if arguments
+            .peek()
+            .is_some_and(|argument| argument == "provider-binding")
+        {
+            arguments.next();
+            let captured: Vec<_> = arguments.take(14).collect();
+            return provider_cli::run(captured);
+        }
         if arguments.peek().is_none() {
             return default_open::open();
         }
@@ -677,16 +688,19 @@ fn print_help() {
     println!("  panelink doctor");
     println!("  panelink pty-probe --terminfo <absolute-dir> -- <executable> [arguments...]");
     println!("  panelink server-probe --directory <private-dir> --terminfo <absolute-dir> [--initialize] [--allow-input] -- <executable> [arguments...]");
-    println!("  panelink serve --directory <private-dir> --terminfo <absolute-dir> [--initialize] [--allow-input] -- <executable> [arguments...]");
+    println!("  panelink serve --directory <private-dir> --terminfo <absolute-dir> [--initialize] [--allow-input] [--opencode-bridge] -- <executable> [arguments...]");
     println!("  panelink control --directory <private-dir> --context <absolute-file> <command> [arguments...]");
     println!("  panelink attach --directory <private-dir> --context-dir <private-dir>");
+    println!("  panelink provider-binding show|status --directory DIR --target G:W:P:S:R --project PROJECT");
+    println!("  panelink provider-binding prepare --directory DIR --target G:W:P:S:R --project PROJECT --session ID");
+    println!("  panelink provider-binding resume --directory DIR --target G:W:P:S:R --project PROJECT --ticket HEX --revision N");
     println!();
     println!("pty-probe runs one disposable child on macOS/aarch64.");
     println!("server-probe runs a foreground one-child server; control exchanges typed commands.");
     println!("serve runs an experimental foreground server (up to four panes, zsh splits).");
     println!("attach is an experimental full-screen client for serve; Ctrl-X detaches.");
     println!(
-        "Experimental prototype: up to four panes per workspace; provider recovery is not implemented."
+        "Experimental prototype: up to four panes; opt-in pinned-provider recovery requires explicit prepare and resume."
     );
 }
 

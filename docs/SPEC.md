@@ -1,6 +1,36 @@
 # Panelink: working implementation specification
 
-Revision: 0.24, 2026-10-23. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
+Revision: 0.25, 2026-10-24. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
+
+Development identity evidence updated2026-10-24: pinned OpenCode2.0.32 private
+fixtures now also prove an API-created/UI-selected new root, a static nonempty
+transcript import and native full-history fork, and a same-client project
+round-trip through Ctrl-O. Native forks are top-level (`parentID` absent), with
+origin in `fork`; linked children remain distinct and ineligible as top-level
+bindings. See [remaining-case evidence](progress/P4-REMAINING-IDENTITY.md).
+This is scoped fixture evidence. Production bridge and durable/manual recovery
+acceptance remain separate; no current-at-crash guarantee is established.
+
+## Current usability contract, 2026-10-24
+
+Each pane reserves one blank cell on all four sides of its outer rectangle.
+Its PTY and snapshots use the inset content size, with a minimum of 5 rows by
+20 columns (7 by 22 outer cells). Root limits remain 80 by 240 outer cells.
+Pointer coordinates sent to a child are relative to that content rectangle.
+
+Normal-screen wheel scrolling is a bounded read-only history query pinned to
+an exact target. It uses a separate viewport and hides the history cursor;
+typing returns to live output. Alternate-screen applications receive typed
+wheel input only when mouse reporting is enabled, through the same ownership,
+deduplication and nonreplayable admission rules as keyboard input. Without
+mouse reporting, alternate-screen scrolling stays at live output and reports
+that limitation. Querying scroll mode never claims input ownership.
+
+Agents may explicitly select a durable private caller-context root with
+`PANELINK_AGENT_CONTEXT_DIR`. It must be an absolute, UID-owned 0700 directory
+without symlinks. The CLI never silently changes roots after an error or an
+uncertain operation. This setting supplies writable metadata storage; local
+control-socket access remains subject to the invoking agent's permissions.
 
 ## Purpose and requirement authority
 
@@ -471,6 +501,71 @@ Reliable identity capture is an M1 requirement for the supported managed OpenCod
 
 ### Durable provider-session identity
 
+Managed implementation update2026-10-24: opt-in `serve --opencode-bridge`
+now provisions an original TUI plugin through a private launch configuration
+for the exact pinned2.0.32 executable. A same-user one-use stream grant binds
+the complete managed target, canonical project, provider version and random
+source instance. The worker requests challenge-bound selected-route snapshots
+every500ms with a300ms operation deadline and3000ms host-receipt lease; startup
+accept is bounded to15s. Failure revokes verification without killing the PTY.
+There is no reconnect or implicit regrant. Ordinary launcher panes and later
+generic shell splits do not enable the adapter.
+
+The owner now saves confirmed identity and managed-launch metadata in a single
+atomic record, acknowledging only the matching private worker completion.
+Restoration is always historical/stale. `provider-binding prepare` validates an
+explicit exact top-level ID/project and durably prepares a one-shot choice;
+the separate `resume` action revalidates, durably spends its ticket before
+navigation, then waits for fresh selected-route confirmation and a saved joint
+record. Lost replies stay uncertain; neither navigation acknowledgment nor a
+prepared choice is selected-state proof. See the [operator contract](progress/P4-MANUAL-RECOVERY.md)
+and [native acceptance](progress/P4-NATIVE-MANUAL-RECOVERY.md). Native acceptance
+is still being completed; the historical component notes below describe their
+earlier narrower scope. Current-at-crash and automatic resume are disabled.
+
+Transport component update2026-10-24: the independent `PLBRDG01` bounded wire
+codec and same-user, grant-scoped Unix endpoints are implemented and verified
+through private socketpair/pathname fixtures, admission and binding storage.
+See [wire/channel evidence](progress/P4-BRIDGE-TRANSPORT-RESULT.md). A consumed
+issuer grant binds complete target/project/version/source instance; it is not
+provider executable attestation or a global replay/revocation guarantee.
+Endpoints accept supplied streams and create no global listener. Live source/
+grant delivery, owner/worker integration, bounded queues, fresh snapshot
+reconciliation and production heartbeat policy remain open. Host receipt alone
+does not prove when a route was observed; buffered metadata is not a selection
+or reconciliation barrier. These components enable no recovery or automatic
+resume behavior.
+
+Component implementation update2026-10-24: a typed protocol-v1 receiver now
+wraps the binding core with source-instance sequencing, host-time expiry and
+explicit reconciliation. A separate private single-writer store synchronizes
+bounded metadata before confirmation. Parent component tests and three actual
+process-kill boundaries pass; every restored record starts stale. See
+[implementation evidence](progress/P4-BRIDGE-STORE-RESULT.md). The caller must
+supply trustworthy source identity/clocks, nonreused instances and an IO policy.
+These exported components add no live transport, authenticated plugin, state-
+owner dispatch, atomic managed-session linkage or recovery UI. The lease remains
+bounded caller-selected prototype policy; production heartbeat timing and the
+full integration requirements below remain open. A saved newer record may
+exist after an acknowledgment was lost, without any current-at-crash guarantee.
+
+Development evidence (2026-10-24): the pinned OpenCode2.0.32 private two-TUI
+[selected-route gate](progress/P4-V2-TUI-RESULT.md) passes three fresh runs of
+initial identity and keyboard A-B-A with passive-client isolation. Its100ms
+polling is an observation experiment, not the product heartbeat contract or a
+durable ordering barrier. No live Panelink provider bridge, saved binding or
+provider recovery is enabled by this result; the requirements below remain.
+
+The subsequent [extended fixture cases](progress/P4-V2-EXTENDED-RESULT.md)
+pass opposite-client switching and controlled observer-delivery loss/expiry/
+explicit reconciliation in three fresh runs each. Keyboard new-conversation
+navigation yields Home without a selected ID. These observations add no durable
+binding or production heartbeat guarantee; allocation timing and the remaining
+new-ID/nonempty-fork/same-client project-switch cases remain unproven.
+Scoped linked-child and separate-client directory isolation evidence is recorded
+in [the follow-up](progress/P4-V2-ISOLATION-RESULT.md).
+
+
 The [OpenCode CLI](https://docs.opencode.ai/docs/cli/) accepts an explicit session ID for resume. That flag does not identify which session a particular pane currently displays. The [plugin documentation](https://docs.opencode.ai/docs/plugins/) lists session events, but a session-created/updated event alone is not proof of the TUI's active selection.
 
 The selected adapter must establish an authoritative binding between managed-session ID/launch generation, canonical project identity, and the exact current top-level OpenCode session ID. Store binding revision, verification source/time, supported provider version, and state (`unbound`, `pending`, `verified`, `stale`, `ambiguous`, or `unavailable`). Child/subagent activity cannot overwrite the displayed top-level binding. Never infer identity from pane title, process PID, newest session in a directory, or latest activity timestamp.
@@ -482,6 +577,16 @@ On an in-TUI session switch, fork, new conversation, or project switch, the adap
 The mapping acknowledged as saved is the recovery boundary. A crash before a switch update is durably acknowledged can leave only the previous verified mapping. After restart present it as “last confirmed conversation” with verification time, not as guaranteed current-at-crash identity. A claim of current-session recovery additionally requires the supported adapter to demonstrate an ordering barrier for session selection and durable identity recording. If the provider cannot supply or reliably observe all switches, disable that claim for that mode. An optional plugin or a periodic heartbeat alone does not prove the barrier.
 
 Missing/stale/ambiguous identity uses a visible manual recovery flow: retain the pane layout/history; offer a provider-owned session picker or explicit user-supplied ID and project; validate that choice through a supported provider interface; save the chosen mapping before a new explicit resume. Never silently fall back to `--continue`, choose the directory's latest session, start a replacement agent, or retry an uncertain resume with a new operation key. Deleted/inaccessible provider sessions produce an actionable error and preserve Panelink history. Resume starts no new prompt or automatic work merely because an old conversation was reopened.
+
+For the explicit one-shot workflow, saving the choice means durably recording a
+prepared candidate with its complete managed launch scope, source instance,
+prospective revision and ticket. It must not replace the last-confirmed selected
+binding or claim selection before navigation. The separate resume action
+revalidates the candidate and durably marks that ticket spent before issuing at
+most one action. Only a later fresh selected-route observation may atomically
+update the joint managed/provider binding and acknowledge selected-and-saved.
+An interrupted or lost-acknowledgment operation remains uncertain and is never
+automatically replayed, even if its prepared candidate still exists.
 
 M1 must demonstrate two concurrent sessions in the same project, initial identity persistence, idle in-TUI switches, new/forked sessions, stale events, bridge disable/failure, and crashes before/after mapping acknowledgment. If the chosen provider version/integration cannot support the required identity contract, record that limitation and use the explicit last-confirmed/manual fallback before calling recovery supported. No undocumented TUI event or unsupported interception API is assumed to exist.
 

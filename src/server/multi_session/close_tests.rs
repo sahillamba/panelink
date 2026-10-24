@@ -26,8 +26,13 @@ use std::time::{Duration, Instant};
 const GENERATION: u64 = 77;
 const LEASE: u64 = 1;
 const NOW: u64 = 3;
+// Layout geometry is the pane's outer rectangle; PTY launch/resize sizes are
+// the inset content rectangle used by the compositor.
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 81;
+const CONTENT_ROWS: u16 = ROWS - 2;
+const CONTENT_COLUMNS: u16 = COLUMNS - 2;
+const SPLIT_CONTENT_COLUMNS: u16 = (COLUMNS - 1) / 2 - 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Effect {
@@ -249,7 +254,7 @@ impl Fixture {
     /// Split `target` to the right and return the new target.
     fn split_right(&mut self, target: TargetRef) -> TargetRef {
         let split_key = self.next_key();
-        let launch = launch_request(split_key, (ROWS, 40));
+        let launch = launch_request(split_key, (CONTENT_ROWS, SPLIT_CONTENT_COLUMNS));
         let mut bytes = Vec::new();
         encode_split_request(
             &SplitRequest {
@@ -371,8 +376,8 @@ fn closing_a_live_sibling_stops_it_collapses_and_resizes_the_survivor() {
                 Effect::Stop(closed.session),
                 Effect::Resize {
                     session: survivor.session,
-                    rows: ROWS,
-                    columns: COLUMNS,
+                    rows: CONTENT_ROWS,
+                    columns: CONTENT_COLUMNS,
                 },
             ]
         );
@@ -493,8 +498,8 @@ fn phased_close_keeps_ledger_pending_until_tick_driven_completion() {
             },
             Effect::ApplySize {
                 session: first.session,
-                rows: ROWS,
-                columns: COLUMNS,
+                rows: CONTENT_ROWS,
+                columns: CONTENT_COLUMNS,
             },
         ]
     );
@@ -621,8 +626,8 @@ fn shell_exit_with_live_sibling_collapses_automatically_in_poll() {
         fixture.take_log(),
         [Effect::ApplySize {
             session: second.session,
-            rows: ROWS,
-            columns: COLUMNS,
+            rows: CONTENT_ROWS,
+            columns: CONTENT_COLUMNS,
         }]
     );
     let layout = fixture.owner.layout_snapshot().unwrap();
@@ -719,8 +724,8 @@ fn survivor_resize_failure_is_partial_and_pending() {
     let pending = fixture.owner.pending_resizes();
     let entry = pending.into_iter().flatten().next().unwrap();
     assert_eq!(entry.target, first);
-    assert_eq!(entry.desired, (ROWS, COLUMNS));
-    assert_eq!(entry.confirmed, (ROWS, 40));
+    assert_eq!(entry.desired, (CONTENT_ROWS, CONTENT_COLUMNS));
+    assert_eq!(entry.confirmed, (CONTENT_ROWS, SPLIT_CONTENT_COLUMNS));
     assert!(fixture.owner.pane_statuses()[0].unwrap().resize_pending);
 }
 
@@ -799,7 +804,7 @@ fn split_duplicates_survive_close_and_resplit() {
     let mut fixture = Fixture::new();
     let first = fixture.first;
     let split_key = fixture.next_key();
-    let launch = launch_request(split_key, (ROWS, 40));
+    let launch = launch_request(split_key, (CONTENT_ROWS, SPLIT_CONTENT_COLUMNS));
     let mut bytes = Vec::new();
     encode_split_request(
         &SplitRequest {
@@ -1028,7 +1033,7 @@ fn failed_split_records_are_reclaimed_so_a_later_split_succeeds() {
     let mut fixture = Fixture::new();
     let first = fixture.first;
     let split_key = fixture.next_key();
-    let launch = launch_request(split_key, (ROWS, 40));
+    let launch = launch_request(split_key, (CONTENT_ROWS, SPLIT_CONTENT_COLUMNS));
     let mut bytes = Vec::new();
     encode_split_request(
         &SplitRequest {

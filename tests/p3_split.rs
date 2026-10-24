@@ -512,7 +512,7 @@ fn split_scenario(shell: Shell) {
         generation,
         2,
         (first_target, layout.revision),
-        (SplitDirection::Right, ROOT_ROWS, PANE_COLUMNS),
+        (SplitDirection::Right, ROOT_ROWS - 2, PANE_COLUMNS - 2),
         shell,
         &context,
         second_name,
@@ -592,8 +592,8 @@ fn split_scenario(shell: Shell) {
     let first_screen = read_screen(&mut owner, &mut first_client);
     assert!(!first_screen.contains("P3SP-ACK-T2"));
 
-    // Each child's own PTY reports its assigned layout rectangle.
-    let expected_size = format!("P3SP-SIZE-{ROOT_ROWS}x{PANE_COLUMNS}");
+    // Each child's own PTY reports its inset content rectangle.
+    let expected_size = format!("P3SP-SIZE-{}x{}", ROOT_ROWS - 2, PANE_COLUMNS - 2);
     submit(&mut owner, &mut first_client, "SIZE");
     let screen = wait_for(&mut owner, &mut first_client, &expected_size, &[]);
     assert_eq!(extract_pid(&screen, &expected_size), Some(first_pid));
@@ -634,7 +634,7 @@ fn split_scenario(shell: Shell) {
         .resize_layout(2, 30, 101, resize)
         .expect("resize the layout root and both PTYs");
     assert_eq!(grown.revision, 3);
-    let expected_size = "P3SP-SIZE-30x50";
+    let expected_size = "P3SP-SIZE-28x48";
     submit(&mut owner, &mut first_client, "SIZE");
     let screen = wait_for(&mut owner, &mut first_client, expected_size, &[]);
     assert_eq!(extract_pid(&screen, expected_size), Some(first_pid));
@@ -669,7 +669,7 @@ fn split_scenario(shell: Shell) {
             generation,
             sequence,
             (source, layout_revision),
-            (SplitDirection::Down, 15, 50),
+            (SplitDirection::Down, 13, 48),
             shell,
             &context,
             &name,

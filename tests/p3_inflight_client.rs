@@ -311,6 +311,13 @@ struct HeldResponse {
     request_id: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HeldSubmit {
+    key: OperationKey,
+    target: TargetRef,
+    request_id: u64,
+}
+
 struct ExpectedSubmit {
     target: TargetRef,
     owner_revision: u64,
@@ -405,6 +412,102 @@ impl Proxy {
 }
 
 impl Drop for Proxy {
+    fn drop(&mut self) {
+        self.release_and_join(false);
+    }
+}
+
+struct PreAdmissionProxy {
+    cancel: Arc<AtomicBool>,
+    release: Option<mpsc::Sender<()>>,
+    barrier: mpsc::Receiver<Result<HeldSubmit, String>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl PreAdmissionProxy {
+    fn start(
+        proxy_dir: PathBuf,
+        server_dir: PathBuf,
+        expected_target: TargetRef,
+        owner_revision: u64,
+        text: String,
+    ) -> Self {
+        let listener = PrivateListener::bind(&proxy_dir).expect("bind private pre-admission proxy");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let thread_cancel = Arc::clone(&cancel);
+        let (barrier_tx, barrier) = mpsc::sync_channel(1);
+        let (release, release_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let expected = ExpectedSubmit {
+                target: expected_target,
+                owner_revision,
+                text,
+            };
+            let result = proxy_submit_before_admission(
+                listener,
+                &server_dir,
+                &expected,
+                &thread_cancel,
+                &release_rx,
+                &barrier_tx,
+            );
+            if let Err(error) = result {
+                let _ = barrier_tx.send(Err(error));
+            }
+        });
+        Self {
+            cancel,
+            release: Some(release),
+            barrier,
+            worker: Some(worker),
+        }
+    }
+
+    fn held_submit(&self) -> HeldSubmit {
+        match self.barrier.recv_timeout(STARTUP_DEADLINE) {
+            Ok(Ok(held)) => held,
+            Ok(Err(error)) => panic!("pre-admission proxy rejected Submit: {error}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("pre-admission proxy did not reach Submit barrier")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("pre-admission proxy ended before Submit barrier")
+            }
+        }
+    }
+
+    fn release_and_join(&mut self, require_join: bool) {
+        self.cancel.store(true, Ordering::Release);
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        if self.worker.as_ref().is_some_and(JoinHandle::is_finished) {
+            let result = self
+                .worker
+                .take()
+                .expect("pre-admission proxy worker")
+                .join();
+            if require_join {
+                result.expect("bounded pre-admission proxy worker");
+            }
+        } else if require_join {
+            panic!("pre-admission proxy did not terminate within bounded teardown");
+        } else {
+            self.worker.take();
+        }
+    }
+}
+
+impl Drop for PreAdmissionProxy {
     fn drop(&mut self) {
         self.release_and_join(false);
     }
@@ -515,6 +618,100 @@ fn proxy_submit_once(
         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => Ok(()),
         Err(mpsc::RecvTimeoutError::Timeout) => {
             Err("held response teardown deadline elapsed".to_owned())
+        }
+    }
+}
+
+fn proxy_submit_before_admission(
+    listener: PrivateListener,
+    server_dir: &Path,
+    expected: &ExpectedSubmit,
+    cancel: &AtomicBool,
+    release: &mpsc::Receiver<()>,
+    barrier: &mpsc::SyncSender<Result<HeldSubmit, String>>,
+) -> Result<(), String> {
+    let accept_deadline = Instant::now() + STARTUP_DEADLINE;
+    let mut client = loop {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let slice = (Instant::now() + PROXY_ACCEPT_POLL).min(accept_deadline);
+        match listener.accept(slice) {
+            Ok(stream) => break stream,
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                if Instant::now() >= accept_deadline {
+                    return Err("pre-admission proxy accept deadline elapsed".to_owned());
+                }
+            }
+            Err(error) => return Err(format!("pre-admission proxy accept failed: {error}")),
+        }
+    };
+    let mut server = AuthenticatedStream::connect(server_dir, Instant::now() + IO_DEADLINE)
+        .map_err(|error| format!("connect pre-admission proxy to real server: {error}"))?;
+
+    let hello = client
+        .read_frame(Instant::now() + IO_DEADLINE)
+        .map_err(|error| format!("read client Hello: {error}"))?;
+    if hello.kind() != MessageKind::Hello || hello.request_id() != 0 {
+        return Err("client did not begin with one Hello".to_owned());
+    }
+    write_frame(
+        &mut server,
+        hello.kind(),
+        hello.request_id(),
+        hello.payload(),
+    )?;
+    let welcome = server
+        .read_frame(Instant::now() + IO_DEADLINE)
+        .map_err(|error| format!("read real server Welcome: {error}"))?;
+    if welcome.kind() != MessageKind::Welcome || welcome.request_id() != 0 {
+        return Err("real server did not return one Welcome".to_owned());
+    }
+    decode_welcome(welcome.payload())
+        .map_err(|error| format!("validate pre-admission Welcome: {error}"))?;
+    write_frame(
+        &mut client,
+        welcome.kind(),
+        welcome.request_id(),
+        welcome.payload(),
+    )?;
+
+    let request = client
+        .read_frame(Instant::now() + IO_DEADLINE)
+        .map_err(|error| format!("read pre-admission Submit: {error}"))?;
+    if request.kind() != MessageKind::Request || request.request_id() == 0 {
+        return Err("Submit was not one nonzero-ID Request frame".to_owned());
+    }
+    let decoded = decode_request_payload(request.payload())
+        .map_err(|error| format!("decode pre-admission Submit: {error}"))?;
+    match decoded.command {
+        Command::Submit {
+            owner_revision,
+            text,
+        } if decoded.target == expected.target
+            && owner_revision == expected.owner_revision
+            && text == expected.text => {}
+        _ => return Err("client request was not the exact expected Submit".to_owned()),
+    }
+    let held = HeldSubmit {
+        key: decoded.key,
+        target: decoded.target,
+        request_id: request.request_id(),
+    };
+    barrier
+        .send(Ok(held))
+        .map_err(|_| "parent dropped the pre-admission barrier".to_owned())?;
+
+    // Keep the decoded Submit frame local and never forward it. After the
+    // parent kills and reaps the submitting Child, returning drops the frame
+    // and both transport streams without presenting the key to server ingress.
+    match release.recv_timeout(PROXY_HOLD_DEADLINE) {
+        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            drop(request);
+            Ok(())
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err("pre-admission barrier teardown deadline elapsed".to_owned())
         }
     }
 }
@@ -906,6 +1103,238 @@ fn killed_submit_client_resyncs_applied_input_without_replay() {
 
     // Server shutdown is an explicit fixture action; Fixture::drop also has a
     // bounded fallback for assertion unwinds.
+    let server = fixture.server.as_mut().expect("owned server child");
+    assert!(server
+        .try_wait()
+        .expect("server live before explicit stop")
+        .is_none());
+    // SAFETY: signal only this test's still-live, unreaped server Child.
+    assert_eq!(
+        unsafe { libc::kill(server.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    let stopped = wait_owned_child(server, STOP_DEADLINE);
+    assert!(stopped.success(), "explicit SIGTERM shutdown: {stopped}");
+    wait_for_server_exit(&mut fixture);
+    assert!(
+        !server_dir.join("control.sock").exists(),
+        "explicit stop removes the owned server endpoint"
+    );
+}
+
+#[test]
+fn killed_submit_client_before_admission_resyncs_without_sending_submit() {
+    let mut fixture = Fixture::new();
+    let token = format!("INFLIGHT-TOKEN-PRE-ADMISSION-{}", std::process::id());
+    let check = format!("INFLIGHT-CHECK-PRE-ADMISSION-{}", std::process::id());
+    let record = fixture.record_path();
+    let script = format!(
+        "/bin/stty -echo; printf 'INFLIGHT-READY:%s\\n' \"$$\"; handled=0; \\
+         while IFS= read -r received; do \\
+           if [ \"$received\" = '{token}' ]; then \\
+             handled=$((handled + 1)); printf '%s\\n' '{token}' >> '{}'; \\
+             printf 'INFLIGHT-EFFECT:%s\\n' \"$$\"; \\
+           elif [ \"$received\" = '{check}' ]; then \\
+             printf 'INFLIGHT-CHECK:%s:%s\\n' \"$$\" \"$handled\"; \\
+           fi; \\
+         done",
+        record.display()
+    );
+    fixture.start(&script);
+
+    let server_dir = fixture.server_directory();
+    let caller_context = fixture.context_path();
+    let init = fixture.control(&server_dir, &caller_context, &["init"]);
+    assert_success(&init, "initialize pre-admission caller context");
+    let initial_generation = json_u64(&String::from_utf8_lossy(&init.stdout), "generation");
+    let initial_lease = json_u64(&String::from_utf8_lossy(&init.stdout), "lease");
+    assert!(initial_generation > 0 && initial_lease > 0);
+
+    let describe = fixture.control(&server_dir, &caller_context, &["describe"]);
+    let describe_json = assert_success(&describe, "describe pre-admission target");
+    let target = json_string(&describe_json, "target");
+    let owner_revision = json_u64(&describe_json, "owner_revision");
+    assert!(!json_bool(&describe_json, "child_exited"));
+
+    let observer_context = fixture.observer_context_path();
+    let observer_init = fixture.control(&server_dir, &observer_context, &["init", target.as_str()]);
+    assert_success(&observer_init, "initialize pre-admission observer context");
+    let observer_describe = fixture.control(&server_dir, &observer_context, &["describe"]);
+    let observer_describe_json = assert_success(&observer_describe, "describe target as observer");
+    assert_target(&observer_describe_json, &target);
+    let ready_pid = poll_ready_pid(&mut fixture, &server_dir, &observer_context, &target);
+
+    let claim = fixture.control(
+        &server_dir,
+        &caller_context,
+        &["claim", target.as_str(), &owner_revision.to_string()],
+    );
+    let claim_json = assert_success(&claim, "claim pre-admission input ownership");
+    assert_eq!(json_string(&claim_json, "status"), "completed");
+    assert_eq!(json_string(&claim_json, "outcome"), "applied");
+    let claimed_describe = fixture.control(&server_dir, &caller_context, &["describe"]);
+    let claimed_json = assert_success(&claimed_describe, "confirm pre-admission owner");
+    assert_target(&claimed_json, &target);
+    let claimed_revision = json_u64(&claimed_json, "owner_revision");
+    assert_eq!(json_u64(&claimed_json, "owner_lease"), initial_lease);
+
+    let before_submit = ContextFile::open_existing(&caller_context, Instant::now() + IO_DEADLINE)
+        .expect("open caller before pre-admission Submit");
+    assert_eq!(before_submit.context().uncertain(), None);
+    let next_before_submit = before_submit.context().next_sequence();
+    drop(before_submit);
+
+    let proxy_dir = fixture.proxy_directory();
+    private_dir(&proxy_dir);
+    let parsed_target = parse_target(&target);
+    let mut proxy = PreAdmissionProxy::start(
+        proxy_dir.clone(),
+        server_dir.clone(),
+        parsed_target,
+        claimed_revision,
+        token.clone(),
+    );
+    let submit_args = vec![
+        "control".to_owned(),
+        "--directory".to_owned(),
+        proxy_dir.display().to_string(),
+        "--context".to_owned(),
+        caller_context.display().to_string(),
+        "submit".to_owned(),
+        target.clone(),
+        claimed_revision.to_string(),
+        token.clone(),
+    ];
+    let (mut submit_child, submit_stdout, submit_stderr) =
+        OwnedClient::spawn(&mut fixture, &submit_args, "pre-admission-submit");
+
+    let held = proxy.held_submit();
+    assert_eq!(held.target, parsed_target);
+    assert!(held.request_id > 0);
+    submit_child.assert_running();
+    let kill_status = submit_child.kill_with_sigkill_and_reap();
+    assert_eq!(kill_status.signal(), Some(libc::SIGKILL));
+    assert_eq!(held.key.generation, initial_generation);
+    assert_eq!(held.key.lease, initial_lease);
+    assert_eq!(held.key.sequence, next_before_submit);
+    proxy.release_and_join(true);
+
+    assert!(Fixture::read_capture(&submit_stdout).is_empty());
+    assert!(Fixture::read_capture(&submit_stderr).is_empty());
+    let uncertain = ContextFile::open_existing(&caller_context, Instant::now() + IO_DEADLINE)
+        .expect("reopen caller after exact CLI child released its context lock");
+    let state = uncertain.context();
+    assert_eq!(state.generation(), initial_generation);
+    assert_eq!(state.lease(), initial_lease);
+    assert_eq!(state.uncertain(), Some(held.key));
+    assert_eq!(state.next_sequence(), held.key.sequence + 1);
+    drop(uncertain);
+
+    // Status and resync use the real server directory directly. The proxy
+    // captured the Submit but never wrote it upstream.
+    let status = fixture.control(
+        &server_dir,
+        &caller_context,
+        &["status", &held.key.sequence.to_string()],
+    );
+    let status_json = String::from_utf8_lossy(&status.stdout).into_owned();
+    assert_eq!(status.status.code(), Some(1));
+    assert!(status.stderr.is_empty());
+    assert!(!json_bool(&status_json, "ok"));
+    assert_eq!(json_u64(&status_json, "generation"), held.key.generation);
+    assert_eq!(json_u64(&status_json, "lease"), held.key.lease);
+    assert_eq!(json_u64(&status_json, "sequence"), held.key.sequence);
+    assert_eq!(json_string(&status_json, "status"), "not_admitted");
+    let still_uncertain = ContextFile::open_existing(&caller_context, Instant::now() + IO_DEADLINE)
+        .expect("reopen caller after read-only NotAdmitted status");
+    assert_eq!(still_uncertain.context().uncertain(), Some(held.key));
+    assert_eq!(
+        still_uncertain.context().next_sequence(),
+        held.key.sequence + 1
+    );
+    drop(still_uncertain);
+
+    let resync = fixture.control(&server_dir, &caller_context, &["resync"]);
+    let resync_json = String::from_utf8_lossy(&resync.stdout).into_owned();
+    assert_eq!(resync.status.code(), Some(1));
+    assert!(resync.stderr.is_empty());
+    assert!(!json_bool(&resync_json, "ok"));
+    assert_eq!(json_u64(&resync_json, "generation"), held.key.generation);
+    assert_eq!(json_u64(&resync_json, "lease"), held.key.lease);
+    assert_eq!(json_u64(&resync_json, "sequence"), held.key.sequence);
+    assert_eq!(json_string(&resync_json, "status"), "not_admitted");
+    assert!(!json_bool(&resync_json, "uncertain"));
+    assert!(json_bool(&resync_json, "context_cleared"));
+    let recovered = fixture.control(&server_dir, &caller_context, &["show"]);
+    let recovered_json = assert_success(&recovered, "show caller after NotAdmitted resync");
+    assert_eq!(json_u64(&recovered_json, "generation"), initial_generation);
+    assert_eq!(json_u64(&recovered_json, "lease"), initial_lease);
+    assert_eq!(
+        json_u64(&recovered_json, "next_sequence"),
+        held.key.sequence + 1
+    );
+    assert!(recovered_json.contains("\"uncertain\":null"));
+    let second_resync = fixture.control(&server_dir, &caller_context, &["resync"]);
+    let second_json = assert_success(&second_resync, "verify repeated NotAdmitted resync");
+    assert!(!json_bool(&second_json, "uncertain"));
+    assert!(!json_bool(&second_json, "context_cleared"));
+    let clear = ContextFile::open_existing(&caller_context, Instant::now() + IO_DEADLINE)
+        .expect("reopen caller after repeated NotAdmitted resync");
+    assert_eq!(clear.context().generation(), initial_generation);
+    assert_eq!(clear.context().lease(), initial_lease);
+    assert_eq!(clear.context().uncertain(), None);
+    assert_eq!(clear.context().next_sequence(), next_before_submit + 1);
+    drop(clear);
+
+    let check_submit = fixture.control(
+        &server_dir,
+        &caller_context,
+        &[
+            "submit",
+            target.as_str(),
+            &claimed_revision.to_string(),
+            check.as_str(),
+        ],
+    );
+    let check_json = assert_success(&check_submit, "submit explicit zero-count CHECK");
+    assert_eq!(json_string(&check_json, "status"), "completed");
+    assert_eq!(json_string(&check_json, "outcome"), "applied");
+    let check_observed = poll_observer_read(
+        &mut fixture,
+        &server_dir,
+        &observer_context,
+        &target,
+        &ready_pid,
+        &check,
+    );
+    assert_target(&check_observed, &target);
+    let check_text = json_string(&check_observed, "text");
+    assert!(
+        check_text.contains(&format!("INFLIGHT-CHECK:{ready_pid}:0")),
+        "explicit CHECK reports zero handled tokens"
+    );
+    assert!(!check_text.contains(&format!("INFLIGHT-EFFECT:{ready_pid}")));
+    assert!(!fixture.record_path().exists());
+
+    let final_info = fixture.control(&server_dir, &observer_context, &["describe"]);
+    let final_json = assert_success(&final_info, "confirm original target after NotAdmitted");
+    assert_target(&final_json, &target);
+    assert!(!json_bool(&final_json, "child_exited"));
+    let pid = ready_pid.parse::<u32>().expect("shell PID is numeric");
+    let pid_status = bounded_status(
+        {
+            let mut command = ProcessCommand::new("/bin/kill");
+            command.args(["-0", &pid.to_string()]);
+            command
+        },
+        PROCESS_DEADLINE,
+    );
+    assert!(
+        pid_status.success(),
+        "original controlled shell PID remains live"
+    );
+    fixture.assert_live_server();
+
     let server = fixture.server.as_mut().expect("owned server child");
     assert!(server
         .try_wait()

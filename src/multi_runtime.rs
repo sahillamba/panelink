@@ -60,8 +60,8 @@ use crate::session_registry::SessionState;
 use crate::split_protocol::{decode_split_request, decode_split_result};
 use crate::transport::{AuthenticatedStream, OwnedFrame};
 use crate::ui_protocol::{
-    decode_attach_target, decode_layout_reply, decode_resize_reply, decode_screen_reply,
-    decode_ui_request, UiRequest, ATTACH_TARGET_BYTES,
+    decode_attach_target, decode_history_reply, decode_layout_reply, decode_resize_reply,
+    decode_screen_reply, decode_ui_request, UiRequest, ATTACH_TARGET_BYTES,
 };
 use crate::watch_protocol::WatchStatus;
 use crate::workspace_watch_protocol as workspace_watch;
@@ -1998,6 +1998,38 @@ fn dispatch_ui(
                 Err(error) => self::error(&error),
             }
         }
+        UiRequest::HistoryQuery(query) => {
+            let target = query.target;
+            let captured = owner.observe_target(connection, target, now, |effects| {
+                let (snapshot, offset_rows) = effects
+                    .history_snapshot(query.offset_rows)
+                    .map_err(|_| "history unavailable")?;
+                let revision = effects.revision();
+                let metadata = crate::screen_checkpoint::CheckpointMetadata::new(
+                    target,
+                    0,
+                    unix_millis(),
+                    revision,
+                )
+                .map_err(|_| "invalid_history")?;
+                let checkpoint = crate::screen_checkpoint::encode(&snapshot, &metadata)
+                    .map_err(|_| "invalid_history")?;
+                crate::ui_protocol::prefix_history_reply(
+                    target,
+                    revision,
+                    offset_rows,
+                    effects.alternate_screen_active(),
+                    effects.mouse_reporting_enabled(),
+                    checkpoint,
+                )
+                .map_err(|_| "invalid_history")
+            });
+            match captured {
+                Ok(Ok(bytes)) => reply(MultiReply::Snapshot(bytes)),
+                Ok(Err(label)) => reply(MultiReply::Error(label)),
+                Err(error) => self::error(&error),
+            }
+        }
         UiRequest::KeyInput(view) => {
             match owner.handle_key_input(
                 connection,
@@ -2006,6 +2038,19 @@ fn dispatch_ui(
                 now,
                 PtyEffects::validate_keys,
                 |effects| effects.keys(view.keys()),
+            ) {
+                Ok(bytes) => reply(MultiReply::Response(bytes)),
+                Err(error) => self::error(&error),
+            }
+        }
+        UiRequest::MouseWheelInput(input) => {
+            match owner.handle_mouse_wheel(
+                connection,
+                &input,
+                payload,
+                now,
+                |effects| effects.validate_mouse_wheel(input.column, input.row, input.up),
+                |effects| effects.mouse_wheel(input.column, input.row, input.up),
             ) {
                 Ok(bytes) => reply(MultiReply::Response(bytes)),
                 Err(error) => self::error(&error),
@@ -2343,7 +2388,9 @@ enum RequestSchema {
     Split,
     UiLayout,
     UiScreen(TargetRef),
+    UiHistory(TargetRef),
     UiKeys(OperationKey),
+    UiMouseWheel(OperationKey),
     UiResize(OperationKey),
     /// Schema-9 close request or close status query for this key.
     Close(OperationKey),
@@ -2377,7 +2424,9 @@ fn classify(payload: &[u8]) -> Option<RequestSchema> {
         [0, 8] => match decode_ui_request(payload).ok()? {
             UiRequest::LayoutQuery => Some(RequestSchema::UiLayout),
             UiRequest::ScreenQuery { target } => Some(RequestSchema::UiScreen(target)),
+            UiRequest::HistoryQuery(query) => Some(RequestSchema::UiHistory(query.target)),
             UiRequest::KeyInput(view) => Some(RequestSchema::UiKeys(view.key())),
+            UiRequest::MouseWheelInput(input) => Some(RequestSchema::UiMouseWheel(input.key)),
             UiRequest::RootResize(resize) => Some(RequestSchema::UiResize(resize.key)),
         },
         [0, 9] => {
@@ -2407,6 +2456,9 @@ fn response_matches(schema: RequestSchema, payload: &[u8]) -> bool {
         RequestSchema::UiKeys(key) => {
             decode_response_payload(payload).is_ok_and(|response| response.key == key)
         }
+        RequestSchema::UiMouseWheel(key) => {
+            decode_response_payload(payload).is_ok_and(|response| response.key == key)
+        }
         RequestSchema::Session(SessionRequest::Describe) => decode_session_info(payload).is_ok(),
         RequestSchema::Session(SessionRequest::Detach) => false,
         RequestSchema::Session(_) => decode_response_payload(payload).is_ok(),
@@ -2429,6 +2481,7 @@ fn response_matches(schema: RequestSchema, payload: &[u8]) -> bool {
         RequestSchema::Split => decode_split_result(payload).is_ok(),
         RequestSchema::UiLayout => decode_layout_reply(payload).is_ok(),
         RequestSchema::UiScreen(_) => false,
+        RequestSchema::UiHistory(_) => false,
         RequestSchema::UiResize(key) => {
             decode_resize_reply(payload).is_ok_and(|result| result.key == key)
                 || decode_response_payload(payload).is_ok_and(|response| response.key == key)
@@ -2446,6 +2499,8 @@ fn response_matches(schema: RequestSchema, payload: &[u8]) -> bool {
 fn snapshot_matches(schema: RequestSchema, payload: &[u8]) -> bool {
     matches!(schema, RequestSchema::UiScreen(target)
         if decode_screen_reply(payload).is_ok_and(|view| view.target() == target))
+        || matches!(schema, RequestSchema::UiHistory(target)
+            if decode_history_reply(payload).is_ok_and(|view| view.target() == target))
 }
 
 fn workspace_response_matches(request: workspace_watch::Request, payload: &[u8]) -> bool {

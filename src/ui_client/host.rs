@@ -333,7 +333,9 @@ fn run_inner(directory: PathBuf, context_dir: PathBuf) -> i32 {
         (Ok(code), Ok(())) => return code,
         (Err(error), _) | (_, Err(error)) => error.message(),
     };
-    report(code, &mut host.tty);
+    if !report(code, &mut host.tty) {
+        report_stderr_fallback(code);
+    }
     1
 }
 
@@ -356,8 +358,11 @@ fn fail(message: &str) -> i32 {
         OFlags::WRONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
-        report(message, &mut File::from(fd));
+        if report(message, &mut File::from(fd)) {
+            return 1;
+        }
     }
+    report_stderr_fallback(message);
     1
 }
 
@@ -374,7 +379,7 @@ fn report_notice(message: &str, tty: &mut File) {
 }
 
 /// Bounded `error: MESSAGE\n` write to an already nonblocking terminal.
-fn report(message: &str, tty: &mut File) {
+fn report(message: &str, tty: &mut impl Write) -> bool {
     let mut line = [0_u8; 160];
     let mut length = 0;
     for part in [b"error: ".as_slice(), message.as_bytes(), b"\r\n"] {
@@ -382,7 +387,21 @@ fn report(message: &str, tty: &mut File) {
         line[length..length + take].copy_from_slice(&part[..take]);
         length += take;
     }
-    let _ = write_control(tty, &line[..length]);
+    write_control(tty, &line[..length]).is_ok()
+}
+
+/// If the controlling terminal is unavailable or stopped accepting writes,
+/// make one bounded best-effort write to the inherited stderr endpoint. Open
+/// `/dev/fd/2` separately with NONBLOCK so a full parent pipe cannot hold
+/// attach shutdown. The message is always one of this module's fixed labels.
+fn report_stderr_fallback(message: &str) {
+    if let Ok(fd) = open(
+        "/dev/fd/2",
+        OFlags::WRONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        let _ = report(message, &mut File::from(fd));
+    }
 }
 
 fn previous_layout_availability(server_dir: &std::path::Path) -> Availability {
@@ -564,6 +583,7 @@ fn event_loop(
                         app.report_worker_status(label, now);
                     }
                 }
+                ClientResult::Scroll(update) => app.apply_scroll_update(update, now),
                 ClientResult::Split {
                     id,
                     focus_generation,
@@ -630,6 +650,13 @@ fn event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_diagnostic_is_bounded_plain_text() {
+        let mut output = Vec::new();
+        assert!(report("terminal output made no progress", &mut output));
+        assert_eq!(output, b"error: terminal output made no progress\r\n");
+    }
 
     #[test]
     fn exit_restores_the_terminal_before_any_network_detach_work() {

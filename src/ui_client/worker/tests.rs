@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui_client::net::ScrollResult;
 use crossterm_input::Decoder;
 use panelink::split_menu::{Availability, DisabledReason};
 use std::io::{Read, Write};
@@ -32,6 +33,11 @@ impl Backend for SlowBackend {
                 let _ = self.release.recv();
                 ClientResult::Paste(Ok(()))
             }
+            Command::Scroll { target, epoch, .. } => ClientResult::Scroll(ScrollUpdate {
+                target,
+                epoch,
+                result: ScrollResult::Failed("test scroll"),
+            }),
             Command::Poll(_) => {
                 let _ = self.entered.send(GateCommand::Poll);
                 let _ = self.release.recv();
@@ -329,6 +335,11 @@ impl Backend for SocketBackend {
                 ClientResult::Keys(Ok(()))
             }
             Command::Paste { .. } => ClientResult::Paste(Ok(())),
+            Command::Scroll { target, epoch, .. } => ClientResult::Scroll(ScrollUpdate {
+                target,
+                epoch,
+                result: ScrollResult::Failed("test scroll"),
+            }),
             Command::Split {
                 id,
                 focus_generation,

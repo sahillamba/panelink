@@ -12,9 +12,12 @@ use std::time::{Duration, Instant};
 use panelink::close_protocol::CloseResult;
 use panelink::control_protocol::{TargetRef, MAX_INPUT_TEXT_BYTES};
 use panelink::terminal::Key;
-use panelink::ui_protocol::{LAYOUT_REPLY_BYTES, MAX_KEYS, MAX_SCREEN_REPLY_BYTES};
+use panelink::ui_protocol::{
+    HISTORY_QUERY_BYTES, LAYOUT_REPLY_BYTES, MAX_HISTORY_REPLY_BYTES, MAX_KEYS,
+    MAX_SCREEN_REPLY_BYTES, MOUSE_WHEEL_INPUT_BYTES,
+};
 
-use super::net::{Net, NetUpdate, NetView, DETACH_BUDGET};
+use super::net::{Net, NetUpdate, NetView, ScrollUpdate, DETACH_BUDGET};
 use super::state::{ClosePlan, Effects, SplitPlan};
 
 const COMMAND_CAPACITY: usize = 32;
@@ -45,6 +48,14 @@ enum Command {
         target: TargetRef,
         text: String,
     },
+    Scroll {
+        target: TargetRef,
+        epoch: u64,
+        offset_rows: u16,
+        column: u16,
+        row: u16,
+        up: bool,
+    },
     Split {
         id: u64,
         focus_generation: u64,
@@ -63,6 +74,7 @@ impl Command {
         match self {
             Self::Keys { keys, .. } => keys.capacity() * std::mem::size_of::<Key>(),
             Self::Paste { text, .. } => text.capacity(),
+            Self::Scroll { .. } => HISTORY_QUERY_BYTES + MOUSE_WHEEL_INPUT_BYTES,
             Self::Split { .. } => std::mem::size_of::<SplitPlan>(),
             Self::Close { .. } => std::mem::size_of::<ClosePlan>(),
             Self::Poll(_) | Self::Detach => 0,
@@ -78,6 +90,7 @@ struct Envelope {
 pub(crate) enum ClientResult {
     Keys(Result<(), &'static str>),
     Paste(Result<(), &'static str>),
+    Scroll(ScrollUpdate),
     Split {
         id: u64,
         focus_generation: u64,
@@ -104,6 +117,7 @@ pub(crate) struct WorkerHandle {
     budget: Arc<Mutex<Budget>>,
     thread: Option<JoinHandle<()>>,
     poll_pending: bool,
+    scroll_pending: bool,
     server_directory: PathBuf,
 }
 
@@ -133,6 +147,7 @@ impl WorkerHandle {
             budget,
             thread: Some(thread),
             poll_pending: false,
+            scroll_pending: false,
             server_directory: PathBuf::new(),
         }
     }
@@ -216,6 +231,9 @@ impl WorkerHandle {
                 if matches!(&result.result, ClientResult::Poll(_)) {
                     self.poll_pending = false;
                 }
+                if matches!(&result.result, ClientResult::Scroll(_)) {
+                    self.scroll_pending = false;
+                }
                 Some(result)
             }
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
@@ -296,6 +314,34 @@ impl Effects for WorkerHandle {
         })
     }
 
+    fn scroll(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        offset_rows: u16,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<(), &'static str> {
+        if self.scroll_pending {
+            return Err("client busy: wheel request pending");
+        }
+        self.submit_with(
+            HISTORY_QUERY_BYTES + MOUSE_WHEEL_INPUT_BYTES,
+            MAX_HISTORY_REPLY_BYTES + INPUT_RESULT_RESERVATION,
+            || Command::Scroll {
+                target,
+                epoch,
+                offset_rows,
+                column,
+                row,
+                up,
+            },
+        )?;
+        self.scroll_pending = true;
+        Ok(())
+    }
+
     fn split(
         &mut self,
         plan: SplitPlan,
@@ -340,6 +386,14 @@ impl Backend for Net {
         match command {
             Command::Keys { target, keys } => ClientResult::Keys(self.send_keys(target, &keys)),
             Command::Paste { target, text } => ClientResult::Paste(self.send_paste(target, &text)),
+            Command::Scroll {
+                target,
+                epoch,
+                offset_rows,
+                column,
+                row,
+                up,
+            } => ClientResult::Scroll(self.scroll(target, epoch, offset_rows, column, row, up)),
             Command::Split {
                 id,
                 focus_generation,

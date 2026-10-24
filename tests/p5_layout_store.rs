@@ -1,7 +1,7 @@
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
 use panelink::layout_store::{LayoutSlot, LayoutStore, SaveOutcome};
-use panelink::pane_layout::{LayoutSnapshot, PaneGeometry, Rect, MIN_PANE_COLUMNS, MIN_PANE_ROWS};
+use panelink::pane_layout::{LayoutSnapshot, PaneGeometry, Rect};
 use panelink::saved_layout::{encode, LayoutMetadata, SavedLayout, SAVED_LAYOUT_BYTES};
 use std::fs::{self};
 use std::io::{self};
@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
+
+const SAVED_MIN_ROWS: u16 = 5;
+const SAVED_MIN_COLUMNS: u16 = 20;
 
 struct Fixture(PathBuf);
 
@@ -93,8 +96,8 @@ fn snap_one(rows: u16, columns: u16, revision: u64, gen: u64, ws: u64) -> Layout
 
 fn saved_one(generation: u64, workspace: u64, sequence: u64, revision: u64) -> SavedLayout {
     let snapshot = snap_one(
-        MIN_PANE_ROWS + 1,
-        MIN_PANE_COLUMNS + 5,
+        SAVED_MIN_ROWS + 1,
+        SAVED_MIN_COLUMNS + 5,
         revision,
         generation,
         workspace,
@@ -104,20 +107,20 @@ fn saved_one(generation: u64, workspace: u64, sequence: u64, revision: u64) -> S
 }
 
 fn saved_two(generation: u64, workspace: u64, sequence: u64, revision: u64) -> SavedLayout {
-    let usable_cols = MIN_PANE_COLUMNS + 21 - 1;
+    let usable_cols = SAVED_MIN_COLUMNS * 2;
     let first_cols = usable_cols / 2;
     let second_cols = usable_cols - first_cols;
     let snapshot = LayoutSnapshot {
         revision,
-        rows: MIN_PANE_ROWS + 1,
-        columns: MIN_PANE_COLUMNS + 21,
+        rows: SAVED_MIN_ROWS + 1,
+        columns: SAVED_MIN_COLUMNS * 2 + 1,
         panes: [
             Some(PaneGeometry {
                 target: target(generation, workspace),
                 rect: Rect {
                     x: 0,
                     y: 0,
-                    rows: MIN_PANE_ROWS + 1,
+                    rows: SAVED_MIN_ROWS + 1,
                     columns: first_cols,
                 },
             }),
@@ -126,7 +129,7 @@ fn saved_two(generation: u64, workspace: u64, sequence: u64, revision: u64) -> S
                 rect: Rect {
                     x: first_cols + 1,
                     y: 0,
-                    rows: MIN_PANE_ROWS + 1,
+                    rows: SAVED_MIN_ROWS + 1,
                     columns: second_cols,
                 },
             }),
@@ -136,14 +139,14 @@ fn saved_two(generation: u64, workspace: u64, sequence: u64, revision: u64) -> S
         divider: Some(Rect {
             x: first_cols,
             y: 0,
-            rows: MIN_PANE_ROWS + 1,
+            rows: SAVED_MIN_ROWS + 1,
             columns: 1,
         }),
         dividers: [
             Some(Rect {
                 x: first_cols,
                 y: 0,
-                rows: MIN_PANE_ROWS + 1,
+                rows: SAVED_MIN_ROWS + 1,
                 columns: 1,
             }),
             None,
@@ -234,7 +237,7 @@ fn equal_seq_different_bytes_refused() {
     let first = saved_one(7, 1, 1, 1);
     store.save(7, 1, &first).unwrap();
     // Same metadata key but different geometry -> different valid encoded bytes
-    let snap = snap_one(MIN_PANE_ROWS + 2, MIN_PANE_COLUMNS + 5, 1, 7, 1);
+    let snap = snap_one(SAVED_MIN_ROWS + 2, SAVED_MIN_COLUMNS + 5, 1, 7, 1);
     let second = SavedLayout::from_snapshot(meta(7, 1, 1, 1), &snap).unwrap();
     assert!(store.save(7, 1, &second).is_err());
 }

@@ -1824,6 +1824,10 @@ mod tests {
     use crate::session_protocol::{encode_session_request, LeaseRef};
     use std::cell::Cell;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     const GENERATION: u64 = 7;
     const WORKSPACE: u64 = 11;
@@ -1915,6 +1919,59 @@ mod tests {
 
         fn screen_revision(&self) -> Option<u64> {
             self.screen_revision
+        }
+    }
+
+    struct BlockingValidationSink {
+        validation_calls: Arc<AtomicUsize>,
+        input_calls: Arc<AtomicUsize>,
+        reached_validation: SyncSender<(u64, String)>,
+        release_validation: Mutex<Receiver<()>>,
+    }
+
+    impl EffectSink for BlockingValidationSink {
+        fn validate(&self, command: Command<'_>) -> Result<(), RejectionCode> {
+            let validation_index = self.validation_calls.fetch_add(1, Ordering::SeqCst);
+            if validation_index == 0 {
+                let Command::Submit {
+                    owner_revision,
+                    text,
+                } = command
+                else {
+                    return Err(RejectionCode::Unsupported);
+                };
+                self.reached_validation
+                    .send((owner_revision, text.to_owned()))
+                    .map_err(|_| RejectionCode::Capacity)?;
+                self.release_validation
+                    .lock()
+                    .expect("validation release lock poisoned")
+                    .recv()
+                    .map_err(|_| RejectionCode::Capacity)?;
+            }
+            Ok(())
+        }
+
+        fn read(
+            &mut self,
+            _source: ReadSource,
+            _max_text_bytes: usize,
+            _max_lines: u16,
+        ) -> Result<ReadResult, Outcome> {
+            Err(Outcome::Failed)
+        }
+
+        fn input(&mut self, _command: Command<'_>) -> Outcome {
+            self.input_calls.fetch_add(1, Ordering::SeqCst);
+            Outcome::Applied
+        }
+
+        fn poll(&mut self) -> Result<(), Outcome> {
+            Ok(())
+        }
+
+        fn child_exited(&self) -> bool {
+            false
         }
     }
 
@@ -2185,6 +2242,89 @@ mod tests {
             Err(ServerError::Protocol(ProtocolError::OperationConflict))
         ));
         assert_eq!(owner.effects().inputs, 1);
+    }
+
+    #[test]
+    fn submit_validation_barrier_precedes_admission_and_duplicate_does_not_replay() {
+        let (reached_validation_tx, reached_validation_rx) = sync_channel(1);
+        let (release_validation_tx, release_validation_rx) = sync_channel(1);
+        let validation_calls = Arc::new(AtomicUsize::new(0));
+        let input_calls = Arc::new(AtomicUsize::new(0));
+        let sink = BlockingValidationSink {
+            validation_calls: Arc::clone(&validation_calls),
+            input_calls: Arc::clone(&input_calls),
+            reached_validation: reached_validation_tx,
+            release_validation: Mutex::new(release_validation_rx),
+        };
+        let mut owner = StateOwner::new(GENERATION, target(), sink, true).unwrap();
+        let connection = owner
+            .connect(&hello(CAPABILITY_READ, CAPABILITY_INPUT), 1)
+            .unwrap()
+            .0;
+        let claim_key = operation_key(connection.lease(), 1);
+        let claim_payload = session_payload(SessionRequest::Claim {
+            key: claim_key,
+            target: target(),
+            expected_owner_revision: owner.owner_snapshot().revision,
+            ttl_seconds: 30,
+        });
+        let SessionReply::Payload(claim_reply) = owner
+            .handle_session(&connection, &claim_payload, 2)
+            .unwrap()
+        else {
+            panic!("claim must return an operation result");
+        };
+        assert_eq!(
+            response(&claim_reply).body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        let owner_revision = owner.owner_snapshot().revision;
+        let key = operation_key(connection.lease(), 2);
+        let text = "barrier-before-admission";
+        let payload = control_payload(
+            key,
+            target(),
+            Command::Submit {
+                owner_revision,
+                text,
+            },
+        );
+
+        let worker = std::thread::spawn(move || {
+            let result = owner.handle_control(&connection, &payload, 3);
+            (owner, result, payload)
+        });
+
+        let observed = reached_validation_rx.recv_timeout(Duration::from_secs(2));
+        let no_input_at_barrier = input_calls.load(Ordering::SeqCst) == 0;
+        // Always release the test sink before asserting, so a failed barrier
+        // observation cannot leave the worker blocked.
+        let _ = release_validation_tx.send(());
+        let (mut owner, first_result, payload) = worker.join().unwrap();
+        let (observed_revision, observed_text) =
+            observed.expect("Submit must reach the blocking validation boundary");
+        assert_eq!(observed_revision, owner_revision);
+        assert_eq!(observed_text, text);
+        assert!(
+            no_input_at_barrier,
+            "input ran before validation was released"
+        );
+        assert_eq!(validation_calls.load(Ordering::SeqCst), 1);
+
+        let first = first_result.unwrap();
+        assert_eq!(
+            response(&first).body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        assert_eq!(input_calls.load(Ordering::SeqCst), 1);
+
+        let duplicate = owner.handle_control(&connection, &payload, 3).unwrap();
+        assert_eq!(
+            response(&duplicate).body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        assert_eq!(input_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(validation_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

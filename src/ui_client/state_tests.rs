@@ -1,5 +1,6 @@
 use super::*;
 use crossterm_input::Decoder;
+use crossterm_input::{Event, KeyModifiers, MouseEvent, MouseEventKind};
 use panelink::protocol::OperationKey;
 use panelink::screen_checkpoint::{decode, encode, CheckpointMetadata};
 use panelink::split_menu::DisabledReason;
@@ -72,6 +73,7 @@ fn two_panes() -> LayoutReply {
 struct Fake {
     keys: Vec<(TargetRef, Vec<Key>)>,
     pastes: Vec<TargetRef>,
+    scrolls: Vec<(TargetRef, u64, u16, u16, u16, bool)>,
     splits: Vec<SplitPlan>,
     split_reply: Option<Result<TargetRef, &'static str>>,
     split_async: bool,
@@ -93,6 +95,19 @@ impl Effects for Fake {
     }
     fn send_paste(&mut self, target: TargetRef, _text: &str) -> Result<(), &'static str> {
         self.pastes.push(target);
+        Ok(())
+    }
+    fn scroll(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        offset_rows: u16,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<(), &'static str> {
+        self.scrolls
+            .push((target, epoch, offset_rows, column, row, up));
         Ok(())
     }
     fn split(
@@ -288,6 +303,10 @@ fn split_completion_waits_for_newer_validated_layout_before_focusing_target() {
     layout.revision = 6;
     app.set_layout(layout);
     assert_eq!(app.focus(), Some(target(2)));
+    assert_eq!(
+        app.status.map(|(message, _)| message),
+        Some("split applied; new pane focused")
+    );
 }
 
 #[test]
@@ -423,8 +442,8 @@ fn split_intent_uses_captured_target_and_server_revision_then_focuses_new_pane()
             target: target(1),
             expected_layout_revision: 5,
             direction: SplitDirection::Right,
-            rows: 24,
-            columns: 40,
+            rows: 22,
+            columns: 38,
         }]
     );
     assert_eq!(app.focus(), Some(target(1)));
@@ -453,7 +472,7 @@ fn keyboard_fallback_ctrl_b_s_opens_for_focused_and_esc_closes_without_bytes() {
     feed(&mut app, &mut fake, b"\x02s\x1b[B\x1b[B\r");
     assert_eq!(fake.splits.len(), 1);
     assert_eq!(fake.splits[0].direction, SplitDirection::Up);
-    assert_eq!(fake.splits[0].rows, 11);
+    assert_eq!(fake.splits[0].rows, 9);
 }
 
 #[test]
@@ -483,10 +502,196 @@ fn ctrl_x_quits_after_flushing_and_paste_goes_to_focus() {
     assert_eq!(fake.keys, vec![(target(1), vec![Key::Char('q')])]);
 }
 
+#[test]
+fn wheel_routes_to_outer_pane_with_content_local_coordinates_and_typing_invalidates_reply() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(1));
+    let event = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    });
+    app.handle_event(
+        &event,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    assert_eq!(fake.scrolls.len(), 1);
+    let (scroll_target, epoch, offset, column, row, up) = fake.scrolls[0];
+    assert_eq!(scroll_target, target(1));
+    assert_eq!((offset, column, row, up), (3, 0, 0, true));
+
+    // A reply from the pending query is rejected after typing returns the
+    // pane to its live viewport, even if the network response arrives later.
+    let checkpoint = blank_checkpoint(24, 81, 1);
+    feed(&mut app, &mut fake, b"x");
+    app.apply_scroll_update(
+        ScrollUpdate {
+            target: target(1),
+            epoch,
+            result: ScrollResult::History {
+                offset_rows: 3,
+                checkpoint,
+            },
+        },
+        Instant::now(),
+    );
+    let slot = app
+        .screens
+        .iter()
+        .find(|slot| slot.target == Some(target(1)))
+        .unwrap();
+    assert_eq!(slot.history_offset, 0);
+}
+
+#[test]
+fn wheel_down_at_live_offset_still_queries_mode_and_pending_bursts_do_not_invalidate() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(1));
+    let event = |kind| {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let availability = Availability::Disabled(DisabledReason::NoPreviousLayoutSaved);
+    app.handle_event(
+        &event(MouseEventKind::ScrollDown),
+        Instant::now(),
+        availability,
+        &mut fake,
+    );
+    assert_eq!(fake.scrolls.len(), 1);
+    let (_, epoch, offset, _, _, up) = fake.scrolls[0];
+    assert_eq!((offset, up), (0, false));
+
+    // The first bounded history request remains current while a second tick
+    // arrives before its large snapshot result is applied.
+    app.handle_event(
+        &event(MouseEventKind::ScrollUp),
+        Instant::now(),
+        availability,
+        &mut fake,
+    );
+    assert_eq!(fake.scrolls.len(), 1);
+    assert_eq!(
+        app.screens
+            .iter()
+            .find(|slot| slot.target == Some(target(1)))
+            .unwrap()
+            .view_epoch,
+        epoch
+    );
+}
+
+#[test]
+fn closing_pane_discards_late_history_reply() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(two_panes());
+    let event = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 2,
+        row: 2,
+        modifiers: KeyModifiers::NONE,
+    });
+    app.handle_event(
+        &event,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    let (_, epoch, ..) = fake.scrolls[0];
+    app.set_layout(survivor_only());
+    app.apply_scroll_update(
+        ScrollUpdate {
+            target: target(1),
+            epoch,
+            result: ScrollResult::History {
+                offset_rows: 3,
+                checkpoint: blank_checkpoint(24, 40, 1),
+            },
+        },
+        Instant::now(),
+    );
+    assert!(app
+        .screens
+        .iter()
+        .all(|slot| slot.target != Some(target(1))));
+}
+
+#[test]
+fn alternate_live_screen_and_same_target_resize_invalidate_history_replies() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(1));
+    let event = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 2,
+        row: 2,
+        modifiers: KeyModifiers::NONE,
+    });
+    app.handle_event(
+        &event,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    let (_, pending_epoch, ..) = fake.scrolls[0];
+
+    let mut resized = one_pane(2);
+    resized.columns = 80;
+    resized.panes[0].as_mut().unwrap().rect.columns = 80;
+    app.set_layout(resized);
+    app.apply_scroll_update(
+        ScrollUpdate {
+            target: target(1),
+            epoch: pending_epoch,
+            result: ScrollResult::History {
+                offset_rows: 3,
+                checkpoint: blank_checkpoint(24, 81, 1),
+            },
+        },
+        Instant::now(),
+    );
+    let slot = app
+        .screens
+        .iter_mut()
+        .find(|slot| slot.target == Some(target(1)))
+        .unwrap();
+    assert_eq!(slot.history_offset, 0);
+    assert!(slot.view_epoch != pending_epoch);
+
+    // A live alternate-screen checkpoint retires any normal-screen history
+    // view even when the target and geometry have not changed.
+    slot.history_offset = 3;
+    let epoch = slot.view_epoch;
+    let mut alternate = blank_checkpoint(24, 80, 1);
+    alternate[80] = 1;
+    app.load_screen(target(1), 2, &decode(&alternate).unwrap())
+        .unwrap();
+    let slot = app
+        .screens
+        .iter()
+        .find(|slot| slot.target == Some(target(1)))
+        .unwrap();
+    assert_eq!(slot.history_offset, 0);
+    assert!(slot.view_epoch > epoch);
+}
+
 /// A blank checkpoint record (cell-level conversion is covered by
 /// `terminal::checkpoint_load` tests).
 fn blank_checkpoint(rows: u16, columns: u16, pane: u64) -> Vec<u8> {
-    let snapshot = ScreenSnapshot::try_new(TerminalSize::new(rows, columns).unwrap()).unwrap();
+    let snapshot = ScreenSnapshot::try_new(
+        TerminalSize::new(rows.saturating_sub(2), columns.saturating_sub(2)).unwrap(),
+    )
+    .unwrap();
     encode(
         &snapshot,
         &CheckpointMetadata::new(target(pane), 0, 1, 1).unwrap(),
@@ -503,6 +708,16 @@ fn render_text(app: &App) -> String {
     let mut parser = vt100::Parser::new(rows, columns, 0);
     parser.process(&bytes);
     parser.screen().contents()
+}
+
+#[test]
+fn unpadded_old_server_snapshot_has_an_actionable_upgrade_notice() {
+    let mut app = App::new(24, 81).unwrap();
+    app.set_layout(one_pane(1));
+    let bytes = blank_checkpoint(26, 83, 1);
+    app.load_screen(target(1), 1, &decode(&bytes).unwrap())
+        .unwrap();
+    assert!(render_text(&app).contains("restart server for pane padding"));
 }
 
 #[test]
@@ -610,9 +825,19 @@ fn navigation_mode_direct_split_keys() {
 
 #[test]
 fn navigation_mode_split_at_four_pane_capacity_reports_without_effect() {
-    let mut app = App::new(24, 81).unwrap();
+    let mut app = App::new(32, 81).unwrap();
     let mut fake = Fake::default();
-    let layout = two_panes();
+    let mut layout = two_panes();
+    layout.rows = 32;
+    for pane in layout.panes.iter_mut().flatten() {
+        pane.rect.rows = 32;
+    }
+    if let Some(divider) = &mut layout.divider {
+        divider.rows = 32;
+    }
+    for divider in layout.dividers.iter_mut().flatten() {
+        divider.rows = 32;
+    }
     let mut local = super::local_layout(&layout).unwrap();
     for (target, revision, direction, fresh) in [
         (
@@ -1095,8 +1320,8 @@ fn split_works_again_after_a_close_shrinks_the_layout() {
             target: target(2),
             expected_layout_revision: 3,
             direction: SplitDirection::Down,
-            rows: 12,
-            columns: 81,
+            rows: 10,
+            columns: 79,
         }]
     );
     assert_eq!(app.focus(), Some(target(2)));

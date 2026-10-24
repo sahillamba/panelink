@@ -558,7 +558,9 @@ fn bare_panelink_starts_splits_detaches_reattaches_and_stops() {
     let mut client = open_client(&fixture);
     assert!(fixture.socket().exists(), "server socket created");
     client.type_slowly(b"echo ACK$((40+1))\r");
-    client.wait_screen("ACK41", |screen| screen.contains("\nACK41"));
+    client.wait_screen("ACK41", |screen| {
+        screen.lines().any(|line| line.trim() == "ACK41")
+    });
 
     // Right-click opens the split menu; `r` splits right.
     client.write(b"\x1b[<2;10;5M\x1b[<2;10;5m");

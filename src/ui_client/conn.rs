@@ -29,7 +29,9 @@ use panelink::session_protocol::{
 };
 use panelink::terminal::Key;
 use panelink::transport::{AuthenticatedStream, OwnedFrame};
-use panelink::ui_protocol::{encode_attach_target, encode_key_input, KeyInput};
+use panelink::ui_protocol::{
+    encode_attach_target, encode_key_input, encode_mouse_wheel_input, KeyInput, MouseWheelInput,
+};
 use panelink::watch_protocol::WatchStatus;
 
 /// Deadline for exchanges made before the host terminal is taken over.
@@ -125,6 +127,16 @@ pub(crate) enum Reply {
 pub(crate) enum InputResult {
     Applied,
     NotOwner,
+    Failed(&'static str),
+}
+
+/// Result of one non-replayable mouse-wheel input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MouseInputResult {
+    Applied,
+    NotOwner,
+    /// The server confirmed before admission that the child disabled mouse input.
+    Unsupported,
     Failed(&'static str),
 }
 
@@ -596,6 +608,47 @@ impl PaneConn {
         Ok(self.input_result(outcome))
     }
 
+    /// Deliver one typed wheel event. This event is never resent.
+    pub(crate) fn send_mouse_wheel(
+        &mut self,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<MouseInputResult, &'static str> {
+        let Some(revision) = self.owner_revision else {
+            return Ok(MouseInputResult::NotOwner);
+        };
+        let target = self.target;
+        let (key, reply) = self.keyed(|key| {
+            encode_mouse_wheel_input(&MouseWheelInput {
+                key,
+                target,
+                expected_owner_revision: revision,
+                column,
+                row,
+                up,
+            })
+            .map(|bytes| bytes.to_vec())
+            .map_err(|_| "request_invalid")
+        })?;
+        let outcome = self.settle_response(key, reply)?;
+        Ok(match outcome {
+            ResponseOutcome::Status(OperationStatus::Completed(Outcome::Applied)) => {
+                MouseInputResult::Applied
+            }
+            ResponseOutcome::Rejected(RejectionCode::Unsupported) => MouseInputResult::Unsupported,
+            ResponseOutcome::Rejected(
+                RejectionCode::InputBusy | RejectionCode::StaleOwner | RejectionCode::ExpiredOwner,
+            ) => {
+                self.owner_revision = None;
+                self.next_claim = Instant::now();
+                MouseInputResult::NotOwner
+            }
+            ResponseOutcome::ServerError(label) => MouseInputResult::Failed(label),
+            _ => MouseInputResult::Failed("mouse input not delivered"),
+        })
+    }
+
     /// Deliver one paste through control PASTE; never resent.
     pub(crate) fn send_paste(&mut self, text: &str) -> Result<InputResult, &'static str> {
         let Some(owner_revision) = self.owner_revision else {
@@ -994,6 +1047,9 @@ pub(crate) fn server_label(payload: &[u8]) -> &'static str {
         b"target_stale" => "server: target_stale",
         b"lease_expired" => "server: lease_expired",
         b"result_expired" => "server: result_expired",
+        b"invalid_request" | b"unsupported_request_schema" | b"invalid_ui_request" => {
+            "scrolling requires a newer Panelink server; restart it"
+        }
         b"sequence_not_increasing" => "server: sequence_not_increasing",
         _ => "server error",
     }
@@ -1025,6 +1081,20 @@ fn nonce() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_server_reject_label_explains_scroll_compatibility() {
+        for label in [
+            b"invalid_request".as_slice(),
+            b"unsupported_request_schema".as_slice(),
+            b"invalid_ui_request".as_slice(),
+        ] {
+            assert_eq!(
+                server_label(label),
+                "scrolling requires a newer Panelink server; restart it"
+            );
+        }
+    }
 
     #[test]
     fn lease_renewal_is_scheduled_before_expiry_and_retried_on_failure() {

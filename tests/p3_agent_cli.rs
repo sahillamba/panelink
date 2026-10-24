@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::fs::OpenOptions;
+use std::os::unix::fs::symlink;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use panelink::client_context::ContextFile;
 use panelink::handshake_protocol::{Hello, CAPABILITY_INPUT, CAPABILITY_READ};
 use panelink::protocol::OperationKey;
 use panelink::protocol_wire::{Frame, MessageKind};
@@ -150,6 +152,14 @@ impl Fixture {
         self.command_output(args)
     }
 
+    fn agent_with_context_dir(&self, context_dir: &Path, args: &[&str]) -> Output {
+        let mut command = self.command();
+        command
+            .env("PANELINK_AGENT_CONTEXT_DIR", context_dir)
+            .args(args);
+        run_bounded(command, "agent CLI with explicit context directory")
+    }
+
     fn wait_for_server_stop(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -203,6 +213,182 @@ fn field<'a>(json: &'a str, name: &str) -> Option<&'a str> {
 
 fn deadline_after(duration: Duration) -> Instant {
     Instant::now() + duration
+}
+
+fn run_bounded(mut command: Command, description: &str) -> Output {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn bounded agent CLI command");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if child
+            .try_wait()
+            .expect("poll bounded agent CLI command")
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .expect("collect bounded agent CLI output");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .expect("collect timed-out agent CLI output");
+            panic!(
+                "{description} exceeded its 10-second deadline: stdout={:?} stderr={:?}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn context_directory_failure_can_be_overridden_for_read_only_pane_discovery() {
+    let mut fixture = Fixture::new();
+    let startup = fixture.start();
+    let first_target = field(&startup, "target")
+        .unwrap_or_else(|| panic!("startup lacked target: {startup}"))
+        .to_owned();
+    Fixture::assert_ok(
+        &fixture.control("split.ctx", &["init", &first_target]),
+        "initialize split context",
+    );
+    let split = Fixture::assert_ok(
+        &fixture.control("split.ctx", &["split", &first_target, "1", "right"]),
+        "create second pane",
+    );
+    assert_eq!(field(&split, "outcome"), Some("applied"), "{split}");
+
+    // A non-directory at the default location reproduces a context-root
+    // failure without relying on host permission bits or sandbox behavior.
+    fs::write(fixture.state.join("agent-contexts"), "blocked").unwrap();
+    let default_failure = fixture.agent(&["pane", "list", "--json"]);
+    assert!(!default_failure.status.success());
+    let default_failure = String::from_utf8_lossy(&default_failure.stdout);
+    assert_eq!(
+        field(&default_failure, "error"),
+        Some("context_directory_unsafe"),
+        "{default_failure}"
+    );
+
+    // The explicit root must itself be creatable and private. A missing
+    // parent is reported without printing its path or silently changing roots.
+    let unavailable_root = fixture.root.join("missing-parent").join("agent-contexts");
+    let unavailable =
+        fixture.agent_with_context_dir(&unavailable_root, &["pane", "list", "--json"]);
+    assert!(!unavailable.status.success());
+    let unavailable = String::from_utf8_lossy(&unavailable.stdout);
+    assert_eq!(
+        field(&unavailable, "error"),
+        Some("context_directory_unavailable"),
+        "{unavailable}"
+    );
+    assert!(unavailable.contains("PANELINK_AGENT_CONTEXT_DIR"));
+    assert!(!unavailable.contains(unavailable_root.to_str().unwrap()));
+
+    let relative_root = Path::new("relative-agent-contexts");
+    let relative = fixture.agent_with_context_dir(relative_root, &["pane", "list", "--json"]);
+    assert!(!relative.status.success());
+    assert_eq!(
+        field(&String::from_utf8_lossy(&relative.stdout), "error"),
+        Some("context_directory_unsafe")
+    );
+
+    let target_root = fixture.root.join("private-context-target");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&target_root)
+        .unwrap();
+    let symlink_root = fixture.root.join("context-symlink");
+    symlink(&target_root, &symlink_root).unwrap();
+    let linked = fixture.agent_with_context_dir(&symlink_root, &["pane", "list", "--json"]);
+    assert!(!linked.status.success());
+    assert_eq!(
+        field(&String::from_utf8_lossy(&linked.stdout), "error"),
+        Some("context_directory_unsafe")
+    );
+
+    let public_root = fixture.root.join("nonprivate-contexts");
+    fs::DirBuilder::new()
+        .mode(0o755)
+        .create(&public_root)
+        .unwrap();
+    let public = fixture.agent_with_context_dir(&public_root, &["pane", "list", "--json"]);
+    assert!(!public.status.success());
+    assert_eq!(
+        field(&String::from_utf8_lossy(&public.stdout), "error"),
+        Some("context_directory_unsafe")
+    );
+
+    let context_root = fixture.root.join("agent-contexts-override");
+    let listing = Fixture::assert_ok(
+        &fixture.agent_with_context_dir(&context_root, &["pane", "list", "--json"]),
+        "pane list with explicit context directory",
+    );
+    assert_eq!(field(&listing, "action"), Some("pane_list"), "{listing}");
+    assert!(listing.contains("\"index\":1"), "{listing}");
+    assert!(listing.contains("\"index\":2"), "{listing}");
+
+    let read = Fixture::assert_ok(
+        &fixture.agent_with_context_dir(
+            &context_root,
+            &["pane", "read", "2", "--lines", "24", "--json"],
+        ),
+        "pane read with explicit context directory",
+    );
+    assert_eq!(field(&read, "action"), Some("pane_read"), "{read}");
+    assert_eq!(field(&read, "source"), Some("screen"), "{read}");
+
+    // Seed a durable uncertain query reservation in the exact context used
+    // above. A rejected override must leave it intact; reopening the same
+    // stable root then reconciles NotAdmitted before issuing the read.
+    let target = field(&read, "target").expect("pane read target");
+    let target_name = target.replace(':', "-");
+    let context_path = context_root
+        .join("agent")
+        .join(format!("{target_name}.ctx"));
+    let mut context =
+        ContextFile::open_existing(&context_path, deadline_after(Duration::from_secs(2)))
+            .expect("open pane caller context");
+    let uncertain_key = context.reserve().expect("reserve uncertain query key");
+    drop(context);
+
+    let rejected_switch = fixture.agent_with_context_dir(
+        &public_root,
+        &["pane", "read", "2", "--lines", "24", "--json"],
+    );
+    assert!(!rejected_switch.status.success());
+    assert_eq!(
+        field(&String::from_utf8_lossy(&rejected_switch.stdout), "error"),
+        Some("context_directory_unsafe")
+    );
+    let context = ContextFile::open_existing(&context_path, deadline_after(Duration::from_secs(2)))
+        .expect("reopen context after rejected override");
+    assert_eq!(context.context().uncertain(), Some(uncertain_key));
+    drop(context);
+
+    let reconciled = fixture.agent_with_context_dir(
+        &context_root,
+        &["pane", "read", "2", "--lines", "24", "--json"],
+    );
+    assert!(!reconciled.status.success());
+    assert_eq!(
+        field(&String::from_utf8_lossy(&reconciled.stdout), "error"),
+        Some("previous_operation_settled")
+    );
+    let context = ContextFile::open_existing(&context_path, deadline_after(Duration::from_secs(2)))
+        .expect("reopen reconciled caller context");
+    assert_eq!(context.context().uncertain(), None);
+    drop(context);
+    Fixture::assert_ok(
+        &fixture.agent_with_context_dir(
+            &context_root,
+            &["pane", "read", "2", "--lines", "24", "--json"],
+        ),
+        "separate pane read after exact context reconciliation",
+    );
 }
 
 struct ObserverGuard(Option<Child>);

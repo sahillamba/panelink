@@ -15,14 +15,41 @@ pub mod launch;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod launch_worker;
 pub mod managed_launch_protocol;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod managed_provider_store;
 pub mod pane_layout;
 pub mod pane_metadata_protocol;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod private_record_store;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod process_metadata;
 pub mod protocol;
 pub mod protocol_wire;
 pub mod provider_binding;
 pub mod provider_binding_codec;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod provider_binding_store;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod provider_binding_worker;
+pub mod provider_bridge;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod provider_bridge_launch;
+pub mod provider_bridge_protocol;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod provider_bridge_runtime;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod provider_bridge_transport;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod provider_bridge_v2;
+pub mod provider_recovery;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod provider_recovery_control;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod provider_recovery_endpoint;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod provider_recovery_prepared;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod provider_recovery_runtime;
 pub mod recovery_chooser;
 pub mod recovery_view;
 pub mod response_protocol;

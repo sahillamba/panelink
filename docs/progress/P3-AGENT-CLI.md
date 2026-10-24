@@ -59,6 +59,25 @@ directories, 0600 fixed-format context file), where name is selected by
 `--as`, `PANELINK_AGENT`, or `agent`. The context file stores operation
 identity/sequence metadata only; input contents are never persisted.
 
+For an agent sandbox that cannot write the default application-support
+location, set `PANELINK_AGENT_CONTEXT_DIR` to one stable absolute directory in
+its writable project. For example, from the project root:
+
+```sh
+export PANELINK_AGENT_CONTEXT_DIR="$PWD/.panelink-agent-contexts"
+panelink pane list --json
+panelink pane read 2 --lines 80 --json
+```
+
+Panelink creates private0700 directories and rejects relative paths, symlinks,
+foreign owners and non-private existing roots. Keep this exact root for future
+invocations so uncertain operations remain visible; there is no automatic
+fallback to a fresh context root. This setting grants no additional access:
+the agent execution tool must also permit connecting to the workspace's local
+Unix socket. `control_unavailable` after context setup may indicate that
+separate socket permission restriction. No terminal output is stored in these
+context files.
+
 An agent must claim before input, unless `pane send --claim` is used. Claim,
 release, input and interrupt use the existing compare-and-set owner revision
 and operation key protocol. If a UI or another owner wins that race, the CLI

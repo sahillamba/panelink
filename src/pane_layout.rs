@@ -8,12 +8,16 @@ use crate::control_protocol::TargetRef;
 use std::error::Error;
 use std::fmt;
 
-/// Smallest supported terminal viewport height for one pane.
-pub const MIN_PANE_ROWS: u16 = 5;
+/// Smallest supported terminal content height for one pane.
+pub const MIN_CONTENT_ROWS: u16 = 5;
+/// Smallest supported terminal content width for one pane.
+pub const MIN_CONTENT_COLUMNS: u16 = 20;
+/// Smallest outer pane height, including one blank row above and below content.
+pub const MIN_PANE_ROWS: u16 = MIN_CONTENT_ROWS + 2;
 /// Largest supported terminal viewport height for one pane.
 pub const MAX_PANE_ROWS: u16 = 80;
-/// Smallest supported terminal viewport width for one pane.
-pub const MIN_PANE_COLUMNS: u16 = 20;
+/// Smallest outer pane width, including one blank column on each side.
+pub const MIN_PANE_COLUMNS: u16 = MIN_CONTENT_COLUMNS + 2;
 /// Largest supported terminal viewport width for one pane.
 pub const MAX_PANE_COLUMNS: u16 = 240;
 /// Maximum number of pane leaves retained in one workspace layout.
@@ -57,6 +61,24 @@ impl Rect {
         };
         x >= self.x && x < right && y >= self.y && y < bottom
     }
+}
+
+/// Returns the terminal content rectangle inset one cell from every pane edge.
+///
+/// A pane must remain large enough to provide the supported 5x20 PTY viewport,
+/// and its outer coordinates must have representable exclusive bounds.
+pub fn content_rect(rect: Rect) -> Option<Rect> {
+    if rect.rows < MIN_PANE_ROWS || rect.columns < MIN_PANE_COLUMNS {
+        return None;
+    }
+    rect.x.checked_add(rect.columns)?;
+    rect.y.checked_add(rect.rows)?;
+    Some(Rect {
+        x: rect.x.checked_add(1)?,
+        y: rect.y.checked_add(1)?,
+        rows: rect.rows.checked_sub(2)?,
+        columns: rect.columns.checked_sub(2)?,
+    })
 }
 
 /// Immutable association between a complete pane target and its cell rectangle.
@@ -1034,6 +1056,47 @@ mod tests {
         })
     }
 
+    #[test]
+    fn content_rect_insets_each_edge_and_requires_the_supported_content_minimum() {
+        let outer = Rect {
+            x: 4,
+            y: 7,
+            rows: MIN_PANE_ROWS,
+            columns: MIN_PANE_COLUMNS,
+        };
+        assert_eq!(
+            content_rect(outer),
+            Some(Rect {
+                x: 5,
+                y: 8,
+                rows: MIN_CONTENT_ROWS,
+                columns: MIN_CONTENT_COLUMNS,
+            })
+        );
+        assert_eq!(content_rect(Rect { rows: 6, ..outer }), None);
+        assert_eq!(
+            content_rect(Rect {
+                columns: 21,
+                ..outer
+            }),
+            None
+        );
+        assert_eq!(
+            content_rect(Rect {
+                x: u16::MAX,
+                ..outer
+            }),
+            None
+        );
+        assert_eq!(
+            content_rect(Rect {
+                y: u16::MAX,
+                ..outer
+            }),
+            None
+        );
+    }
+
     fn assert_split(
         direction: SplitDirection,
         rows: u16,
@@ -1091,26 +1154,26 @@ mod tests {
         );
         assert_split(
             SplitDirection::Up,
-            11,
+            15,
             82,
-            geometry(new, 0, 0, 5, 82).expect("new top"),
-            geometry(old, 0, 6, 5, 82).expect("old bottom"),
+            geometry(new, 0, 0, 7, 82).expect("new top"),
+            geometry(old, 0, 8, 7, 82).expect("old bottom"),
             Rect {
                 x: 0,
-                y: 5,
+                y: 7,
                 rows: 1,
                 columns: 82,
             },
         );
         assert_split(
             SplitDirection::Down,
-            12,
+            16,
             82,
-            geometry(old, 0, 0, 5, 82).expect("old top"),
-            geometry(new, 0, 6, 6, 82).expect("new bottom"),
+            geometry(old, 0, 0, 7, 82).expect("old top"),
+            geometry(new, 0, 8, 8, 82).expect("new bottom"),
             Rect {
                 x: 0,
-                y: 5,
+                y: 7,
                 rows: 1,
                 columns: 82,
             },
@@ -1121,18 +1184,20 @@ mod tests {
     fn exact_minimum_splits_succeed_and_one_cell_less_fails() {
         let old = existing_target();
         for direction in [SplitDirection::Left, SplitDirection::Right] {
-            let at_minimum = PaneLayout::new(old, 5, 41).expect("minimum root");
+            let at_minimum = PaneLayout::new(old, MIN_PANE_ROWS, 45).expect("minimum root");
             assert_eq!(at_minimum.can_split(old, direction), Ok(()));
-            let too_narrow = PaneLayout::new(old, 5, 40).expect("valid unsplittable root");
+            let too_narrow =
+                PaneLayout::new(old, MIN_PANE_ROWS, 44).expect("valid unsplittable root");
             assert_eq!(
                 too_narrow.can_split(old, direction),
                 Err(LayoutError::LayoutTooSmall)
             );
         }
         for direction in [SplitDirection::Up, SplitDirection::Down] {
-            let at_minimum = PaneLayout::new(old, 11, 20).expect("minimum root");
+            let at_minimum = PaneLayout::new(old, 15, MIN_PANE_COLUMNS).expect("minimum root");
             assert_eq!(at_minimum.can_split(old, direction), Ok(()));
-            let too_short = PaneLayout::new(old, 10, 20).expect("valid unsplittable root");
+            let too_short =
+                PaneLayout::new(old, 14, MIN_PANE_COLUMNS).expect("valid unsplittable root");
             assert_eq!(
                 too_short.can_split(old, direction),
                 Err(LayoutError::LayoutTooSmall)
@@ -1193,17 +1258,17 @@ mod tests {
             let mut invalid = original;
             invalidate(&mut invalid);
             assert_eq!(
-                PaneLayout::new(invalid, 5, 20).map(|_| ()),
+                PaneLayout::new(invalid, MIN_PANE_ROWS, MIN_PANE_COLUMNS).map(|_| ()),
                 Err(LayoutError::InvalidTarget)
             );
-            let layout = PaneLayout::new(original, 5, 41).expect("layout");
+            let layout = PaneLayout::new(original, MIN_PANE_ROWS, 45).expect("layout");
             assert_eq!(
                 layout.preview_split(original, 1, SplitDirection::Right, invalid),
                 Err(LayoutError::InvalidTarget)
             );
         }
 
-        let layout = PaneLayout::new(original, 5, 41).expect("layout");
+        let layout = PaneLayout::new(original, MIN_PANE_ROWS, 45).expect("layout");
         let mut wrong_generation = new_target();
         wrong_generation.generation += 1;
         assert_eq!(
@@ -1271,7 +1336,7 @@ mod tests {
     #[test]
     fn preview_and_rejection_failures_leave_the_layout_unchanged() {
         let original = existing_target();
-        let mut layout = PaneLayout::new(original, 5, 41).expect("layout");
+        let mut layout = PaneLayout::new(original, MIN_PANE_ROWS, 45).expect("layout");
         let before = layout.snapshot();
         assert_eq!(
             layout.preview_split(original, 2, SplitDirection::Right, new_target()),
@@ -1309,7 +1374,7 @@ mod tests {
             .expect("valid preview");
         assert_eq!(
             layout
-                .resize(1, 5, 42)
+                .resize(1, MIN_PANE_ROWS, 46)
                 .expect("resize one-pane layout")
                 .revision,
             2
@@ -1322,7 +1387,7 @@ mod tests {
     #[test]
     fn capacity_is_four_and_rejects_a_fifth_pane() {
         let original = existing_target();
-        let mut layout = PaneLayout::new(original, 11, 121).expect("layout");
+        let mut layout = PaneLayout::new(original, 21, 121).expect("layout");
         let preview = layout
             .preview_split(original, 1, SplitDirection::Right, new_target())
             .expect("first split");
@@ -1423,16 +1488,16 @@ mod tests {
     #[test]
     fn resize_recomputes_both_panes_and_no_op_preserves_revision() {
         let original = existing_target();
-        let mut layout = PaneLayout::new(original, 11, 82).expect("layout");
+        let mut layout = PaneLayout::new(original, 15, 82).expect("layout");
         let preview = layout
             .preview_split(original, 1, SplitDirection::Down, new_target())
             .expect("split");
         layout.commit_split(preview).expect("commit");
         let before = layout.snapshot();
-        assert_eq!(layout.resize(before.revision, 11, 82), Ok(before));
+        assert_eq!(layout.resize(before.revision, 15, 82), Ok(before));
         assert_eq!(layout.snapshot(), before);
 
-        let resized = layout.resize(before.revision, 12, 83).expect("resize");
+        let resized = layout.resize(before.revision, 16, 83).expect("resize");
         assert_eq!(resized.revision, before.revision + 1);
         assert_eq!(resized.panes[0].expect("old top").target, original);
         assert_eq!(
@@ -1440,7 +1505,7 @@ mod tests {
             Rect {
                 x: 0,
                 y: 0,
-                rows: 5,
+                rows: 7,
                 columns: 83
             }
         );
@@ -1449,8 +1514,8 @@ mod tests {
             resized.panes[1].expect("new bottom").rect,
             Rect {
                 x: 0,
-                y: 6,
-                rows: 6,
+                y: 8,
+                rows: 8,
                 columns: 83
             }
         );
@@ -1458,7 +1523,7 @@ mod tests {
             resized.divider,
             Some(Rect {
                 x: 0,
-                y: 5,
+                y: 7,
                 rows: 1,
                 columns: 83
             })
@@ -1533,10 +1598,10 @@ mod tests {
     #[test]
     fn revision_overflow_rejects_changes_but_allows_no_op_resize() {
         let original = existing_target();
-        let mut layout = PaneLayout::new(original, 5, 41).expect("layout");
+        let mut layout = PaneLayout::new(original, MIN_PANE_ROWS, 45).expect("layout");
         layout.state.snapshot.revision = u64::MAX;
         let before = layout.snapshot();
-        assert_eq!(layout.resize(u64::MAX, 5, 41), Ok(before));
+        assert_eq!(layout.resize(u64::MAX, MIN_PANE_ROWS, 45), Ok(before));
         assert_eq!(
             layout.can_split(original, SplitDirection::Right),
             Err(LayoutError::RevisionExhausted)
@@ -1546,7 +1611,7 @@ mod tests {
             Err(LayoutError::RevisionExhausted)
         );
         assert_eq!(
-            layout.resize(u64::MAX, 5, 42),
+            layout.resize(u64::MAX, MIN_PANE_ROWS, 46),
             Err(LayoutError::RevisionExhausted)
         );
         assert_eq!(layout.snapshot(), before);
@@ -1574,7 +1639,7 @@ mod tests {
                 (new_target(), existing_target()),
                 (existing_target(), new_target()),
             ] {
-                let mut layout = PaneLayout::new(existing_target(), 11, 82).expect("layout");
+                let mut layout = PaneLayout::new(existing_target(), 15, 82).expect("layout");
                 let preview = layout
                     .preview_split(existing_target(), 1, direction, new_target())
                     .expect("split");
@@ -1584,9 +1649,9 @@ mod tests {
                     collapsed,
                     LayoutSnapshot {
                         revision: 3,
-                        rows: 11,
+                        rows: 15,
                         columns: 82,
-                        panes: [geometry(survivor, 0, 0, 11, 82), None, None, None],
+                        panes: [geometry(survivor, 0, 0, 15, 82), None, None, None],
                         divider: None,
                         dividers: [None; MAX_PANES - 1],
                     },
@@ -1684,7 +1749,7 @@ mod tests {
         original.pane = 9_876_543_210_125;
         original.session = 9_876_543_210_126;
         original.occupant_revision = 9_876_543_210_127;
-        let layout = PaneLayout::new(original, 5, 41).expect("layout");
+        let layout = PaneLayout::new(original, MIN_PANE_ROWS, 45).expect("layout");
         let preview = layout
             .preview_split(
                 original,

@@ -530,7 +530,9 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     });
 
     client.type_slowly(b"echo ACK$((40+1))\r");
-    client.wait_screen("ACK41 output", |screen| screen.contains("\nACK41"));
+    client.wait_screen("ACK41 output", |screen| {
+        screen.lines().any(|line| line.trim() == "ACK41")
+    });
     assert!(read_pane(&fixture, "one.ctx", &first).contains("ACK41"));
 
     // Right-click inside pane 1 opens the menu; nothing reaches the child.
@@ -539,6 +541,9 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
         screen.contains("Split Right") && screen.contains("Split Down")
     });
     client.write(b"r");
+    client.wait_screen("pane-2 focus", |screen| {
+        screen.contains("split applied; new pane focused")
+    });
     let layout = wait_control("two panes", || {
         let (_, layout) = fixture.control("one.ctx", &["layout"]);
         (field(&layout, "pane_count") == Some("2")).then_some(layout)
@@ -869,7 +874,9 @@ fn reattach_after_server_restart_replaces_dead_contexts() {
         screen.contains("PANE1-READY")
     });
     client.type_slowly(b"echo RE$((40+3))\r");
-    client.wait_screen("typing after restart", |screen| screen.contains("\nRE43"));
+    client.wait_screen("typing after restart", |screen| {
+        screen.lines().any(|line| line.trim() == "RE43")
+    });
     client.write(b"\x18");
     assert_eq!(client.wait_attach_exit(), 0);
     drop(client);

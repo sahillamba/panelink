@@ -5,7 +5,7 @@
 //! executable through the shared launch policy, and consumes itself to spawn.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -85,9 +85,46 @@ impl PreparedLaunch {
         &self.environment
     }
 
+    /// Add only the two launch-scoped provider bridge activation values after
+    /// the bounded schema-6 request has passed its normal validation path.
+    pub(crate) fn with_provider_bridge_env(
+        mut self,
+        bridge_environment: &Environment,
+    ) -> Result<Self, PrepareError> {
+        let config_name = OsStr::new("OPENCODE_CONFIG_DIR");
+        let socket_name = OsStr::new("PANELINK_BRIDGE_SOCKET");
+        if bridge_environment.len() != 2
+            || !bridge_environment.contains_key(config_name)
+            || !bridge_environment.contains_key(socket_name)
+        {
+            return Err(PrepareError::InvalidEnvironment);
+        }
+        for name in [config_name, socket_name] {
+            let value = bridge_environment
+                .get(name)
+                .ok_or(PrepareError::InvalidEnvironment)?;
+            if value.is_empty()
+                || value.as_os_str().as_bytes().contains(&0)
+                || value.as_os_str().as_bytes().len() > MAX_PATH_BYTES
+                || !Path::new(value).is_absolute()
+            {
+                return Err(PrepareError::InvalidEnvironment);
+            }
+            self.environment.insert(name.to_owned(), value.clone());
+        }
+        Ok(self)
+    }
+
     /// Validated terminal dimensions.
     pub const fn size(&self) -> &TerminalSize {
         &self.size
+    }
+
+    /// Select the checked content size before the initial workspace child is
+    /// spawned. Its startup request describes the outer layout rectangle.
+    pub(crate) fn with_initial_size(mut self, size: TerminalSize) -> Self {
+        self.size = size;
+        self
     }
 
     /// Consume this descriptor and pass it to the reviewed PTY spawn path.
@@ -409,6 +446,72 @@ mod tests {
         assert_eq!(prepared.environment().len(), 6);
         assert!(!prepared.environment().contains_key(OsStr::new("HOME")));
         assert!(!prepared.environment().contains_key(OsStr::new("USER")));
+    }
+
+    #[test]
+    fn provider_bridge_environment_accepts_only_the_two_private_launch_paths() {
+        let fixture = Fixture::new();
+        let cwd = fixture.path().join("client");
+        fs::create_dir(&cwd).unwrap();
+        let environment = valid_environment(fixture.path().as_os_str().as_bytes());
+        let payload = request_payload(RequestInput {
+            generation: 17,
+            executable: b"/bin/sh",
+            working_directory: b".",
+            client_working_directory: cwd.as_os_str().as_bytes(),
+            arguments: &[],
+            environment: &environment,
+            rows: 10,
+            columns: 100,
+        });
+        let bridge = Environment::from([
+            (
+                OsString::from("OPENCODE_CONFIG_DIR"),
+                fixture.path().join("config").into_os_string(),
+            ),
+            (
+                OsString::from("PANELINK_BRIDGE_SOCKET"),
+                fixture.path().join("bridge.sock").into_os_string(),
+            ),
+        ]);
+        let prepared = prepare(&payload, target(17, 44), fixture.path())
+            .unwrap()
+            .with_provider_bridge_env(&bridge)
+            .unwrap();
+        assert_eq!(
+            prepared
+                .environment()
+                .get(OsStr::new("OPENCODE_CONFIG_DIR")),
+            bridge.get(OsStr::new("OPENCODE_CONFIG_DIR"))
+        );
+        assert_eq!(
+            prepared
+                .environment()
+                .get(OsStr::new("PANELINK_BRIDGE_SOCKET")),
+            bridge.get(OsStr::new("PANELINK_BRIDGE_SOCKET"))
+        );
+
+        let mut extra = bridge.clone();
+        extra.insert(OsString::from("EXTRA"), OsString::from("rejected"));
+        assert_eq!(
+            prepare(&payload, target(17, 44), fixture.path())
+                .unwrap()
+                .with_provider_bridge_env(&extra)
+                .unwrap_err(),
+            PrepareError::InvalidEnvironment
+        );
+        let mut relative = bridge;
+        relative.insert(
+            OsString::from("PANELINK_BRIDGE_SOCKET"),
+            OsString::from("bridge.sock"),
+        );
+        assert_eq!(
+            prepare(&payload, target(17, 44), fixture.path())
+                .unwrap()
+                .with_provider_bridge_env(&relative)
+                .unwrap_err(),
+            PrepareError::InvalidEnvironment
+        );
     }
 
     #[test]

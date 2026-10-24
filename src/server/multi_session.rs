@@ -1145,7 +1145,12 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                         Some(PaneSizeState {
                             target,
                             confirmed: (rows, columns),
-                            desired: None,
+                            // The launch dimensions describe the outer root;
+                            // the UI's content rectangle is smaller. Startup
+                            // performs an immediate owner resize before the
+                            // server is published, and this pending marker
+                            // ensures that same-revision retry is not skipped.
+                            desired: Some((rows, columns)),
                         }),
                         None,
                         None,
@@ -1468,7 +1473,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             .flatten()
             .find(|pane| pane.target == new_target)
             .ok_or(SplitFailure::Layout(LayoutError::InvalidLayoutState))?;
-        if request.launch().dimensions() != (planned.rect.rows, planned.rect.columns) {
+        let content = crate::pane_layout::content_rect(planned.rect)
+            .ok_or(SplitFailure::LaunchSizeMismatch)?;
+        if request.launch().dimensions() != (content.rows, content.columns) {
             return Err(SplitFailure::LaunchSizeMismatch);
         }
         Ok((preview, new_target))
@@ -1503,9 +1510,16 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     where
         Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
     {
-        let desired = (rect.rows, rect.columns);
+        let Some(content) = crate::pane_layout::content_rect(rect) else {
+            let confirmed = self
+                .pane_state(target)
+                .map_or((rect.rows, rect.columns), |state| state.confirmed);
+            self.record_pane_size(target, confirmed, Some((rect.rows, rect.columns)));
+            return false;
+        };
+        let desired = (content.rows, content.columns);
         let applied = match self.launches.session_mut(target) {
-            Ok(session) => resize(&mut session.effects, rect.rows, rect.columns).is_ok(),
+            Ok(session) => resize(&mut session.effects, content.rows, content.columns).is_ok(),
             Err(_) => false,
         };
         if applied {
@@ -2117,6 +2131,84 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 Err(error) => return Err(ServerError::Protocol(error)),
             }
             // Commit the pin only after this call reserved the unique key.
+            handler.session.input_owner = candidate;
+            let outcome = terminal_outcome(apply(&mut handler.session.effects));
+            handler.global.ledger.complete(key, outcome)?;
+            handler.session.input_owner.finish_input(key)?;
+            status_reply(key, OperationStatus::Completed(outcome))
+        })();
+        handler.synchronize_metadata();
+        result
+    }
+
+    /// Admit and synchronously deliver one non-replayable mouse-wheel event.
+    ///
+    /// A disabled mouse mode is rejected by `validate` before ledger
+    /// admission, allowing the attach client to fall back to a read-only
+    /// history query. Admitted events are never retried or replayed.
+    pub fn handle_mouse_wheel<V, A>(
+        &mut self,
+        connection: &Connection,
+        request: &crate::ui_protocol::MouseWheelInput,
+        payload: &[u8],
+        now_secs: u64,
+        validate: V,
+        apply: A,
+    ) -> Result<Vec<u8>, ServerError>
+    where
+        V: FnOnce(&E) -> Result<(), RejectionCode>,
+        A: FnOnce(&mut E) -> Outcome,
+    {
+        let key = request.key;
+        self.global.require_live_connection(connection, now_secs)?;
+        if key.lease != connection.lease
+            || key.generation != self.global.generation
+            || connection.selected_capabilities & CAPABILITY_INPUT == 0
+        {
+            return rejected_reply(key, RejectionCode::Unauthorized);
+        }
+        if let Some(reply) = known_reply(&self.global, key, payload, now_secs)? {
+            return Ok(reply);
+        }
+        if self
+            .global
+            .require_target_scope(connection, request.target)
+            .is_err()
+        {
+            return rejected_reply(key, RejectionCode::Unauthorized);
+        }
+        let session = match self.launches.session_mut(request.target) {
+            Ok(session) => session,
+            Err(RegistryError::InvalidTarget | RegistryError::EffectsUnavailable) => {
+                return rejected_reply(key, RejectionCode::StaleTarget);
+            }
+            Err(_) => return Err(ServerError::Internal),
+        };
+        let mut handler = SessionHandler::new(&mut self.global, session);
+        let result = (|| {
+            let mut candidate = handler.session.input_owner.clone();
+            if let Err(error) = candidate.begin_input(
+                Owner::Client(key.lease),
+                request.expected_owner_revision,
+                key,
+                now_secs,
+            ) {
+                return rejected_reply(key, owner_rejection(error));
+            }
+            if let Err(code) = validate(&handler.session.effects) {
+                return rejected_reply(key, code);
+            }
+            match handler.global.ledger.admit(key, payload, now_secs) {
+                Ok(Admission::Execute) => {}
+                Ok(Admission::InProgress) => return status_reply(key, OperationStatus::InProgress),
+                Ok(Admission::Completed(outcome)) => {
+                    return status_reply(key, OperationStatus::Completed(outcome));
+                }
+                Err(error) if is_capacity_error(&error) => {
+                    return rejected_reply(key, RejectionCode::Capacity);
+                }
+                Err(error) => return Err(ServerError::Protocol(error)),
+            }
             handler.session.input_owner = candidate;
             let outcome = terminal_outcome(apply(&mut handler.session.effects));
             handler.global.ledger.complete(key, outcome)?;
@@ -5830,6 +5922,9 @@ mod split_tests {
         (rows, columns): (u16, u16),
         env_value: &[u8],
     ) -> Vec<u8> {
+        // Split fixtures describe the new pane's outer layout rectangle. The
+        // launch request carries only the usable PTY content dimensions.
+        let (rows, columns) = (rows.saturating_sub(2), columns.saturating_sub(2));
         let environment = [EnvironmentEntry {
             name: b"SPLIT_TEST_VALUE",
             value: env_value,
@@ -5885,6 +5980,11 @@ mod split_tests {
             )
             .unwrap();
         assert_eq!(result.outcome, Outcome::Applied);
+        owner
+            .resize_layout(1, ROOT_ROWS, ROOT_COLUMNS, |_: &mut Sink, _, _| {
+                Ok::<_, ()>(())
+            })
+            .unwrap();
         log.borrow_mut().clear();
         Fixture {
             owner,
@@ -6067,8 +6167,8 @@ mod split_tests {
                     Effect::Record(LaunchState::Applied),
                     Effect::Resize {
                         session: 1,
-                        rows: existing_rect.rows,
-                        columns: existing_rect.columns,
+                        rows: existing_rect.rows - 2,
+                        columns: existing_rect.columns - 2,
                     },
                 ],
                 "{direction:?}"
@@ -6309,7 +6409,7 @@ mod split_tests {
             narrow.first,
             1,
             SplitDirection::Left,
-            (24, 20),
+            (24, 22),
             b"env",
         );
         let error = no_effects_split(&mut narrow, &payload).unwrap_err();
@@ -6344,6 +6444,9 @@ mod split_tests {
                     })
                 },
             )
+            .unwrap();
+        owner
+            .resize_layout(1, 24, 40, |_: &mut Sink, _, _| Ok::<_, ()>(()))
             .unwrap();
         log.borrow_mut().clear();
         Fixture {
@@ -6438,7 +6541,7 @@ mod split_tests {
             target,
             layout.revision,
             SplitDirection::Left,
-            (5, 40),
+            (7, 40),
             b"env",
         );
         let error = no_effects_split(&mut full, &fifth_payload).unwrap_err();
@@ -6629,8 +6732,8 @@ mod split_tests {
             assert_eq!(fixture.owner.layout_snapshot().unwrap().pane_count(), 2);
             assert!(fixture.log.borrow().contains(&Effect::Resize {
                 session: 1,
-                rows: 24,
-                columns: 40
+                rows: 22,
+                columns: 38
             }));
             assert_eq!(
                 ledger_status(&fixture, 2),
@@ -6678,8 +6781,8 @@ mod split_tests {
         assert_eq!(pending.iter().flatten().count(), 1);
         let entry = pending.into_iter().flatten().next().unwrap();
         assert_eq!(entry.target, fixture.first);
-        assert_eq!(entry.desired, (12, 81));
-        assert_eq!(entry.confirmed, (ROOT_ROWS, ROOT_COLUMNS));
+        assert_eq!(entry.desired, (10, 79));
+        assert_eq!(entry.confirmed, (ROOT_ROWS - 2, ROOT_COLUMNS - 2));
         assert!(!format!("{entry:?}").contains(&GENERATION.to_string()));
         assert_no_input(&fixture);
     }
@@ -6742,8 +6845,8 @@ mod split_tests {
             *fixture.log.borrow(),
             [Effect::Resize {
                 session: 1,
-                rows: 12,
-                columns: 81
+                rows: 10,
+                columns: 79
             }]
         );
         assert_eq!(fixture.owner.layout_snapshot().unwrap().revision, 2);
@@ -6765,8 +6868,8 @@ mod split_tests {
             *fixture.log.borrow(),
             [Effect::Resize {
                 session: 1,
-                rows: 12,
-                columns: 81
+                rows: 10,
+                columns: 79
             }]
         );
         assert!(fixture.owner.pending_resizes().iter().all(Option::is_none));
@@ -6825,7 +6928,7 @@ mod split_tests {
         let entry = pending.into_iter().flatten().next().unwrap();
         assert_eq!(pending.iter().flatten().count(), 1);
         assert_eq!(entry.target.session, 2);
-        assert_eq!((entry.desired, entry.confirmed), ((30, 50), (24, 40)));
+        assert_eq!((entry.desired, entry.confirmed), ((28, 48), (22, 38)));
         fixture.log.borrow_mut().clear();
 
         let error = fixture
@@ -6839,8 +6942,8 @@ mod split_tests {
         ));
         let only_second = [Effect::Resize {
             session: 2,
-            rows: 30,
-            columns: 50,
+            rows: 28,
+            columns: 48,
         }];
         assert_eq!(*fixture.log.borrow(), only_second);
         fixture.log.borrow_mut().clear();
@@ -6906,13 +7009,13 @@ mod split_tests {
             [
                 Effect::Resize {
                     session: 1,
-                    rows: 30,
-                    columns: 50
+                    rows: 28,
+                    columns: 48
                 },
                 Effect::Resize {
                     session: 2,
-                    rows: 30,
-                    columns: 50
+                    rows: 28,
+                    columns: 48
                 },
             ]
         );
@@ -7532,6 +7635,12 @@ mod runtime_helper_tests {
                 |()| Ok::<_, ()>(Sink::default()),
             )
             .unwrap();
+        owner
+            .resize_layout(1, 24, 81, |sink: &mut Sink, rows, columns| {
+                sink.resizes.push((rows, columns));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
         (owner, result.target.unwrap())
     }
 
@@ -7729,7 +7838,7 @@ mod runtime_helper_tests {
         );
         assert_eq!(
             owner.launches.effects(first).unwrap().effects.resizes,
-            vec![(30, 100)]
+            vec![(22, 79), (28, 98)]
         );
 
         // Stale revision: Failed, no PTY effect.
@@ -7746,7 +7855,7 @@ mod runtime_helper_tests {
         ));
         assert_eq!(
             owner.launches.effects(first).unwrap().effects.resizes.len(),
-            1
+            2
         );
 
         // A failing PTY resize is Partial with the pane marked pending.

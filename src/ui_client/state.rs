@@ -22,15 +22,15 @@ use panelink::terminal::compose::{
 use panelink::terminal::{Key, ScreenSnapshot, TerminalError, TerminalSize};
 use panelink::ui_protocol::{planned_split_size, LayoutReply, MAX_KEYS};
 
-use super::keys::{confirm_input, map_key, menu_input, mouse_button, KeyAction};
-use super::net::NetUpdate;
+use super::keys::{confirm_input, map_key, menu_input, mouse_button, mouse_wheel, KeyAction};
+use super::net::{NetUpdate, ScrollResult, ScrollUpdate};
 
 /// Largest root the client requests (terminal-core and compositor bound).
 pub(crate) const MAX_ROOT_ROWS: u16 = 80;
 /// Largest root the client requests.
 pub(crate) const MAX_ROOT_COLUMNS: u16 = 240;
-const MIN_ROOT_ROWS: u16 = 5;
-const MIN_ROOT_COLUMNS: u16 = 20;
+const MIN_ROOT_ROWS: u16 = panelink::pane_layout::MIN_PANE_ROWS;
+const MIN_ROOT_COLUMNS: u16 = panelink::pane_layout::MIN_PANE_COLUMNS;
 const STATUS_TTL: Duration = Duration::from_secs(3);
 /// Navigation mode ends by itself after this long without a key.
 const NAV_TIMEOUT: Duration = Duration::from_secs(4);
@@ -79,6 +79,16 @@ pub(crate) trait Effects {
     fn send_keys(&mut self, target: TargetRef, keys: &[Key]) -> Result<(), &'static str>;
     /// Deliver one bracketed paste to one pane (control PASTE).
     fn send_paste(&mut self, target: TargetRef, text: &str) -> Result<(), &'static str>;
+    /// Submit one bounded wheel action against the captured pane and view epoch.
+    fn scroll(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        offset_rows: u16,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<(), &'static str>;
     /// Submit one split on the connection pinned to `plan.target`; return the
     /// new pane after it is connected and claimed.
     fn split(
@@ -117,6 +127,10 @@ struct ScreenSlot {
     target: Option<TargetRef>,
     revision: u64,
     snapshot: ScreenSnapshot,
+    history: ScreenSnapshot,
+    history_offset: u16,
+    view_epoch: u64,
+    history_pending: bool,
 }
 
 /// Client presentation state; PTYs and sessions stay server-owned.
@@ -156,6 +170,10 @@ impl App {
                 target: None,
                 revision: 0,
                 snapshot: ScreenSnapshot::try_new(size)?,
+                history: ScreenSnapshot::try_new(size)?,
+                history_offset: 0,
+                view_epoch: 0,
+                history_pending: false,
             })
         };
         Ok(Self {
@@ -307,9 +325,33 @@ impl App {
             self.status = Some(("pane already closed", Instant::now()));
         }
         for slot in &mut self.screens {
-            if slot.target.is_some_and(|target| !present(target)) {
-                slot.target = None;
-                slot.revision = 0;
+            if let Some(target) = slot.target {
+                let new_pane = reply
+                    .panes
+                    .iter()
+                    .flatten()
+                    .find(|pane| pane.target == target);
+                if let Some(pane) = new_pane {
+                    let old_rect = self.layout.and_then(|layout| {
+                        layout
+                            .panes
+                            .iter()
+                            .flatten()
+                            .find(|old| old.target == target)
+                            .map(|old| old.rect)
+                    });
+                    if old_rect != Some(pane.rect) {
+                        slot.history_offset = 0;
+                        slot.view_epoch = slot.view_epoch.wrapping_add(1);
+                        slot.history_pending = false;
+                    }
+                } else {
+                    slot.target = None;
+                    slot.revision = 0;
+                    slot.history_offset = 0;
+                    slot.view_epoch = slot.view_epoch.wrapping_add(1);
+                    slot.history_pending = false;
+                }
             }
         }
         self.layout = Some(reply);
@@ -324,6 +366,7 @@ impl App {
             } else if present {
                 self.pending_split_focus = None;
                 self.focus_target(target);
+                self.set_status("split applied; new pane focused", Instant::now());
             }
         }
         self.dirty = true;
@@ -467,6 +510,129 @@ impl App {
         }
     }
 
+    /// Apply a history or wheel completion only to the exact pane/view epoch
+    /// that initiated it. Live screen polls keep updating `snapshot` while a
+    /// history view is pinned.
+    pub(crate) fn apply_scroll_update(&mut self, update: ScrollUpdate, now: Instant) {
+        let Some(slot) = self
+            .screens
+            .iter_mut()
+            .find(|slot| slot.target == Some(update.target) && slot.view_epoch == update.epoch)
+        else {
+            return;
+        };
+        slot.history_pending = false;
+        match update.result {
+            ScrollResult::History {
+                offset_rows,
+                checkpoint,
+            } => match panelink::screen_checkpoint::decode(&checkpoint) {
+                Ok(snapshot) if offset_rows > 0 => {
+                    if slot.history.load_checkpoint(&snapshot).is_ok() {
+                        slot.history_offset = offset_rows;
+                        self.dirty = true;
+                    } else {
+                        self.set_status("history snapshot invalid", now);
+                    }
+                }
+                Ok(_) => {
+                    slot.history_offset = 0;
+                    self.dirty = true;
+                }
+                Err(_) => self.set_status("history snapshot invalid", now),
+            },
+            ScrollResult::MouseDelivered => {
+                slot.history_offset = 0;
+                self.dirty = true;
+            }
+            ScrollResult::AlternateScreenNoMouse => {
+                slot.history_offset = 0;
+                self.dirty = true;
+                self.set_status("alternate-screen app; use its scroll keys", now);
+            }
+            ScrollResult::Failed(label) => self.set_status(label, now),
+        }
+    }
+
+    fn return_to_live(&mut self, target: TargetRef) {
+        if let Some(slot) = self
+            .screens
+            .iter_mut()
+            .find(|slot| slot.target == Some(target))
+        {
+            slot.history_offset = 0;
+            slot.history_pending = false;
+            slot.view_epoch = slot.view_epoch.wrapping_add(1);
+            self.dirty = true;
+        }
+    }
+
+    fn scroll_pane(
+        &mut self,
+        target: TargetRef,
+        screen_x: u16,
+        screen_y: u16,
+        up: bool,
+        now: Instant,
+        effects: &mut impl Effects,
+    ) {
+        let Some(pane) = self.layout.and_then(|layout| {
+            layout
+                .panes
+                .into_iter()
+                .flatten()
+                .find(|pane| pane.target == target)
+        }) else {
+            return;
+        };
+        let Some(content) = panelink::pane_layout::content_rect(pane.rect) else {
+            return;
+        };
+        let column = screen_x
+            .saturating_sub(content.x)
+            .min(content.columns.saturating_sub(1));
+        let row = screen_y
+            .saturating_sub(content.y)
+            .min(content.rows.saturating_sub(1));
+        let Some(slot_index) = self
+            .screens
+            .iter()
+            .position(|slot| slot.target == Some(target))
+            .or_else(|| self.screens.iter().position(|slot| slot.target.is_none()))
+        else {
+            return;
+        };
+        let slot = &mut self.screens[slot_index];
+        if slot.target != Some(target) {
+            slot.target = Some(target);
+            slot.revision = 0;
+            slot.history_offset = 0;
+        }
+        // A single large history checkpoint may be in flight. Ignore further
+        // wheel ticks until its result is applied so a dropped/coalesced event
+        // cannot invalidate the request that is already on the wire.
+        if slot.history_pending {
+            return;
+        }
+        let requested = if up {
+            slot.history_offset
+                .saturating_add(3)
+                .min(panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS)
+        } else {
+            slot.history_offset.saturating_sub(3)
+        };
+        let epoch = slot.view_epoch.wrapping_add(1);
+        slot.history_pending = true;
+        self.dirty = true;
+        match effects.scroll(target, epoch, requested, column, row, up) {
+            Ok(()) => slot.view_epoch = epoch,
+            Err(label) => {
+                slot.history_pending = false;
+                self.set_status(label, now);
+            }
+        }
+    }
+
     /// Last loaded screen revision for one pane.
     #[cfg(test)]
     pub(crate) fn screen_revision(&self, target: TargetRef) -> Option<u64> {
@@ -493,6 +659,11 @@ impl App {
         slot.snapshot.load_checkpoint(checkpoint)?;
         slot.target = Some(target);
         slot.revision = revision;
+        if checkpoint.buffer() == panelink::screen_checkpoint::ScreenBuffer::Alternate {
+            slot.history_offset = 0;
+            slot.history_pending = false;
+            slot.view_epoch = slot.view_epoch.wrapping_add(1);
+        }
         self.dirty = true;
         Ok(())
     }
@@ -638,6 +809,7 @@ impl App {
                 }
                 match self.focus {
                     Some(target) => {
+                        self.return_to_live(target);
                         if let Err(label) = effects.send_paste(target, text) {
                             self.set_status(label, now);
                         }
@@ -656,8 +828,15 @@ impl App {
                     self.flush(now, effects);
                     self.open_at_pointer(mouse.column, mouse.row, now, recovery_availability);
                 }
-                // Mouse events never reach children in this phase.
-                _ => {}
+                _ => {
+                    if let (Some(up), Some(target)) =
+                        (mouse_wheel(mouse), self.pane_at(mouse.column, mouse.row))
+                    {
+                        self.flush(now, effects);
+                        self.focus_target(target);
+                        self.scroll_pane(target, mouse.column, mouse.row, up, now, effects);
+                    }
+                }
             },
             Event::FocusGained | Event::FocusLost | Event::Resize(_, _) => {}
         }
@@ -924,6 +1103,7 @@ impl App {
             self.set_status("no focused pane", now);
             return;
         };
+        self.return_to_live(focus);
         if self.pending_target != Some(focus) || self.pending_len == MAX_KEYS {
             self.flush(now, effects);
             if self.pending_len != 0 {
@@ -1060,16 +1240,34 @@ impl App {
                     .screens
                     .iter()
                     .find(|slot| slot.target == Some(pane.target));
-                let content = match (pane.pending_confirmed, screen) {
-                    (Some(_), _) => PaneContent::Placeholder("resize pending"),
-                    (None, Some(slot))
-                        if slot.snapshot.rows() == pane.rect.rows
-                            && slot.snapshot.columns() == pane.rect.columns =>
+                let content_rect = panelink::pane_layout::content_rect(pane.rect);
+                let content = match (pane.pending_confirmed, screen, content_rect) {
+                    (Some(_), _, _) => PaneContent::Placeholder("resize pending"),
+                    (None, Some(slot), Some(_)) if slot.history_pending => {
+                        PaneContent::Placeholder("loading scrollback...")
+                    }
+                    (None, Some(slot), Some(rect))
+                        if slot.history_offset > 0
+                            && slot.history.rows() == rect.rows
+                            && slot.history.columns() == rect.columns =>
+                    {
+                        PaneContent::Snapshot(&slot.history)
+                    }
+                    (None, Some(slot), Some(rect))
+                        if slot.snapshot.rows() == rect.rows
+                            && slot.snapshot.columns() == rect.columns =>
                     {
                         PaneContent::Snapshot(&slot.snapshot)
                     }
-                    (None, Some(_)) => PaneContent::Placeholder("resizing..."),
-                    (None, None) => PaneContent::Placeholder("connecting..."),
+                    (None, Some(slot), Some(_))
+                        if slot.snapshot.rows() == pane.rect.rows
+                            && slot.snapshot.columns() == pane.rect.columns =>
+                    {
+                        PaneContent::Placeholder("restart server for pane padding")
+                    }
+                    (None, Some(_), Some(_)) => PaneContent::Placeholder("resizing..."),
+                    (None, None, _) => PaneContent::Placeholder("connecting..."),
+                    (None, Some(_), None) => PaneContent::Placeholder("pane too small"),
                 };
                 panes[index] = Some(PaneView {
                     rect: pane.rect,

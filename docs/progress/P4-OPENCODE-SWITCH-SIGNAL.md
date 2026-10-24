@@ -1,5 +1,9 @@
 # P4 OpenCode 1.19.0 switch-signal probe
 
+Historical1.19.0 evidence. The installed CLI is now2.0.32; see the
+[current V2 preflight](P4-V2-IDENTITY-RESULT.md). This result is not V2
+compatibility or identity proof.
+
 Status: **selected-session switch not proven**. Read-only inspection confirms
 keyboard session-list selection navigates directly and does not dispatch
 `tui.session.select`. That event is a separate push signal. The TUI plugin host

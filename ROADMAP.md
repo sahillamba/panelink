@@ -1,19 +1,21 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: Phase3 killed input-client post-completion/pre-ack acceptance delivered and parent-verified; fullPhase3 remains open.
-last-updated: 2026-10-23
+current-phase: PAUSED by user at Phase4 managed-native UI input gate; bridge, joint storage, explicit recovery and native failure acceptance implemented/verified. See docs/progress/P4-PAUSED-HANDOFF-2026-10-24.md.
+last-updated: 2026-10-24
+last-verified-p4: Final serial Rust1231pass/0fail/15ignored; strict all-target Clippy pass. Earlier seven supporting checks pass, Python196(one live skip)/decoder39/docs316; latest probe additions need supporting rerun. Native manual/fork and failure pass Luna+parent. Active binary unchanged.
 checkpoint: User-authorized verified Phase3 checkpoint: scrollback, pane run, owner discovery and client/server/killed-input-client acceptance on codex/p3-scrollback-integration based on9f3d8a0; see Git history for checkpoint ID. FullPhase3 remains open; no push. Original source checkout preserved.
-last-verified: Complete locked/offline serial Cargo1089pass/0fail/15ignored in157.19s (lib712/binary142/integration235 across53 targets); all seven supporting checks pass, decoder39/Python77/final docs272/0. Parent targeted killed-input-client1/1 in0.84s; worker startup denial and parent fixture failures preserved separately. See P3-INFLIGHT-CLIENT-RESULT.md. Prior ACK42/history-writer intermittency remains unresolved.
+last-verified: Final usability tree locked/offline serial Cargo1111pass/0fail/15ignored in164.34s (lib722/binary148/integration241 across55 targets); all seven supporting checks pass, decoder39/Python77/docs281/0. Real outer-PTY normal-history/app-wheel tests pass. Earlier sizing, startup-output and asynchronous writer-fixture failures are preserved in docs/progress/P3-USABILITY-FIXES-RESULT.md.
+prior-evidence-orchestration: Serial1091pass/0fail/15ignored in182.72s plus seven supporting checks before user-reported usability repairs; see P3-ORCHESTRATION-RESULT.md.
 prior-evidence-scrollback: Final serial Cargo1064pass/0fail/15ignored in122.73s (lib712/binary123/integration229 across50 targets); seven non-Cargo checks passed separately, decoder39/Python77/docs253/0. First full serial run1063pass/1fail/15ignored at shutdown HUP marker; isolated and full rerun pass without code changes. See P3-LIVE-SCROLLBACK-RESULT.md.
 prior-evidence-metadata: Final serial Cargo1059pass/0fail/15ignored in152.92s (lib709/binary123/integration227 across50 targets); all7 non-Cargo verifier checks pass separately, decoder39/Python77/docs251/0. Initial parallel verifier7/8 had2 library timing/observation failures; preserved in P3-PANE-METADATA-RESULT.md, not relabeled. No final Cargo timeout.
 prior-evidence-upstream: verifier 8/8; full suite 993 passed/0 failed/15 ignored after origin/main merge (095bf45) and four-pane, agent CLI, L16 relaunch, L17 attach, L18 exit status, before stash integration; not combined-tree verification.
 prior-evidence-stash: live-split slice library 641 passed/4 ignored, focused integration 73 passed/0 failed, verifier 7/8 with binary 115 passed/1 failed at pathname-bind EPERM; not combined-tree verification. See docs/progress/ASYNC-LAUNCH-RESULT.md.
-next-action: Diagnose the recorded history-writer startup admission contention and attach-host ACK42 intermittency with bounded Luna tasks, preserving permitted nonblocking admission/input semantics and actual diagnostics. Stabilize only demonstrated fixture defects; no product fix claim without evidence. Keep human four-pane/provider/reboot and owner-pending/death-before-admission limits separate.
+next-action: Wait for user resume; then follow P4-PAUSED-HANDOFF-2026-10-24.md. Establish noncolliding native picker input in disposable fixture, finish actual managed UI new/fork/project/Home transitions, final verification/docs and phase-completion commit. No push.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
-blocked-on: Phase 4 live identity is blocked upstream (OpenCode 1.19.0 publishes no keyboard session-switch signal). Phase 2 scoped acceptance is DONE 2026-10-22 with remaining host evidence limits in docs/progress/SESSION.md.
+blocked-on: User-requested pause. Managed native UI gate open: Ctrl-X provider leader collides with attach detach; bare Ctrl-O/P is not session-list input. Explicit recovery/native failure passed; do not count earlier weak modal predicate. Phase3 host gate separate.
 merged-origin: 2026-10-22 merged origin/main (Wave1 usability, Wave2 client/server close, Herdr study, Subagents SA plan); see docs/progress/WAVE2-RESULT.md, USABILITY-WAVE1-RESULT.md, SUBAGENTS-PLAN.md
 setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1. Current source/status supersedes the historical index block in STASH-MERGE-RESULT.md. Worktree graph project: Users-sahillamba-.codex-worktrees-7060-panelink.
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
@@ -49,8 +51,8 @@ phase-usability-wave1: scoped implementation delivered 2026-10-22; typed keys/he
 
 | Work | Model | Effort |
 | --- | --- | --- |
-| Precise bounded implementation and targeted tests | gpt-6-luna | high (current user request 2026-10-23) |
-| Small documentation, tooling and bounded maintenance tasks | gpt-6-luna | medium |
+| Precise bounded implementation and targeted tests | gpt-6-luna | high (current user request 2026-10-24) |
+| Documentation, tooling and bounded maintenance tasks | gpt-6-luna | high (explicit user routing 2026-10-24) |
 | Architecture, ambiguity, security review, integration | Parent orchestrator | inherited |
 | Escalation after two failed attempts at same defect | Parent orchestrator | inherited |
 
@@ -190,7 +192,9 @@ Inspect current state/ownership before assigning work; no worker must survive.
 - [x] Bounded server SIGKILL acceptance: cooperative-shell exit, stale socket replacement, full generation/target fencing, old-context refusal/preservation and no completed-input replay; see docs/progress/P3-SERVER-DEATH-RESULT.md (2026-10-23). No arbitrary descendant cleanup guarantee.
 - [x] Real input CLI SIGKILL after server Completed(Applied) but before caller acknowledgment; exact uncertain key/status/resync/sequence, same child and no token replay verified. See docs/progress/P3-INFLIGHT-CLIENT-RESULT.md (2026-10-23). Does not cover death before admission or owner-pending.
 - [x] Reconcile and close the accepted bounded event/watch/launch/layout implementation scope: finite watches/reconciliation, workspace invalidations/gap recovery, four-pane lifecycle and managed pane run. Historical umbrella warning superseded; indefinite subscriptions/large Snapshot queues/direct-launch proposal are separate future scope. See docs/progress/P3-RUNTIME-CONTRACT-RESULT.md.
-- [ ] Complete independent Phase3 host/lifetime acceptance before marking Phase3 complete: human four-pane Apple Terminal evidence remains open; preserve explicit in-flight/client/server crash observation limits. Do not infer provider/reboot acceptance or arbitrary descendant cleanup from automated prototype results.
+- [x] Review and verify the accumulated pre-delivery real-CLI and internal handler-boundary regressions with the earlier intermittent-acceptance fixes: complete serial Cargo1091/0/15 ignored and all seven supporting checks pass. Three Luna High workers found no additional required production task; see docs/progress/P3-ORCHESTRATION-RESULT.md (2026-10-24).
+- [x] Repair user-reported agent context storage, wheel history/app scrolling and pane padding; preserve legacy saved geometry and immediate startup output. Parent final serial1111/0/15 ignored plus all seven supporting checks; see docs/progress/P3-USABILITY-FIXES-RESULT.md. Activation completed after explicit user approval; the fresh workspace uses the verified build.
+- [ ] Complete independent Phase3 host/lifetime acceptance before marking Phase3 complete: human four-pane Apple Terminal evidence remains open; preserve explicit in-flight/client/server crash observation limits. This is the sole explicit remaining Phase3 gate after the 2026-10-24 audit. Do not infer provider/reboot acceptance or arbitrary descendant cleanup from automated prototype results.
 
 ## Phase 3A — right-click splits and new terminal sessions (DONE 2026-10-19)
 
@@ -274,9 +278,26 @@ restore workspace layouts, live processes, provider conversations or every
 alternate-screen frame; V-HISTORY's complete reboot/layout acceptance remains
 open.
 
-## Phase 4 — early OpenCode identity gate (attempted; proof blocked)
+## Phase 4 — early OpenCode identity gate (scoped observation passes; integration open)
 
-- [ ] Pin installed OpenCode version; prove selected top-level identity and session changes with two agents in same project. (2026-10-21: version 1.19.0 pinned and two-session creation/server/SSE observed in an isolated probe; selected identity and switch NOT proven; see P4-OPENCODE-IDENTITY-PROBE.md. Private-PTY run: local TUI plugin loads and captures the initial route 3/3; ordered A-B-A switch not proven; see P4-OPENCODE-TUI-IDENTITY.md.)
+2026-10-24: two Luna High owners delivered the V2 observer and harness;
+parent review corrected loading, warm-up and picker scoping. Three fresh pinned
+2.0.32 private two-TUI runs pass A-B-A with the other client continuously on B,
+zero rejected/missed/extra observations, verified empty user messages and full
+cleanup. Python121/0/no skips. See [current result](docs/progress/P4-V2-TUI-RESULT.md).
+This is a development gate, not a live Panelink adapter or recovery feature.
+
+- [x] Pin installed OpenCode version; prove selected top-level identity and session changes with two agents in the same project. Scoped no-prompt private two-TUI proof3/3 on2.0.32; no model-workload or production integration claim. Historical1.19.0 missing-switch evidence remains in P4-OPENCODE-TUI-IDENTITY.md.
+- [x] Scoped opposite-client B-A-B and keyboard new-conversation route outcome,3/3 fresh runs. Home has no selected ID; no new-ID guarantee. See P4-V2-EXTENDED-RESULT.md.
+- [x] Scoped record-delivery pause, host-time observer expiry and explicit fresh reconciliation while both TUIs/server stay alive,3/3. Development monitor only; durability false.
+- [x] Scoped linked-child selection as non-top-level, exclusion from root listing, keyboard parent return and original-client identity continuity,3/3 fresh runs. Empty-parent fork returns400; nonempty copied-history fork is untested.
+- [x] Scoped separate-client directory/project identity isolation,3/3 fresh runs, exact new-directory selection and foreign-scope rejection. See P4-V2-ISOLATION-RESULT.md.
+- [x] Scoped pinned-native fixture proves API-created/UI-selected new root, static nonempty transcript import plus actual full-history fork, and same-client Ctrl-O project round-trip; Luna run and independent parent run pass. Native forks are top-level with a separate `fork` origin. See P4-REMAINING-IDENTITY.md. Production adapter acceptance remains separate.
+- [ ] Exercise new/fork/project transitions through the actual managed adapter, including visible refusal/manual fallback for foreign project scope.
+- [x] Typed protocol-v1 admission wraps the binding core with source ordering, bounded caller lease, expiry, reconciliation and revision issuance.12 focused tests; no wire/source-auth/live integration claim.
+- [x] Single-writer bounded binding store plus component storage/acknowledgment and actual process-kill/reopen boundaries.9 focused store and4 combined target tests; all restoration stale. See P4-BRIDGE-STORE-RESULT.md.
+- [x] Bounded independent protocol-v1 Hello/Welcome/Observation codec plus same-user, one-use scoped-grant Unix endpoints.19 focused codec/channel tests and2 combined private IPC cases pass; no provider executable attestation, freshness barrier or live listener activation. See P4-BRIDGE-TRANSPORT-RESULT.md.
+- [ ] Integrate trusted live provider source/grant provisioning, fresh-snapshot reconciliation, owner/worker dispatch and production heartbeat/expiry contract.
 - [ ] Persist and acknowledge binding revisions; demonstrate or explicitly reject current-at-crash claims.
 - [ ] Implement last-confirmed/manual fallback without latest-session heuristics.
 

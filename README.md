@@ -35,6 +35,7 @@ reattach to it.
 | ...then close focused pane | `x`, then `y` to confirm; the last pane ends the workspace |
 | ...then leave NAV mode | Esc (or wait 4 seconds); Ctrl-X detaches |
 | Focus a pane | Click it |
+| Scroll a pane | Use the mouse wheel over its content; typing returns normal history to live output |
 | Close pane from the menu | Right-click the pane, choose Close pane, then press `y` to confirm |
 | List/close panes from a shell | `panelink panes`; `panelink close 1` (or `2`) |
 | Detach (shells keep running) | Ctrl-X |
@@ -45,9 +46,15 @@ Current limits: at most four panes, no tabs. The attach client forwards ordinary
 Ctrl-letter keys, Alt/Meta characters when delivered by the host, F1–F12,
 Delete/Insert/Page Up/Page Down and Shift-Tab. Ctrl-B remains navigation and
 Ctrl-X detaches; Ctrl-C goes to the focused child. Modified function/navigation
-keys and application mouse pass-through remain unsupported. Help consumes
-typing, paste and mouse actions while open. There is no provider (OpenCode)
-session recovery. The older disposable probe retains its narrower input map.
+keys and application pointer clicks remain unsupported. Wheel events reach
+alternate-screen applications that enable mouse reporting; without that mode,
+Panelink reports the limitation. Normal screens scroll through retained live
+history. Panes have a one-cell blank margin on each side. Help consumes
+typing, paste and mouse actions while open. An experimental pinned OpenCode
+adapter is available only through a dedicated `serve --opencode-bridge` launch,
+with explicit prepare/resume commands; see the [provider guide](docs/progress/P4-MANUAL-RECOVERY.md).
+Native acceptance remains in progress. The older disposable probe retains its
+narrower input map.
 
 Local help, navigation and Ctrl-X remain available while the attach client
 waits for the server. If typing backs up, a busy status appears. Ctrl-X still
@@ -65,6 +72,19 @@ Agents and scripts can use `panelink pane list --json` to discover panes and
 `events --pane N` follows the pane selected when the command starts; closing it
 does not switch the stream to a replacement at that index. See the
 [agent CLI contract](docs/progress/P3-AGENT-CLI.md) for commands and limits.
+
+If an agent cannot write Panelink's default caller-context directory, give it
+a stable writable directory for its private operation metadata:
+
+```sh
+export PANELINK_AGENT_CONTEXT_DIR="$PWD/.panelink-agent-contexts"
+panelink pane list --json
+panelink pane read 2 --lines 80 --json
+```
+
+The CLI creates the directory with mode 0700. Keep using the same directory so
+uncertain operations can be reconciled. The agent also needs permission to
+connect to Panelink's local control socket.
 
 `pane list --json` also reports `input_owner_info`: the server-issued owner
 ID, whether it is your caller context, its revision and server-clock expiry.

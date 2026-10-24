@@ -148,6 +148,15 @@ pub(crate) fn mouse_button(mouse: &MouseEvent) -> Option<(bool, bool)> {
     }
 }
 
+/// `true` for an upward wheel step, `false` for downward movement.
+pub(crate) fn mouse_wheel(mouse: &MouseEvent) -> Option<bool> {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => Some(true),
+        MouseEventKind::ScrollDown => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

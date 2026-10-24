@@ -9,7 +9,7 @@ use std::io::{self, Write};
 
 use super::render::{paint_row, paint_row_diff, validate_snapshot, Placement};
 use super::{io_error, ScreenSnapshot, TerminalError, TerminalSize};
-use crate::pane_layout::Rect;
+use crate::pane_layout::{content_rect, Rect};
 
 /// Largest pane or overlay height accepted by the compositor.
 pub const MAX_RECT_ROWS: u16 = 80;
@@ -23,7 +23,7 @@ const MAX_OVERLAY_CELLS: usize = MAX_ROWS * MAX_COLUMNS;
 /// Content shown inside one pane rectangle.
 #[derive(Clone, Copy, Debug)]
 pub enum PaneContent<'a> {
-    /// A sanitized terminal snapshot whose dimensions equal the pane rectangle.
+    /// A sanitized terminal snapshot whose dimensions equal the inset content rectangle.
     Snapshot(&'a ScreenSnapshot),
     /// A blank pane with one centered, clipped status line (for example a
     /// starting, launch-failed or resize-pending pane). Only printable ASCII
@@ -178,6 +178,7 @@ pub struct Compositor {
     pending_meta: FrameMeta,
     valid: bool,
     pending_ready: bool,
+    padded: bool,
 }
 
 impl std::fmt::Debug for Compositor {
@@ -193,6 +194,16 @@ impl Compositor {
     /// Reserve fixed slot arrays and the maximum-size overlay. Pane snapshots
     /// allocate only to the active pane dimensions as frames are staged.
     pub fn try_new() -> Result<Self, TerminalError> {
+        Self::with_padding(true)
+    }
+
+    /// Preserve saved checkpoint geometry without adding live-pane margins.
+    /// Recovery snapshots retain the dimensions recorded by their source.
+    pub fn try_new_unpadded() -> Result<Self, TerminalError> {
+        Self::with_padding(false)
+    }
+
+    fn with_padding(padded: bool) -> Result<Self, TerminalError> {
         Ok(Self {
             displayed: std::array::from_fn(|_| None),
             target: std::array::from_fn(|_| None),
@@ -202,6 +213,7 @@ impl Compositor {
             pending_meta: FrameMeta::EMPTY,
             valid: false,
             pending_ready: false,
+            padded,
         })
     }
 
@@ -241,7 +253,7 @@ impl Compositor {
     /// otherwise only differences against the committed baseline are written.
     pub fn render<W: Write>(&mut self, frame: &ComposeFrame<'_>, output: &mut W) -> io::Result<()> {
         self.pending_ready = false;
-        validate_frame(frame)?;
+        validate_frame(frame, self.padded)?;
         self.stage(frame);
         match self.write_frame(output) {
             Ok(()) => {
@@ -277,10 +289,12 @@ impl Compositor {
             match pane.content {
                 PaneContent::Snapshot(snapshot) => {
                     slot_meta.kind = SlotKind::Snapshot;
+                    let content = pane_content_rect(pane.rect, self.padded)
+                        .expect("validated pane dimensions");
                     match self.target[slot].as_mut() {
                         Some(target) => target.copy_from(snapshot),
                         None => {
-                            let size = TerminalSize::new(pane.rect.rows, pane.rect.columns)
+                            let size = TerminalSize::new(content.rows, content.columns)
                                 .expect("validated pane dimensions");
                             let mut target = ScreenSnapshot::try_new(size)
                                 .expect("bounded compositor pane allocation");
@@ -291,7 +305,9 @@ impl Compositor {
                 }
                 PaneContent::Placeholder(text) => {
                     slot_meta.kind = SlotKind::Placeholder;
-                    let limit = usize::from(pane.rect.columns).min(MAX_COLUMNS);
+                    let content = pane_content_rect(pane.rect, self.padded)
+                        .expect("validated pane dimensions");
+                    let limit = usize::from(content.columns).min(MAX_COLUMNS);
                     let mut len = 0;
                     for byte in text.chars().take(limit).map(ascii_cell) {
                         slot_meta.placeholder[len] = byte;
@@ -326,10 +342,14 @@ impl Compositor {
                 Some(PaneView {
                     rect,
                     content: PaneContent::Snapshot(snapshot),
-                }) if !snapshot.cursor_hidden() => CursorState::Visible {
-                    row: rect.y + snapshot.cursor_row().min(snapshot.rows() - 1),
-                    column: rect.x + snapshot.cursor_column().min(snapshot.columns() - 1),
-                },
+                }) if !snapshot.cursor_hidden() => {
+                    let content =
+                        pane_content_rect(rect, self.padded).expect("validated pane dimensions");
+                    CursorState::Visible {
+                        row: content.y + snapshot.cursor_row().min(snapshot.rows() - 1),
+                        column: content.x + snapshot.cursor_column().min(snapshot.columns() - 1),
+                    }
+                }
                 _ => CursorState::Hidden,
             },
             _ => CursorState::Hidden,
@@ -484,13 +504,18 @@ impl Compositor {
                 let snapshot = self.target[slot]
                     .as_ref()
                     .ok_or_else(|| invalid("snapshot slot missing"))?;
+                let content =
+                    pane_content_rect(rect, self.padded).expect("validated pane dimensions");
+                if self.padded && damage.iter().any(Option::is_some) {
+                    self.paint_padding(output, rect, exclude, damage)?;
+                }
                 let placement = Placement {
-                    row: rect.y,
-                    column: rect.x,
+                    row: content.y,
+                    column: content.x,
                     exclude,
                 };
                 for row in 0..snapshot.rows() {
-                    let host_row = rect.y + row;
+                    let host_row = content.y + row;
                     let damaged = damage
                         .iter()
                         .flatten()
@@ -506,10 +531,12 @@ impl Compositor {
             }
             SlotKind::Placeholder => {
                 output.write_all(b"\x1b[0m")?;
+                let content =
+                    pane_content_rect(rect, self.padded).expect("validated pane dimensions");
                 let text = meta.placeholder_text();
                 let text_len = u16::try_from(text.len()).unwrap_or(0);
-                let text_row = (rect.rows - 1) / 2;
-                let text_column = (rect.columns - text_len) / 2;
+                let text_row = content.y + (content.rows - 1) / 2;
+                let text_column = content.x - rect.x + (content.columns - text_len) / 2;
                 for row in 0..rect.rows {
                     let host_row = rect.y + row;
                     write_ascii_run(
@@ -519,7 +546,7 @@ impl Compositor {
                         rect.columns,
                         |column| excluded(exclude, host_row, column),
                         |offset| {
-                            if row == text_row && offset >= text_column {
+                            if host_row == text_row && offset >= text_column {
                                 text.get(usize::from(offset - text_column))
                                     .copied()
                                     .unwrap_or(b' ')
@@ -532,6 +559,49 @@ impl Compositor {
                 Ok(())
             }
         }
+    }
+
+    /// Clear pane margins when an overlay moves or disappears over them.
+    fn paint_padding<W: Write>(
+        &self,
+        output: &mut W,
+        rect: Rect,
+        exclude: Option<Rect>,
+        damage: [Option<Rect>; 2],
+    ) -> io::Result<()> {
+        let damaged = |row: u16, column: u16| {
+            damage
+                .iter()
+                .flatten()
+                .any(|rect| rect.contains(column, row))
+        };
+        output.write_all(b"\x1b[0m")?;
+        for row in [rect.y, rect.y + rect.rows - 1] {
+            write_ascii_run(
+                output,
+                row,
+                rect.x,
+                rect.columns,
+                |column| !damaged(row, column) || excluded(exclude, row, column),
+                |_| b' ',
+            )?;
+        }
+        let right = rect.x + rect.columns - 1;
+        for row in rect.y + 1..rect.y + rect.rows - 1 {
+            for column in [rect.x, right] {
+                if damaged(row, column) {
+                    write_ascii_run(
+                        output,
+                        row,
+                        column,
+                        1,
+                        |candidate| excluded(exclude, row, candidate),
+                        |_| b' ',
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Paint the divider, or with `only`, just its cells inside that rectangle.
@@ -739,7 +809,15 @@ fn overlaps(left: Rect, right: Rect) -> bool {
         && right_y < left_y + u32::from(left.rows)
 }
 
-fn validate_frame(frame: &ComposeFrame<'_>) -> io::Result<()> {
+fn pane_content_rect(rect: Rect, padded: bool) -> Option<Rect> {
+    if padded {
+        content_rect(rect)
+    } else {
+        Some(rect)
+    }
+}
+
+fn validate_frame(frame: &ComposeFrame<'_>, padded: bool) -> io::Result<()> {
     let (host_rows, host_columns) = (frame.host_rows, frame.host_columns);
     if host_rows == 0 || host_columns == 0 {
         return Err(invalid("compose host viewport is empty"));
@@ -752,11 +830,15 @@ fn validate_frame(frame: &ComposeFrame<'_>) -> io::Result<()> {
         if !within_limits(pane.rect) {
             return Err(invalid("pane rectangle exceeds terminal bounds"));
         }
+        let content = pane_content_rect(pane.rect, padded)
+            .ok_or_else(|| invalid("pane rectangle is smaller than the minimum content size"))?;
         if let PaneContent::Snapshot(snapshot) = pane.content {
-            if snapshot.rows() != pane.rect.rows || snapshot.columns() != pane.rect.columns {
-                return Err(invalid("pane snapshot does not match its rectangle"));
+            if snapshot.rows() != content.rows || snapshot.columns() != content.columns {
+                return Err(invalid(
+                    "pane snapshot does not match its content rectangle",
+                ));
             }
-            validate_snapshot(snapshot, pane.rect.rows, pane.rect.columns)?;
+            validate_snapshot(snapshot, content.rows, content.columns)?;
         }
     }
 
@@ -883,25 +965,30 @@ mod tests {
         cell.text_len = u8::try_from(text.len()).unwrap();
     }
 
-    /// Host 10x41: left pane, one-column divider at column 20, right pane.
+    /// Two panes with one-cell padding and a one-column divider.
     fn side_by_side<'a>(left: &'a ScreenSnapshot, right: &'a ScreenSnapshot) -> ComposeFrame<'a> {
+        let rows = left.rows() + 2;
+        let columns = left.columns() + 2;
+        let right_x = columns + 1;
+        let host_rows = rows.max(right.rows() + 2);
+        let host_columns = right_x + right.columns() + 2;
         ComposeFrame {
-            host_rows: 10,
-            host_columns: 41,
+            host_rows,
+            host_columns,
             panes: [
                 Some(PaneView {
-                    rect: rect(0, 0, 10, 20),
+                    rect: rect(0, 0, rows, columns),
                     content: PaneContent::Snapshot(left),
                 }),
                 Some(PaneView {
-                    rect: rect(0, 21, 10, 20),
+                    rect: rect(0, right_x, right.rows() + 2, right.columns() + 2),
                     content: PaneContent::Snapshot(right),
                 }),
                 None,
                 None,
             ],
-            divider: Some(rect(0, 20, 10, 1)),
-            dividers: [Some(rect(0, 20, 10, 1)), None, None],
+            divider: Some(rect(0, columns, rows, 1)),
+            dividers: [Some(rect(0, columns, rows, 1)), None, None],
             focused: None,
             overlay: None,
         }
@@ -938,6 +1025,14 @@ mod tests {
             .to_owned()
     }
 
+    fn assert_blank(parser: &Parser, row: u16, column: u16) {
+        let text = cell_text(parser, row, column);
+        assert!(
+            text.is_empty() || text == " ",
+            "cell {row},{column} was {text:?}"
+        );
+    }
+
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack
             .windows(needle.len())
@@ -965,7 +1060,6 @@ mod tests {
 
     fn assert_same_screen(actual: &Parser, expected: &Parser, frame: &ComposeFrame<'_>) {
         let (actual, expected) = (actual.screen(), expected.screen());
-        assert_eq!(actual.contents(), expected.contents());
         assert_eq!(actual.hide_cursor(), expected.hide_cursor());
         if !expected.hide_cursor() {
             assert_eq!(actual.cursor_position(), expected.cursor_position());
@@ -976,7 +1070,14 @@ mod tests {
                     actual.cell(row, column).unwrap(),
                     expected.cell(row, column).unwrap(),
                 );
-                assert_eq!(left.contents(), right.contents(), "cell {row},{column}");
+                let left_text = left.contents();
+                let right_text = right.contents();
+                assert!(
+                    left_text == right_text
+                        || (left_text.is_empty() && right_text == " ")
+                        || (left_text == " " && right_text.is_empty()),
+                    "cell {row},{column}: {left_text:?} != {right_text:?}"
+                );
                 assert_eq!(left.is_wide(), right.is_wide());
                 assert_eq!(left.fgcolor(), right.fgcolor());
                 assert_eq!(left.bgcolor(), right.bgcolor());
@@ -1021,19 +1122,22 @@ mod tests {
         let output = fresh_render(&frame);
 
         assert!(output.starts_with(b"\x1b[?25l\x1b[?7l\x1b[0m\x1b[2J"));
-        assert!(contains(&output, b"\x1b[1;22H\x1b[0;39;49mR"));
-        assert!(contains(&output, b"\x1b[2;22H\x1b[0;39;49mr"));
+        assert!(contains(&output, b"\x1b[2;25H\x1b[0;39;49mR"));
+        assert!(contains(&output, b"\x1b[3;25H\x1b[0;39;49mr"));
         let parser = screen(&output, &frame);
-        assert_eq!(cell_text(&parser, 0, 0), "L");
-        assert_eq!(cell_text(&parser, 0, 3), "T");
-        assert_eq!(cell_text(&parser, 0, 21), "R");
-        assert_eq!(cell_text(&parser, 1, 21), "r");
-        for row in 0..10 {
-            assert_eq!(cell_text(&parser, row, 20), "|");
+        assert_eq!(cell_text(&parser, 1, 1), "L");
+        assert_eq!(cell_text(&parser, 1, 4), "T");
+        assert_eq!(cell_text(&parser, 1, 24), "R");
+        assert_eq!(cell_text(&parser, 2, 24), "r");
+        for (row, column) in [(0, 0), (0, 1), (1, 0), (11, 21), (1, 21)] {
+            assert_blank(&parser, row, column);
+        }
+        for row in 0..12 {
+            assert_eq!(cell_text(&parser, row, 22), "|");
         }
         assert!(positions(&output)
             .iter()
-            .all(|&(row, column)| row <= 10 && column <= 41));
+            .all(|&(row, column)| row <= 12 && column <= 45));
     }
 
     #[test]
@@ -1041,34 +1145,34 @@ mod tests {
         let top = snapshot_from("TOP", 5, 20);
         let bottom = snapshot_from("BOTTOM", 5, 20);
         let frame = ComposeFrame {
-            host_rows: 11,
-            host_columns: 20,
+            host_rows: 15,
+            host_columns: 22,
             panes: [
                 Some(PaneView {
-                    rect: rect(0, 0, 5, 20),
+                    rect: rect(0, 0, 7, 22),
                     content: PaneContent::Snapshot(&top),
                 }),
                 Some(PaneView {
-                    rect: rect(6, 0, 5, 20),
+                    rect: rect(8, 0, 7, 22),
                     content: PaneContent::Snapshot(&bottom),
                 }),
                 None,
                 None,
             ],
-            divider: Some(rect(5, 0, 1, 20)),
-            dividers: [Some(rect(5, 0, 1, 20)), None, None],
+            divider: Some(rect(7, 0, 1, 22)),
+            dividers: [Some(rect(7, 0, 1, 22)), None, None],
             focused: None,
             overlay: None,
         };
         let output = fresh_render(&frame);
 
-        assert!(contains(&output, b"\x1b[7;1H\x1b[0;39;49mB"));
+        assert!(contains(&output, b"\x1b[10;2H\x1b[0;39;49mB"));
         let parser = screen(&output, &frame);
-        assert_eq!(cell_text(&parser, 0, 0), "T");
-        assert_eq!(cell_text(&parser, 6, 0), "B");
-        assert_eq!(cell_text(&parser, 6, 5), "M");
-        for column in 0..20 {
-            assert_eq!(cell_text(&parser, 5, column), "-");
+        assert_eq!(cell_text(&parser, 1, 1), "T");
+        assert_eq!(cell_text(&parser, 9, 1), "B");
+        assert_eq!(cell_text(&parser, 9, 6), "M");
+        for column in 0..22 {
+            assert_eq!(cell_text(&parser, 7, column), "-");
         }
     }
 
@@ -1081,47 +1185,47 @@ mod tests {
             snapshot_from("P4", 10, 20),
         ];
         let frame = ComposeFrame {
-            host_rows: 21,
-            host_columns: 41,
+            host_rows: 25,
+            host_columns: 45,
             panes: [
                 Some(PaneView {
-                    rect: rect(0, 0, 10, 20),
+                    rect: rect(0, 0, 12, 22),
                     content: PaneContent::Snapshot(&panes[0]),
                 }),
                 Some(PaneView {
-                    rect: rect(0, 21, 10, 20),
+                    rect: rect(0, 23, 12, 22),
                     content: PaneContent::Snapshot(&panes[1]),
                 }),
                 Some(PaneView {
-                    rect: rect(11, 0, 10, 20),
+                    rect: rect(13, 0, 12, 22),
                     content: PaneContent::Snapshot(&panes[2]),
                 }),
                 Some(PaneView {
-                    rect: rect(11, 21, 10, 20),
+                    rect: rect(13, 23, 12, 22),
                     content: PaneContent::Snapshot(&panes[3]),
                 }),
             ],
-            divider: Some(rect(0, 20, 21, 1)),
+            divider: Some(rect(0, 22, 25, 1)),
             dividers: [
-                Some(rect(0, 20, 21, 1)),
-                Some(rect(10, 0, 1, 20)),
-                Some(rect(10, 21, 1, 20)),
+                Some(rect(0, 22, 25, 1)),
+                Some(rect(12, 0, 1, 22)),
+                Some(rect(12, 23, 1, 22)),
             ],
             focused: None,
             overlay: None,
         };
         let output = fresh_render(&frame);
         let rendered = screen(&output, &frame);
-        assert_eq!(cell_text(&rendered, 0, 0), "P");
-        assert_eq!(cell_text(&rendered, 0, 21), "P");
-        assert_eq!(cell_text(&rendered, 11, 0), "P");
-        assert_eq!(cell_text(&rendered, 11, 21), "P");
-        for row in 0..21 {
-            assert_eq!(cell_text(&rendered, row, 20), "|");
+        assert_eq!(cell_text(&rendered, 1, 1), "P");
+        assert_eq!(cell_text(&rendered, 1, 24), "P");
+        assert_eq!(cell_text(&rendered, 14, 1), "P");
+        assert_eq!(cell_text(&rendered, 14, 24), "P");
+        for row in 0..25 {
+            assert_eq!(cell_text(&rendered, row, 22), "|");
         }
-        for column in 0..20 {
-            assert_eq!(cell_text(&rendered, 10, column), "-");
-            assert_eq!(cell_text(&rendered, 10, column + 21), "-");
+        for column in 0..22 {
+            assert_eq!(cell_text(&rendered, 12, column), "-");
+            assert_eq!(cell_text(&rendered, 12, column + 23), "-");
         }
     }
 
@@ -1135,8 +1239,8 @@ mod tests {
 
         let output = rendered(&mut compositor, &side_by_side(&left, &after));
         assert!(!contains(&output, b"\x1b[2J"));
-        assert_eq!(positions(&output), vec![(1, 23)]);
-        assert!(contains(&output, b"\x1b[1;23H\x1b[0;39;49mX"));
+        assert_eq!(positions(&output), vec![(2, 26)]);
+        assert!(contains(&output, b"\x1b[2;26H\x1b[0;39;49mX"));
         assert!(!contains(&output, b"LEFT"));
         assert_incremental_matches_full(&[
             side_by_side(&left, &before),
@@ -1158,7 +1262,7 @@ mod tests {
         let mut frame = side_by_side(&left, &moved);
         frame.focused = Some(1);
         let output = rendered_committed(&mut compositor, &frame);
-        assert_eq!(output, b"\x1b[3;25H");
+        assert_eq!(output, b"\x1b[4;28H");
     }
 
     #[test]
@@ -1170,18 +1274,12 @@ mod tests {
         rendered_committed(&mut compositor, &side_by_side(&left, &right));
 
         let mut moved = side_by_side(&left, &narrow);
-        moved.host_columns = 42;
-        moved.panes[1] = Some(PaneView {
-            rect: rect(0, 22, 10, 20),
-            content: PaneContent::Snapshot(&narrow),
-        });
-        moved.divider = Some(rect(0, 21, 10, 1));
-        moved.dividers = [Some(rect(0, 21, 10, 1)), None, None];
+        moved.host_columns = 46;
         let output = rendered_committed(&mut compositor, &moved);
         assert!(output.starts_with(b"\x1b[?25l\x1b[?7l\x1b[0m\x1b[2J"));
 
         let mut grown = moved;
-        grown.host_columns = 43;
+        grown.host_columns = 47;
         assert!(contains(
             &rendered_committed(&mut compositor, &grown),
             b"\x1b[2J"
@@ -1215,26 +1313,26 @@ mod tests {
         ];
         let mut frame = side_by_side(&left, &right);
         frame.overlay = Some(OverlayView {
-            rect: rect(0, 30, 4, 20),
+            rect: rect(1, 30, 4, 20),
             lines: &lines,
         });
         let output = fresh_render(&frame);
 
         assert!(positions(&output)
             .iter()
-            .all(|&(row, column)| row <= 10 && column <= 41));
-        assert!(contains(&output, b"\x1b[0;7m\x1b[1;31HSplit Left "));
-        assert!(contains(&output, b"\x1b[0;2m\x1b[2;31HSplit Right"));
+            .all(|&(row, column)| row <= 12 && column <= 45));
+        assert!(contains(&output, b"\x1b[0;7m\x1b[2;31HSplit Left "));
+        assert!(contains(&output, b"\x1b[0;2m\x1b[3;31HSplit Right"));
         assert!(!contains(&output, b"\x1b]52"));
         let parser = screen(&output, &frame);
-        assert_eq!(cell_text(&parser, 0, 29), "R");
-        assert_eq!(cell_text(&parser, 0, 30), "S");
-        assert_eq!(cell_text(&parser, 0, 40), " ");
-        assert!(parser.screen().cell(0, 30).unwrap().inverse());
-        assert!(parser.screen().cell(1, 30).unwrap().dim());
-        assert!(parser.screen().cell(2, 30).unwrap().bold());
-        assert_eq!(cell_text(&parser, 2, 37), "?");
-        assert_eq!(cell_text(&parser, 3, 30), " ");
+        assert_eq!(cell_text(&parser, 1, 29), "R");
+        assert_eq!(cell_text(&parser, 1, 30), "S");
+        assert_blank(&parser, 1, 40);
+        assert!(parser.screen().cell(1, 30).unwrap().inverse());
+        assert!(parser.screen().cell(2, 30).unwrap().dim());
+        assert!(parser.screen().cell(3, 30).unwrap().bold());
+        assert_eq!(cell_text(&parser, 3, 37), "?");
+        assert_blank(&parser, 4, 30);
 
         // Pane changes under an unchanged overlay never overwrite it.
         let mut compositor = Compositor::try_new().unwrap();
@@ -1286,9 +1384,9 @@ mod tests {
         let mut frame = side_by_side(&left, &right);
         frame.focused = Some(1);
         let output = fresh_render(&frame);
-        assert!(output.ends_with(b"\x1b[3;25H\x1b[?25h"));
+        assert!(output.ends_with(b"\x1b[4;28H\x1b[?25h"));
         let parser = screen(&output, &frame);
-        assert_eq!(parser.screen().cursor_position(), (2, 24));
+        assert_eq!(parser.screen().cursor_position(), (3, 27));
         assert!(!parser.screen().hide_cursor());
 
         let mut overlaid = frame;
@@ -1303,7 +1401,7 @@ mod tests {
 
         let mut placeholder = frame;
         placeholder.panes[1] = Some(PaneView {
-            rect: rect(0, 21, 10, 20),
+            rect: rect(0, 23, 12, 22),
             content: PaneContent::Placeholder("starting"),
         });
         assert!(!contains(&fresh_render(&placeholder), b"\x1b[?25h"));
@@ -1315,7 +1413,7 @@ mod tests {
             *b"\x1b[?25l"
         );
         let output = rendered_committed(&mut compositor, &frame);
-        assert!(output.ends_with(b"\x1b[3;25H\x1b[?25h"));
+        assert!(output.ends_with(b"\x1b[4;28H\x1b[?25h"));
     }
 
     #[test]
@@ -1323,39 +1421,39 @@ mod tests {
         let left = snapshot_from("L", 10, 20);
         let mut frame = side_by_side(&left, &left);
         frame.panes[1] = Some(PaneView {
-            rect: rect(0, 21, 10, 20),
+            rect: rect(0, 23, 12, 22),
             content: PaneContent::Placeholder("starting"),
         });
         let parser = screen(&fresh_render(&frame), &frame);
-        // Rows 10 -> text row 4; 20 - 8 columns -> offset 6 -> host column 27.
-        assert_eq!(cell_text(&parser, 4, 27), "s");
-        assert_eq!(cell_text(&parser, 4, 34), "g");
-        assert_eq!(cell_text(&parser, 4, 26), " ");
+        // Content is 10x20 at row 1, column 24; the eight-cell label centers at column 30.
+        assert_eq!(cell_text(&parser, 5, 30), "s");
+        assert_eq!(cell_text(&parser, 5, 37), "g");
+        assert_eq!(cell_text(&parser, 5, 29), " ");
 
         frame.panes[1] = Some(PaneView {
-            rect: rect(0, 21, 10, 20),
+            rect: rect(0, 23, 12, 22),
             content: PaneContent::Placeholder("launch_failed: \x1b]52;c;Q\x07 é and much more"),
         });
         let output = fresh_render(&frame);
         assert!(!contains(&output, b"\x1b]52"));
         assert!(!contains(&output, "é".as_bytes()));
-        assert!(positions(&output).iter().all(|&(_, column)| column <= 41));
+        assert!(positions(&output).iter().all(|&(_, column)| column <= 45));
         let parser = screen(&output, &frame);
-        assert_eq!(cell_text(&parser, 4, 21), "l");
-        assert_eq!(cell_text(&parser, 4, 36), "?");
-        assert_eq!(cell_text(&parser, 4, 40), ";");
-        assert_eq!(cell_text(&parser, 4, 20), "|");
+        assert_eq!(cell_text(&parser, 5, 24), "l");
+        assert_eq!(cell_text(&parser, 5, 39), "?");
+        assert_eq!(cell_text(&parser, 5, 43), ";");
+        assert_eq!(cell_text(&parser, 5, 22), "|");
 
         // Changing the placeholder text repaints only that pane.
         let mut compositor = Compositor::try_new().unwrap();
         rendered_committed(&mut compositor, &frame);
         frame.panes[1] = Some(PaneView {
-            rect: rect(0, 21, 10, 20),
+            rect: rect(0, 23, 12, 22),
             content: PaneContent::Placeholder("resize_pending"),
         });
         let output = rendered_committed(&mut compositor, &frame);
         assert!(!contains(&output, b"\x1b[2J"));
-        assert!(positions(&output).iter().all(|&(_, column)| column >= 22));
+        assert!(positions(&output).iter().all(|&(_, column)| column >= 24));
         assert!(rendered_committed(&mut compositor, &frame).is_empty());
     }
 
@@ -1376,14 +1474,14 @@ mod tests {
         frame.host_columns = 40;
         cases.push(frame);
         let mut frame = valid;
-        frame.panes[1] = pane(rect(0, 21, 10, 20), &small);
+        frame.panes[1] = pane(rect(0, 23, 12, 22), &small);
         cases.push(frame);
         let mut frame = valid;
-        frame.panes[1] = pane(rect(0, 15, 10, 20), &left);
+        frame.panes[1] = pane(rect(0, 15, 12, 22), &left);
         frame.divider = None;
         cases.push(frame);
         let mut frame = valid;
-        frame.divider = Some(rect(0, 19, 10, 1));
+        frame.divider = Some(rect(0, 21, 12, 1));
         frame.dividers = [frame.divider, None, None];
         cases.push(frame);
         let mut frame = valid;
@@ -1397,8 +1495,8 @@ mod tests {
         });
         cases.push(frame);
         let mut frame = valid;
-        frame.divider = Some(rect(0, 20, 10, 2));
-        frame.dividers = [Some(rect(0, 20, 10, 2)), None, None];
+        frame.divider = Some(rect(0, 22, 12, 2));
+        frame.dividers = [Some(rect(0, 22, 12, 2)), None, None];
         cases.push(frame);
         let mut frame = valid;
         frame.panes[1] = Some(PaneView {
@@ -1496,10 +1594,11 @@ mod tests {
         let frame = side_by_side(&left, &right);
         let output = fresh_render(&frame);
         let parser = screen(&output, &frame);
-        assert_eq!(cell_text(&parser, 0, 19), "?");
-        assert_eq!(cell_text(&parser, 0, 20), "|");
-        assert_eq!(cell_text(&parser, 0, 21), "界");
-        assert_eq!(cell_text(&parser, 0, 23), "X");
+        assert_eq!(cell_text(&parser, 1, 20), "?");
+        assert_blank(&parser, 1, 21);
+        assert_eq!(cell_text(&parser, 1, 22), "|");
+        assert_eq!(cell_text(&parser, 1, 24), "界");
+        assert_eq!(cell_text(&parser, 1, 26), "X");
 
         // A wide glyph straddling the overlay's left edge keeps a fallback.
         let lines = [OverlayLine {
@@ -1508,15 +1607,15 @@ mod tests {
         }];
         let mut overlaid = frame;
         overlaid.overlay = Some(OverlayView {
-            rect: rect(0, 22, 1, 4),
+            rect: rect(1, 25, 1, 4),
             lines: &lines,
         });
         let output = fresh_render(&overlaid);
         assert!(!contains(&output, "界X".as_bytes()));
         let parser = screen(&output, &overlaid);
-        assert_eq!(cell_text(&parser, 0, 21), "?");
-        assert_eq!(cell_text(&parser, 0, 22), "M");
-        assert_eq!(cell_text(&parser, 0, 25), "U");
+        assert_eq!(cell_text(&parser, 1, 24), "?");
+        assert_eq!(cell_text(&parser, 1, 25), "M");
+        assert_eq!(cell_text(&parser, 1, 28), "U");
         assert_incremental_matches_full(&[frame, overlaid, frame]);
     }
 
@@ -1538,7 +1637,7 @@ mod tests {
         });
         let mut placeholder = side_by_side(&c, &a);
         placeholder.panes[0] = Some(PaneView {
-            rect: rect(0, 0, 10, 20),
+            rect: rect(0, 0, 12, 22),
             content: PaneContent::Placeholder("starting"),
         });
         assert_incremental_matches_full(&[
@@ -1553,7 +1652,7 @@ mod tests {
 
     #[test]
     fn maximum_frame_streams_under_four_mib_without_a_frame_buffer() {
-        let mut first = snapshot_from("", 80, 119);
+        let mut first = snapshot_from("", 78, 117);
         let maximum_cell_text = format!("A{}", "\u{20d0}".repeat(7));
         for cell in &mut first.cells {
             set_text(cell, &maximum_cell_text);
@@ -1562,10 +1661,10 @@ mod tests {
             cell.foreground = crate::terminal::Color::Rgb(255, 255, 255);
             cell.background = crate::terminal::Color::Rgb(255, 255, 255);
         }
-        let mut second = snapshot_from("", 80, 120);
+        let mut second = snapshot_from("", 78, 118);
         second.copy_from(&first);
-        second.columns = 120;
-        second.cells.resize(80 * 120, first.cells[0]);
+        second.columns = 118;
+        second.cells.resize(78 * 118, first.cells[0]);
         let frame = ComposeFrame {
             host_rows: 80,
             host_columns: 240,

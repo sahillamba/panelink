@@ -652,13 +652,13 @@ fn split_ui_keys_and_resize_over_socketpairs_with_two_real_zsh_children() {
             one.keys(first, owner, "echo SZ1-$(stty size | tr ' ' x)"),
             OperationStatus::Completed(Outcome::Applied)
         );
-        wait_screen(&mut one, first, "SZ1-30x50", &[]);
+        wait_screen(&mut one, first, "SZ1-28x48", &[]);
         let owner = two.describe().owner_revision;
         assert_eq!(
             two.keys(second, owner, "echo SZ2-$(stty size | tr ' ' x)"),
             OperationStatus::Completed(Outcome::Applied)
         );
-        wait_screen(&mut two, second, "SZ2-30x50", &[]);
+        wait_screen(&mut two, second, "SZ2-28x48", &[]);
         // A stale layout revision is rejected without effects.
         let stale = encode_root_resize(&RootResize {
             key: one.key(),

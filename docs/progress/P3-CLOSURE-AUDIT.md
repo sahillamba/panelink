@@ -1,8 +1,29 @@
 # Phase 3 closure gate audit — 2026-10-23
 
+Latest amendment, 2026-10-24: the user's three-pane screenshot reports blocked
+agent metadata storage, nonworking scrolling and a request for pane padding.
+These usability repairs are delivered and parent-verified: final serial
+1111 passed/0 failed/15 ignored in164.34s, plus all seven supporting checks.
+See [repair result](P3-USABILITY-FIXES-RESULT.md). After explicit user approval, the launcher was switched and a fresh workspace
+started on the verified worktree build; read-only pane discovery/read pass. The 1091-test
+evidence below is the prior baseline. Human four-pane acceptance remains open;
+partial host feedback and automated outer-PTY tests do not close it.
+
+
 Read-only audit of the current integrated working tree and its recorded evidence.
 This note does not close Phase 3 or promote human-host, reboot, or provider
 acceptance to passing.
+
+Current status (2026-10-24): the accepted bounded implementation and accumulated
+automated regressions are reviewed and integrated verification passed
+1091/0/15 ignored with all seven supporting checks. Three Luna High workers
+found no further required production task. Human four-pane Apple Terminal
+evidence is the sole explicit remaining Phase3 gate; no manual task is assigned.
+See [orchestration result](P3-ORCHESTRATION-RESULT.md),
+[remaining-gates audit](P3-REMAINING-GATES-2026-10-24.md) and
+[PTY audit](P3-PTY-INTERRUPTION-AUDIT.md). Optional admitted-input timing windows
+remain observation limits and must not become new closure requirements merely
+because they are untested.
 
 | Gate | Implemented | Tested evidence | Open limit |
 |---|---|---|---|
@@ -58,10 +79,64 @@ context retains its uncertain key; status/resync observes and clears it without
 resubmission, and the same child reports one handled token. This closes that
 post-completion/pre-client-ack coverage gap, not death before admission or
 while the owner is still processing input. Human four-pane acceptance remains
-separate. Prior known test intermittency remains unresolved; investigate those
-recorded failures before extending lifecycle claims.
+separate. The history-writer startup contention and ACK42 attach-host test
+intermittencies received bounded stabilizations and parent verification; see
+[the result](P3-INTERMITTENT-ACCEPTANCE-RESULT.md). Their earlier failed runs
+remain historical evidence, and repeated passing runs do not establish a timing
+guarantee.
 
 Other open work should be specified from the existing phase contract before
-implementation. In particular, do not turn provider identity, active-agent
-load targets, physical reboot recovery, or unresolved product choices into new
-Phase 3 requirements based only on aspirational roadmap prose.
+implementation. A proxy barrier can establish pre-delivery client death; a
+separate in-process harness would be needed to pause after server dispatch but
+before ledger admission. Do
+not turn provider identity, active-agent load targets, physical reboot recovery,
+or unresolved product choices into new Phase 3 requirements based only on
+aspirational roadmap prose.
+
+## Pre-delivery client-death slice specified — 2026-10-23
+
+The bounded test contract is now recorded in
+[P3-PRE-ADMISSION-CLIENT-DEATH-TASK.md](P3-PRE-ADMISSION-CLIENT-DEATH-TASK.md).
+The selected automated acceptance uses the authenticated proxy to pause after
+decoding the real Submit but before forwarding it. This proves durable client
+reservation while the server reports `NotAdmitted`; same-context resync clears
+uncertainty without sending input, and an independent shell CHECK remains at
+zero. An attempted in-test-file design for a server-side validation latch is
+not available in the current fixture: it launches a separate production
+server, and injecting `EffectSink::validate` would require a production hook or
+an in-process harness. The narrower pre-delivery test is therefore the current
+slice. It does not prove post-dispatch/pre-admission or admitted owner-pending/
+PTY interruption.
+
+## Pre-delivery client-death acceptance delivered — 2026-10-23
+
+The acceptance is implemented in `tests/p3_inflight_client.rs`; see
+[P3-PRE-ADMISSION-CLIENT-DEATH-RESULT.md](P3-PRE-ADMISSION-CLIENT-DEATH-RESULT.md).
+The proxy captures the exact Submit and never forwards it. The real CLI Child
+is SIGKILLed after context reservation; the server reports `NotAdmitted`,
+same-context resync clears uncertainty without resend, and the controlled
+shell CHECK remains zero. Parent's focused target passed 2/2, with docs/fmt/
+whitespace checks passing. This is explicitly pre-delivery evidence and does
+not test server dispatch before admission or owner-pending/PTy interruption.
+Full Phase 3 and the separate human four-pane/provider/reboot limits remain
+open.
+
+## Post-dispatch barrier feasibility audited — 2026-10-23
+
+The actual CLI cannot be paused deterministically inside server validation by
+the current separate-process integration fixture. Its proxy stops before
+delivery, or after the server completes processing. The in-crate `StateOwner`
+handler can be tested at `EffectSink::validate` with a bounded fake sink, but
+this omits socket ingress and real CLI death. The audit and limits are recorded
+in [P3-POST-DISPATCH-FEASIBILITY.md](P3-POST-DISPATCH-FEASIBILITY.md). Next is
+a handler-boundary unit test only; do not claim real client-death coverage or
+add a production hook. Owner-pending/PTy, human four-pane, provider and reboot
+gates remain separate.
+
+The in-crate `StateOwner` test is now delivered in `src/server.rs`; the focused
+test passed 1/1. It blocks at test-only validation, observes zero effects, then
+verifies one terminal effect and exact-duplicate deduplication. This verifies
+handler ordering only; it is not socket ingress or real CLI-death evidence.
+The admitted owner-pending/PTy audit is now recorded in
+[P3-PTY-INTERRUPTION-AUDIT.md](P3-PTY-INTERRUPTION-AUDIT.md). It preserves the
+evidence limits without adding a production hook or a new closure requirement.

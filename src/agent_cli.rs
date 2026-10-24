@@ -250,7 +250,20 @@ fn workspace(caller: &str) -> Result<Workspace, CliError> {
             ));
         }
     }
-    let agent_root = state.root.join("agent-contexts");
+    // Agent contexts hold durable lease/sequence and uncertainty state. Keep
+    // the default beside Panelink state, but let a caller choose an explicit
+    // stable private location when its execution environment cannot write the
+    // application-support directory. Never fall back automatically: changing
+    // context roots can hide a prior uncertain operation.
+    let agent_root = std::env::var_os("PANELINK_AGENT_CONTEXT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.root.join("agent-contexts"));
+    if !agent_root.is_absolute() {
+        return Err(CliError::new(
+            "context_directory_unsafe",
+            "agent context directory must be an absolute private directory owned by this user",
+        ));
+    }
     ensure_private_directory(&agent_root)?;
     let caller_dir = agent_root.join(caller);
     ensure_private_directory(&caller_dir)?;
@@ -288,7 +301,7 @@ fn ensure_private_directory(path: &Path) -> Result<(), CliError> {
                 .map_err(|_| {
                     CliError::new(
                         "context_directory_unavailable",
-                        "could not create agent context directory",
+                        "could not create agent context directory; set PANELINK_AGENT_CONTEXT_DIR to a writable private directory",
                     )
                 })?;
             let metadata = fs::symlink_metadata(path).map_err(|_| {
@@ -310,7 +323,7 @@ fn ensure_private_directory(path: &Path) -> Result<(), CliError> {
         Err(_) => {
             return Err(CliError::new(
                 "context_directory_unavailable",
-                "could not inspect agent context directory",
+                "could not inspect agent context directory; set PANELINK_AGENT_CONTEXT_DIR to a writable private directory",
             ));
         }
     }
@@ -374,7 +387,7 @@ fn link_error(error: &'static str) -> CliError {
         ),
         _ => CliError::new(
             "control_unavailable",
-            "could not connect to or query the workspace",
+            "could not connect to or query the workspace; ensure it is running and the agent is permitted to connect to its local control socket",
         ),
     }
 }
@@ -2115,7 +2128,7 @@ fn write_line(value: &str) {
 }
 
 fn print_help() {
-    println!("Agent pane commands:\n  panelink pane list [--as NAME] [--json]\n  panelink pane run [--pane N] [--direction left|right|up|down] [--cwd DIR] [--as NAME] [--json] -- COMMAND [ARG ...]\n  panelink pane read N [--lines K] [--scrollback] [--json]\n  panelink pane claim|release N [--json]\n  panelink pane send N TEXT [--enter] [--claim] [--json]\n  panelink pane keys N Enter|Tab|Esc|C-c|Up|Down|Left|Right|Backspace... [--json]\n  panelink pane interrupt|close N [--json]\n  panelink wait N (--text STRING [--regex] | --quiet SECS | --exit | --change) --timeout SECS [--json]\n  panelink events [--pane N] [--timeout SECS] --json");
+    println!("Agent pane commands:\n  panelink pane list [--as NAME] [--json]\n  panelink pane run [--pane N] [--direction left|right|up|down] [--cwd DIR] [--as NAME] [--json] -- COMMAND [ARG ...]\n  panelink pane read N [--lines K] [--scrollback] [--json]\n  panelink pane claim|release N [--json]\n  panelink pane send N TEXT [--enter] [--claim] [--json]\n  panelink pane keys N Enter|Tab|Esc|C-c|Up|Down|Left|Right|Backspace... [--json]\n  panelink pane interrupt|close N [--json]\n  panelink wait N (--text STRING [--regex] | --quiet SECS | --exit | --change) --timeout SECS [--json]\n  panelink events [--pane N] [--timeout SECS] --json\n\nSet PANELINK_AGENT_CONTEXT_DIR to an absolute, stable private directory when the default context location is not writable. It must be owned by this user, have mode 0700, and remain the same across invocations.");
 }
 
 #[cfg(test)]

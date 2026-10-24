@@ -1310,9 +1310,75 @@ impl PtyEffects {
         self.session.snapshot()
     }
 
+    /// Return a bounded viewport over retained normal history. The parser's
+    /// live viewport remains unchanged. Alternate-screen history is clamped to
+    /// zero by the core session.
+    pub fn history_snapshot(&self, offset_rows: u16) -> Result<(ScreenSnapshot, u16), Outcome> {
+        if self.failed {
+            return Err(Outcome::Unknown);
+        }
+        self.session
+            .history_snapshot(offset_rows)
+            .map_err(|_| Outcome::Failed)
+    }
+
+    /// Whether the child has enabled a VT mouse tracking mode.
+    pub fn mouse_reporting_enabled(&self) -> bool {
+        self.session.mouse_reporting_enabled()
+    }
+
+    /// Whether the parser is currently displaying the alternate screen.
+    pub fn alternate_screen_active(&self) -> bool {
+        self.session.alternate_screen_active()
+    }
+
     /// Check that typed keys could be queued now, without any effect.
     pub fn validate_keys(&self) -> Result<(), RejectionCode> {
         self.validate_input_capacity()
+    }
+
+    /// Check that one wheel event can be admitted at the current content size.
+    pub fn validate_mouse_wheel(
+        &self,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<(), RejectionCode> {
+        if !self.is_live()
+            || self.closing
+            || self.stopped
+            || !self.alternate_screen_active()
+            || !self.mouse_reporting_enabled()
+        {
+            return Err(RejectionCode::Unsupported);
+        }
+        let size = self.session.size();
+        if column >= size.columns() || row >= size.rows() {
+            return Err(RejectionCode::InvalidRequest);
+        }
+        self.validate_input_capacity()?;
+        self.session
+            .validate_mouse_wheel(column, row, up)
+            .map_err(|error| match error {
+                crate::terminal::TerminalError::InvalidMousePosition => {
+                    RejectionCode::InvalidRequest
+                }
+                _ => RejectionCode::Unsupported,
+            })
+    }
+
+    /// Queue and synchronously deliver one typed wheel event using the same
+    /// bounded drain and suffix-discard policy as other pane input.
+    pub fn mouse_wheel(&mut self, column: u16, row: u16, up: bool) -> Outcome {
+        if self.validate_mouse_wheel(column, row, up).is_err() {
+            return Outcome::Failed;
+        }
+        if self.session.mouse_wheel(column, row, up).is_err() {
+            self.session.discard_pending_input();
+            return Outcome::Failed;
+        }
+        let request_bytes = self.session.pending_input_bytes();
+        self.drain_request(request_bytes)
     }
 
     /// Queue and synchronously deliver one bounded sequence of typed keys.
@@ -1610,6 +1676,64 @@ mod tests {
             text.push('\n');
         }
         text
+    }
+
+    #[test]
+    fn pty_history_and_mouse_adapters_clamp_views_and_revalidate_wheel_input() {
+        let fixture = Fixture::new();
+        let mut effects = PtyEffects::new(shell(
+            concat!(
+                "stty -echo -icanon min 0 time 0; ",
+                "printf 'NORMAL-ONE\\r\\nNORMAL-TWO\\r\\nNORMAL-THREE\\r\\nNORMAL-FOUR\\r\\nNORMAL-FIVE\\r\\nNORMAL-SIX\\r\\nNORMAL-SEVEN\\r\\nNORMAL-EIGHT\\r\\nNORMAL-NINE\\r\\n'; ",
+                "printf 'NORMAL-READY\\n'; ",
+                "while [ ! -f enter-mouse ]; do /bin/sleep 0.01; done; ",
+                "printf '\\033[?1049h\\033[?1000hMOUSE-READY\\n'; ",
+                "while [ ! -f leave-mouse ]; do /bin/sleep 0.01; done; ",
+                "printf '\\033[?1049lMOUSE-NORMAL\\n'; while :; do /bin/sleep 1; done"
+            ),
+            fixture.path(),
+        ));
+        pump_until_screen_text(&mut effects, "NORMAL-READY");
+        let live_before = visible_text(&effects);
+        let (history, actual_offset) = effects
+            .history_snapshot(u16::MAX)
+            .expect("bounded history view");
+        assert!(actual_offset > 0);
+        assert!(history.cell(0, 0).is_some_and(|cell| cell.text() == "N"));
+        assert_eq!(visible_text(&effects), live_before);
+        assert!(!effects.alternate_screen_active());
+
+        fs::write(fixture.path().join("enter-mouse"), b"go").unwrap();
+        pump_until_screen_text(&mut effects, "MOUSE-READY");
+        assert!(effects.mouse_reporting_enabled());
+        assert!(effects.alternate_screen_active());
+        assert_eq!(effects.validate_mouse_wheel(79, 7, true), Ok(()));
+        assert_eq!(
+            effects.validate_mouse_wheel(80, 7, true),
+            Err(RejectionCode::InvalidRequest)
+        );
+        assert_eq!(effects.mouse_wheel(79, 7, true), Outcome::Applied);
+        assert_eq!(effects.session.pending_input_bytes(), 0);
+
+        effects.closing = true;
+        assert_eq!(
+            effects.validate_mouse_wheel(0, 0, true),
+            Err(RejectionCode::Unsupported)
+        );
+        fs::write(fixture.path().join("leave-mouse"), b"go").unwrap();
+        pump_until_screen_text(&mut effects, "MOUSE-NORMAL");
+        assert!(!effects.alternate_screen_active());
+        assert!(effects.mouse_reporting_enabled());
+        effects.closing = false;
+        assert_eq!(
+            effects.validate_mouse_wheel(0, 0, false),
+            Err(RejectionCode::Unsupported)
+        );
+        effects.closing = true;
+        effects
+            .session
+            .shutdown()
+            .expect("stop mouse fixture child");
     }
 
     fn pump_until_screen_text(effects: &mut PtyEffects, needle: &str) {

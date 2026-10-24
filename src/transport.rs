@@ -115,7 +115,6 @@ impl AuthenticatedStream {
     /// Path and peer checks complete before any protocol bytes are exchanged.
     /// Connection failure never causes a request or input to be retransmitted.
     pub fn connect(directory: &Path, deadline: Instant) -> io::Result<Self> {
-        use rustix::net::{self, sockopt, AddressFamily, SocketAddrUnix, SocketType};
         check_deadline(deadline)?;
         let directory = validate_path(directory)?;
         let (directory_fd, identity) = open_private_directory(&directory, false)?;
@@ -123,39 +122,10 @@ impl AuthenticatedStream {
         let socket_identity = entry_identity(&directory_fd, SOCKET_BASENAME)?
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "control socket is absent"))?;
         verify_socket_permissions(&directory_fd, socket_identity)?;
-        let address = SocketAddrUnix::new(directory.join(SOCKET_BASENAME))?;
-        // macOS does not expose SOCK_CLOEXEC at socket creation. Serialize
-        // creation through the first CLOEXEC flag set so a concurrent
-        // Panelink-managed exec cannot inherit the unmarked descriptor.
-        let fd = with_spawn_gate_until(deadline, || {
-            let fd = net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
-            rustix::io::fcntl_setfd(
-                &fd,
-                rustix::io::fcntl_getfd(&fd)? | rustix::io::FdFlags::CLOEXEC,
-            )?;
-            Ok(fd)
-        })?;
-        check_deadline(deadline)?;
-        rustix::fs::fcntl_setfl(&fd, rustix::fs::fcntl_getfl(&fd)? | OFlags::NONBLOCK)?;
-        sockopt::set_socket_nosigpipe(&fd, true)?;
-        check_deadline(deadline)?;
-        match net::connect(&fd, &address) {
-            Ok(()) => {}
-            Err(Errno::INPROGRESS) => loop {
-                check_deadline(deadline)?;
-                sockopt::socket_error(&fd)??;
-                match net::getpeername(&fd) {
-                    Ok(Some(_)) => break,
-                    Ok(None) | Err(Errno::NOTCONN) => wait_for_readiness(deadline)?,
-                    Err(error) => return Err(error.into()),
-                }
-            },
-            Err(error) => return Err(error.into()),
-        }
-        check_deadline(deadline)?;
+        let stream = connect_unix_with_deadline(&directory.join(SOCKET_BASENAME), deadline)?;
         verify_directory_path(&directory, identity)?;
         verify_socket_permissions(&directory_fd, socket_identity)?;
-        Self::new(UnixStream::from(fd))
+        Self::new(stream)
     }
 
     /// Authenticate the kernel-reported peer UID, then make the stream
@@ -393,6 +363,46 @@ impl PrivateListener {
 fn with_spawn_gate<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     let _guard = crate::spawn_gate::acquire()?;
     operation()
+}
+
+/// Create a same-user nonblocking stream under the cooperative exec gate.
+/// Callers validate their own private path identity before and after connecting.
+pub(crate) fn connect_unix_with_deadline(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+    use rustix::net::{self, sockopt, AddressFamily, SocketAddrUnix, SocketType};
+    check_deadline(deadline)?;
+    let address = SocketAddrUnix::new(path)?;
+    // macOS does not expose SOCK_CLOEXEC at socket creation. Serialize
+    // creation through the first CLOEXEC flag set so a concurrent
+    // Panelink-managed exec cannot inherit the unmarked descriptor.
+    let fd = with_spawn_gate_until(deadline, || {
+        let fd = net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
+        rustix::io::fcntl_setfd(
+            &fd,
+            rustix::io::fcntl_getfd(&fd)? | rustix::io::FdFlags::CLOEXEC,
+        )?;
+        Ok(fd)
+    })?;
+    check_deadline(deadline)?;
+    rustix::fs::fcntl_setfl(&fd, rustix::fs::fcntl_getfl(&fd)? | OFlags::NONBLOCK)?;
+    sockopt::set_socket_nosigpipe(&fd, true)?;
+    check_deadline(deadline)?;
+    match net::connect(&fd, &address) {
+        Ok(()) => {}
+        Err(Errno::INPROGRESS) => loop {
+            check_deadline(deadline)?;
+            sockopt::socket_error(&fd)??;
+            match net::getpeername(&fd) {
+                Ok(Some(_)) => break,
+                Ok(None) | Err(Errno::NOTCONN) => wait_for_readiness(deadline)?,
+                Err(error) => return Err(error.into()),
+            }
+        },
+        Err(error) => return Err(error.into()),
+    }
+    check_deadline(deadline)?;
+    let stream = UnixStream::from(fd);
+    require_same_user(&stream)?;
+    Ok(stream)
 }
 
 fn with_spawn_gate_until<T>(

@@ -16,14 +16,15 @@ use panelink::response_protocol::{decode_response_payload, ResponseBody};
 use panelink::split_protocol::{decode_split_result, encode_split_request, SplitRequest};
 use panelink::terminal::Key;
 use panelink::ui_protocol::{
-    decode_layout_reply, decode_resize_reply, decode_screen_reply, encode_layout_query,
-    encode_root_resize, encode_screen_query, LayoutReply, RootResize,
+    decode_history_reply, decode_layout_reply, decode_resize_reply, decode_screen_reply,
+    encode_history_query, encode_layout_query, encode_root_resize, encode_screen_query,
+    HistoryReplyView, LayoutReply, RootResize, MAX_HISTORY_REPLY_BYTES,
 };
 
 use super::conn::{
     connect, context_path, ensure_context_dir, handshake, parse_context_name, Bootstrap,
-    InputResult, LeaseAction, PaneConn, Reply, ResumeError, CLOSE_DEADLINE, DEADLINE, OP_DEADLINE,
-    SPLIT_DEADLINE,
+    InputResult, LeaseAction, MouseInputResult, PaneConn, Reply, ResumeError, CLOSE_DEADLINE,
+    DEADLINE, OP_DEADLINE, SPLIT_DEADLINE,
 };
 use super::state::{App, ClosePlan, SplitPlan};
 
@@ -60,6 +61,24 @@ pub(crate) struct ScreenUpdate {
     pub target: TargetRef,
     pub revision: u64,
     pub checkpoint: Vec<u8>,
+}
+
+/// Result of one wheel action. History checkpoints remain independent of the
+/// live screen cache and are applied only while the captured view epoch holds.
+pub(crate) struct ScrollUpdate {
+    pub target: TargetRef,
+    pub epoch: u64,
+    pub result: ScrollResult,
+}
+
+pub(crate) enum ScrollResult {
+    History {
+        offset_rows: u16,
+        checkpoint: Vec<u8>,
+    },
+    MouseDelivered,
+    AlternateScreenNoMouse,
+    Failed(&'static str),
 }
 
 /// Bounded view delta from one worker poll.
@@ -184,6 +203,72 @@ impl Net {
 
     fn pane_mut(&mut self, target: TargetRef) -> Option<&mut PaneConn> {
         self.panes.iter_mut().find(|pane| pane.target == target)
+    }
+
+    /// Inspect current terminal modes with READ only, then either deliver one
+    /// typed wheel operation under the existing owner/dedup path or return a
+    /// pure retained-history checkpoint. Never falls back after uncertain
+    /// input delivery.
+    pub(crate) fn scroll(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        offset_rows: u16,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> ScrollUpdate {
+        let result = (|| {
+            let pane = self.pane_mut(target).ok_or("pane not connected")?;
+            let query =
+                encode_history_query(target, offset_rows).map_err(|_| "history request invalid")?;
+            let bytes = match pane.request(&query)? {
+                Reply::Snapshot(bytes) => bytes,
+                Reply::Error(label) => return Err(label),
+                Reply::Response(_) => return Err("history reply invalid"),
+            };
+            let view = decode_history_reply(&bytes).map_err(|_| "history reply invalid")?;
+            if view.target() != target {
+                return Err("history reply invalid");
+            }
+            validate_history_checkpoint(&view)?;
+            if view.alternate_screen() && view.mouse_reporting() {
+                if pane.owner_revision.is_none() {
+                    let _ = pane.claim(Instant::now());
+                }
+                return match pane.send_mouse_wheel(column, row, up)? {
+                    MouseInputResult::Applied => Ok(ScrollResult::MouseDelivered),
+                    MouseInputResult::Unsupported => {
+                        // The server explicitly rejected before admission; a
+                        // fresh READ decides whether scrollback is now valid.
+                        let retry = encode_history_query(target, offset_rows)
+                            .map_err(|_| "history request invalid")?;
+                        let retry = match pane.request(&retry)? {
+                            Reply::Snapshot(bytes) => bytes,
+                            Reply::Error(label) => return Err(label),
+                            Reply::Response(_) => return Err("history reply invalid"),
+                        };
+                        let retry =
+                            decode_history_reply(&retry).map_err(|_| "history reply invalid")?;
+                        if retry.target() != target {
+                            return Err("history reply invalid");
+                        }
+                        validate_history_checkpoint(&retry)?;
+                        history_result(retry)
+                    }
+                    MouseInputResult::NotOwner => {
+                        Err("input is owned by another client; wheel not sent")
+                    }
+                    MouseInputResult::Failed(label) => Err(label),
+                };
+            }
+            history_result(view)
+        })();
+        ScrollUpdate {
+            target,
+            epoch,
+            result: result.unwrap_or_else(ScrollResult::Failed),
+        }
     }
 
     fn any_connected(&mut self) -> Option<&mut PaneConn> {
@@ -533,6 +618,25 @@ impl Net {
         }
         self.panes.clear();
     }
+}
+
+fn validate_history_checkpoint(view: &HistoryReplyView<'_>) -> Result<(), &'static str> {
+    if view.checkpoint().len() > MAX_HISTORY_REPLY_BYTES {
+        return Err("history reply invalid");
+    }
+    panelink::screen_checkpoint::decode(view.checkpoint())
+        .map(|_| ())
+        .map_err(|_| "history checkpoint invalid")
+}
+
+fn history_result(view: HistoryReplyView<'_>) -> Result<ScrollResult, &'static str> {
+    if view.alternate_screen() {
+        return Ok(ScrollResult::AlternateScreenNoMouse);
+    }
+    Ok(ScrollResult::History {
+        offset_rows: view.offset_rows(),
+        checkpoint: view.checkpoint().to_vec(),
+    })
 }
 
 /// How one close reply frame was classified.

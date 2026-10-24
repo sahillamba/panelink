@@ -96,6 +96,7 @@ struct ServerProbe {
     terminfo: PathBuf,
     initialize: bool,
     allow_input: bool,
+    opencode_bridge: bool,
     executable: OsString,
     arguments: Vec<OsString>,
 }
@@ -214,7 +215,11 @@ fn parse(args: Vec<OsString>) -> Result<CliCommand, ()> {
         return Err(());
     };
     if first == OsStr::new("server-probe") {
-        parse_server_probe(&args[1..]).map(CliCommand::ServerProbe)
+        let request = parse_server_probe(&args[1..])?;
+        if request.opencode_bridge {
+            return Err(());
+        }
+        Ok(CliCommand::ServerProbe(request))
     } else if first == OsStr::new("serve") {
         parse_server_probe(&args[1..]).map(CliCommand::Serve)
     } else if first == OsStr::new("control") {
@@ -249,10 +254,12 @@ fn parse_server_probe(args: &[OsString]) -> Result<ServerProbe, ()> {
     let terminfo = next_path(args, &mut index)?;
     let mut initialize = false;
     let mut allow_input = false;
+    let mut opencode_bridge = false;
     while args.get(index).is_some_and(|arg| arg != OsStr::new("--")) {
         match args[index].to_str() {
             Some("--initialize") if !initialize => initialize = true,
             Some("--allow-input") if !allow_input => allow_input = true,
+            Some("--opencode-bridge") if !opencode_bridge => opencode_bridge = true,
             _ => return Err(()),
         }
         index += 1;
@@ -273,6 +280,7 @@ fn parse_server_probe(args: &[OsString]) -> Result<ServerProbe, ()> {
         terminfo,
         initialize,
         allow_input,
+        opencode_bridge,
         executable,
         arguments,
     })
@@ -1458,6 +1466,50 @@ fn history_diagnostic_line(
     line
 }
 
+/// Only fixed bridge state and durable metadata are emitted; never a grant or provider ID.
+fn emit_provider_snapshot(snapshot: panelink::provider_bridge_runtime::RuntimeSnapshot) {
+    use panelink::provider_bridge_runtime::RuntimeStatus;
+    let status = match snapshot.status() {
+        RuntimeStatus::Initializing => "initializing",
+        RuntimeStatus::Unbound => "unbound",
+        RuntimeStatus::Pending => "pending",
+        RuntimeStatus::LastConfirmed => "last_confirmed",
+        RuntimeStatus::Stale => "stale",
+        RuntimeStatus::Ambiguous => "ambiguous",
+        RuntimeStatus::Unavailable => "unavailable",
+        RuntimeStatus::StorageFailed => "storage_failed",
+    };
+    let mut line = String::from("{\"ok\":true,\"action\":\"provider-binding\",\"target\":");
+    push_target(&mut line, snapshot.target());
+    let _ = write!(
+        line,
+        ",\"status\":\"{status}\",\"last_confirmed_revision\":"
+    );
+    match snapshot.last_confirmed_revision() {
+        Some(revision) => {
+            let _ = write!(line, "{revision}");
+        }
+        None => line.push_str("null"),
+    }
+    line.push_str(",\"current_at_crash\":false,\"automatic_resume\":false}");
+    let _ = write_json(&line);
+}
+
+/// Bounded diagnostics writer: a slow log consumer cannot block the PTY owner.
+fn provider_status_reporter(
+) -> Option<std::sync::mpsc::SyncSender<panelink::provider_bridge_runtime::RuntimeSnapshot>> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("panelink-provider-status".into())
+        .spawn(move || {
+            while let Ok(snapshot) = receiver.recv() {
+                emit_provider_snapshot(snapshot);
+            }
+        })
+        .ok()?;
+    Some(sender)
+}
+
 /// Foreground multi-session server: same storage/endpoint semantics as
 /// `server-probe`, but the first child is a managed schema-6 launch and the
 /// runtime routes schemas 1, 2, 5, 6 (status), 7 (split) and 8 (pane UI).
@@ -1483,6 +1535,19 @@ fn run_serve(request: ServerProbe) -> i32 {
         Ok(storage) => storage,
         Err(_) => return emit_failure("server_storage_unavailable"),
     };
+    let mut provider_launch = if request.opencode_bridge {
+        match panelink::provider_bridge_launch::BridgeLaunch::prepare(
+            &request.directory,
+            storage.generation(),
+            &context,
+            &request.executable,
+        ) {
+            Ok(launch) => Some(launch),
+            Err(_) => return emit_failure("provider_bridge_launch_unavailable"),
+        }
+    } else {
+        None
+    };
     let listener = match PrivateListener::bind(&request.directory) {
         Ok(listener) => listener,
         // EPERM/EACCES is reported distinctly so callers can tell an
@@ -1498,18 +1563,23 @@ fn run_serve(request: ServerProbe) -> i32 {
         Err(_) => return emit_failure("signal_registration_failed"),
     };
     let (rows, columns) = host_size();
-    let started = StartedMultiServer::start(
-        storage,
-        &request.terminfo,
-        &StartupLaunch {
-            executable: &request.executable,
-            arguments: &request.arguments,
-            context: &context,
-            rows,
-            columns,
-        },
-        request.allow_input,
-    );
+    let launch = StartupLaunch {
+        executable: &request.executable,
+        arguments: &request.arguments,
+        context: &context,
+        rows,
+        columns,
+    };
+    let started = match provider_launch.as_ref() {
+        Some(provider) => StartedMultiServer::start_with_provider_bridge(
+            storage,
+            &request.terminfo,
+            &launch,
+            request.allow_input,
+            provider.environment(),
+        ),
+        None => StartedMultiServer::start(storage, &request.terminfo, &launch, request.allow_input),
+    };
     drop(context);
     let started = match started {
         Ok(started) => started,
@@ -1517,6 +1587,48 @@ fn run_serve(request: ServerProbe) -> i32 {
     };
     let startup = started.startup();
     let mut driver = started.into_driver();
+    let mut manual_recovery = None;
+    let mut provider_runtime = match (provider_launch.as_mut(), startup.target) {
+        (Some(provider), Some(target)) => {
+            let runtime = provider.binding_path(target).and_then(|path| {
+                let listener = provider.take_listener()?;
+                let scope = panelink::managed_provider_store::ManagedProviderScope::new(
+                    target,
+                    provider.project(),
+                    panelink::provider_bridge::SUPPORTED_PROVIDER_VERSION,
+                    startup.key,
+                    panelink::provider_bridge::SUPPORTED_PROVIDER_FINGERPRINT,
+                    None,
+                )?;
+                let outcome = if startup.outcome == Outcome::Applied {
+                    panelink::managed_provider_store::ManagedLaunchOutcome::Applied
+                } else {
+                    panelink::managed_provider_store::ManagedLaunchOutcome::Unknown
+                };
+                let runtime = panelink::provider_bridge_runtime::ProviderBridgeRuntime::start_managed(
+                    &path, scope.clone(), outcome, listener,
+                )?;
+                manual_recovery = panelink::provider_recovery_runtime::ManualRecovery::start(
+                    &path, &provider.launch_directory().join("manual.sock"), scope,
+                ).ok();
+                if manual_recovery.is_none() {
+                    eprintln!("panelink: explicit provider recovery unavailable; saved history is retained");
+                }
+                Ok(runtime)
+            });
+            match runtime {
+                Ok(runtime) => Some(runtime),
+                Err(_) => {
+                    eprintln!(
+                        "panelink: provider identity unavailable; use explicit manual recovery"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let mut provider_snapshot = None;
     // Capture is best-effort: a history filesystem failure never prevents
     // running shells or their authenticated control socket from starting.
     let history_path = request.directory.join("history");
@@ -1577,6 +1689,9 @@ fn run_serve(request: ServerProbe) -> i32 {
         }
         return 1;
     }
+    let provider_reporter = provider_runtime
+        .as_ref()
+        .and_then(|_| provider_status_reporter());
     let mut failed = false;
     let mut reported_capture_failure = false;
     while !stop.load(Ordering::Relaxed) {
@@ -1587,6 +1702,35 @@ fn run_serve(request: ServerProbe) -> i32 {
         // A per-session poll error (for example one exited child) does not
         // stop the server or its sibling session.
         let _ = driver.tick(&clock);
+        if let Some(runtime) = provider_runtime.as_mut() {
+            let target = runtime.snapshot().target();
+            let live = driver
+                .owner()
+                .pane_statuses()
+                .iter()
+                .flatten()
+                .any(|pane| pane.live && pane.geometry.target == target);
+            if live {
+                let now = Instant::now();
+                runtime.poll(now);
+                if let Some(recovery) = manual_recovery.as_mut() {
+                    recovery.poll(runtime, now);
+                }
+                let snapshot = runtime.snapshot();
+                if provider_snapshot != Some(snapshot)
+                    && provider_reporter
+                        .as_ref()
+                        .is_some_and(|reporter| reporter.try_send(snapshot).is_ok())
+                {
+                    provider_snapshot = Some(snapshot);
+                }
+            } else {
+                // A source may never outlive its exact managed occupant.
+                drop(manual_recovery.take());
+                drop(provider_runtime.take());
+                eprintln!("panelink: provider identity unavailable; managed pane ended");
+            }
+        }
         if driver.history_capture_failed() && !reported_capture_failure {
             eprintln!(
                 "{}",
@@ -1624,6 +1768,10 @@ fn run_serve(request: ServerProbe) -> i32 {
         }
     }
     driver.stop_connections(&clock);
+    drop(manual_recovery.take());
+    if let Some(runtime) = provider_runtime.take() {
+        let _ = runtime.finish(Instant::now() + Duration::from_millis(250));
+    }
     drop(driver);
     drop(listener);
     if history_failure.load(Ordering::Relaxed) {
@@ -3531,7 +3679,7 @@ fn fresh_nonce() -> u64 {
 fn print_help() {
     let _ = writeln!(
         io::stdout().lock(),
-        "Usage:\n  panelink server-probe --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink serve --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink control --directory DIR --context FILE init [TARGET]\n  panelink control --directory DIR --context FILE show|describe|resync|detach\n  panelink control --directory DIR --context FILE layout\n  panelink control --directory DIR --context FILE split TARGET LAYOUT_REV left|right|up|down [--cwd DIR]\n  panelink control --directory DIR --context FILE keys TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE panes\n  panelink control --directory DIR --context FILE close TARGET LAYOUT_REV\n  panelink control --directory DIR --context FILE close-status SEQUENCE\n  panelink control --directory DIR --context FILE read TARGET\n  panelink control --directory DIR --context FILE reconcile TARGET\n  panelink control --directory DIR --context FILE watch TARGET GEN:SEQ LIMIT WAIT_MS\n  panelink control --directory DIR --context FILE claim|release TARGET OWNER_REV\n  panelink control --directory DIR --context FILE handoff TARGET OWNER_REV RECIPIENT_LEASE\n  panelink control --directory DIR --context FILE text|paste|submit TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE interrupt TARGET OWNER_REV\n  panelink control --directory DIR --context FILE status SEQUENCE\n  panelink control --directory DIR --context FILE receipt THROUGH_SEQUENCE\nTARGET is generation:workspace:pane:session:occupant_revision. Use --initialize only for a new empty server directory.\nserve is an experimental server with up to four panes (binary splits; a split needs room for both children). split launches /bin/zsh with this CLI process's own cwd (or --cwd) and environment and needs a serve started with --allow-input. init TARGET pins a new context to one serve pane; layout, split, keys, panes and close work only against serve. close stops one pane's shell (HUP, then KILL after 1 s) and exits 0 only when it exited or was escalated.\n  panelink attach --directory DIR --context-dir CONTEXT_DIR\nattach is an experimental full-screen client for serve (run it inside a terminal): one connection and one private context file per pane under CONTEXT_DIR (created 0700 if missing). Keys go to the focused pane; left-click focuses; right-click or Ctrl-B then s opens the split menu; Ctrl-X detaches (server-owned shells keep running)."
+        "Usage:\n  panelink server-probe --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink serve --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] [--opencode-bridge] -- EXE [ARG...]\n  panelink control --directory DIR --context FILE init [TARGET]\n  panelink control --directory DIR --context FILE show|describe|resync|detach\n  panelink control --directory DIR --context FILE layout\n  panelink control --directory DIR --context FILE split TARGET LAYOUT_REV left|right|up|down [--cwd DIR]\n  panelink control --directory DIR --context FILE keys TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE panes\n  panelink control --directory DIR --context FILE close TARGET LAYOUT_REV\n  panelink control --directory DIR --context FILE close-status SEQUENCE\n  panelink control --directory DIR --context FILE read TARGET\n  panelink control --directory DIR --context FILE reconcile TARGET\n  panelink control --directory DIR --context FILE watch TARGET GEN:SEQ LIMIT WAIT_MS\n  panelink control --directory DIR --context FILE claim|release TARGET OWNER_REV\n  panelink control --directory DIR --context FILE handoff TARGET OWNER_REV RECIPIENT_LEASE\n  panelink control --directory DIR --context FILE text|paste|submit TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE interrupt TARGET OWNER_REV\n  panelink control --directory DIR --context FILE status SEQUENCE\n  panelink control --directory DIR --context FILE receipt THROUGH_SEQUENCE\nTARGET is generation:workspace:pane:session:occupant_revision. Use --initialize only for a new empty server directory.\nserve is an experimental server with up to four panes (binary splits; a split needs room for both children). split launches /bin/zsh with this CLI process's own cwd (or --cwd) and environment and needs a serve started with --allow-input. init TARGET pins a new context to one serve pane; layout, split, keys, panes and close work only against serve. close stops one pane's shell (HUP, then KILL after 1 s) and exits 0 only when it exited or was escalated.\n  panelink attach --directory DIR --context-dir CONTEXT_DIR\nattach is an experimental full-screen client for serve (run it inside a terminal): one connection and one private context file per pane under CONTEXT_DIR (created 0700 if missing). Keys go to the focused pane; left-click focuses; right-click or Ctrl-B then s opens the split menu; Ctrl-X detaches (server-owned shells keep running)."
     );
 }
 
@@ -3999,6 +4147,30 @@ mod tests {
         assert_eq!(probe.arguments.len(), 256);
         values.push(OsString::from("extra"));
         assert!(parse(values).is_err());
+    }
+
+    #[test]
+    fn provider_bridge_is_explicit_and_serve_only() {
+        let values = args(&[
+            "serve",
+            "--directory",
+            "/private/tmp/provider-server",
+            "--terminfo",
+            "/private/tmp/terminfo",
+            "--opencode-bridge",
+            "--",
+            "opencode",
+        ]);
+        let CliCommand::Serve(request) = parse(values.clone()).unwrap() else {
+            panic!("expected serve");
+        };
+        assert!(request.opencode_bridge);
+        let mut probe = values.clone();
+        probe[0] = "server-probe".into();
+        assert!(parse(probe).is_err());
+        let mut repeated = values;
+        repeated.insert(6, "--opencode-bridge".into());
+        assert!(parse(repeated).is_err());
     }
 
     #[test]

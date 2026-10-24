@@ -498,7 +498,7 @@ fn pane_run_refuses_readonly_capacity_and_invalid_pre_spawn_launches() {
         assert_eq!(field(&fixture.list(), "pane_count"), Some("1"));
     }
 
-    for (pane, direction) in [("1", "right"), ("1", "down"), ("2", "down")] {
+    for (pane, direction) in [("1", "right"), ("1", "down"), ("3", "down")] {
         let output = fixture.run([
             "pane",
             "run",
