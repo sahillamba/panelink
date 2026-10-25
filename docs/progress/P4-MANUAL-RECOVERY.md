@@ -2,9 +2,13 @@
 
 Status: the opt-in managed adapter now wires native SDK validation, durable
 prepared choice, separate explicit resume, and fresh selected-route confirmation.
-Native acceptance is in progress; see [live evidence](P4-NATIVE-MANUAL-RECOVERY.md).
-The earlier pure decision model below remains a separate component and is not
-the runtime controller. This note does not close Phase 4.
+Pinned native acceptance passes for missing/deleted, foreign-project, linked
+child, and imported nonempty fork-root choices; explicit resume, fresh
+selected-and-saved confirmation, replay refusal, and historical inspection are
+also documented in [live evidence](P4-NATIVE-MANUAL-RECOVERY.md). The earlier
+pure decision model below remains separate component evidence and is not the
+runtime controller. Managed normal-UI foreign-project refusal and exact return
+now pass separately; see [scoped Phase4 completion](P4-INTEGRATED-RESULT.md).
 
 ## Operator flow
 
@@ -83,8 +87,13 @@ challenge-bound snapshot, not the navigation return value.
 Actual private IPC/disk tests cover explicit prepare/resume and lost-response
 ordering. SIGKILL/reopen tests cover joint mapping and Prepared/Spent boundaries;
 they do not claim power-loss durability. Native evidence and remaining gates are
-recorded separately in the linked live note. The historical component model's
-seven tests below remain component evidence only.
+recorded separately in the linked live note. The native manual-recovery and
+bridge-failure results pass for the pinned client; see
+[manual recovery](P4-NATIVE-MANUAL-RECOVERY.md) and
+[bridge failure](P4-NATIVE-BRIDGE-FAILURE.md). They do not establish normal
+managed-picker foreign-project refusal, power-loss durability, current-at-crash
+identity, or automatic resume. The historical component model's seven tests
+below remain component evidence only.
 
 ## Independent decision-model slice
 

@@ -1,10 +1,10 @@
 # P4 native manual-recovery acceptance
 
-Status: an acceptance probe is prepared for the public explicit recovery CLI
-against the pinned OpenCode 2.0.32 client. It reuses the API bootstrap and
+Status: native acceptance passes in Luna and independent parent runs for the
+public explicit recovery CLI against pinned OpenCode 2.0.32. It reuses the API bootstrap and
 managed `serve` observer, with a fresh temporary HOME and loopback-only
-sandbox. The probe starts no provider model turn, creates only empty fixture
-sessions, injects no terminal input, and does not attach a Panelink UI.
+sandbox. The probe starts no provider model turn, uses empty roots and an inert
+synthetic-history fork, injects no terminal input, and does not attach a Panelink UI.
 
 The primary managed target begins on an API-created root session A. The probe
 tries a verified-missing ID, an API-created then deleted ID, a top-level

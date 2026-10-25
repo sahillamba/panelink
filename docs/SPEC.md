@@ -509,7 +509,8 @@ source instance. The worker requests challenge-bound selected-route snapshots
 every500ms with a300ms operation deadline and3000ms host-receipt lease; startup
 accept is bounded to15s. Failure revokes verification without killing the PTY.
 There is no reconnect or implicit regrant. Ordinary launcher panes and later
-generic shell splits do not enable the adapter.
+generic shell splits do not enable the adapter. The exact version, timings,
+scope and failure rules are recorded in the [pinned adapter contract](progress/P4-PINNED-ADAPTER.md).
 
 The owner now saves confirmed identity and managed-launch metadata in a single
 atomic record, acknowledging only the matching private worker completion.
@@ -519,9 +520,15 @@ the separate `resume` action revalidates, durably spends its ticket before
 navigation, then waits for fresh selected-route confirmation and a saved joint
 record. Lost replies stay uncertain; neither navigation acknowledgment nor a
 prepared choice is selected-state proof. See the [operator contract](progress/P4-MANUAL-RECOVERY.md)
-and [native acceptance](progress/P4-NATIVE-MANUAL-RECOVERY.md). Native acceptance
-is still being completed; the historical component notes below describe their
-earlier narrower scope. Current-at-crash and automatic resume are disabled.
+and [native acceptance](progress/P4-NATIVE-MANUAL-RECOVERY.md). Scoped Phase4
+acceptance is complete for pinned2.0.32: actual managed A-B-A/new/fork/Home,
+foreign project selection, explicit structured manual refusal with A retained,
+and same-instance return with exact newer runtime/disk save all pass Luna and
+independent parent. See [integrated result](progress/P4-INTEGRATED-RESULT.md).
+The private fixture keymap is test apparatus; native shortcut conflicts and
+separate host/reboot/product gates remain. The historical component notes below
+describe their earlier narrower scope. Current-at-crash and automatic resume
+are disabled.
 
 Transport component update2026-10-24: the independent `PLBRDG01` bounded wire
 codec and same-user, grant-scoped Unix endpoints are implemented and verified
@@ -529,9 +536,11 @@ through private socketpair/pathname fixtures, admission and binding storage.
 See [wire/channel evidence](progress/P4-BRIDGE-TRANSPORT-RESULT.md). A consumed
 issuer grant binds complete target/project/version/source instance; it is not
 provider executable attestation or a global replay/revocation guarantee.
-Endpoints accept supplied streams and create no global listener. Live source/
-grant delivery, owner/worker integration, bounded queues, fresh snapshot
-reconciliation and production heartbeat policy remain open. Host receipt alone
+Endpoints accept supplied streams and create no global listener. At that
+component checkpoint, live source/grant delivery, owner/worker integration,
+bounded queues, fresh snapshot reconciliation and production heartbeat policy
+were still open; the scoped managed implementation above now supplies them.
+Host receipt alone
 does not prove when a route was observed; buffered metadata is not a selection
 or reconciliation barrier. These components enable no recovery or automatic
 resume behavior.

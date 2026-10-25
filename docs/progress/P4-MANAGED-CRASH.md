@@ -1,5 +1,13 @@
 # Phase 4 managed record process-kill checks
 
+Status: software-level process-kill checks for joint managed/provider records
+and Prepared/Spent recovery state are complete. They complement the passing
+[native manual-recovery](P4-NATIVE-MANUAL-RECOVERY.md) and
+[bridge-failure](P4-NATIVE-BRIDGE-FAILURE.md) results; those live checks remain
+separate from these synthetic store-boundary tests. Managed normal-UI
+foreign-project refusal and final verification now pass separately; see
+[scoped Phase4 completion](P4-INTEGRATED-RESULT.md).
+
 This acceptance slice exercises the production managed-provider and prepared
 recovery stores across abrupt process termination. It complements in-process
 codec, fault-injection, and state-machine tests. It does not claim machine

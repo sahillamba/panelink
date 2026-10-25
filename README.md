@@ -53,7 +53,7 @@ history. Panes have a one-cell blank margin on each side. Help consumes
 typing, paste and mouse actions while open. An experimental pinned OpenCode
 adapter is available only through a dedicated `serve --opencode-bridge` launch,
 with explicit prepare/resume commands; see the [provider guide](docs/progress/P4-MANUAL-RECOVERY.md).
-Native acceptance remains in progress. The older disposable probe retains its
+Scoped pinned managed acceptance passes; see the [integrated result](docs/progress/P4-INTEGRATED-RESULT.md). The older disposable probe retains its
 narrower input map.
 
 Local help, navigation and Ctrl-X remain available while the attach client

@@ -5,6 +5,12 @@ snapshot stream to `BridgeReceiver` and the asynchronous last-confirmed store
 worker. The opt-in `serve --opencode-bridge` path now activates it for the
 original exact managed occupant, using the pinned private launch configuration.
 The ordinary launcher and subsequent shell splits do not enable the adapter.
+Native pinned-client acceptance now passes for bridge-failure survival and the
+separate explicit manual-recovery flow; see
+[bridge failure](P4-NATIVE-BRIDGE-FAILURE.md) and
+[manual recovery](P4-NATIVE-MANUAL-RECOVERY.md). Normal managed-picker
+foreign-project refusal and same-instance return now pass separately in Luna
+and independent parent runs; see [scoped Phase4 completion](P4-INTEGRATED-RESULT.md).
 
 `ProviderBridgeRuntime::start(path, target, project, listener)` takes the
 parent-owned private listener and starts two bounded workers. The existing
@@ -121,10 +127,14 @@ source variant and oversized worker argument list) were corrected before the
 final passing lint. Pathname listener creation and `run_serve` activation are
 owned by the parent integration slice.
 
-This verifies the coordinator components on this host and in unit fixtures. It
-does not prove provider executable attestation, hostile same-UID isolation,
-production listener permissions, heartbeat scheduling by the server, or
-conversation recovery. No dependency or commit was added.
+These focused results verify the coordinator components on this host and in
+unit fixtures. Separate live native results verify bridge-failure survival and
+the explicit manual-recovery path for the pinned client, but do not prove
+provider executable attestation, hostile same-UID isolation, machine power-loss
+durability, or current-at-crash identity. The managed normal-UI transition
+fixture proves new-root and nonempty-fork selection; visible foreign-project
+refusal remained open at this historical checkpoint; it now passes in the
+[integrated result](P4-INTEGRATED-RESULT.md). No dependency was added.
 
 ## Parent integration review
 

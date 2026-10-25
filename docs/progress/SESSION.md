@@ -1,5 +1,72 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Phase 4 complete — 2026-10-25 (read first)
+
+The user resumed this checkout from `f1d7af9` with GPT-6-Luna implementation
+and audit agents, parent orchestration and independent verification. All
+scoped Phase4 roadmap gates now pass. The completion commit is recorded in
+Git history; no push or live activation is authorized or performed.
+
+Managed native acceptance passes both Luna and an independent parent run:
+A-B-A while passive B stays at revision1, API-created new root, imported
+nonempty-history fork and return, Home stale/return, actual foreign project
+selection, visible structured manual refusal with A preserved, and guarded
+same-TUI return to A with exact runtime/disk revision8 (previously7).
+Parent observer sequences are foreign135, post-refusal foreign138, returnA152.
+The CLI refusal is `manual_selection_required` / `provider_project_mismatch`,
+without a ticket or navigation. Both runs submit zero prompts, verify absence
+of user messages, enforce loopback-only sandboxing, and complete cleanup.
+
+Durable sanitized reports are in [p4-evidence](p4-evidence/managed-native-parent-2026-10-25.json)
+and [the Luna report](p4-evidence/managed-native-luna-2026-10-25.json).
+The integrated result is [P4-INTEGRATED-RESULT.md](P4-INTEGRATED-RESULT.md).
+No agents remain active; prior assignments below are historical.
+
+Parent verification: locked/offline serial Rust **1231pass/0fail/15ignored**,
+63 result groups; all seven supporting checks pass, decoder39, component
+fingerprints, fmt, strict all-target Clippy, isolated build, Python **232run /
+231pass /1 opt-in native skip**, Markdown **332/0**. Logs are under
+`/private/tmp/panelink-p4-20261025`; final documentation changes also pass
+Markdown and whitespace checks. The explicit native run closes the gate
+separately from the intentionally skipped opt-in unittest. Luna final review
+found no material issues; parent reviewed the query/observer/refusal gates.
+
+The accepted isolated binary SHA is
+`1723ccece8d9c39662b8f0833455747f8ac7951de4d9e8d22a73cac4cf92f357`;
+the active workspace binary remains
+`3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e`.
+The exact pinned native OpenCode2.0.32 SHA remains
+`e43ec2df6f36842fd17d1a71a866acb9a84884b489988376c19bf9a7250dabbf`;
+launcher used `~/.opencode/bin/opencode` after PATH lookup. No Rust, shipped
+plugin or dependency changes were needed after the implementation checkpoint.
+
+Earlier failed attempts and corrections remain in the dated P4 startup,
+plugin-merge, picker, observer, exact-query, modal-rows, foreign-refusal and
+exact-return notes. They are not relabeled as passes. The harness now keeps
+server initialization directories empty, composes both plugins, continuously
+drains attach output, uses stable fresh modal reads, bounds actual result
+rows, and uses the supported exact-ID native picker query for return.
+
+Next: follow Phase5's remaining hierarchy/interaction and full V-HISTORY
+acceptance work in ROADMAP.md. Preserve unresolved product decisions. The
+separate Phase3 human four-pane Apple Terminal acceptance remains open.
+Phase4 completion does not close M1, imply overall readiness, prove a machine
+reboot/power-loss boundary, guarantee current-at-crash identity, or enable
+automatic resume/replay. No push or user configuration changes.
+
+## Phase 4 resumed — 2026-10-24 (read first)
+
+The user resumed continuous Luna slices until Phase4 completion after checkpoint
+`f1d7af9`. This revokes the pause below. Current owners: managed picker probe
+(private fixture input/keybind only), managed transition fixture helper/review,
+and parent integration/review/final verification. Historical acceptance remains
+1231Rustpass/15ignored, Python200(one opt-in live skip), docs319/0; no automatic
+resume/current-at-crash guarantee. Finish real managed normal UI transitions;
+explicit manual recovery and native bridge-failure gates already pass Luna and
+independent parent. Keep building in the isolated P4 target. No push or live
+activation. See P4-CONTINUOUS-TASK.md and the preserved paused handoff for detail.
+
+
 ## PAUSED by user — 2026-10-24 (read first)
 
 User requested a pause and durable handoff. All active agents were stopped.

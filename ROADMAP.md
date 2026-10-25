@@ -1,9 +1,9 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: PAUSED by user at Phase4 managed-native UI input gate; bridge, joint storage, explicit recovery and native failure acceptance implemented/verified. See docs/progress/P4-PAUSED-HANDOFF-2026-10-24.md.
-last-updated: 2026-10-24
-last-verified-p4: Final serial Rust1231pass/0fail/15ignored; strict all-target Clippy pass. Earlier seven supporting checks pass, Python196(one live skip)/decoder39/docs316; latest probe additions need supporting rerun. Native manual/fork and failure pass Luna+parent. Active binary unchanged.
+current-phase: Phase4 DONE as scoped pinned managed identity/explicit recovery contract; continue remaining Phase5 work after preserving product decisions and separate Phase3 human host gate.
+last-updated: 2026-10-25
+last-verified-p4: Parent serial Rust1231pass/0fail/15ignored,63groups; all seven supporting checks pass decoder39/Python232run231pass1opt-in skip/docs332zero/fmt/Clippy/build/fingerprints. Luna+independent parent full managed native pass incl foreign135/postrefusal138/returnA152 and exact A rev7->8, passiveB1; zero prompts/cleanup true. Active binary unchanged.
 checkpoint: User-authorized verified Phase3 checkpoint: scrollback, pane run, owner discovery and client/server/killed-input-client acceptance on codex/p3-scrollback-integration based on9f3d8a0; see Git history for checkpoint ID. FullPhase3 remains open; no push. Original source checkout preserved.
 last-verified: Final usability tree locked/offline serial Cargo1111pass/0fail/15ignored in164.34s (lib722/binary148/integration241 across55 targets); all seven supporting checks pass, decoder39/Python77/docs281/0. Real outer-PTY normal-history/app-wheel tests pass. Earlier sizing, startup-output and asynchronous writer-fixture failures are preserved in docs/progress/P3-USABILITY-FIXES-RESULT.md.
 prior-evidence-orchestration: Serial1091pass/0fail/15ignored in182.72s plus seven supporting checks before user-reported usability repairs; see P3-ORCHESTRATION-RESULT.md.
@@ -11,13 +11,14 @@ prior-evidence-scrollback: Final serial Cargo1064pass/0fail/15ignored in122.73s 
 prior-evidence-metadata: Final serial Cargo1059pass/0fail/15ignored in152.92s (lib709/binary123/integration227 across50 targets); all7 non-Cargo verifier checks pass separately, decoder39/Python77/docs251/0. Initial parallel verifier7/8 had2 library timing/observation failures; preserved in P3-PANE-METADATA-RESULT.md, not relabeled. No final Cargo timeout.
 prior-evidence-upstream: verifier 8/8; full suite 993 passed/0 failed/15 ignored after origin/main merge (095bf45) and four-pane, agent CLI, L16 relaunch, L17 attach, L18 exit status, before stash integration; not combined-tree verification.
 prior-evidence-stash: live-split slice library 641 passed/4 ignored, focused integration 73 passed/0 failed, verifier 7/8 with binary 115 passed/1 failed at pathname-bind EPERM; not combined-tree verification. See docs/progress/ASYNC-LAUNCH-RESULT.md.
-next-action: Wait for user resume; then follow P4-PAUSED-HANDOFF-2026-10-24.md. Establish noncolliding native picker input in disposable fixture, finish actual managed UI new/fork/project/Home transitions, final verification/docs and phase-completion commit. No push.
+next-action: Phase4 complete; see P4-INTEGRATED-RESULT.md and Git completion commit. Continue Phase5 remaining hierarchy/interaction and full V-HISTORY acceptance in phase order; retain pending product decisions and separate Phase3 human Apple Terminal gate. No push or activation.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
-blocked-on: User-requested pause. Managed native UI gate open: Ctrl-X provider leader collides with attach detach; bare Ctrl-O/P is not session-list input. Explicit recovery/native failure passed; do not count earlier weak modal predicate. Phase3 host gate separate.
+blocked-on: No remaining scoped Phase4 gate. Phase3 human four-pane Apple Terminal acceptance and Phase5 hierarchy/interaction/reboot/workload acceptance remain separate and open.
 merged-origin: 2026-10-22 merged origin/main (Wave1 usability, Wave2 client/server close, Herdr study, Subagents SA plan); see docs/progress/WAVE2-RESULT.md, USABILITY-WAVE1-RESULT.md, SUBAGENTS-PLAN.md
 setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1. Current source/status supersedes the historical index block in STASH-MERGE-RESULT.md. Worktree graph project: Users-sahillamba-.codex-worktrees-7060-panelink.
+phase-4: DONE — 2026-10-25 — pinned managed UI/foreign refusal/return plus explicit recovery, parent native verified; see docs/progress/P4-INTEGRATED-RESULT.md
 phase-1: DONE — 2026-10-17 — see docs/progress/INTEGRATION.md
 phase-3a: DONE — 2026-10-19 — see docs/progress/P3A-DEFAULT-OPEN.md and INTEGRATION.md
 phase-3b-stop: DONE as scoped two-pane stop slice — 2026-10-20 — checkpoint c3e207e; broader Phase 3 remains open
@@ -278,7 +279,7 @@ restore workspace layouts, live processes, provider conversations or every
 alternate-screen frame; V-HISTORY's complete reboot/layout acceptance remains
 open.
 
-## Phase 4 — early OpenCode identity gate (scoped observation passes; integration open)
+## Phase 4 — early OpenCode identity gate (scoped managed integration DONE)
 
 2026-10-24: two Luna High owners delivered the V2 observer and harness;
 parent review corrected loading, warm-up and picker scoping. Three fresh pinned
@@ -293,13 +294,13 @@ This is a development gate, not a live Panelink adapter or recovery feature.
 - [x] Scoped linked-child selection as non-top-level, exclusion from root listing, keyboard parent return and original-client identity continuity,3/3 fresh runs. Empty-parent fork returns400; nonempty copied-history fork is untested.
 - [x] Scoped separate-client directory/project identity isolation,3/3 fresh runs, exact new-directory selection and foreign-scope rejection. See P4-V2-ISOLATION-RESULT.md.
 - [x] Scoped pinned-native fixture proves API-created/UI-selected new root, static nonempty transcript import plus actual full-history fork, and same-client Ctrl-O project round-trip; Luna run and independent parent run pass. Native forks are top-level with a separate `fork` origin. See P4-REMAINING-IDENTITY.md. Production adapter acceptance remains separate.
-- [ ] Exercise new/fork/project transitions through the actual managed adapter, including visible refusal/manual fallback for foreign project scope.
+- [x] Actual managed adapter new/fork/Home/project transitions pass Luna and independent parent native runs. Foreign same-TUI observer selection, structured public manual refusal/no ticket/preserved A and same-instance return with exact newer runtime/disk revision pass. See P4-INTEGRATED-RESULT.md and durable sanitized reports. Scoped pinned2.0.32 contract only; no current-at-crash/automatic resume/replay.
 - [x] Typed protocol-v1 admission wraps the binding core with source ordering, bounded caller lease, expiry, reconciliation and revision issuance.12 focused tests; no wire/source-auth/live integration claim.
 - [x] Single-writer bounded binding store plus component storage/acknowledgment and actual process-kill/reopen boundaries.9 focused store and4 combined target tests; all restoration stale. See P4-BRIDGE-STORE-RESULT.md.
 - [x] Bounded independent protocol-v1 Hello/Welcome/Observation codec plus same-user, one-use scoped-grant Unix endpoints.19 focused codec/channel tests and2 combined private IPC cases pass; no provider executable attestation, freshness barrier or live listener activation. See P4-BRIDGE-TRANSPORT-RESULT.md.
-- [ ] Integrate trusted live provider source/grant provisioning, fresh-snapshot reconciliation, owner/worker dispatch and production heartbeat/expiry contract.
-- [ ] Persist and acknowledge binding revisions; demonstrate or explicitly reject current-at-crash claims.
-- [ ] Implement last-confirmed/manual fallback without latest-session heuristics.
+- [x] Opt-in pinned2.0.32 source/grant provisioning, fresh challenge snapshots, owner/worker dispatch and versioned500ms/300ms/3000ms heartbeat/IO/lease policy are integrated. Native bridge-failure survival passes Luna plus independent parent; no executable attestation or implicit reconnect. See P4-BRIDGE-RUNTIME.md and P4-NATIVE-BRIDGE-FAILURE.md.
+- [x] Joint managed/provider record persistence, exact private completion acknowledgment, Prepared/Spent and process-kill/reopen gates pass; current-at-crash is explicitly rejected. Historical restoration stays stale. See P4-MANAGED-CRASH.md and P4-NATIVE-MANUAL-RECOVERY.md.
+- [x] Exact-target historical inspection plus explicit SDK-validate/prepare/separate-resume/fresh-selected-save flow is integrated. Native missing/deleted/foreign/child, one-shot replay refusal and nonempty fork-root cases pass Luna plus independent parent. No latest-session scan, automatic resume or replay. See P4-MANUAL-RECOVERY.md and P4-NATIVE-MANUAL-RECOVERY.md.
 
 ## Phase 5 — workspaces, selection, history (in progress; scoped saved history DONE)
 
