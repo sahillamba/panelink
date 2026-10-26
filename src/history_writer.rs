@@ -3163,20 +3163,34 @@ mod tests {
             inject_end_fault: true,
         };
         let mut writer = HistoryWriter::start_with_backend(Box::new(backend), &storage).unwrap();
-        let mut receipt = writer
-            .try_submit(
-                HistoryBatch::new(
-                    target,
-                    1,
-                    1,
-                    false,
-                    expected_rows.clone(),
-                    vec![expected_screen.clone()],
-                    Some(1000),
-                )
-                .unwrap(),
-            )
-            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut batch = HistoryBatch::new(
+            target,
+            1,
+            1,
+            false,
+            expected_rows.clone(),
+            vec![expected_screen.clone()],
+            Some(1000),
+        )
+        .unwrap();
+        let mut receipt = loop {
+            match writer.try_submit(batch) {
+                Ok(receipt) => break receipt,
+                Err(error)
+                    if error.capacity_reason() == Some(CapacityReason::Contended)
+                        && Instant::now() < deadline =>
+                {
+                    batch = error.into_batch();
+                    thread::yield_now();
+                }
+                Err(error) => panic!(
+                    "initial batch admission failed: reason={:?}, capacity={:?}",
+                    error.reason(),
+                    error.capacity_reason()
+                ),
+            }
+        };
         assert_eq!(wait_receipt(&mut receipt), CommitStatus::Committed);
         assert!(writer.had_storage_error());
         assert_eq!(
