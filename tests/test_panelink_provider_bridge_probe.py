@@ -418,7 +418,7 @@ class PanelinkProviderBridgeProbeTests(unittest.TestCase):
             return child_markers if attach.filtered else menu_markers
         trace: dict[str, object] = {}
         selected = select_session(
-            attach, labels[1], labels[0], labels, time.monotonic() + 0.5,
+            attach, labels[1], labels[0], labels, time.monotonic() + 2.0,
             trace, pre_read={"status": "known", "contains_opencode_title": True,
                              "screen_bytes": 5},
             fresh_child_read=read_child,

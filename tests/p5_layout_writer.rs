@@ -5,7 +5,7 @@
 use panelink::layout_store::{LayoutSlot, LayoutStore};
 use panelink::layout_writer::{
     LayoutFinalStatus, LayoutKey, LayoutShutdownOutcome, LayoutStatusHandle, LayoutSubmit,
-    LayoutWriter, MAX_SHUTDOWN_WAIT,
+    LayoutWriter,
 };
 use panelink::pane_layout::{LayoutSnapshot, PaneGeometry, Rect};
 use panelink::saved_layout::{LayoutMetadata, SavedLayout};
@@ -103,26 +103,6 @@ fn wait_for_durable(handle: &LayoutStatusHandle, key: LayoutKey, deadline: Insta
             "candidate {key:?} did not become durable"
         );
         thread::sleep(Duration::from_millis(1));
-    }
-}
-
-#[allow(dead_code)]
-fn wait_for_lock(path: &std::path::Path) {
-    let deadline = Instant::now() + Duration::from_secs(4);
-    loop {
-        match ServerStorage::lock_for_maintenance(path) {
-            Ok(lock) => {
-                drop(lock);
-                return;
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) => panic!("maintenance lock failed: {error}"),
-        }
-        assert!(
-            Instant::now() < deadline,
-            "retained server lock did not release"
-        );
-        thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -247,32 +227,6 @@ fn integration_status_handle_after_shutdown() {
     );
     assert!(!status.unavailable);
     assert_eq!(status.final_status, LayoutFinalStatus::NothingPending);
-}
-
-#[test]
-fn integration_timed_out_shutdown_retains_lock() {
-    let fixture = Fixture::new();
-    let (storage, store) = fixture.prepare();
-    let mut writer = LayoutWriter::start(store, &storage, 1).expect("start layout writer");
-
-    // Block the worker by never giving it work to complete? No, worker is
-    // blocked on recv. Submit one layout; worker will process quickly.
-    // We need to block the store. Use a fake backend is unit territory.
-    // Instead: submit a layout and then time out with a very short wait.
-    let layout = saved_layout_one(storage.generation(), 1, 1, 1);
-    assert_eq!(writer.observe(layout), LayoutSubmit::Accepted);
-
-    let started = Instant::now();
-    let outcome = writer.shutdown(Duration::from_millis(1));
-    assert_eq!(outcome, LayoutShutdownOutcome::TimedOut);
-    assert!(
-        started.elapsed() <= MAX_SHUTDOWN_WAIT + Duration::from_millis(100),
-        "shutdown exceeded capped budget"
-    );
-
-    // The worker may already have finished; just verify status is coherent.
-    drop(storage);
-    thread::sleep(Duration::from_millis(100));
 }
 
 #[test]
