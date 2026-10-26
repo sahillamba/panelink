@@ -1,6 +1,6 @@
 # Panelink: product discovery and spec handoff
 
-Status: first user answers and security review objective recorded; focused follow-ups pending. Updated 2026-10-17.
+Status: first user answers and security review objective recorded; focused follow-ups pending. Updated 2026-10-26.
 
 ## Confirmed requirements
 
@@ -16,15 +16,43 @@ Status: first user answers and security review objective recorded; focused follo
 - OpenCode is the required agent. Tabnine is an optional feasibility item. Preserve the agent's own terminal interface with status and notifications.
 - Provide an easy scriptable/agent command API to discover, read and control other managed agents/processes across panes (requested2026-10-17). Exact access scope/defaults and command contracts are proposed in [AGENT-CONTROL.md](AGENT-CONTROL.md); this does not request autonomous scheduling.
 - Keyboard navigation in the style of tmux, with Herdr-like workspace and mouse interactions.
-- Right-click context menus and automatic clipboard copy after text selection. The user explicitly requested Split Left, Right, Up and Down options (2026-10-17), and on2026-10-18 prioritized a new phase to open a fresh terminal session on the new side before the next planned work. See [Phase3A](progress/P3A-RIGHT-CLICK-SPLITS.md) and the existing [pane-layout design](PANE-LAYOUT.md); the workspace/tab hierarchy remains unresolved.
+- Right-click context menus and automatic clipboard copy after text selection. The user explicitly requested Split Left, Right, Up and Down options (2026-10-17), and on2026-10-18 prioritized a new phase to open a fresh terminal session on the new side before the next planned work. See [Phase3A](progress/P3A-RIGHT-CLICK-SPLITS.md) and the existing [pane-layout design](PANE-LAYOUT.md); the confirmed hierarchy is Project → workspace tabs → split panes.
 - Reboot recovery restores layouts and offers supported agent conversation resume.
 - Local layouts, settings, and saved terminal history.
-- Automatically expose background agents/subagents from OpenCode or compatible OpenCode wrappers in a tab named Subagents for optional observation (requested2026-10-21). See [Phase SA plan](progress/SUBAGENTS-PLAN.md). This selects the dedicated tab, while the rest of the hierarchy and the proposed observation UX remain open. Wrapper compatibility must be proved per supported version.
+- Automatically expose background agents/subagents from OpenCode or compatible OpenCode wrappers in a tab named Subagents for optional observation (requested2026-10-21). See [Phase SA plan](progress/SUBAGENTS-PLAN.md). This selects the dedicated tab, while the project-sidebar presentation and proposed observation UX remain open. Wrapper compatibility must be proved per supported version.
 - Personal use first, public MIT release later, with private Git source hosting for commits and branches.
 
 The earlier desktop UI recommendation is superseded. Ratatui/Crossterm with a terminal engine and independent session server is an engineering candidate, not a selected or installed dependency set. The user's dependency concern is security audit acceptance. Do not treat any named library as accepted or claim the architecture will pass a firm's audit. The dependency-free foundation has been implemented and verified; [ROADMAP.md](../ROADMAP.md) tracks remaining implementation.
 
 ## Current interpretation and recommendations
+
+Hierarchy decision (2026-10-25): the user selected **Project → workspace tabs →
+split panes**. Tabs represent workspaces within a project; each workspace owns
+its split-pane layout. This supersedes the earlier pending hierarchy options.
+It does not select a project sidebar, remote execution, or automatic worktrees.
+
+Keyboard copy mode is implemented as a bounded attached-client prototype for
+the currently visible live/history view. Its `Ctrl-B c` entry key is an
+implementation assumption, not a confirmed long-term shortcut choice. The
+frozen view, local input handling, and cancellation boundaries are documented
+in the [specification](SPEC.md#bounded-keyboard-copy-mode-prototype). Focused
+client, compositor, clipboard-free PTY and full serial checks pass; human Apple
+Terminal and real clipboard acceptance remain open. This does not close Phase 5.
+
+Pane-location swap, ancestor-divider adjustment and zoom are also implemented
+as bounded M2 prototypes. Their current `Ctrl-B m`, `Ctrl-B e`, and `Ctrl-B z`
+bindings are not final shortcut decisions. Zoom resizes the selected PTY while
+hidden processes continue; unzoom restores the underlying split geometry for
+the current root. Swap changes exact pane locations within one tab without
+moving processes. Divider preview commits once on Enter and cancels on Esc.
+Stale captured targets or revisions cancel locally, and uncertain async results
+are not replayed. Runtime ratios/zoom do not claim physical-reboot restoration;
+the saved-observation codec is unchanged. Full serial Rust1399/0/15ignored,
+final client123/0 and outer-terminal3/0 checks pass, with a separate real4PTY
+protocol scenario1/0. Human Apple Terminal, real clipboard, physical reboot
+and representative workload acceptance remain open. Repeat handling follows the host
+key events and is not a final shortcut contract. M2 and Phases 3/5 remain open; see
+the [bounded pane-operations contract](SPEC.md#bounded-pane-operations-prototype).
 
 The user broadly accepted the first-release bundle but did not unambiguously choose among the feature bundles. Interpret the current direction as an agent workspace: project workspaces, tabs/splits, OpenCode launching, session persistence, status/notifications, saved history/search, and mouse support. Confirm the remaining scope through the questions below rather than adding autonomous delegation by implication.
 
@@ -37,7 +65,7 @@ Recommend Herdr-style lifetime: detach or quit the host terminal while processes
 1. Primary host terminal: Apple Terminal selected for the first prototype. Expand terminal compatibility after that baseline works.
 2. Agent scope update: agent-to-pane/process read and control API is now requested. Exact launch/create capabilities and access defaults are under design; autonomous scheduling is not implied.
 3. Lifetime: persistent server with explicit stop (recommended) / prompt on explicit detach / stop with client.
-4. Hierarchy: workspace sidebar with tabs/splits (recommended) / picker with hidden sidebar / workspaces with splits and no tabs.
+4. Project presentation: the bounded opt-in `workspace open` UI currently uses a row-zero project/tab strip and chooser; a persistent project sidebar remains an unselected presentation option.
 5. Remote scope: local Mac with ordinary ssh commands (recommended) / persistent remote sessions / existing tmux attachment.
 6. Private hosting destination: confirmed as [sahillamba/panelink](https://github.com/sahillamba/panelink) on GitHub; the user requested a private repository and an initial commit of the current files.
 
@@ -70,7 +98,9 @@ These are engineering contracts for the draft, not evidence of completed impleme
 
 Ask only for choices still unresolved after the first round; do not require the user to design low-level protocols.
 
-- Workspace hierarchy; whether one project can have several workspaces; terminal session versus pane view behavior.
+- Workspace-tab naming, switching and persistence details under the confirmed
+  Project → workspace tabs → split panes hierarchy; pane views remain distinct
+  from managed process/session identities.
 - First-launch flow, dependency discovery, shell environment, agent configuration, missing CLI errors.
 - Terminal compatibility target: required keyboard protocols, colors, links, images, shell integration, history retention, and export.
 - Shortcut conflicts and focus behavior; pane close versus session stop; multi-window and multiple-viewer policy.

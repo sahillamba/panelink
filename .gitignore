@@ -3,4 +3,5 @@
 __pycache__/
 *.py[cod]
 .codegraph/
+/.panelink-agent-contexts/
 /ci-results/

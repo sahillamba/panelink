@@ -30,7 +30,7 @@ use rustix::process::{ioctl_tiocsctty, kill_process_group, setsid, Pid, Signal};
 use rustix::termios::{tcsetwinsize, Winsize};
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 use rustix_openpty::openpty;
-use vt100::{Callbacks, Color, Parser, Screen};
+use vt100::{Callbacks, Color, MouseProtocolEncoding, MouseProtocolMode, Parser, Screen};
 
 use crate::launch::{Environment, ResolvedLaunch};
 
@@ -188,6 +188,12 @@ pub enum TerminalError {
     SpawnLockPoisoned,
     /// A printable-character key contained a control scalar.
     InvalidKey,
+    /// A mouse wheel position is outside the confirmed content size.
+    InvalidMousePosition,
+    /// The active mouse mode cannot report the requested wheel event.
+    MouseReportingDisabled,
+    /// The active legacy mouse encoding cannot represent this position.
+    MousePositionUnrepresentable,
     /// The encoded input would exceed the fixed pending-input queue.
     InputQueueFull,
     /// Input is disabled because the child exited or input previously failed.
@@ -220,6 +226,13 @@ impl fmt::Display for TerminalError {
             Self::InvalidEnvironment => f.write_str("explicit child environment failed validation"),
             Self::SpawnLockPoisoned => f.write_str("PTY spawn lock is poisoned"),
             Self::InvalidKey => f.write_str("printable key contains a control character"),
+            Self::InvalidMousePosition => {
+                f.write_str("mouse position is outside the terminal content area")
+            }
+            Self::MouseReportingDisabled => f.write_str("child mouse reporting is disabled"),
+            Self::MousePositionUnrepresentable => {
+                f.write_str("active mouse encoding cannot represent this position")
+            }
             Self::InputQueueFull => f.write_str("pending input queue is full"),
             Self::InputDisabled => f.write_str("child input is disabled"),
             Self::SessionClosed => f.write_str("terminal session is closed"),
@@ -468,6 +481,8 @@ pub struct ScreenSnapshot {
     application_cursor: bool,
     bracketed_paste: bool,
     cells: Vec<SnapshotCell>,
+    row_wraps: [bool; 80],
+    row_wraps_available: bool,
 }
 
 impl fmt::Debug for ScreenSnapshot {
@@ -481,6 +496,7 @@ impl fmt::Debug for ScreenSnapshot {
             .field("application_cursor", &self.application_cursor)
             .field("bracketed_paste", &self.bracketed_paste)
             .field("cell_count", &self.cells.len())
+            .field("row_wraps_available", &self.row_wraps_available)
             .field("text", &"<redacted>")
             .finish()
     }
@@ -517,6 +533,8 @@ impl ScreenSnapshot {
             application_cursor: false,
             bracketed_paste: false,
             cells,
+            row_wraps: [false; 80],
+            row_wraps_available: false,
         })
     }
 
@@ -534,6 +552,8 @@ impl ScreenSnapshot {
         self.cells
             .resize_with(source.cells.len(), SnapshotCell::default);
         self.cells.copy_from_slice(&source.cells);
+        self.row_wraps = source.row_wraps;
+        self.row_wraps_available = source.row_wraps_available;
     }
 
     fn refresh(&mut self, screen: &Screen, size: TerminalSize) {
@@ -548,6 +568,11 @@ impl ScreenSnapshot {
         self.cursor_hidden = screen.hide_cursor();
         self.application_cursor = screen.application_cursor();
         self.bracketed_paste = screen.bracketed_paste();
+        self.row_wraps.fill(false);
+        for row in 0..size.rows {
+            self.row_wraps[usize::from(row)] = screen.row_wrapped(row);
+        }
+        self.row_wraps_available = true;
         for row in 0..size.rows {
             for col in 0..size.columns {
                 if let Some(cell) = screen.cell(row, col) {
@@ -582,6 +607,10 @@ impl ScreenSnapshot {
     pub const fn cursor_hidden(&self) -> bool {
         self.cursor_hidden
     }
+    /// Override whether the cursor is hidden in this presentation snapshot.
+    pub fn set_cursor_hidden(&mut self, hidden: bool) {
+        self.cursor_hidden = hidden;
+    }
     /// Whether cursor keys use application-mode encoding.
     pub const fn application_cursor(&self) -> bool {
         self.application_cursor
@@ -593,6 +622,31 @@ impl ScreenSnapshot {
     /// Visible cells in row-major order.
     pub fn cells(&self) -> &[SnapshotCell] {
         &self.cells
+    }
+    /// Authoritative soft-wrap state for a visible row, when known.
+    pub fn row_wrapped(&self, row: u16) -> Option<bool> {
+        (self.row_wraps_available && row < self.rows).then(|| self.row_wraps[usize::from(row)])
+    }
+    /// Borrow all authoritative visible-row wrap flags, when known.
+    pub fn row_wraps(&self) -> Option<&[bool]> {
+        self.row_wraps_available
+            .then(|| &self.row_wraps[..usize::from(self.rows)])
+    }
+    /// Apply authoritative wrap metadata after loading a screen checkpoint.
+    /// The input must contain exactly one flag for each visible row.
+    pub fn apply_row_wraps(&mut self, wraps: &[bool]) -> Result<(), TerminalError> {
+        if wraps.len() != usize::from(self.rows) || self.rows > 80 {
+            return Err(TerminalError::InvalidSize);
+        }
+        self.row_wraps.fill(false);
+        self.row_wraps[..wraps.len()].copy_from_slice(wraps);
+        self.row_wraps_available = true;
+        Ok(())
+    }
+    /// Mark wrap metadata unavailable, as for a checkpoint without a bitmap.
+    pub fn clear_row_wraps(&mut self) {
+        self.row_wraps.fill(false);
+        self.row_wraps_available = false;
     }
     /// Cell at a zero-based visible position.
     pub fn cell(&self, row: u16, column: u16) -> Option<&SnapshotCell> {
@@ -848,6 +902,8 @@ pub struct PumpOutcome {
 pub struct TerminalSession {
     master: Option<File>,
     child: Option<Child>,
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    process_identity: Option<crate::process_metadata::ProcessIdentity>,
     process_group: Pid,
     parser: Parser<CoreCallbacks>,
     size: TerminalSize,
@@ -932,15 +988,23 @@ impl TerminalSession {
             });
         }
         let child = command.spawn().map_err(|e| io_error("spawn child", e))?;
+        // Spawning is complete; native identity sampling must not serialize
+        // unrelated PTY launches behind this child.
+        drop(spawn_guard);
+        // Capture immediately while the PID is known to belong to this child.
+        // Failure is metadata unavailability and must never fail the launch.
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let process_identity = crate::process_metadata::capture_identity(child.id());
         // The status-pipe and PTY creation windows are finished. Service and
         // cleanup of this owned child must not hold the descriptor gate.
-        drop(spawn_guard);
         drop(command);
         drop(pty.user);
         let process_group = Pid::from_child(&child);
         Ok(Self {
             master: Some(File::from(pty.controller)),
             child: Some(child),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            process_identity,
             process_group,
             parser,
             size,
@@ -957,6 +1021,16 @@ impl TerminalSession {
             final_output_complete: false,
             final_output_bytes: 0,
         })
+    }
+
+    /// Return this direct child's captured process identity while it is live.
+    /// The identity is opaque and intentionally excluded from diagnostics.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub fn process_identity(&self) -> Option<crate::process_metadata::ProcessIdentity> {
+        self.exit_status
+            .is_none()
+            .then_some(self.process_identity)
+            .flatten()
     }
 
     /// Queue a typed key, without accepting raw host escape sequences.
@@ -987,6 +1061,47 @@ impl TerminalSession {
         }
         let suffix: &[u8] = if submit { b"\r" } else { b"" };
         self.input.append_parts(&[text.as_bytes(), suffix])
+    }
+
+    /// Whether the child has enabled a VT mouse tracking mode.
+    pub fn mouse_reporting_enabled(&self) -> bool {
+        mouse_reporting_enabled(self.parser.screen())
+    }
+
+    /// Whether the parser is currently displaying the alternate screen.
+    pub fn alternate_screen_active(&self) -> bool {
+        alternate_screen_active(self.parser.screen())
+    }
+
+    /// Queue one typed wheel event at a zero-based position in the content area.
+    ///
+    /// The event is encoded according to the child's current VT mouse mode and
+    /// encoding. It is appended atomically to the bounded input queue.
+    pub fn mouse_wheel(&mut self, column: u16, row: u16, up: bool) -> Result<(), TerminalError> {
+        if !self.input_enabled {
+            return Err(TerminalError::InputDisabled);
+        }
+        if self.cleanup.is_some() || self.nonblocking_shutdown_started {
+            return Err(TerminalError::SessionClosed);
+        }
+        let encoded = encode_mouse_wheel(self.parser.screen(), self.size, column, row, up)?;
+        self.input.append_parts(&[&encoded])
+    }
+
+    /// Revalidate the current mouse mode and coordinate without queueing input.
+    pub(crate) fn validate_mouse_wheel(
+        &self,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<(), TerminalError> {
+        if !self.input_enabled {
+            return Err(TerminalError::InputDisabled);
+        }
+        if self.cleanup.is_some() || self.nonblocking_shutdown_started {
+            return Err(TerminalError::SessionClosed);
+        }
+        encode_mouse_wheel(self.parser.screen(), self.size, column, row, up).map(|_| ())
     }
 
     /// Signal this still-owned child group; never queue or replay the signal.
@@ -1135,6 +1250,18 @@ impl TerminalSession {
     /// Borrow the single retained sanitized snapshot.
     pub fn snapshot(&self) -> &ScreenSnapshot {
         &self.snapshot
+    }
+    /// Return a bounded viewport over retained normal history without changing
+    /// the live parser or its currently displayed screen.
+    ///
+    /// `offset_rows` is clamped to retained history and the returned offset is
+    /// the actual number of rows applied. Alternate-screen views always clamp
+    /// to zero so hidden normal history is not exposed as that pane's screen.
+    pub fn history_snapshot(
+        &self,
+        offset_rows: u16,
+    ) -> Result<(ScreenSnapshot, u16), TerminalError> {
+        history_snapshot_from_screen(self.parser.screen(), self.size, offset_rows)
     }
     /// Borrow the normal history engine, independently of the active buffer.
     /// Historical cells remain in-memory and must be normalized before disk.
@@ -1354,6 +1481,83 @@ impl TerminalSession {
     }
 }
 
+fn history_snapshot_from_screen(
+    screen: &Screen,
+    size: TerminalSize,
+    offset_rows: u16,
+) -> Result<(ScreenSnapshot, u16), TerminalError> {
+    let mut view = screen.clone();
+    let requested = if alternate_screen_active(&view) {
+        0
+    } else {
+        offset_rows
+    };
+    view.set_scrollback(usize::from(requested));
+    let actual = u16::try_from(view.scrollback()).map_err(|_| TerminalError::InvalidSize)?;
+    let mut snapshot = ScreenSnapshot::try_new(size)?;
+    snapshot.refresh(&view, size);
+    if actual > 0 {
+        snapshot.set_cursor_hidden(true);
+    }
+    Ok((snapshot, actual))
+}
+
+fn mouse_reporting_enabled(screen: &Screen) -> bool {
+    screen.mouse_protocol_mode() != MouseProtocolMode::None
+}
+
+fn alternate_screen_active(screen: &Screen) -> bool {
+    screen.alternate_screen()
+}
+
+fn encode_mouse_wheel(
+    screen: &Screen,
+    size: TerminalSize,
+    column: u16,
+    row: u16,
+    up: bool,
+) -> Result<Vec<u8>, TerminalError> {
+    if screen.mouse_protocol_mode() == MouseProtocolMode::None {
+        return Err(TerminalError::MouseReportingDisabled);
+    }
+    if column >= size.columns() || row >= size.rows() {
+        return Err(TerminalError::InvalidMousePosition);
+    }
+
+    let button = if up { 64_u16 } else { 65_u16 };
+    let x = u32::from(column) + 1;
+    let y = u32::from(row) + 1;
+    match screen.mouse_protocol_encoding() {
+        MouseProtocolEncoding::Sgr => Ok(format!("\x1b[<{button};{x};{y}M").into_bytes()),
+        MouseProtocolEncoding::Default => {
+            let encoded_x = x + 32;
+            let encoded_y = y + 32;
+            if encoded_x > u32::from(u8::MAX) || encoded_y > u32::from(u8::MAX) {
+                return Err(TerminalError::MousePositionUnrepresentable);
+            }
+            Ok(vec![
+                0x1b,
+                b'[',
+                b'M',
+                u8::try_from(button + 32).expect("fixed mouse button code"),
+                u8::try_from(encoded_x).expect("validated legacy mouse column"),
+                u8::try_from(encoded_y).expect("validated legacy mouse row"),
+            ])
+        }
+        MouseProtocolEncoding::Utf8 => {
+            let mut encoded = Vec::with_capacity(12);
+            encoded.extend_from_slice(b"\x1b[M");
+            for value in [button + 32, column + 33, row + 33] {
+                let scalar = char::from_u32(u32::from(value))
+                    .ok_or(TerminalError::MousePositionUnrepresentable)?;
+                let mut buffer = [0_u8; 4];
+                encoded.extend_from_slice(scalar.encode_utf8(&mut buffer).as_bytes());
+            }
+            Ok(encoded)
+        }
+    }
+}
+
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         if self.nonblocking_shutdown_started {
@@ -1457,6 +1661,137 @@ fn clone_fd(fd: &OwnedFd) -> Result<OwnedFd, TerminalError> {
 
 #[cfg(test)]
 mod unit_tests;
+
+#[cfg(test)]
+mod pure_history_and_mouse_tests {
+    use super::*;
+
+    fn snapshot_text(snapshot: &ScreenSnapshot) -> String {
+        let mut text = String::new();
+        for row in 0..snapshot.rows() {
+            if row != 0 {
+                text.push('\n');
+            }
+            for column in 0..snapshot.columns() {
+                if let Some(cell) = snapshot.cell(row, column) {
+                    text.push_str(cell.text());
+                }
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn history_snapshot_clips_and_preserves_styled_wide_cells_without_mutating_live_view() {
+        let size = TerminalSize::new(5, 20).unwrap();
+        let mut parser =
+            Parser::new_with_callbacks(size.rows(), size.columns(), 3, CoreCallbacks::new());
+        parser.process(
+            b"\x1b[31mA\x1b[0m\r\nB\r\n\x1b[1;34m\xe6\xbc\xa2X\x1b[0m\r\nD\r\nE\r\nF\r\nG\r\nH",
+        );
+
+        let (live, live_offset) = history_snapshot_from_screen(parser.screen(), size, 0).unwrap();
+        assert_eq!(live_offset, 0);
+        assert!(!live.cursor_hidden());
+        let live_text = snapshot_text(&live);
+        assert!(live_text.contains('D'));
+        assert!(live_text.contains('E'));
+
+        let (older, actual_offset) =
+            history_snapshot_from_screen(parser.screen(), size, 1).unwrap();
+        assert_eq!(actual_offset, 1);
+        assert!(older.cursor_hidden());
+        let wide = older.cell(0, 0).unwrap();
+        assert_eq!(wide.text(), "\u{6f22}");
+        assert!(wide.is_wide());
+        assert!(older.cell(0, 1).unwrap().is_wide_continuation());
+        assert_eq!(wide.foreground(), Color::Idx(4));
+
+        let (oldest, actual_oldest) =
+            history_snapshot_from_screen(parser.screen(), size, u16::MAX).unwrap();
+        assert_eq!(actual_oldest, 3);
+        assert!(snapshot_text(&oldest).starts_with('A'));
+        assert_eq!(parser.screen().scrollback(), 0);
+        assert_eq!(
+            snapshot_text(
+                &history_snapshot_from_screen(parser.screen(), size, 0)
+                    .unwrap()
+                    .0
+            ),
+            live_text
+        );
+    }
+
+    #[test]
+    fn history_snapshot_never_substitutes_hidden_normal_history_for_alternate_screen() {
+        let size = TerminalSize::new(5, 20).unwrap();
+        let mut parser = Parser::new(size.rows(), size.columns(), 8);
+        parser.process(b"NORMAL-ONE\r\nNORMAL-TWO\r\nNORMAL-THREE\r\nNORMAL-FOUR");
+        parser.process(b"\x1b[?1049hALT-ONLY");
+        assert!(alternate_screen_active(parser.screen()));
+
+        let (snapshot, actual) = history_snapshot_from_screen(parser.screen(), size, 8).unwrap();
+        assert_eq!(actual, 0);
+        let text = snapshot_text(&snapshot);
+        assert!(text.contains("ALT-ONLY"));
+        assert!(!text.contains("NORMAL-ONE"));
+        assert!(parser.screen().alternate_screen());
+        assert_eq!(parser.screen().scrollback(), 0);
+    }
+
+    #[test]
+    fn wheel_encoding_matches_enabled_mode_and_rejects_disabled_or_unrepresentable_positions() {
+        let size = TerminalSize::new(8, 240).unwrap();
+        let mut parser = Parser::new(size.rows(), size.columns(), 0);
+        assert!(!mouse_reporting_enabled(parser.screen()));
+        assert_eq!(
+            encode_mouse_wheel(parser.screen(), size, 2, 3, true),
+            Err(TerminalError::MouseReportingDisabled)
+        );
+
+        parser.process(b"\x1b[?1000h");
+        assert!(mouse_reporting_enabled(parser.screen()));
+        assert_eq!(
+            encode_mouse_wheel(parser.screen(), size, 2, 3, true).unwrap(),
+            [b"\x1b[M".as_slice(), &[96, 35, 36]].concat()
+        );
+        assert_eq!(
+            encode_mouse_wheel(parser.screen(), size, 2, 3, false).unwrap(),
+            [b"\x1b[M".as_slice(), &[97, 35, 36]].concat()
+        );
+        assert_eq!(
+            encode_mouse_wheel(parser.screen(), size, 239, 0, true),
+            Err(TerminalError::MousePositionUnrepresentable)
+        );
+        assert_eq!(
+            encode_mouse_wheel(parser.screen(), size, 240, 0, true),
+            Err(TerminalError::InvalidMousePosition)
+        );
+
+        parser.process(b"\x1b[?1005h");
+        let utf8 = encode_mouse_wheel(parser.screen(), size, 2, 3, true).unwrap();
+        assert_eq!(
+            utf8,
+            [b"\x1b[M".as_slice(), "\u{60}\u{23}\u{24}".as_bytes()].concat()
+        );
+        assert_eq!(
+            encode_mouse_wheel(parser.screen(), size, 239, 0, true).unwrap(),
+            [b"\x1b[M`".as_slice(), &[0xc4, 0x90, b'!']].concat()
+        );
+
+        parser.process(b"\x1b[?1006h");
+        assert_eq!(
+            encode_mouse_wheel(parser.screen(), size, 239, 7, false).unwrap(),
+            b"\x1b[<65;240;8M"
+        );
+        parser.process(b"\x1b[?1000l");
+        assert!(!mouse_reporting_enabled(parser.screen()));
+        assert_eq!(
+            encode_mouse_wheel(parser.screen(), size, 2, 3, true),
+            Err(TerminalError::MouseReportingDisabled)
+        );
+    }
+}
 
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod atomic_pty_integration_tests {

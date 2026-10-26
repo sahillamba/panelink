@@ -319,7 +319,13 @@ if b"saved layout from" not in text or b"[Enter]" not in text or b"[v]" not in t
         .arg(env!("CARGO_BIN_EXE_panelink"))
         .arg(&fixture.root)
         .env_clear()
-        .env("PATH", "/usr/bin:/bin:/opt/homebrew/bin")
+        // Resolve the helper through the invoking toolchain. On macOS the
+        // system Python shim may require an unavailable Xcode installation;
+        // the application child still gets the explicit minimal env above.
+        .env(
+            "PATH",
+            std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin:/opt/homebrew/bin".into()),
+        )
         .output();
     let output = match result {
         Ok(output) => output,

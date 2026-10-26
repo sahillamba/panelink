@@ -126,7 +126,8 @@ fn run_frames(
     enter_terminal: bool,
 ) -> Result<(), &'static str> {
     let (rows, columns) = host.size().map_err(host_error_message)?;
-    let mut compositor = Compositor::try_new().map_err(|_| "could not compose recovery view")?;
+    let mut compositor =
+        Compositor::try_new_unpadded().map_err(|_| "could not compose recovery view")?;
     let mut snapshots = [
         ScreenSnapshot::try_new(TerminalSize::new(80, 240).map_err(|_| "invalid frame size")?)
             .map_err(|_| "could not allocate recovery view")?,
@@ -774,7 +775,7 @@ mod tests {
         ));
         let mut ui = RecoveryUi::new();
         let mut snapshots = [snapshot(), snapshot(), snapshot(), snapshot()];
-        let mut compositor = Compositor::try_new().unwrap();
+        let mut compositor = Compositor::try_new_unpadded().unwrap();
         let mut bytes = [0_u8; 64 * 1024];
         let mut output = io::Cursor::new(&mut bytes[..]);
         compose(
@@ -822,7 +823,7 @@ mod tests {
         for size in [(8, 20), (2, 10)] {
             let mut ui = RecoveryUi::new();
             let mut snapshots = [snapshot(), snapshot(), snapshot(), snapshot()];
-            let mut compositor = Compositor::try_new().unwrap();
+            let mut compositor = Compositor::try_new_unpadded().unwrap();
             let mut bytes = [0_u8; 256 * 1024];
             let mut output = io::Cursor::new(&mut bytes[..]);
             compose(

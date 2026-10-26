@@ -105,10 +105,39 @@ impl StartedMultiServer {
     /// launch returns an error after the journal recorded it; an `Unknown`
     /// result keeps the retained child and is reported, never respawned.
     pub fn start(
+        storage: ServerStorage,
+        terminfo: &Path,
+        launch: &StartupLaunch<'_>,
+        allow_input: bool,
+    ) -> Result<Self, MultiStartError> {
+        Self::start_inner(storage, terminfo, launch, allow_input, None)
+    }
+
+    /// Start with exactly the bridge-owned config and socket assignments.
+    /// The bridge values are applied only inside the preparation closure,
+    /// after `execute_launch` has validated the bounded schema-6 request.
+    pub fn start_with_provider_bridge(
+        storage: ServerStorage,
+        terminfo: &Path,
+        launch: &StartupLaunch<'_>,
+        allow_input: bool,
+        bridge_environment: &Environment,
+    ) -> Result<Self, MultiStartError> {
+        Self::start_inner(
+            storage,
+            terminfo,
+            launch,
+            allow_input,
+            Some(bridge_environment),
+        )
+    }
+
+    fn start_inner(
         mut storage: ServerStorage,
         terminfo: &Path,
         launch: &StartupLaunch<'_>,
         allow_input: bool,
+        bridge_environment: Option<&Environment>,
     ) -> Result<Self, MultiStartError> {
         let generation = storage.generation();
         let mut ledger = Ledger::new(generation).map_err(|_| MultiStartError::OwnerUnavailable)?;
@@ -121,6 +150,15 @@ impl StartedMultiServer {
             sequence: 1,
         };
         let payload = startup_request(key, launch)?;
+        let content = crate::pane_layout::content_rect(crate::pane_layout::Rect {
+            x: 0,
+            y: 0,
+            rows: launch.rows,
+            columns: launch.columns,
+        })
+        .ok_or(MultiStartError::LaunchFailed)?;
+        let content_size = crate::terminal::TerminalSize::new(content.rows, content.columns)
+            .map_err(|_| MultiStartError::LaunchFailed)?;
         let mut owner = MultiSessionOwner::<PtyEffects>::with_ledger(ledger, allow_input)
             .map_err(|_| MultiStartError::OwnerUnavailable)?;
         let terminfo = terminfo.to_path_buf();
@@ -132,7 +170,16 @@ impl StartedMultiServer {
                 &payload,
                 0,
                 &mut journal,
-                |request, target| prepare_launch(request, target, &terminfo).map_err(|_| ()),
+                |request, target| {
+                    let prepared = prepare_launch(request, target, &terminfo).map_err(|_| ())?;
+                    let prepared = match bridge_environment {
+                        Some(environment) => prepared
+                            .with_provider_bridge_env(environment)
+                            .map_err(|_| ())?,
+                        None => prepared,
+                    };
+                    Ok::<_, ()>(prepared.with_initial_size(content_size))
+                },
                 |prepared| prepared.spawn().map(PtyEffects::new).map_err(|_| ()),
             )
         };
@@ -142,6 +189,13 @@ impl StartedMultiServer {
         if result.outcome == Outcome::Failed || result.target.is_none() {
             return Err(MultiStartError::LaunchFailed);
         }
+        // The launch request sizes the outer root rectangle. The attached UI
+        // leaves a one-cell border around the child PTY. The child already
+        // starts at that content size, so this records its confirmed size
+        // without pumping early output through a shrinking screen.
+        let _ = owner.resize_layout(1, launch.rows, launch.columns, |effects, rows, columns| {
+            effects.resize(rows, columns)
+        });
         Ok(Self {
             driver: MultiServerDriver::new(owner, storage, PathBuf::from(&terminfo)),
             startup: result,
@@ -299,6 +353,66 @@ mod tests {
         assert!(!format!("{started:?}").contains("DO_NOT"));
         drop(started);
         assert_eq!(reopen_within_bound(&storage_dir.0).unwrap().generation(), 2);
+    }
+
+    #[test]
+    fn opt_in_bridge_environment_reaches_only_the_started_child() {
+        let storage_dir = Fixture::new();
+        let cwd = Fixture::new();
+        let output = cwd.0.join("bridge-env.txt");
+        let script = format!(
+            "printf '%s\\n%s\\n' \"$OPENCODE_CONFIG_DIR\" \"$PANELINK_BRIDGE_SOCKET\" > '{}'",
+            output.display()
+        );
+        let arguments = [OsString::from("-c"), OsString::from(script)];
+        let context = context(&cwd.0);
+        let launch = StartupLaunch {
+            executable: OsStr::new("/bin/sh"),
+            arguments: &arguments,
+            context: &context,
+            rows: 24,
+            columns: 80,
+        };
+        let bridge_environment = Environment::from([
+            (
+                "OPENCODE_CONFIG_DIR".into(),
+                cwd.0.join("private-config").into_os_string(),
+            ),
+            (
+                "PANELINK_BRIDGE_SOCKET".into(),
+                cwd.0.join("bridge.sock").into_os_string(),
+            ),
+        ]);
+        let parent_socket = std::env::var_os("PANELINK_BRIDGE_SOCKET");
+        let parent_config = std::env::var_os("OPENCODE_CONFIG_DIR");
+        let storage = ServerStorage::initialize_for_test(&storage_dir.0).unwrap();
+        let started = StartedMultiServer::start_with_provider_bridge(
+            storage,
+            &cwd.0,
+            &launch,
+            true,
+            &bridge_environment,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !output.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            fs::read_to_string(&output).unwrap(),
+            format!(
+                "{}\n{}\n",
+                cwd.0.join("private-config").display(),
+                cwd.0.join("bridge.sock").display()
+            )
+        );
+        assert_eq!(std::env::var_os("PANELINK_BRIDGE_SOCKET"), parent_socket);
+        assert_eq!(std::env::var_os("OPENCODE_CONFIG_DIR"), parent_config);
+        let journal = fs::read(storage_dir.0.join("launch.journal")).unwrap();
+        assert!(!journal
+            .windows(b"private-config".len())
+            .any(|part| part == b"private-config"));
+        drop(started);
     }
 
     #[test]

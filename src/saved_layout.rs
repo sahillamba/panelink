@@ -5,7 +5,6 @@
 use crate::control_protocol::TargetRef;
 use crate::pane_layout::{
     LayoutSnapshot, PaneGeometry, Rect, MAX_PANES, MAX_PANE_COLUMNS, MAX_PANE_ROWS,
-    MIN_PANE_COLUMNS, MIN_PANE_ROWS,
 };
 use std::fmt;
 
@@ -15,6 +14,11 @@ pub const SAVED_LAYOUT_BYTES: usize = 280;
 /// Historical schema-1 record size, accepted on read only.
 pub const LEGACY_SAVED_LAYOUT_BYTES: usize = 160;
 const MAX_SAVED_PANES: u8 = 4;
+// Saved-layout schemas predate the current live pane inset. Keep their
+// historical geometry domain stable so existing records remain readable and
+// canonical even though new live layouts require 7x22 outer rectangles.
+const MIN_SAVED_ROWS: u16 = 5;
+const MIN_SAVED_COLUMNS: u16 = 20;
 
 /// Canonical saved split orientation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,8 +150,8 @@ impl SavedLayout {
         let count = snapshot.pane_count();
         match count {
             1 => {
-                if !(MIN_PANE_ROWS..=MAX_PANE_ROWS).contains(&snapshot.rows)
-                    || !(MIN_PANE_COLUMNS..=MAX_PANE_COLUMNS).contains(&snapshot.columns)
+                if !(MIN_SAVED_ROWS..=MAX_PANE_ROWS).contains(&snapshot.rows)
+                    || !(MIN_SAVED_COLUMNS..=MAX_PANE_COLUMNS).contains(&snapshot.columns)
                 {
                     return Err(LayoutRecordError::InvalidGeometry);
                 }
@@ -183,8 +187,8 @@ impl SavedLayout {
                 })
             }
             2..=MAX_PANES => {
-                if !(MIN_PANE_ROWS..=MAX_PANE_ROWS).contains(&snapshot.rows)
-                    || !(MIN_PANE_COLUMNS..=MAX_PANE_COLUMNS).contains(&snapshot.columns)
+                if !(MIN_SAVED_ROWS..=MAX_PANE_ROWS).contains(&snapshot.rows)
+                    || !(MIN_SAVED_COLUMNS..=MAX_PANE_COLUMNS).contains(&snapshot.columns)
                 {
                     return Err(LayoutRecordError::InvalidGeometry);
                 }
@@ -436,8 +440,8 @@ pub fn decode(bytes: &[u8]) -> Result<SavedLayout, LayoutRecordError> {
             if axis != 0 {
                 return Err(LayoutRecordError::InvalidRecord);
             }
-            if !(MIN_PANE_ROWS..=MAX_PANE_ROWS).contains(&rows)
-                || !(MIN_PANE_COLUMNS..=MAX_PANE_COLUMNS).contains(&columns)
+            if !(MIN_SAVED_ROWS..=MAX_PANE_ROWS).contains(&rows)
+                || !(MIN_SAVED_COLUMNS..=MAX_PANE_COLUMNS).contains(&columns)
             {
                 return Err(LayoutRecordError::InvalidGeometry);
             }
@@ -488,8 +492,8 @@ pub fn decode(bytes: &[u8]) -> Result<SavedLayout, LayoutRecordError> {
             if count == 2 && axis == LayoutAxis::Single {
                 return Err(LayoutRecordError::InvalidRecord);
             }
-            if !(MIN_PANE_ROWS..=MAX_PANE_ROWS).contains(&rows)
-                || !(MIN_PANE_COLUMNS..=MAX_PANE_COLUMNS).contains(&columns)
+            if !(MIN_SAVED_ROWS..=MAX_PANE_ROWS).contains(&rows)
+                || !(MIN_SAVED_COLUMNS..=MAX_PANE_COLUMNS).contains(&columns)
             {
                 return Err(LayoutRecordError::InvalidGeometry);
             }
@@ -612,8 +616,8 @@ fn read_rect(bytes: &[u8], offset: usize) -> Rect {
 }
 
 fn validate_rect(rows: u16, columns: u16, rect: Rect) -> Result<(), LayoutRecordError> {
-    if rect.rows < MIN_PANE_ROWS
-        || rect.columns < MIN_PANE_COLUMNS
+    if rect.rows < MIN_SAVED_ROWS
+        || rect.columns < MIN_SAVED_COLUMNS
         || u32::from(rect.x) + u32::from(rect.columns) > u32::from(columns)
         || u32::from(rect.y) + u32::from(rect.rows) > u32::from(rows)
     {
@@ -742,14 +746,14 @@ fn validate_derived_geometry(
 ) -> Result<(), LayoutRecordError> {
     match axis {
         LayoutAxis::Single => {
-            if !(MIN_PANE_ROWS..=MAX_PANE_ROWS).contains(&rows)
-                || !(MIN_PANE_COLUMNS..=MAX_PANE_COLUMNS).contains(&columns)
+            if !(MIN_SAVED_ROWS..=MAX_PANE_ROWS).contains(&rows)
+                || !(MIN_SAVED_COLUMNS..=MAX_PANE_COLUMNS).contains(&columns)
             {
                 return Err(LayoutRecordError::InvalidGeometry);
             }
         }
         LayoutAxis::SideBySide => {
-            if columns < 41 {
+            if columns < 2 * MIN_SAVED_COLUMNS + 1 {
                 return Err(LayoutRecordError::InvalidGeometry);
             }
             let usable = columns
@@ -757,15 +761,15 @@ fn validate_derived_geometry(
                 .ok_or(LayoutRecordError::InvalidGeometry)?;
             let first = usable / 2;
             let second = usable - first;
-            if first < MIN_PANE_COLUMNS || second < MIN_PANE_COLUMNS {
+            if first < MIN_SAVED_COLUMNS || second < MIN_SAVED_COLUMNS {
                 return Err(LayoutRecordError::InvalidGeometry);
             }
-            if !(MIN_PANE_ROWS..=MAX_PANE_ROWS).contains(&rows) {
+            if !(MIN_SAVED_ROWS..=MAX_PANE_ROWS).contains(&rows) {
                 return Err(LayoutRecordError::InvalidGeometry);
             }
         }
         LayoutAxis::Stacked => {
-            if rows < 11 {
+            if rows < 2 * MIN_SAVED_ROWS + 1 {
                 return Err(LayoutRecordError::InvalidGeometry);
             }
             let usable = rows
@@ -773,10 +777,10 @@ fn validate_derived_geometry(
                 .ok_or(LayoutRecordError::InvalidGeometry)?;
             let first = usable / 2;
             let second = usable - first;
-            if first < MIN_PANE_ROWS || second < MIN_PANE_ROWS {
+            if first < MIN_SAVED_ROWS || second < MIN_SAVED_ROWS {
                 return Err(LayoutRecordError::InvalidGeometry);
             }
-            if !(MIN_PANE_COLUMNS..=MAX_PANE_COLUMNS).contains(&columns) {
+            if !(MIN_SAVED_COLUMNS..=MAX_PANE_COLUMNS).contains(&columns) {
                 return Err(LayoutRecordError::InvalidGeometry);
             }
         }
@@ -791,7 +795,7 @@ fn derive_split_rects(
 ) -> Result<(Rect, Rect, Rect), LayoutRecordError> {
     match axis {
         LayoutAxis::SideBySide => {
-            if columns < 41 {
+            if columns < 2 * MIN_SAVED_COLUMNS + 1 {
                 return Err(LayoutRecordError::InvalidGeometry);
             }
             let usable = columns
@@ -826,7 +830,7 @@ fn derive_split_rects(
             Ok((first, second, divider))
         }
         LayoutAxis::Stacked => {
-            if rows < 11 {
+            if rows < 2 * MIN_SAVED_ROWS + 1 {
                 return Err(LayoutRecordError::InvalidGeometry);
             }
             let usable = rows
@@ -865,7 +869,7 @@ fn derive_split_rects(
 }
 
 fn validate_leaf_rect(rect: Rect) -> Result<(), LayoutRecordError> {
-    if rect.rows < MIN_PANE_ROWS || rect.columns < MIN_PANE_COLUMNS {
+    if rect.rows < MIN_SAVED_ROWS || rect.columns < MIN_SAVED_COLUMNS {
         return Err(LayoutRecordError::InvalidGeometry);
     }
     if rect.rows > MAX_PANE_ROWS || rect.columns > MAX_PANE_COLUMNS {
@@ -948,6 +952,29 @@ mod tests {
     }
 
     #[test]
+    fn historical_minimum_snapshot_remains_canonical() {
+        let meta = LayoutMetadata::new(7, 8, 1, 1, 1).unwrap();
+        let pane = PaneGeometry {
+            target: target(1, 1),
+            rect: root_rect(MIN_SAVED_ROWS, MIN_SAVED_COLUMNS),
+        };
+        let snapshot = LayoutSnapshot {
+            revision: 1,
+            rows: MIN_SAVED_ROWS,
+            columns: MIN_SAVED_COLUMNS,
+            panes: [Some(pane), None, None, None],
+            divider: None,
+            dividers: [None; MAX_PANES - 1],
+        };
+
+        let saved = SavedLayout::from_snapshot(meta, &snapshot).expect("historical minimum");
+        let bytes = encode(&saved);
+        assert_eq!(decode(&bytes), Ok(saved));
+        assert_eq!(read_u16(&bytes, 48), MIN_SAVED_ROWS);
+        assert_eq!(read_u16(&bytes, 50), MIN_SAVED_COLUMNS);
+    }
+
+    #[test]
     fn encode_uses_exact_offsets_and_zero_padding() {
         let meta = LayoutMetadata::new(1, 2, 3, 4, 5).unwrap();
         let layout = SavedLayout::empty(meta);
@@ -971,8 +998,8 @@ mod tests {
         let cases = [
             (SplitDirection::Left, 7, 83),
             (SplitDirection::Right, 7, 83),
-            (SplitDirection::Up, 11, 82),
-            (SplitDirection::Down, 12, 82),
+            (SplitDirection::Up, 15, 82),
+            (SplitDirection::Down, 16, 82),
         ];
         for &(direction, rows, columns) in &cases {
             let existing = target(1, 1);
@@ -1028,8 +1055,8 @@ mod tests {
             let meta = LayoutMetadata::new(7, 8, 1, snapshot.revision, 1).unwrap();
             SavedLayout::from_snapshot(meta, &snapshot).expect("odd/even side-by-side ok");
         }
-        // Stacked odd (11) and even (12)
-        for rows in [11, 12] {
+        // Stacked odd (15) and even (16)
+        for rows in [15, 16] {
             let mut layout = PaneLayout::new(target(1, 1), rows, 82).expect("root");
             let preview = layout
                 .preview_split(target(1, 1), 1, SplitDirection::Up, target(2, 2))
@@ -1045,7 +1072,7 @@ mod tests {
     fn minimum_and_maximum_roots() {
         // Count1 min/max
         let t = target(1, 1);
-        for (rows, columns) in [(5, 20), (80, 240)] {
+        for (rows, columns) in [(7, 22), (80, 240)] {
             let layout = PaneLayout::new(t, rows, columns).expect("root");
             let snapshot = layout.snapshot();
             let meta = LayoutMetadata::new(7, 8, 1, snapshot.revision, 1).unwrap();
@@ -1053,8 +1080,8 @@ mod tests {
         }
 
         // Count2 SideBySide min/max
-        for columns in [41, 240] {
-            let mut layout = PaneLayout::new(target(1, 1), 5, columns).expect("root");
+        for columns in [45, 240] {
+            let mut layout = PaneLayout::new(target(1, 1), 7, columns).expect("root");
             let preview = layout
                 .preview_split(target(1, 1), 1, SplitDirection::Right, target(2, 2))
                 .expect("split");
@@ -1065,8 +1092,8 @@ mod tests {
         }
 
         // Count2 Stacked min/max
-        for rows in [11, 80] {
-            let mut layout = PaneLayout::new(target(1, 1), rows, 20).expect("root");
+        for rows in [15, 80] {
+            let mut layout = PaneLayout::new(target(1, 1), rows, 22).expect("root");
             let preview = layout
                 .preview_split(target(1, 1), 1, SplitDirection::Down, target(2, 2))
                 .expect("split");
@@ -1174,7 +1201,7 @@ mod tests {
         assert_eq!(decode(&bytes), Err(LayoutRecordError::InvalidRecord));
 
         // count 2 with axis single
-        let mut layout = PaneLayout::new(t, 11, 82).expect("root");
+        let mut layout = PaneLayout::new(t, 15, 82).expect("root");
         let preview = layout
             .preview_split(t, 1, SplitDirection::Down, target(2, 2))
             .expect("split");
@@ -1548,7 +1575,7 @@ mod tests {
 
     #[test]
     fn from_snapshot_rejects_wrong_divider_for_two_panes() {
-        let mut layout = PaneLayout::new(target(1, 1), 11, 82).expect("root");
+        let mut layout = PaneLayout::new(target(1, 1), 15, 82).expect("root");
         let preview = layout
             .preview_split(target(1, 1), 1, SplitDirection::Down, target(2, 2))
             .expect("split");
@@ -1695,7 +1722,7 @@ mod tests {
 
     #[test]
     fn geometry_derives_correct_rects_for_count2() {
-        let mut layout = PaneLayout::new(target(1, 1), 11, 82).expect("root");
+        let mut layout = PaneLayout::new(target(1, 1), 15, 82).expect("root");
         let preview = layout
             .preview_split(target(1, 1), 1, SplitDirection::Down, target(2, 2))
             .expect("split");
@@ -1709,7 +1736,7 @@ mod tests {
             Rect {
                 x: 0,
                 y: 0,
-                rows: 5,
+                rows: 7,
                 columns: 82
             }
         );
@@ -1717,8 +1744,8 @@ mod tests {
             geom[1].unwrap().rect,
             Rect {
                 x: 0,
-                y: 6,
-                rows: 5,
+                y: 8,
+                rows: 7,
                 columns: 82
             }
         );

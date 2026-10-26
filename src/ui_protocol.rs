@@ -1,7 +1,7 @@
 //! Bounded borrowed wire codec for the experimental schema-8 pane UI protocol.
 //!
-//! This module validates and encodes layout queries, screen queries, typed key
-//! input and absolute root resize requests plus their fixed replies. It
+//! This module validates and encodes layout and screen queries, retained-history
+//! queries, typed key and mouse-wheel input, and absolute root resize requests. It
 //! performs no socket, process, layout, ledger or dispatch work and authorizes
 //! nothing. All integers are big-endian; offsets are from payload start.
 //!
@@ -13,10 +13,22 @@
 //! | 2 | ScreenQuery | 48 | Query |
 //! | 3 | KeyInput | 88 + 8 * count | Input |
 //! | 4 | RootResize | 40 | AbsoluteResize |
+//! | 6 | HistoryQuery | 56 | Query |
+//! | 7 | MouseWheelInput | 88 | Input |
 //!
 //! LayoutQuery: `0 schema 8 | 2 kind 1 | 4 reserved u32 zero`.
 //!
 //! ScreenQuery: `0 schema | 2 kind 2 | 4 reserved u32 zero | 8 target (40)`.
+//!
+//! HistoryQuery: `0 schema | 2 kind 6 | 4 reserved u32 zero | 8 target (40) |
+//! 48 offset rows u16 | 50 reserved 6 zero`. It is READ-only; the reply also
+//! identifies the active terminal buffer and mouse-reporting mode.
+//!
+//! MouseWheelInput: `0 schema | 2 kind 7 | 4 operation key (24) | 28 target
+//! (40) | 68 expected input-owner revision u64 | 76 column u16 | 78 row u16 |
+//! 80 direction u16 (1 up, 2 down) | 82 reserved 6 zero`. It is a
+//! non-replayable input operation and uses the normal input ownership and
+//! exact-payload deduplication path.
 //!
 //! KeyInput:
 //!
@@ -53,6 +65,7 @@
 //! | `0x8001` | LayoutReply schema 9 | 424 |
 //! | `0x8002` | ScreenReply header | 64 + checkpoint (Snapshot frame) |
 //! | `0x8003` | ResizeReply | 48 |
+//! | `0x8004` | HistoryReply header | 64 + checkpoint (Snapshot frame) |
 //!
 //! LayoutReply:
 //!
@@ -75,8 +88,20 @@
 //!
 //! ScreenReply (carried in one `MessageKind::Snapshot` frame): `0 schema |
 //! 2 kind 0x8002 | 4 target (40) | 44 screen revision u64 nonzero | 52
-//! checkpoint length u32 | 56 reserved 8 zero | 64 checkpoint bytes` where the
-//! checkpoint is one complete `screen_checkpoint` record for the same target.
+//! checkpoint length u32 | 56 wrap marker u16 | 58 reserved 6 zero | 64
+//! checkpoint bytes` where the checkpoint is one complete `screen_checkpoint`
+//! record for the same target. Without the separately negotiated row-wrap
+//! capability, the marker is zero and the payload ends after the checkpoint.
+//! With it, marker bit 0 may announce a packed LSB-first row-wrap bitmap after
+//! the checkpoint; all other marker bits remain zero.
+//!
+//! HistoryReply (Snapshot frame) uses the ScreenReply layout with the offset
+//! at 52, mode flags at 54 (bit 0 alternate screen, bit 1 mouse reporting,
+//! bit 2 negotiated wrap-bitmap marker), checkpoint length at 56, four
+//! reserved zero bytes at 60, and checkpoint bytes at 64. When marked, the
+//! packed LSB-first row-wrap bitmap follows the checkpoint. Alternate-screen
+//! history is clamped to zero so a hidden shell buffer is never shown as app
+//! content.
 //!
 //! ResizeReply: `0 schema | 2 kind 0x8003 | 4 key (24) | 28 status u16 (1
 //! Applied, 2 ResizePending) | 30 pending pane flags u16 (bit i = spatial pane
@@ -101,6 +126,10 @@ pub const LAYOUT_REPLY_SCHEMA: u16 = 9;
 pub const LAYOUT_QUERY_BYTES: usize = 8;
 /// Exact size of a ScreenQuery request.
 pub const SCREEN_QUERY_BYTES: usize = 48;
+/// Exact size of a HistoryQuery request.
+pub const HISTORY_QUERY_BYTES: usize = 56;
+/// Maximum retained-history offset accepted by a HistoryQuery.
+pub const MAX_HISTORY_OFFSET_ROWS: u16 = 8_192;
 /// Fixed KeyInput prefix before the key entries.
 pub const KEY_INPUT_PREFIX_BYTES: usize = 88;
 /// Encoded size of one key entry.
@@ -117,6 +146,8 @@ pub const ATTACH_TARGET_BYTES: usize = 48;
 pub const LAYOUT_REPLY_BYTES: usize = 424;
 /// Fixed ScreenReply header before the checkpoint record.
 pub const SCREEN_REPLY_HEADER_BYTES: usize = 64;
+/// Maximum number of bytes in a packed row-wrap bitmap (80 terminal rows).
+pub const MAX_ROW_WRAP_BITMAP_BYTES: usize = 10;
 /// Exact size of a ResizeReply.
 pub const RESIZE_REPLY_BYTES: usize = 48;
 
@@ -125,9 +156,12 @@ const KIND_SCREEN_QUERY: u16 = 2;
 const KIND_KEY_INPUT: u16 = 3;
 const KIND_ROOT_RESIZE: u16 = 4;
 const KIND_ATTACH_TARGET: u16 = 5;
+const KIND_HISTORY_QUERY: u16 = 6;
+const KIND_MOUSE_WHEEL_INPUT: u16 = 7;
 const KIND_LAYOUT_REPLY: u16 = 0x8001;
 const KIND_SCREEN_REPLY: u16 = 0x8002;
 const KIND_RESIZE_REPLY: u16 = 0x8003;
+const KIND_HISTORY_REPLY: u16 = 0x8004;
 const PANE_ENTRY_BYTES: usize = 72;
 const DIVIDER_OFFSET: usize = 20;
 const PANE0_OFFSET: usize = 48;
@@ -136,7 +170,12 @@ const MAX_SCREEN_REPLY_CHECKPOINT_BYTES: usize =
 
 /// Maximum complete ScreenReply payload (header plus largest checkpoint).
 pub const MAX_SCREEN_REPLY_BYTES: usize =
-    SCREEN_REPLY_HEADER_BYTES + MAX_SCREEN_REPLY_CHECKPOINT_BYTES;
+    SCREEN_REPLY_HEADER_BYTES + MAX_SCREEN_REPLY_CHECKPOINT_BYTES + MAX_ROW_WRAP_BITMAP_BYTES;
+/// Maximum complete HistoryReply payload (header plus checkpoint).
+pub const MAX_HISTORY_REPLY_BYTES: usize =
+    SCREEN_REPLY_HEADER_BYTES + MAX_SCREEN_REPLY_CHECKPOINT_BYTES + MAX_ROW_WRAP_BITMAP_BYTES;
+/// Fixed MouseWheelInput request size.
+pub const MOUSE_WHEEL_INPUT_BYTES: usize = 88;
 
 /// Fixed, data-free validation errors for schema-9 payloads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,6 +215,10 @@ pub enum UiCodecError {
     InvalidCheckpoint,
     /// A status or flag code is unknown.
     InvalidStatus,
+    /// A history offset exceeds the supported bound.
+    InvalidHistoryOffset,
+    /// A mouse wheel direction is invalid.
+    InvalidMouseDirection,
 }
 
 impl fmt::Display for UiCodecError {
@@ -198,6 +241,8 @@ impl fmt::Display for UiCodecError {
             Self::InvalidLayout => "pane-ui layout is inconsistent",
             Self::InvalidCheckpoint => "pane-ui screen checkpoint is invalid",
             Self::InvalidStatus => "pane-ui status code is invalid",
+            Self::InvalidHistoryOffset => "pane-ui history offset exceeds its limit",
+            Self::InvalidMouseDirection => "pane-ui mouse direction is invalid",
         })
     }
 }
@@ -258,6 +303,62 @@ pub struct KeyInputView<'a> {
     target: TargetRef,
     expected_owner_revision: u64,
     entries: &'a [u8],
+}
+
+/// Read-only request for a normal-buffer viewport at an offset from live.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HistoryQuery {
+    /// Complete target identity.
+    pub target: TargetRef,
+    /// Rows to move back from the live bottom; zero requests the live view.
+    pub offset_rows: u16,
+}
+
+/// One non-replayable mouse-wheel event for a pane.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct MouseWheelInput {
+    /// Operation key; never replayed (`OperationClass::Input`).
+    pub key: OperationKey,
+    /// Complete target identity receiving the event.
+    pub target: TargetRef,
+    /// Expected current input-owner revision.
+    pub expected_owner_revision: u64,
+    /// Zero-based column within the pane content rectangle.
+    pub column: u16,
+    /// Zero-based row within the pane content rectangle.
+    pub row: u16,
+    /// `true` scrolls up; `false` scrolls down.
+    pub up: bool,
+}
+
+impl MouseWheelInput {
+    /// Classify as non-replayable input.
+    pub const fn operation_class(&self) -> OperationClass {
+        OperationClass::Input
+    }
+
+    fn validate(&self) -> Result<(), UiCodecError> {
+        validate_key(self.key)?;
+        validate_target(self.target)?;
+        if self.target.generation != self.key.generation {
+            return Err(UiCodecError::GenerationMismatch);
+        }
+        if self.expected_owner_revision == 0 {
+            return Err(UiCodecError::ZeroRevision);
+        }
+        if self.column >= MAX_PANE_COLUMNS || self.row >= MAX_PANE_ROWS {
+            return Err(UiCodecError::InvalidDimensions);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for MouseWheelInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MouseWheelInput")
+            .field("direction", &if self.up { "up" } else { "down" })
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> KeyInputView<'a> {
@@ -347,8 +448,12 @@ pub enum UiRequest<'a> {
         /// Complete target identity.
         target: TargetRef,
     },
+    /// Read a bounded normal-buffer viewport without input ownership.
+    HistoryQuery(HistoryQuery),
     /// Deliver typed keys to one target.
     KeyInput(KeyInputView<'a>),
+    /// Deliver one scroll-wheel event as non-replayable input.
+    MouseWheelInput(MouseWheelInput),
     /// Resize the layout root.
     RootResize(RootResize),
 }
@@ -357,8 +462,10 @@ impl UiRequest<'_> {
     /// Classify this request under the existing operation protocol.
     pub const fn operation_class(&self) -> OperationClass {
         match self {
-            Self::LayoutQuery | Self::ScreenQuery { .. } => OperationClass::Query,
-            Self::KeyInput(_) => OperationClass::Input,
+            Self::LayoutQuery | Self::ScreenQuery { .. } | Self::HistoryQuery(_) => {
+                OperationClass::Query
+            }
+            Self::KeyInput(_) | Self::MouseWheelInput(_) => OperationClass::Input,
             Self::RootResize(_) => OperationClass::AbsoluteResize,
         }
     }
@@ -369,7 +476,9 @@ impl fmt::Debug for UiRequest<'_> {
         match self {
             Self::LayoutQuery => f.write_str("LayoutQuery"),
             Self::ScreenQuery { .. } => f.write_str("ScreenQuery { <redacted> }"),
+            Self::HistoryQuery(_) => f.write_str("HistoryQuery { <redacted> }"),
             Self::KeyInput(view) => view.fmt(f),
+            Self::MouseWheelInput(input) => input.fmt(f),
             Self::RootResize(resize) => resize.fmt(f),
         }
     }
@@ -431,6 +540,8 @@ pub struct ScreenReplyView<'a> {
     target: TargetRef,
     screen_revision: u64,
     checkpoint: &'a [u8],
+    rows: u16,
+    wraps: Option<&'a [u8]>,
 }
 
 impl<'a> ScreenReplyView<'a> {
@@ -448,11 +559,95 @@ impl<'a> ScreenReplyView<'a> {
     pub const fn checkpoint(&self) -> &'a [u8] {
         self.checkpoint
     }
+
+    /// Whether this reply included negotiated authoritative row-wrap metadata.
+    pub const fn wrap_metadata_available(&self) -> bool {
+        self.wraps.is_some()
+    }
+
+    /// Whether the zero-based checkpoint row soft-wraps into the next row.
+    pub fn row_wrapped(&self, row: u16) -> Option<bool> {
+        let wraps = self.wraps?;
+        if row >= self.rows {
+            return None;
+        }
+        Some(wraps[usize::from(row) / 8] & (1 << (row % 8)) != 0)
+    }
 }
 
 impl fmt::Debug for ScreenReplyView<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ScreenReplyView")
+            .field("checkpoint_len", &self.checkpoint.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Borrowed decoded history reply with the server's current input mode.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct HistoryReplyView<'a> {
+    target: TargetRef,
+    screen_revision: u64,
+    offset_rows: u16,
+    alternate_screen: bool,
+    mouse_reporting: bool,
+    checkpoint: &'a [u8],
+    rows: u16,
+    wraps: Option<&'a [u8]>,
+}
+
+impl<'a> HistoryReplyView<'a> {
+    /// Target whose view this is.
+    pub const fn target(&self) -> TargetRef {
+        self.target
+    }
+
+    /// Revision represented by the checkpoint.
+    pub const fn screen_revision(&self) -> u64 {
+        self.screen_revision
+    }
+
+    /// Effective bounded offset returned by the server.
+    pub const fn offset_rows(&self) -> u16 {
+        self.offset_rows
+    }
+
+    /// Whether the child currently uses its alternate screen.
+    pub const fn alternate_screen(&self) -> bool {
+        self.alternate_screen
+    }
+
+    /// Whether the child currently requests mouse reporting.
+    pub const fn mouse_reporting(&self) -> bool {
+        self.mouse_reporting
+    }
+
+    /// Validated screen checkpoint bytes.
+    pub const fn checkpoint(&self) -> &'a [u8] {
+        self.checkpoint
+    }
+
+    /// Whether this reply included negotiated authoritative row-wrap metadata.
+    pub const fn wrap_metadata_available(&self) -> bool {
+        self.wraps.is_some()
+    }
+
+    /// Whether the zero-based checkpoint row soft-wraps into the next row.
+    pub fn row_wrapped(&self, row: u16) -> Option<bool> {
+        let wraps = self.wraps?;
+        if row >= self.rows {
+            return None;
+        }
+        Some(wraps[usize::from(row) / 8] & (1 << (row % 8)) != 0)
+    }
+}
+
+impl fmt::Debug for HistoryReplyView<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HistoryReplyView")
+            .field("offset_rows", &self.offset_rows)
+            .field("alternate_screen", &self.alternate_screen)
+            .field("mouse_reporting", &self.mouse_reporting)
             .field("checkpoint_len", &self.checkpoint.len())
             .finish_non_exhaustive()
     }
@@ -511,7 +706,15 @@ pub fn planned_split_size(
         .flatten()
         .find(|pane| pane.target == target)
         .ok_or(LayoutError::StaleTarget)?;
-    crate::pane_layout::split_geometry(pane.rect, direction)
+    let outer = crate::pane_layout::split_geometry(pane.rect, direction)?;
+    let content = crate::pane_layout::content_rect(crate::pane_layout::Rect {
+        x: 0,
+        y: 0,
+        rows: outer.0,
+        columns: outer.1,
+    })
+    .ok_or(LayoutError::InvalidLayoutState)?;
+    Ok((content.rows, content.columns))
 }
 
 /// Encode a LayoutQuery.
@@ -527,6 +730,38 @@ pub fn encode_screen_query(target: TargetRef) -> Result<[u8; SCREEN_QUERY_BYTES]
     let mut bytes = [0_u8; SCREEN_QUERY_BYTES];
     put_header(&mut bytes, KIND_SCREEN_QUERY);
     put_target(&mut bytes, 8, target);
+    Ok(bytes)
+}
+
+/// Validate and encode one bounded history-view query.
+pub fn encode_history_query(
+    target: TargetRef,
+    offset_rows: u16,
+) -> Result<[u8; HISTORY_QUERY_BYTES], UiCodecError> {
+    validate_target(target)?;
+    if offset_rows > MAX_HISTORY_OFFSET_ROWS {
+        return Err(UiCodecError::InvalidHistoryOffset);
+    }
+    let mut bytes = [0_u8; HISTORY_QUERY_BYTES];
+    put_header(&mut bytes, KIND_HISTORY_QUERY);
+    put_target(&mut bytes, 8, target);
+    put_u16(&mut bytes, 48, offset_rows);
+    Ok(bytes)
+}
+
+/// Validate and encode one non-replayable mouse-wheel input.
+pub fn encode_mouse_wheel_input(
+    request: &MouseWheelInput,
+) -> Result<[u8; MOUSE_WHEEL_INPUT_BYTES], UiCodecError> {
+    request.validate()?;
+    let mut bytes = [0_u8; MOUSE_WHEEL_INPUT_BYTES];
+    put_header(&mut bytes, KIND_MOUSE_WHEEL_INPUT);
+    put_key(&mut bytes, 4, request.key);
+    put_target(&mut bytes, 28, request.target);
+    put_u64(&mut bytes, 68, request.expected_owner_revision);
+    put_u16(&mut bytes, 76, request.column);
+    put_u16(&mut bytes, 78, request.row);
+    put_u16(&mut bytes, 80, if request.up { 1 } else { 2 });
     Ok(bytes)
 }
 
@@ -602,7 +837,22 @@ pub fn decode_ui_request(bytes: &[u8]) -> Result<UiRequest<'_>, UiCodecError> {
             validate_target(target)?;
             Ok(UiRequest::ScreenQuery { target })
         }
+        KIND_HISTORY_QUERY => {
+            exact_size(bytes, HISTORY_QUERY_BYTES)?;
+            let target = read_target(bytes, 8);
+            validate_target(target)?;
+            let offset_rows = read_u16(bytes, 48);
+            if offset_rows > MAX_HISTORY_OFFSET_ROWS {
+                return Err(UiCodecError::InvalidHistoryOffset);
+            }
+            zero(&bytes[50..])?;
+            Ok(UiRequest::HistoryQuery(HistoryQuery {
+                target,
+                offset_rows,
+            }))
+        }
         KIND_KEY_INPUT => decode_key_input(bytes).map(UiRequest::KeyInput),
+        KIND_MOUSE_WHEEL_INPUT => decode_mouse_wheel_input(bytes).map(UiRequest::MouseWheelInput),
         KIND_ROOT_RESIZE => {
             exact_size(bytes, ROOT_RESIZE_BYTES)?;
             let request = RootResize {
@@ -652,6 +902,28 @@ fn decode_key_input(bytes: &[u8]) -> Result<KeyInputView<'_>, UiCodecError> {
         expected_owner_revision,
         entries,
     })
+}
+
+fn decode_mouse_wheel_input(bytes: &[u8]) -> Result<MouseWheelInput, UiCodecError> {
+    exact_size(bytes, MOUSE_WHEEL_INPUT_BYTES)?;
+    let key = read_key(bytes, 4);
+    let target = read_target(bytes, 28);
+    let direction = read_u16(bytes, 80);
+    let request = MouseWheelInput {
+        key,
+        target,
+        expected_owner_revision: read_u64(bytes, 68),
+        column: read_u16(bytes, 76),
+        row: read_u16(bytes, 78),
+        up: match direction {
+            1 => true,
+            2 => false,
+            _ => return Err(UiCodecError::InvalidMouseDirection),
+        },
+    };
+    zero(&bytes[82..])?;
+    request.validate()?;
+    Ok(request)
 }
 
 /// Validate and encode one LayoutReply.
@@ -773,8 +1045,48 @@ pub fn prefix_screen_reply(
     Ok(checkpoint)
 }
 
+/// Prefix a ScreenReply with an optional, separately negotiated row-wrap bitmap.
+/// Passing `None` emits the exact legacy bytes produced by
+/// [`prefix_screen_reply`].
+pub fn prefix_screen_reply_with_wraps(
+    target: TargetRef,
+    screen_revision: u64,
+    mut checkpoint: Vec<u8>,
+    wraps: Option<&[bool]>,
+) -> Result<Vec<u8>, UiCodecError> {
+    let (bitmap, bitmap_len) = encode_wrap_bitmap(target, screen_revision, &checkpoint, wraps)?;
+    if wraps.is_none() {
+        return prefix_screen_reply(target, screen_revision, checkpoint);
+    }
+    let bitmap = bitmap.expect("bitmap is present when wrap flags are supplied");
+    let mut prefix = [0_u8; SCREEN_REPLY_HEADER_BYTES];
+    put_header(&mut prefix, KIND_SCREEN_REPLY);
+    put_target(&mut prefix, 4, target);
+    put_u64(&mut prefix, 44, screen_revision);
+    put_u32(&mut prefix, 52, checkpoint.len() as u32);
+    put_u16(&mut prefix, 56, 1);
+    checkpoint
+        .try_reserve_exact(SCREEN_REPLY_HEADER_BYTES + bitmap_len)
+        .map_err(|_| UiCodecError::PayloadTooLarge)?;
+    checkpoint.splice(0..0, prefix);
+    checkpoint.extend_from_slice(&bitmap[..bitmap_len]);
+    if checkpoint.len() > MAX_SCREEN_REPLY_BYTES {
+        return Err(UiCodecError::PayloadTooLarge);
+    }
+    Ok(checkpoint)
+}
+
 /// Decode a ScreenReply and validate its embedded checkpoint record.
 pub fn decode_screen_reply(bytes: &[u8]) -> Result<ScreenReplyView<'_>, UiCodecError> {
+    decode_screen_reply_with_wraps(bytes, false)
+}
+
+/// Decode a ScreenReply when row-wrap capability negotiation is explicit.
+/// A marked trailer is rejected unless `wraps_negotiated` is true.
+pub fn decode_screen_reply_with_wraps(
+    bytes: &[u8],
+    wraps_negotiated: bool,
+) -> Result<ScreenReplyView<'_>, UiCodecError> {
     if bytes.len() > MAX_SCREEN_REPLY_BYTES {
         return Err(UiCodecError::PayloadTooLarge);
     }
@@ -782,7 +1094,15 @@ pub fn decode_screen_reply(bytes: &[u8]) -> Result<ScreenReplyView<'_>, UiCodecE
         return Err(UiCodecError::Truncated);
     }
     header(bytes, KIND_SCREEN_REPLY)?;
-    zero(&bytes[56..SCREEN_REPLY_HEADER_BYTES])?;
+    let flags = read_u16(bytes, 56);
+    if flags & !1 != 0 {
+        return Err(UiCodecError::NonzeroReserved);
+    }
+    zero(&bytes[58..SCREEN_REPLY_HEADER_BYTES])?;
+    let has_wraps = flags & 1 != 0;
+    if has_wraps && !wraps_negotiated {
+        return Err(UiCodecError::InvalidStatus);
+    }
     let target = read_target(bytes, 4);
     validate_target(target)?;
     let screen_revision = read_u64(bytes, 44);
@@ -790,13 +1110,193 @@ pub fn decode_screen_reply(bytes: &[u8]) -> Result<ScreenReplyView<'_>, UiCodecE
         return Err(UiCodecError::ZeroRevision);
     }
     let length = read_u32(bytes, 52) as usize;
-    exact_size(bytes, SCREEN_REPLY_HEADER_BYTES + length)?;
-    let checkpoint = &bytes[SCREEN_REPLY_HEADER_BYTES..];
+    let checkpoint_end = SCREEN_REPLY_HEADER_BYTES
+        .checked_add(length)
+        .ok_or(UiCodecError::PayloadTooLarge)?;
+    if bytes.len() < checkpoint_end {
+        return Err(UiCodecError::Truncated);
+    }
+    let checkpoint = &bytes[SCREEN_REPLY_HEADER_BYTES..checkpoint_end];
     validate_checkpoint(target, screen_revision, checkpoint)?;
+    let rows = crate::screen_checkpoint::decode(checkpoint)
+        .map_err(|_| UiCodecError::InvalidCheckpoint)?
+        .rows();
+    let wraps = if has_wraps {
+        let bitmap_len = wrap_bitmap_len(rows)?;
+        exact_size(bytes, checkpoint_end + bitmap_len)?;
+        validate_wrap_bitmap(&bytes[checkpoint_end..], rows)?;
+        Some(&bytes[checkpoint_end..])
+    } else {
+        exact_size(bytes, checkpoint_end)?;
+        None
+    };
     Ok(ScreenReplyView {
         target,
         screen_revision,
         checkpoint,
+        rows,
+        wraps,
+    })
+}
+
+/// Prefix a history checkpoint with its bounded view metadata.
+pub fn prefix_history_reply(
+    target: TargetRef,
+    screen_revision: u64,
+    offset_rows: u16,
+    alternate_screen: bool,
+    mouse_reporting: bool,
+    mut checkpoint: Vec<u8>,
+) -> Result<Vec<u8>, UiCodecError> {
+    validate_target(target)?;
+    if screen_revision == 0 {
+        return Err(UiCodecError::ZeroRevision);
+    }
+    if offset_rows > MAX_HISTORY_OFFSET_ROWS {
+        return Err(UiCodecError::InvalidHistoryOffset);
+    }
+    validate_checkpoint(target, screen_revision, &checkpoint)?;
+    let mut prefix = [0_u8; SCREEN_REPLY_HEADER_BYTES];
+    put_header(&mut prefix, KIND_HISTORY_REPLY);
+    put_target(&mut prefix, 4, target);
+    put_u64(&mut prefix, 44, screen_revision);
+    put_u16(&mut prefix, 52, offset_rows);
+    put_u16(
+        &mut prefix,
+        54,
+        u16::from(alternate_screen) | (u16::from(mouse_reporting) << 1),
+    );
+    put_u32(&mut prefix, 56, checkpoint.len() as u32);
+    checkpoint
+        .try_reserve_exact(SCREEN_REPLY_HEADER_BYTES)
+        .map_err(|_| UiCodecError::PayloadTooLarge)?;
+    checkpoint.splice(0..0, prefix);
+    if checkpoint.len() > MAX_HISTORY_REPLY_BYTES {
+        return Err(UiCodecError::PayloadTooLarge);
+    }
+    Ok(checkpoint)
+}
+
+/// Prefix a HistoryReply with an optional, separately negotiated row-wrap bitmap.
+/// Passing `None` emits the exact legacy bytes produced by
+/// [`prefix_history_reply`].
+pub fn prefix_history_reply_with_wraps(
+    target: TargetRef,
+    screen_revision: u64,
+    offset_rows: u16,
+    alternate_screen: bool,
+    mouse_reporting: bool,
+    mut checkpoint: Vec<u8>,
+    wraps: Option<&[bool]>,
+) -> Result<Vec<u8>, UiCodecError> {
+    if wraps.is_none() {
+        return prefix_history_reply(
+            target,
+            screen_revision,
+            offset_rows,
+            alternate_screen,
+            mouse_reporting,
+            checkpoint,
+        );
+    }
+    validate_target(target)?;
+    if screen_revision == 0 {
+        return Err(UiCodecError::ZeroRevision);
+    }
+    if offset_rows > MAX_HISTORY_OFFSET_ROWS {
+        return Err(UiCodecError::InvalidHistoryOffset);
+    }
+    let (bitmap, bitmap_len) = encode_wrap_bitmap(target, screen_revision, &checkpoint, wraps)?;
+    let bitmap = bitmap.expect("bitmap is present when wrap flags are supplied");
+    let mut prefix = [0_u8; SCREEN_REPLY_HEADER_BYTES];
+    put_header(&mut prefix, KIND_HISTORY_REPLY);
+    put_target(&mut prefix, 4, target);
+    put_u64(&mut prefix, 44, screen_revision);
+    put_u16(&mut prefix, 52, offset_rows);
+    put_u16(
+        &mut prefix,
+        54,
+        u16::from(alternate_screen) | (u16::from(mouse_reporting) << 1) | 4,
+    );
+    put_u32(&mut prefix, 56, checkpoint.len() as u32);
+    checkpoint
+        .try_reserve_exact(SCREEN_REPLY_HEADER_BYTES + bitmap_len)
+        .map_err(|_| UiCodecError::PayloadTooLarge)?;
+    checkpoint.splice(0..0, prefix);
+    checkpoint.extend_from_slice(&bitmap[..bitmap_len]);
+    if checkpoint.len() > MAX_HISTORY_REPLY_BYTES {
+        return Err(UiCodecError::PayloadTooLarge);
+    }
+    Ok(checkpoint)
+}
+
+/// Decode and validate one history checkpoint reply.
+pub fn decode_history_reply(bytes: &[u8]) -> Result<HistoryReplyView<'_>, UiCodecError> {
+    decode_history_reply_with_wraps(bytes, false)
+}
+
+/// Decode a HistoryReply when row-wrap capability negotiation is explicit.
+/// A marked trailer is rejected unless `wraps_negotiated` is true.
+pub fn decode_history_reply_with_wraps(
+    bytes: &[u8],
+    wraps_negotiated: bool,
+) -> Result<HistoryReplyView<'_>, UiCodecError> {
+    if bytes.len() > MAX_HISTORY_REPLY_BYTES {
+        return Err(UiCodecError::PayloadTooLarge);
+    }
+    if bytes.len() < SCREEN_REPLY_HEADER_BYTES {
+        return Err(UiCodecError::Truncated);
+    }
+    header(bytes, KIND_HISTORY_REPLY)?;
+    let target = read_target(bytes, 4);
+    validate_target(target)?;
+    let screen_revision = read_u64(bytes, 44);
+    if screen_revision == 0 {
+        return Err(UiCodecError::ZeroRevision);
+    }
+    let offset_rows = read_u16(bytes, 52);
+    if offset_rows > MAX_HISTORY_OFFSET_ROWS {
+        return Err(UiCodecError::InvalidHistoryOffset);
+    }
+    let flags = read_u16(bytes, 54);
+    if flags & !0b111 != 0 {
+        return Err(UiCodecError::InvalidStatus);
+    }
+    let has_wraps = flags & 4 != 0;
+    if has_wraps && !wraps_negotiated {
+        return Err(UiCodecError::InvalidStatus);
+    }
+    let checkpoint_len = read_u32(bytes, 56) as usize;
+    zero(&bytes[60..SCREEN_REPLY_HEADER_BYTES])?;
+    let checkpoint_end = SCREEN_REPLY_HEADER_BYTES
+        .checked_add(checkpoint_len)
+        .ok_or(UiCodecError::PayloadTooLarge)?;
+    if bytes.len() < checkpoint_end {
+        return Err(UiCodecError::Truncated);
+    }
+    let checkpoint = &bytes[SCREEN_REPLY_HEADER_BYTES..checkpoint_end];
+    validate_checkpoint(target, screen_revision, checkpoint)?;
+    let rows = crate::screen_checkpoint::decode(checkpoint)
+        .map_err(|_| UiCodecError::InvalidCheckpoint)?
+        .rows();
+    let wraps = if has_wraps {
+        let bitmap_len = wrap_bitmap_len(rows)?;
+        exact_size(bytes, checkpoint_end + bitmap_len)?;
+        validate_wrap_bitmap(&bytes[checkpoint_end..], rows)?;
+        Some(&bytes[checkpoint_end..])
+    } else {
+        exact_size(bytes, checkpoint_end)?;
+        None
+    };
+    Ok(HistoryReplyView {
+        target,
+        screen_revision,
+        offset_rows,
+        alternate_screen: flags & 1 != 0,
+        mouse_reporting: flags & 2 != 0,
+        checkpoint,
+        rows,
+        wraps,
     })
 }
 
@@ -862,7 +1362,7 @@ fn validate_resize_reply(reply: &ResizeReply) -> Result<(), UiCodecError> {
     if reply.revision == 0 {
         return Err(UiCodecError::ZeroRevision);
     }
-    validate_root(reply.rows, reply.columns)?;
+    validate_legacy_root(reply.rows, reply.columns)?;
     let any_pending = reply.pending.contains(&true);
     if any_pending != (reply.status == ResizeStatus::ResizePending) {
         return Err(UiCodecError::InvalidStatus);
@@ -891,11 +1391,63 @@ fn validate_checkpoint(
     Ok(())
 }
 
+fn encode_wrap_bitmap(
+    target: TargetRef,
+    screen_revision: u64,
+    checkpoint: &[u8],
+    wraps: Option<&[bool]>,
+) -> Result<(Option<[u8; MAX_ROW_WRAP_BITMAP_BYTES]>, usize), UiCodecError> {
+    let Some(wraps) = wraps else {
+        return Ok((None, 0));
+    };
+    validate_checkpoint(target, screen_revision, checkpoint)?;
+    let rows = crate::screen_checkpoint::decode(checkpoint)
+        .map_err(|_| UiCodecError::InvalidCheckpoint)?
+        .rows();
+    if wraps.len() != usize::from(rows) {
+        return Err(UiCodecError::InvalidDimensions);
+    }
+    let bitmap_len = wrap_bitmap_len(rows)?;
+    let mut bitmap = [0_u8; MAX_ROW_WRAP_BITMAP_BYTES];
+    for (row, wrapped) in wraps.iter().copied().enumerate() {
+        if wrapped {
+            bitmap[row / 8] |= 1 << (row % 8);
+        }
+    }
+    Ok((Some(bitmap), bitmap_len))
+}
+
+fn wrap_bitmap_len(rows: u16) -> Result<usize, UiCodecError> {
+    if rows == 0 || rows > MAX_PANE_ROWS {
+        return Err(UiCodecError::InvalidDimensions);
+    }
+    Ok(usize::from(rows).div_ceil(8))
+}
+
+fn validate_wrap_bitmap(bitmap: &[u8], rows: u16) -> Result<(), UiCodecError> {
+    let expected = wrap_bitmap_len(rows)?;
+    if bitmap.len() != expected {
+        return Err(if bitmap.len() < expected {
+            UiCodecError::Truncated
+        } else {
+            UiCodecError::TrailingBytes
+        });
+    }
+    let used_last_bits = rows % 8;
+    if used_last_bits != 0 {
+        let allowed = (1_u8 << used_last_bits) - 1;
+        if bitmap[expected - 1] & !allowed != 0 {
+            return Err(UiCodecError::NonzeroReserved);
+        }
+    }
+    Ok(())
+}
+
 fn validate_layout(reply: &LayoutReply) -> Result<(), UiCodecError> {
     if reply.revision == 0 {
         return Err(UiCodecError::ZeroRevision);
     }
-    validate_root(reply.rows, reply.columns)?;
+    validate_legacy_root(reply.rows, reply.columns)?;
     let Some(first) = reply.panes[0] else {
         return Err(UiCodecError::InvalidLayout);
     };
@@ -1034,13 +1586,29 @@ fn rect_within(rect: Rect, rows: u16, columns: u16) -> bool {
 }
 
 fn validate_root(rows: u16, columns: u16) -> Result<(), UiCodecError> {
-    validate_pane_size(rows, columns)
-}
-
-fn validate_pane_size(rows: u16, columns: u16) -> Result<(), UiCodecError> {
     if (MIN_PANE_ROWS..=MAX_PANE_ROWS).contains(&rows)
         && (MIN_PANE_COLUMNS..=MAX_PANE_COLUMNS).contains(&columns)
     {
+        Ok(())
+    } else {
+        Err(UiCodecError::InvalidDimensions)
+    }
+}
+
+/// Existing LayoutReply/ResizeReply payloads retain their schema and may
+/// describe the pre-padding 5x20 minimum. New resize requests use the larger
+/// outer geometry above; accepting old observations keeps metadata clients
+/// compatible with servers deployed before padding.
+fn validate_legacy_root(rows: u16, columns: u16) -> Result<(), UiCodecError> {
+    if (5..=MAX_PANE_ROWS).contains(&rows) && (20..=MAX_PANE_COLUMNS).contains(&columns) {
+        Ok(())
+    } else {
+        Err(UiCodecError::InvalidDimensions)
+    }
+}
+
+fn validate_pane_size(rows: u16, columns: u16) -> Result<(), UiCodecError> {
+    if (5..=MAX_PANE_ROWS).contains(&rows) && (20..=MAX_PANE_COLUMNS).contains(&columns) {
         Ok(())
     } else {
         Err(UiCodecError::InvalidDimensions)
@@ -1351,6 +1919,16 @@ mod tests {
         encode_checkpoint(&snapshot, &metadata).unwrap()
     }
 
+    fn checkpoint_rows(target: TargetRef, revision: u64, rows: u16) -> Vec<u8> {
+        checkpoint_geometry(target, revision, rows, 20)
+    }
+
+    fn checkpoint_geometry(target: TargetRef, revision: u64, rows: u16, columns: u16) -> Vec<u8> {
+        let snapshot = ScreenSnapshot::try_new(TerminalSize::new(rows, columns).unwrap()).unwrap();
+        let metadata = CheckpointMetadata::new(target, 0, 1, revision).unwrap();
+        encode_checkpoint(&snapshot, &metadata).unwrap()
+    }
+
     #[test]
     fn golden_request_bytes() {
         assert_eq!(hex(&encode_layout_query()), "0008000100000000");
@@ -1441,20 +2019,20 @@ mod tests {
         };
         assert_eq!(
             planned_split_size(&single, TARGET, SplitDirection::Right),
-            Ok((24, 40))
+            Ok((22, 38))
         );
         assert_eq!(
             planned_split_size(&single, TARGET, SplitDirection::Left),
-            Ok((24, 40))
+            Ok((22, 38))
         );
-        // 23 usable rows: first child floor 11, second 12.
+        // 23 outer rows split into 11 and 12; borders leave 9 and 10.
         assert_eq!(
             planned_split_size(&single, TARGET, SplitDirection::Down),
-            Ok((12, 81))
+            Ok((10, 79))
         );
         assert_eq!(
             planned_split_size(&single, TARGET, SplitDirection::Up),
-            Ok((11, 81))
+            Ok((9, 79))
         );
         assert_eq!(
             planned_split_size(&single, SIBLING, SplitDirection::Right),
@@ -1580,6 +2158,45 @@ mod tests {
     }
 
     #[test]
+    fn layout_reply_keeps_legacy_minimum_geometry_decodable() {
+        let legacy = LayoutReply {
+            revision: 1,
+            rows: 5,
+            columns: 20,
+            panes: [
+                Some(UiPane {
+                    target: TARGET,
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        rows: 5,
+                        columns: 20,
+                    },
+                    pending_confirmed: Some((5, 20)),
+                }),
+                None,
+                None,
+                None,
+            ],
+            divider: None,
+            dividers: [None; MAX_PANES - 1],
+        };
+        let encoded = encode_layout_reply(&legacy).unwrap();
+        assert_eq!(decode_layout_reply(&encoded).unwrap(), legacy);
+        // New client resize requests still require the padded outer minimum.
+        let too_small = RootResize {
+            key: KEY,
+            expected_layout_revision: 1,
+            rows: 5,
+            columns: 20,
+        };
+        assert_eq!(
+            encode_root_resize(&too_small),
+            Err(UiCodecError::InvalidDimensions)
+        );
+    }
+
+    #[test]
     fn request_round_trips_every_key_and_class() {
         let keys = [
             Key::Char('a'),
@@ -1635,13 +2252,284 @@ mod tests {
         let resize = RootResize {
             key: KEY,
             expected_layout_revision: 2,
-            rows: 5,
+            rows: 7,
             columns: 240,
         };
         let encoded = encode_root_resize(&resize).unwrap();
         let decoded = decode_ui_request(&encoded).unwrap();
         assert_eq!(decoded, UiRequest::RootResize(resize));
         assert_eq!(decoded.operation_class(), OperationClass::AbsoluteResize);
+    }
+
+    #[test]
+    fn history_and_mouse_wheel_requests_round_trip_with_bounds() {
+        let query = encode_history_query(TARGET, 17).unwrap();
+        assert_eq!(query.len(), HISTORY_QUERY_BYTES);
+        assert_eq!(
+            decode_ui_request(&query).unwrap(),
+            UiRequest::HistoryQuery(HistoryQuery {
+                target: TARGET,
+                offset_rows: 17,
+            })
+        );
+        assert_eq!(
+            decode_ui_request(&query).unwrap().operation_class(),
+            OperationClass::Query
+        );
+        assert_eq!(
+            encode_history_query(TARGET, MAX_HISTORY_OFFSET_ROWS + 1),
+            Err(UiCodecError::InvalidHistoryOffset)
+        );
+
+        let input = MouseWheelInput {
+            key: KEY,
+            target: TARGET,
+            expected_owner_revision: 9,
+            column: 3,
+            row: 2,
+            up: true,
+        };
+        let encoded = encode_mouse_wheel_input(&input).unwrap();
+        assert_eq!(encoded.len(), MOUSE_WHEEL_INPUT_BYTES);
+        assert_eq!(
+            decode_ui_request(&encoded).unwrap(),
+            UiRequest::MouseWheelInput(input)
+        );
+        assert_eq!(
+            decode_ui_request(&encoded).unwrap().operation_class(),
+            OperationClass::Input
+        );
+        let mut invalid_direction = encoded;
+        invalid_direction[81] = 3;
+        assert_eq!(
+            decode_ui_request(&invalid_direction),
+            Err(UiCodecError::InvalidMouseDirection)
+        );
+        let mut reserved = encoded;
+        reserved[87] = 1;
+        assert_eq!(
+            decode_ui_request(&reserved),
+            Err(UiCodecError::NonzeroReserved)
+        );
+    }
+
+    #[test]
+    fn history_reply_preserves_view_metadata_and_validates_checkpoint() {
+        let record = checkpoint(TARGET, 9);
+        let reply = prefix_history_reply(TARGET, 9, 7, true, false, record.clone()).unwrap();
+        let view = decode_history_reply(&reply).unwrap();
+        assert_eq!(view.target(), TARGET);
+        assert_eq!(view.screen_revision(), 9);
+        assert_eq!(view.offset_rows(), 7);
+        assert!(view.alternate_screen());
+        assert!(!view.mouse_reporting());
+        assert_eq!(view.checkpoint(), record.as_slice());
+
+        let mut bad_flags = reply.clone();
+        bad_flags[55] |= 0x80;
+        assert_eq!(
+            decode_history_reply(&bad_flags),
+            Err(UiCodecError::InvalidStatus)
+        );
+        let mut bad_target = reply;
+        bad_target[43] = 8;
+        assert_eq!(
+            decode_history_reply(&bad_target),
+            Err(UiCodecError::InvalidCheckpoint)
+        );
+    }
+
+    #[test]
+    fn wrap_bitmap_round_trips_supported_row_counts_and_legacy_bytes() {
+        assert_eq!(wrap_bitmap_len(1), Ok(1));
+        assert_eq!(wrap_bitmap_len(8), Ok(1));
+        assert_eq!(wrap_bitmap_len(9), Ok(2));
+        assert_eq!(wrap_bitmap_len(80), Ok(10));
+
+        for rows in [5, 8, 9, 80] {
+            let record = checkpoint_rows(TARGET, 9, rows);
+            let flags: Vec<_> = (0..rows).map(|row| row % 3 == 1).collect();
+            let legacy_screen = prefix_screen_reply(TARGET, 9, record.clone()).unwrap();
+            let screen_none =
+                prefix_screen_reply_with_wraps(TARGET, 9, record.clone(), None).unwrap();
+            assert_eq!(screen_none, legacy_screen);
+            let screen =
+                prefix_screen_reply_with_wraps(TARGET, 9, record.clone(), Some(&flags)).unwrap();
+            assert!(screen.len() <= MAX_SCREEN_REPLY_BYTES);
+            assert_eq!(
+                screen.len(),
+                legacy_screen.len() + usize::from(rows).div_ceil(8)
+            );
+            assert_eq!(
+                decode_screen_reply(&screen),
+                Err(UiCodecError::InvalidStatus)
+            );
+            let screen_view = decode_screen_reply_with_wraps(&screen, true).unwrap();
+            assert!(screen_view.wrap_metadata_available());
+            assert_eq!(screen_view.checkpoint(), record.as_slice());
+            for row in 0..rows {
+                assert_eq!(screen_view.row_wrapped(row), Some(flags[usize::from(row)]));
+            }
+            assert_eq!(screen_view.row_wrapped(rows), None);
+            assert_eq!(
+                decode_screen_reply(&legacy_screen).unwrap().row_wrapped(0),
+                None
+            );
+
+            let legacy_history =
+                prefix_history_reply(TARGET, 9, 3, true, false, record.clone()).unwrap();
+            let history_none =
+                prefix_history_reply_with_wraps(TARGET, 9, 3, true, false, record.clone(), None)
+                    .unwrap();
+            assert_eq!(history_none, legacy_history);
+            let history = prefix_history_reply_with_wraps(
+                TARGET,
+                9,
+                3,
+                true,
+                false,
+                record.clone(),
+                Some(&flags),
+            )
+            .unwrap();
+            assert!(history.len() <= MAX_HISTORY_REPLY_BYTES);
+            let history_view = decode_history_reply_with_wraps(&history, true).unwrap();
+            assert!(history_view.alternate_screen());
+            assert!(!history_view.mouse_reporting());
+            assert!(history_view.wrap_metadata_available());
+            assert_eq!(history_view.checkpoint(), record.as_slice());
+            for row in 0..rows {
+                assert_eq!(history_view.row_wrapped(row), Some(flags[usize::from(row)]));
+            }
+            assert_eq!(
+                decode_history_reply(&legacy_history)
+                    .unwrap()
+                    .row_wrapped(0),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_replies_reject_noncanonical_or_unnegotiated_trailers() {
+        let record = checkpoint(TARGET, 9);
+        let flags = [true, false, true, false, true];
+        let screen =
+            prefix_screen_reply_with_wraps(TARGET, 9, record.clone(), Some(&flags)).unwrap();
+        assert_eq!(
+            decode_screen_reply_with_wraps(&screen, false),
+            Err(UiCodecError::InvalidStatus)
+        );
+
+        let mut bad_screen = screen.clone();
+        bad_screen[57] |= 2;
+        assert_eq!(
+            decode_screen_reply_with_wraps(&bad_screen, true),
+            Err(UiCodecError::NonzeroReserved)
+        );
+        let mut bad_padding = screen.clone();
+        *bad_padding.last_mut().unwrap() |= 0b1000_0000;
+        assert_eq!(
+            decode_screen_reply_with_wraps(&bad_padding, true),
+            Err(UiCodecError::NonzeroReserved)
+        );
+        let mut truncated = screen.clone();
+        truncated.pop();
+        assert_eq!(
+            decode_screen_reply_with_wraps(&truncated, true),
+            Err(UiCodecError::Truncated)
+        );
+        let mut trailing = screen.clone();
+        trailing.push(0);
+        assert_eq!(
+            decode_screen_reply_with_wraps(&trailing, true),
+            Err(UiCodecError::TrailingBytes)
+        );
+
+        let history =
+            prefix_history_reply_with_wraps(TARGET, 9, 0, false, true, record, Some(&flags))
+                .unwrap();
+        assert_eq!(
+            decode_history_reply(&history),
+            Err(UiCodecError::InvalidStatus)
+        );
+        let mut bad_history_flags = history.clone();
+        bad_history_flags[55] |= 0x80;
+        assert_eq!(
+            decode_history_reply_with_wraps(&bad_history_flags, true),
+            Err(UiCodecError::InvalidStatus)
+        );
+        let mut bad_history_padding = history;
+        *bad_history_padding.last_mut().unwrap() |= 0b1000_0000;
+        assert_eq!(
+            decode_history_reply_with_wraps(&bad_history_padding, true),
+            Err(UiCodecError::NonzeroReserved)
+        );
+    }
+
+    #[test]
+    fn wrap_builders_require_exact_checkpoint_derived_row_count() {
+        let record = checkpoint(TARGET, 9);
+        assert_eq!(
+            prefix_screen_reply_with_wraps(TARGET, 9, record.clone(), Some(&[false; 4])),
+            Err(UiCodecError::InvalidDimensions)
+        );
+        assert_eq!(
+            prefix_history_reply_with_wraps(TARGET, 9, 0, false, false, record, Some(&[false; 6])),
+            Err(UiCodecError::InvalidDimensions)
+        );
+    }
+
+    #[test]
+    fn maximum_wrap_replies_reach_the_extended_bound() {
+        assert_eq!(
+            MAX_SCREEN_REPLY_BYTES,
+            SCREEN_REPLY_HEADER_BYTES
+                + crate::screen_checkpoint::MAX_SCREEN_CHECKPOINT_BYTES
+                + MAX_ROW_WRAP_BITMAP_BYTES
+        );
+        assert_eq!(MAX_HISTORY_REPLY_BYTES, MAX_SCREEN_REPLY_BYTES);
+        let record = checkpoint_geometry(TARGET, 9, MAX_PANE_ROWS, MAX_PANE_COLUMNS);
+        assert_eq!(
+            record.len(),
+            crate::screen_checkpoint::MAX_SCREEN_CHECKPOINT_BYTES
+        );
+        let wraps = [true; MAX_PANE_ROWS as usize];
+        let screen =
+            prefix_screen_reply_with_wraps(TARGET, 9, record.clone(), Some(&wraps)).unwrap();
+        assert_eq!(screen.len(), MAX_SCREEN_REPLY_BYTES);
+        assert_eq!(
+            decode_screen_reply_with_wraps(&screen, true)
+                .unwrap()
+                .row_wrapped(79),
+            Some(true)
+        );
+        let history =
+            prefix_history_reply_with_wraps(TARGET, 9, 0, false, false, record, Some(&wraps))
+                .unwrap();
+        assert_eq!(history.len(), MAX_HISTORY_REPLY_BYTES);
+        assert_eq!(
+            decode_history_reply_with_wraps(&history, true)
+                .unwrap()
+                .row_wrapped(79),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn random_malformed_wrap_payloads_are_rejected_without_panics() {
+        let mut state = 0x8d26_4f13_u32;
+        for length in 0..256 {
+            let mut bytes = Vec::with_capacity(length);
+            for _ in 0..length {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                bytes.push(state as u8);
+            }
+            assert!(decode_screen_reply_with_wraps(&bytes, true).is_err());
+            assert!(decode_history_reply_with_wraps(&bytes, true).is_err());
+        }
     }
 
     #[test]

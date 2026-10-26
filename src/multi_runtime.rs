@@ -22,7 +22,8 @@ use crate::close_protocol::{
 use crate::control_protocol::TargetRef;
 use crate::event_protocol::{encode_event, Event};
 use crate::handshake_protocol::{
-    encode_welcome, validate_welcome, Welcome, CAPABILITY_EVENTS, CAPABILITY_READ,
+    encode_welcome, validate_welcome, Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT,
+    CAPABILITY_READ, CAPABILITY_WORKSPACE_EVENTS,
 };
 use crate::history_capture::{lock_capture, HistoryCaptureCoordinator, SharedHistoryCapture};
 use crate::history_diagnostics::{HistoryDiagnostics, HistoryReason};
@@ -34,6 +35,8 @@ use crate::layout_writer::{LayoutShutdownOutcome, LayoutStatusHandle, LayoutWrit
 use crate::managed_launch_protocol::{decode_launch_result, decode_status_query};
 use crate::pane_layout::LayoutSnapshot;
 use crate::pane_layout::Rect;
+use crate::pane_metadata_protocol::{self as pane_metadata, Observation, PathStatus};
+use crate::process_metadata::{MetadataJob, MetadataWorker, ProcessIdentity};
 use crate::protocol::OperationKey;
 use crate::protocol_wire::{Frame, MessageKind};
 use crate::response_protocol::decode_response_payload;
@@ -57,10 +60,12 @@ use crate::session_registry::SessionState;
 use crate::split_protocol::{decode_split_request, decode_split_result};
 use crate::transport::{AuthenticatedStream, OwnedFrame};
 use crate::ui_protocol::{
-    decode_attach_target, decode_layout_reply, decode_resize_reply, decode_screen_reply,
-    decode_ui_request, UiRequest, ATTACH_TARGET_BYTES,
+    decode_attach_target, decode_history_reply_with_wraps, decode_layout_reply,
+    decode_resize_reply, decode_screen_reply_with_wraps, decode_ui_request, UiRequest,
+    ATTACH_TARGET_BYTES,
 };
 use crate::watch_protocol::WatchStatus;
+use crate::workspace_watch_protocol as workspace_watch;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
@@ -81,6 +86,64 @@ pub enum PaneExit {
 
 #[cfg(test)]
 mod launch_tests;
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+mod metadata_tests;
+
+#[cfg(test)]
+mod workspace_adapter_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_watch_uses_the_shared_pending_budget() {
+        assert!(watch_capacity(4, 3));
+        assert!(!watch_capacity(7, 1));
+        assert!(!watch_capacity(0, MAX_PENDING_WATCHES));
+    }
+
+    #[test]
+    fn response_preflight_rejects_page_that_skips_requested_cursor() {
+        let requested = workspace_watch::WorkspaceCursor {
+            generation: 2,
+            workspace: 3,
+            sequence: 7,
+        };
+        let request = workspace_watch::Request::Watch {
+            cursor: requested,
+            limit: 8,
+            wait_ms: 0,
+        };
+        let skipped = workspace_watch::WatchReply {
+            status: WatchStatus::Changed,
+            cursor: workspace_watch::WorkspaceCursor {
+                sequence: 9,
+                ..requested
+            },
+            events: vec![workspace_watch::LayoutEvent {
+                sequence: 9,
+                revision: 4,
+                empty: false,
+            }],
+        };
+        let bytes = workspace_watch::encode_watch_reply(&skipped).unwrap();
+        assert!(!workspace_response_matches(request, &bytes));
+
+        let consecutive = workspace_watch::WatchReply {
+            status: WatchStatus::Changed,
+            cursor: workspace_watch::WorkspaceCursor {
+                sequence: 8,
+                ..requested
+            },
+            events: vec![workspace_watch::LayoutEvent {
+                sequence: 8,
+                revision: 4,
+                empty: false,
+            }],
+        };
+        let bytes = workspace_watch::encode_watch_reply(&consecutive).unwrap();
+        assert!(workspace_response_matches(request, &bytes));
+    }
+}
 
 /// Maximum finite watches retained between owner ticks.
 pub const MAX_PENDING_WATCHES: usize = 8;
@@ -154,6 +217,8 @@ pub enum MultiReply {
         /// Terminal scoped watch status.
         end: WatchEnd,
     },
+    /// Encoded schema-11 workspace reconciliation or watch response.
+    WorkspaceResponse(Vec<u8>),
     /// Fixed lower-snake-case label; never caller content.
     Error(&'static str),
     /// Acknowledge Detach and close only this connection.
@@ -167,6 +232,9 @@ impl fmt::Debug for MultiReply {
             Self::Response(bytes) => write!(f, "Response({} bytes)", bytes.len()),
             Self::Snapshot(bytes) => write!(f, "Snapshot({} bytes)", bytes.len()),
             Self::Watch { events, .. } => write!(f, "Watch({} events)", events.len()),
+            Self::WorkspaceResponse(bytes) => {
+                write!(f, "WorkspaceResponse({} bytes)", bytes.len())
+            }
             Self::Error(_) => f.write_str("Error(<label>)"),
             Self::Detached => f.write_str("Detached"),
         }
@@ -319,8 +387,14 @@ impl Drop for ActiveGuard {
 pub struct MultiServerDriver {
     hub: Hub,
     pending_watches: Vec<PendingWatch>,
+    pending_workspace_watches: Vec<PendingWorkspaceWatch>,
     pending_closes: Vec<PendingClose>,
     pending_splits: Vec<PendingSplitReply>,
+    metadata_worker: Option<MetadataWorker>,
+    metadata_origin: Instant,
+    metadata_busy: bool,
+    metadata_pending: Option<PendingMetadata>,
+    next_metadata_id: u64,
     launch_worker: Option<LaunchWorker>,
     active_launch_target: Option<TargetRef>,
     stopping: bool,
@@ -434,8 +508,10 @@ impl Drop for MultiServerDriver {
         }
         self.hub.shutdown();
         self.settle_pending_watches();
+        self.settle_pending_workspace_watches();
         self.settle_pending_closes();
         self.settle_pending_splits();
+        self.settle_pending_metadata();
         // Capture and freeze the pre-stop topology so shutdown-caused exits
         // cannot replace it with an empty tombstone.
         self.observe_layout();
@@ -530,11 +606,18 @@ impl MultiServerDriver {
         terminfo: PathBuf,
     ) -> Self {
         let launch_worker = LaunchWorker::start(&storage, terminfo.clone()).ok();
+        let metadata_origin = Instant::now();
         Self {
             hub: Hub::new(),
             pending_watches: Vec::with_capacity(MAX_PENDING_WATCHES),
+            pending_workspace_watches: Vec::with_capacity(MAX_PENDING_WATCHES),
             pending_closes: Vec::with_capacity(MAX_PENDING_CLOSES),
             pending_splits: Vec::with_capacity(MAX_CONNECTIONS),
+            metadata_worker: MetadataWorker::start(metadata_origin).ok(),
+            metadata_origin,
+            metadata_busy: false,
+            metadata_pending: None,
+            next_metadata_id: 1,
             launch_worker,
             active_launch_target: None,
             stopping: false,
@@ -688,6 +771,7 @@ impl MultiServerDriver {
     pub fn tick(&mut self, clock: impl Fn() -> u64) -> Result<(), ServerError> {
         self.drive_history();
         let progress = self.owner.poll(clock());
+        self.advance_metadata(&clock);
         // Close ownership belongs to the driver, never to the bounded worker
         // reply lifetime. Advance even when the original worker timed out.
         let _ = self.owner.advance_closes_at(Instant::now());
@@ -696,6 +780,7 @@ impl MultiServerDriver {
         self.process_pending_splits();
         self.process_pending_closes(&clock);
         self.process_pending_watches(&clock);
+        self.process_pending_workspace_watches(&clock);
         self.hub.reap_finished();
         self.drive_history();
         self.observe_layout();
@@ -724,7 +809,7 @@ impl MultiServerDriver {
 
     /// Finite watches waiting for a later tick.
     pub fn pending_watches(&self) -> usize {
-        self.pending_watches.len()
+        self.pending_watches.len() + self.pending_workspace_watches.len()
     }
 
     /// Stop workers and settle queued requests; children stay alive until
@@ -734,8 +819,10 @@ impl MultiServerDriver {
         self.hub.shutdown();
         self.process_pending(&clock);
         self.settle_pending_watches();
+        self.settle_pending_workspace_watches();
         self.settle_pending_closes();
         self.settle_pending_splits();
+        self.settle_pending_metadata();
     }
 
     fn process_pending(&mut self, clock: &impl Fn() -> u64) {
@@ -743,6 +830,17 @@ impl MultiServerDriver {
             let Ok(envelope) = self.hub.receiver.try_recv() else {
                 break;
             };
+            let metadata = match &envelope.request {
+                MultiRequest::Request {
+                    connection,
+                    payload,
+                } if payload.get(..2) == Some(&[0, 12]) => Some((*connection, payload.clone())),
+                _ => None,
+            };
+            if let Some((connection, payload)) = metadata {
+                self.begin_metadata(envelope, connection, &payload, clock());
+                continue;
+            }
             let result = if matches!(&envelope.request, MultiRequest::Request { payload, .. } if payload.get(..2) == Some(&[0, 7]))
             {
                 self.dispatch_async_split(&envelope.request, clock())
@@ -752,7 +850,10 @@ impl MultiServerDriver {
                     &envelope.request,
                     clock(),
                     PendingCapacity {
-                        watches: self.pending_watches.len() < MAX_PENDING_WATCHES,
+                        watches: watch_capacity(
+                            self.pending_watches.len(),
+                            self.pending_workspace_watches.len(),
+                        ),
                         closes: self.pending_closes.len() < MAX_PENDING_CLOSES,
                     },
                 )
@@ -775,6 +876,13 @@ impl MultiServerDriver {
                         deadline,
                     });
                 }
+                DispatchResult::PendingWorkspaceWatch { request, deadline } => {
+                    self.pending_workspace_watches.push(PendingWorkspaceWatch {
+                        envelope,
+                        request,
+                        deadline,
+                    });
+                }
                 DispatchResult::PendingClose { key, deadline } => {
                     self.pending_closes.push(PendingClose {
                         envelope,
@@ -791,6 +899,179 @@ impl MultiServerDriver {
                 }
             }
         }
+    }
+
+    fn begin_metadata(
+        &mut self,
+        envelope: MultiEnvelope,
+        connection: Connection,
+        payload: &[u8],
+        now: u64,
+    ) {
+        if pane_metadata::decode_query(payload).is_err() {
+            let _ = envelope.try_reply(MultiReply::Error("invalid_metadata_request"));
+            return;
+        }
+        let (target, identity, unavailable_status) =
+            match self
+                .owner
+                .authorize_metadata_query(&connection, payload, now)
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = envelope.try_reply(MultiReply::Error(error.code()));
+                    return;
+                }
+            };
+        let Some(identity) = identity else {
+            let observation =
+                Observation::unavailable(target, self.metadata_now_ms(), unavailable_status);
+            self.reply_metadata(envelope, observation);
+            return;
+        };
+        let Some(worker) = self.metadata_worker.as_ref() else {
+            self.reply_metadata(
+                envelope,
+                Observation::unavailable(target, self.metadata_now_ms(), PathStatus::Unsupported),
+            );
+            return;
+        };
+        if self.metadata_busy {
+            self.reply_metadata(
+                envelope,
+                Observation::unavailable(target, self.metadata_now_ms(), PathStatus::Busy),
+            );
+            return;
+        }
+        let id = self.next_metadata_id;
+        let Some(next_id) = id.checked_add(1) else {
+            self.reply_metadata(
+                envelope,
+                Observation::unavailable(target, self.metadata_now_ms(), PathStatus::Busy),
+            );
+            return;
+        };
+        self.next_metadata_id = next_id;
+        if worker
+            .submit(MetadataJob {
+                id,
+                target,
+                identity,
+            })
+            .is_err()
+        {
+            self.reply_metadata(
+                envelope,
+                Observation::unavailable(target, self.metadata_now_ms(), PathStatus::Busy),
+            );
+            return;
+        }
+        self.metadata_busy = true;
+        self.metadata_pending = Some(PendingMetadata {
+            envelope,
+            connection,
+            target,
+            identity,
+            id,
+            deadline: Instant::now() + Duration::from_millis(500),
+        });
+    }
+
+    fn advance_metadata(&mut self, clock: &impl Fn() -> u64) {
+        if self
+            .metadata_pending
+            .as_ref()
+            .is_some_and(|pending| Instant::now() >= pending.deadline)
+        {
+            let pending = self.metadata_pending.take().expect("pending checked");
+            self.reply_metadata(
+                pending.envelope,
+                Observation::unavailable(
+                    pending.target,
+                    self.metadata_now_ms(),
+                    PathStatus::TimedOut,
+                ),
+            );
+            // Keep metadata_busy set until the worker's late completion arrives.
+        }
+        let completion = match self.metadata_worker.as_ref().map(MetadataWorker::poll) {
+            Some(Ok(completion)) => completion,
+            Some(Err(())) => {
+                self.metadata_worker = None;
+                self.metadata_busy = false;
+                if let Some(pending) = self.metadata_pending.take() {
+                    self.reply_metadata(
+                        pending.envelope,
+                        Observation::unavailable(
+                            pending.target,
+                            self.metadata_now_ms(),
+                            PathStatus::QueryFailed,
+                        ),
+                    );
+                }
+                None
+            }
+            None => None,
+        };
+        if let Some(completion) = completion {
+            self.metadata_busy = false;
+            if let Some(pending) = self.metadata_pending.take() {
+                if completion.id == pending.id {
+                    let observation = if self.owner.metadata_publish_allowed(
+                        &pending.connection,
+                        pending.target,
+                        pending.identity,
+                        clock(),
+                    ) && completion.observation.target == pending.target
+                    {
+                        completion.observation
+                    } else {
+                        Observation::unavailable(
+                            pending.target,
+                            completion.observation.sampled_at_mono_ms,
+                            PathStatus::IdentityMismatch,
+                        )
+                    };
+                    self.reply_metadata(pending.envelope, observation);
+                } else {
+                    self.reply_metadata(
+                        pending.envelope,
+                        Observation::unavailable(
+                            pending.target,
+                            self.metadata_now_ms(),
+                            PathStatus::IdentityMismatch,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    fn settle_pending_metadata(&mut self) {
+        if let Some(pending) = self.metadata_pending.take() {
+            self.reply_metadata(
+                pending.envelope,
+                Observation::unavailable(
+                    pending.target,
+                    self.metadata_now_ms(),
+                    PathStatus::TimedOut,
+                ),
+            );
+        }
+    }
+
+    fn reply_metadata(&self, envelope: MultiEnvelope, observation: Observation) {
+        let response = pane_metadata::encode_observation(&observation)
+            .map(MultiReply::Response)
+            .unwrap_or(MultiReply::Error("metadata_response_invalid"));
+        let _ = envelope.try_reply(response);
+    }
+
+    fn metadata_now_ms(&self) -> u64 {
+        self.metadata_origin
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64
     }
 
     fn process_pending_closes(&mut self, clock: &impl Fn() -> u64) {
@@ -1025,6 +1306,31 @@ impl MultiServerDriver {
 
     fn settle_pending_watches(&mut self) {
         for pending in self.pending_watches.drain(..) {
+            let _ = pending
+                .envelope
+                .try_reply(MultiReply::Error("server_stopping"));
+        }
+    }
+
+    fn process_pending_workspace_watches(&mut self, clock: &impl Fn() -> u64) {
+        let mut index = 0;
+        while index < self.pending_workspace_watches.len() {
+            match resolve_pending_workspace_watch(
+                &mut self.owner,
+                &self.pending_workspace_watches[index],
+                clock(),
+            ) {
+                Some(reply) => {
+                    let pending = self.pending_workspace_watches.swap_remove(index);
+                    let _ = pending.envelope.try_reply(reply);
+                }
+                None => index += 1,
+            }
+        }
+    }
+
+    fn settle_pending_workspace_watches(&mut self) {
+        for pending in self.pending_workspace_watches.drain(..) {
             let _ = pending
                 .envelope
                 .try_reply(MultiReply::Error("server_stopping"));
@@ -1355,6 +1661,12 @@ struct PendingWatch {
     deadline: Instant,
 }
 
+struct PendingWorkspaceWatch {
+    envelope: MultiEnvelope,
+    request: workspace_watch::Request,
+    deadline: Instant,
+}
+
 struct PendingClose {
     envelope: MultiEnvelope,
     key: OperationKey,
@@ -1367,10 +1679,23 @@ struct PendingSplitReply {
     deadline: Instant,
 }
 
+struct PendingMetadata {
+    envelope: MultiEnvelope,
+    connection: Connection,
+    target: TargetRef,
+    identity: ProcessIdentity,
+    id: u64,
+    deadline: Instant,
+}
+
 enum DispatchResult {
     Reply(MultiReply),
     Pending {
         request: WatchRequest,
+        deadline: Instant,
+    },
+    PendingWorkspaceWatch {
+        request: workspace_watch::Request,
         deadline: Instant,
     },
     PendingClose {
@@ -1394,6 +1719,10 @@ fn error(error: &ServerError) -> DispatchResult {
 struct PendingCapacity {
     watches: bool,
     closes: bool,
+}
+
+fn watch_capacity(pane_watches: usize, workspace_watches: usize) -> bool {
+    pane_watches.saturating_add(workspace_watches) < MAX_PENDING_WATCHES
 }
 
 fn dispatch(
@@ -1445,9 +1774,67 @@ fn dispatch(
             Some([0, 7]) => reply(MultiReply::Error("split_dispatch_unavailable")),
             Some([0, 8]) => dispatch_ui(owner, connection, payload, now),
             Some([0, 9]) => dispatch_close(owner, connection, payload, now, pending.closes),
+            Some([0, 11]) => match workspace_watch::decode_request(payload) {
+                Ok(request) => {
+                    dispatch_workspace_watch(owner, connection, request, now, pending.watches)
+                }
+                Err(_) => reply(MultiReply::Error("invalid_workspace_watch_request")),
+            },
+            Some([0, 13]) => dispatch_pane_operations(owner, connection, payload, now),
             _ => reply(MultiReply::Error("unsupported_request_schema")),
         },
     }
+}
+
+fn dispatch_pane_operations(
+    owner: &mut MultiSessionOwner<PtyEffects>,
+    connection: &Connection,
+    payload: &[u8],
+    now: u64,
+) -> DispatchResult {
+    use crate::pane_operations_protocol::{self as pane_ops, Request};
+
+    let request = match pane_ops::decode_request(payload) {
+        Ok(request) => request,
+        Err(_) => return reply(MultiReply::Error("invalid_pane_operations_request")),
+    };
+    if !pane_operations_capability_allowed(request, connection.selected_capabilities()) {
+        return reply(MultiReply::Error("capability_denied"));
+    }
+    match request {
+        Request::ViewQuery => match owner.pane_operations_view(connection, now) {
+            Ok(Some(view)) => match pane_ops::encode_view(&view) {
+                Ok(bytes) => reply(MultiReply::Response(bytes.to_vec())),
+                Err(_) => reply(MultiReply::Error("invalid_pane_operations_view")),
+            },
+            Ok(None) => reply(MultiReply::Error("no_layout")),
+            Err(error) => self::error(&error),
+        },
+        mutation => match owner.handle_pane_operation(
+            connection,
+            mutation,
+            payload,
+            now,
+            |effects, rows, columns| effects.resize(rows, columns),
+        ) {
+            Ok(bytes) => reply(MultiReply::Response(bytes)),
+            Err(error) => self::error(&error),
+        },
+    }
+}
+
+fn pane_operations_capability_allowed(
+    request: crate::pane_operations_protocol::Request,
+    selected: u64,
+) -> bool {
+    let required = crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS
+        | match request {
+            crate::pane_operations_protocol::Request::ViewQuery => CAPABILITY_READ,
+            crate::pane_operations_protocol::Request::Swap(_)
+            | crate::pane_operations_protocol::Request::DividerSet(_)
+            | crate::pane_operations_protocol::Request::ZoomSet(_) => CAPABILITY_INPUT,
+        };
+    selected & required == required
 }
 
 fn dispatch_session(
@@ -1655,8 +2042,53 @@ fn dispatch_ui(
                 .map_err(|_| "invalid_screen")?;
                 let checkpoint = crate::screen_checkpoint::encode(effects.screen(), &metadata)
                     .map_err(|_| "invalid_screen")?;
-                crate::ui_protocol::prefix_screen_reply(target, revision, checkpoint)
-                    .map_err(|_| "invalid_screen")
+                let wraps = (connection.selected_capabilities()
+                    & crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS
+                    != 0)
+                    .then(|| effects.screen().row_wraps())
+                    .flatten();
+                crate::ui_protocol::prefix_screen_reply_with_wraps(
+                    target, revision, checkpoint, wraps,
+                )
+                .map_err(|_| "invalid_screen")
+            });
+            match captured {
+                Ok(Ok(bytes)) => reply(MultiReply::Snapshot(bytes)),
+                Ok(Err(label)) => reply(MultiReply::Error(label)),
+                Err(error) => self::error(&error),
+            }
+        }
+        UiRequest::HistoryQuery(query) => {
+            let target = query.target;
+            let captured = owner.observe_target(connection, target, now, |effects| {
+                let (snapshot, offset_rows) = effects
+                    .history_snapshot(query.offset_rows)
+                    .map_err(|_| "history unavailable")?;
+                let revision = effects.revision();
+                let metadata = crate::screen_checkpoint::CheckpointMetadata::new(
+                    target,
+                    0,
+                    unix_millis(),
+                    revision,
+                )
+                .map_err(|_| "invalid_history")?;
+                let checkpoint = crate::screen_checkpoint::encode(&snapshot, &metadata)
+                    .map_err(|_| "invalid_history")?;
+                let wraps = (connection.selected_capabilities()
+                    & crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS
+                    != 0)
+                    .then(|| snapshot.row_wraps())
+                    .flatten();
+                crate::ui_protocol::prefix_history_reply_with_wraps(
+                    target,
+                    revision,
+                    offset_rows,
+                    effects.alternate_screen_active(),
+                    effects.mouse_reporting_enabled(),
+                    checkpoint,
+                    wraps,
+                )
+                .map_err(|_| "invalid_history")
             });
             match captured {
                 Ok(Ok(bytes)) => reply(MultiReply::Snapshot(bytes)),
@@ -1672,6 +2104,19 @@ fn dispatch_ui(
                 now,
                 PtyEffects::validate_keys,
                 |effects| effects.keys(view.keys()),
+            ) {
+                Ok(bytes) => reply(MultiReply::Response(bytes)),
+                Err(error) => self::error(&error),
+            }
+        }
+        UiRequest::MouseWheelInput(input) => {
+            match owner.handle_mouse_wheel(
+                connection,
+                &input,
+                payload,
+                now,
+                |effects| effects.validate_mouse_wheel(input.column, input.row, input.up),
+                |effects| effects.mouse_wheel(input.column, input.row, input.up),
             ) {
                 Ok(bytes) => reply(MultiReply::Response(bytes)),
                 Err(error) => self::error(&error),
@@ -1920,6 +2365,81 @@ fn resolve_pending_watch(
     }
 }
 
+fn dispatch_workspace_watch(
+    owner: &mut MultiSessionOwner<PtyEffects>,
+    connection: &Connection,
+    request: workspace_watch::Request,
+    now: u64,
+    pending_capacity: bool,
+) -> DispatchResult {
+    match request {
+        workspace_watch::Request::Reconcile {
+            generation,
+            workspace,
+        } => match owner.reconcile_workspace(connection, generation, workspace, now) {
+            Ok(state) => match workspace_watch::encode_reconciliation(&state) {
+                Ok(bytes) => reply(MultiReply::WorkspaceResponse(bytes)),
+                Err(_) => reply(MultiReply::Error("invalid_workspace_reconciliation")),
+            },
+            Err(error) => self::error(&error),
+        },
+        workspace_watch::Request::Watch {
+            cursor,
+            limit,
+            wait_ms,
+        } => {
+            let deadline = Instant::now().checked_add(Duration::from_millis(u64::from(wait_ms)));
+            match owner.read_workspace_events(connection, cursor, limit, now) {
+                Ok(page) if page.status != WatchStatus::TimedOut || wait_ms == 0 => {
+                    encode_workspace_watch_reply(page)
+                }
+                Ok(_) if !pending_capacity => reply(MultiReply::Error("watch_capacity")),
+                Ok(_) => match deadline {
+                    Some(deadline) => DispatchResult::PendingWorkspaceWatch { request, deadline },
+                    None => reply(MultiReply::Error("watch_deadline")),
+                },
+                Err(error) => self::error(&error),
+            }
+        }
+    }
+}
+
+fn encode_workspace_watch_reply(page: workspace_watch::WatchReply) -> DispatchResult {
+    match workspace_watch::encode_watch_reply(&page) {
+        Ok(bytes) => reply(MultiReply::WorkspaceResponse(bytes)),
+        Err(_) => reply(MultiReply::Error("invalid_workspace_watch_reply")),
+    }
+}
+
+fn resolve_pending_workspace_watch(
+    owner: &mut MultiSessionOwner<PtyEffects>,
+    pending: &PendingWorkspaceWatch,
+    now: u64,
+) -> Option<MultiReply> {
+    let workspace_watch::Request::Watch { cursor, limit, .. } = pending.request else {
+        return Some(MultiReply::Error("invalid_workspace_watch_request"));
+    };
+    let MultiRequest::Request { connection, .. } = &pending.envelope.request else {
+        return Some(MultiReply::Error("invalid_workspace_watch_request"));
+    };
+    match owner.read_workspace_events(connection, cursor, limit, now) {
+        Ok(page) if page.status != WatchStatus::TimedOut => {
+            Some(match workspace_watch::encode_watch_reply(&page) {
+                Ok(bytes) => MultiReply::WorkspaceResponse(bytes),
+                Err(_) => MultiReply::Error("invalid_workspace_watch_reply"),
+            })
+        }
+        Ok(page) if Instant::now() >= pending.deadline => {
+            Some(match workspace_watch::encode_watch_reply(&page) {
+                Ok(bytes) => MultiReply::WorkspaceResponse(bytes),
+                Err(_) => MultiReply::Error("invalid_workspace_watch_reply"),
+            })
+        }
+        Ok(_) => None,
+        Err(error) => Some(MultiReply::Error(error.code())),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Connection worker. Workers parse/validate frames and forward requests only.
 // ---------------------------------------------------------------------------
@@ -1934,12 +2454,19 @@ enum RequestSchema {
     Split,
     UiLayout,
     UiScreen(TargetRef),
+    UiHistory(TargetRef),
     UiKeys(OperationKey),
+    UiMouseWheel(OperationKey),
     UiResize(OperationKey),
+    /// Schema-13 authoritative pane view query or keyed mutation.
+    PaneOperations(crate::pane_operations_protocol::Request),
     /// Schema-9 close request or close status query for this key.
     Close(OperationKey),
     /// Schema-9 pane status query.
     Panes,
+    /// Schema-11 workspace reconciliation or finite watch.
+    Workspace(workspace_watch::Request),
+    Metadata(TargetRef),
 }
 
 fn classify(payload: &[u8]) -> Option<RequestSchema> {
@@ -1965,7 +2492,9 @@ fn classify(payload: &[u8]) -> Option<RequestSchema> {
         [0, 8] => match decode_ui_request(payload).ok()? {
             UiRequest::LayoutQuery => Some(RequestSchema::UiLayout),
             UiRequest::ScreenQuery { target } => Some(RequestSchema::UiScreen(target)),
+            UiRequest::HistoryQuery(query) => Some(RequestSchema::UiHistory(query.target)),
             UiRequest::KeyInput(view) => Some(RequestSchema::UiKeys(view.key())),
+            UiRequest::MouseWheelInput(input) => Some(RequestSchema::UiMouseWheel(input.key)),
             UiRequest::RootResize(resize) => Some(RequestSchema::UiResize(resize.key)),
         },
         [0, 9] => {
@@ -1979,6 +2508,15 @@ fn classify(payload: &[u8]) -> Option<RequestSchema> {
                     .map(|()| RequestSchema::Panes)
             }
         }
+        [0, 11] => workspace_watch::decode_request(payload)
+            .ok()
+            .map(RequestSchema::Workspace),
+        [0, 12] => pane_metadata::decode_query(payload)
+            .ok()
+            .map(RequestSchema::Metadata),
+        [0, 13] => crate::pane_operations_protocol::decode_request(payload)
+            .ok()
+            .map(RequestSchema::PaneOperations),
         _ => None,
     }
 }
@@ -1987,6 +2525,9 @@ fn response_matches(schema: RequestSchema, payload: &[u8]) -> bool {
     match schema {
         RequestSchema::Control => decode_response_payload(payload).is_ok(),
         RequestSchema::UiKeys(key) => {
+            decode_response_payload(payload).is_ok_and(|response| response.key == key)
+        }
+        RequestSchema::UiMouseWheel(key) => {
             decode_response_payload(payload).is_ok_and(|response| response.key == key)
         }
         RequestSchema::Session(SessionRequest::Describe) => decode_session_info(payload).is_ok(),
@@ -2011,6 +2552,7 @@ fn response_matches(schema: RequestSchema, payload: &[u8]) -> bool {
         RequestSchema::Split => decode_split_result(payload).is_ok(),
         RequestSchema::UiLayout => decode_layout_reply(payload).is_ok(),
         RequestSchema::UiScreen(_) => false,
+        RequestSchema::UiHistory(_) => false,
         RequestSchema::UiResize(key) => {
             decode_resize_reply(payload).is_ok_and(|result| result.key == key)
                 || decode_response_payload(payload).is_ok_and(|response| response.key == key)
@@ -2019,12 +2561,85 @@ fn response_matches(schema: RequestSchema, payload: &[u8]) -> bool {
             decode_close_result(payload).is_ok_and(|result| result.key == key)
         }
         RequestSchema::Panes => decode_pane_reply(payload).is_ok(),
+        RequestSchema::Workspace(request) => workspace_response_matches(request, payload),
+        RequestSchema::Metadata(target) => pane_metadata::decode_observation(payload)
+            .is_ok_and(|observation| observation.target == target),
+        RequestSchema::PaneOperations(request) => match request {
+            crate::pane_operations_protocol::Request::ViewQuery => {
+                crate::pane_operations_protocol::decode_view(payload).is_ok()
+            }
+            crate::pane_operations_protocol::Request::Swap(value) => {
+                decode_response_payload(payload).is_ok_and(|response| response.key == value.key)
+            }
+            crate::pane_operations_protocol::Request::DividerSet(value) => {
+                decode_response_payload(payload).is_ok_and(|response| response.key == value.key)
+            }
+            crate::pane_operations_protocol::Request::ZoomSet(value) => {
+                decode_response_payload(payload).is_ok_and(|response| response.key == value.key)
+            }
+        },
     }
 }
 
-fn snapshot_matches(schema: RequestSchema, payload: &[u8]) -> bool {
+fn snapshot_matches(schema: RequestSchema, payload: &[u8], wraps_negotiated: bool) -> bool {
     matches!(schema, RequestSchema::UiScreen(target)
-        if decode_screen_reply(payload).is_ok_and(|view| view.target() == target))
+        if decode_screen_reply_with_wraps(payload, wraps_negotiated).is_ok_and(|view| view.target() == target))
+        || matches!(schema, RequestSchema::UiHistory(target)
+            if decode_history_reply_with_wraps(payload, wraps_negotiated).is_ok_and(|view| view.target() == target))
+}
+
+fn workspace_response_matches(request: workspace_watch::Request, payload: &[u8]) -> bool {
+    match request {
+        workspace_watch::Request::Reconcile {
+            generation,
+            workspace,
+        } => workspace_watch::decode_reconciliation(payload).is_ok_and(|state| {
+            state.cursor.generation == generation
+                && state.cursor.workspace == workspace
+                && state.revision != 0
+                && state.layout.as_ref().is_none_or(|layout| {
+                    layout.revision == state.revision
+                        && layout.panes.iter().flatten().all(|pane| {
+                            pane.target.generation == generation
+                                && pane.target.workspace == workspace
+                        })
+                })
+        }),
+        workspace_watch::Request::Watch { cursor, limit, .. } => {
+            workspace_watch::decode_watch_reply(payload).is_ok_and(|reply| {
+                if reply.cursor.generation != cursor.generation
+                    || reply.cursor.workspace != cursor.workspace
+                {
+                    return false;
+                }
+                match reply.status {
+                    WatchStatus::Changed => {
+                        let Some(first) = cursor.sequence.checked_add(1) else {
+                            return false;
+                        };
+                        reply.events.len() <= usize::from(limit)
+                            && reply
+                                .events
+                                .first()
+                                .is_some_and(|event| event.sequence == first)
+                            && reply.events.windows(2).all(|pair| {
+                                pair[0].sequence.checked_add(1) == Some(pair[1].sequence)
+                            })
+                            && reply
+                                .events
+                                .last()
+                                .is_some_and(|event| event.sequence == reply.cursor.sequence)
+                    }
+                    WatchStatus::TimedOut => {
+                        reply.events.is_empty() && reply.cursor.sequence == cursor.sequence
+                    }
+                    WatchStatus::ResyncRequired => {
+                        reply.events.is_empty() && reply.cursor.sequence >= cursor.sequence
+                    }
+                }
+            })
+        }
+    }
 }
 
 fn split_hello(payload: &[u8]) -> Option<(SessionHello, Option<TargetRef>)> {
@@ -2133,9 +2748,31 @@ fn run_worker(
             }
             continue;
         }
+        if matches!(schema, RequestSchema::Workspace(_))
+            && connection.selected_capabilities() & (CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS)
+                != (CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS)
+        {
+            if write_error(&mut stream, request_id, "capability_denied", stop).is_err() {
+                return;
+            }
+            continue;
+        }
+        if let RequestSchema::PaneOperations(request) = schema {
+            if !pane_operations_capability_allowed(request, connection.selected_capabilities()) {
+                if write_error(&mut stream, request_id, "capability_denied", stop).is_err() {
+                    return;
+                }
+                continue;
+            }
+        }
         // A close's bounded stop runs inside the owner tick; wait longer.
         let reply_deadline = if matches!(schema, RequestSchema::Close(_)) {
             CLOSE_REPLY_DEADLINE
+        } else if matches!(
+            schema,
+            RequestSchema::Workspace(workspace_watch::Request::Watch { .. })
+        ) {
+            OWNER_REPLY_DEADLINE + Duration::from_millis(1_100)
         } else {
             OWNER_REPLY_DEADLINE
         };
@@ -2158,7 +2795,24 @@ fn run_worker(
                 &payload,
                 stop,
             ),
-            MultiReply::Snapshot(payload) if snapshot_matches(schema, &payload) => {
+            MultiReply::WorkspaceResponse(payload) if response_matches(schema, &payload) => {
+                write_frame(
+                    &mut stream,
+                    MessageKind::Response,
+                    request_id,
+                    &payload,
+                    stop,
+                )
+            }
+            MultiReply::Snapshot(payload)
+                if snapshot_matches(
+                    schema,
+                    &payload,
+                    connection.selected_capabilities()
+                        & crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS
+                        != 0,
+                ) =>
+            {
                 write_frame_until(
                     &mut stream,
                     MessageKind::Snapshot,
@@ -2368,6 +3022,159 @@ mod tests {
         lease: 4,
         sequence: 5,
     };
+
+    #[test]
+    fn pane_operations_classifier_and_capability_classes_are_strict() {
+        use crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS;
+        use crate::pane_operations_protocol::{self as pane_ops, PaneSwap, Request};
+
+        let query = pane_ops::encode_request(&Request::ViewQuery).unwrap();
+        assert!(matches!(
+            classify(&query),
+            Some(RequestSchema::PaneOperations(Request::ViewQuery))
+        ));
+        assert!(!pane_operations_capability_allowed(
+            Request::ViewQuery,
+            CAPABILITY_PANE_OPERATIONS
+        ));
+        assert!(pane_operations_capability_allowed(
+            Request::ViewQuery,
+            CAPABILITY_PANE_OPERATIONS | CAPABILITY_READ
+        ));
+
+        let swap = Request::Swap(PaneSwap {
+            key: KEY,
+            expected_layout_revision: 2,
+            source: TARGET,
+            destination: TargetRef {
+                pane: 3,
+                session: 3,
+                ..TARGET
+            },
+        });
+        let mutation = pane_ops::encode_request(&swap).unwrap();
+        assert!(
+            matches!(classify(&mutation), Some(RequestSchema::PaneOperations(value)) if value == swap)
+        );
+        assert!(!pane_operations_capability_allowed(
+            swap,
+            CAPABILITY_PANE_OPERATIONS | CAPABILITY_READ
+        ));
+        assert!(pane_operations_capability_allowed(
+            swap,
+            CAPABILITY_PANE_OPERATIONS | CAPABILITY_INPUT
+        ));
+
+        let mut trailing = query;
+        trailing.push(0);
+        assert!(classify(&trailing).is_none());
+    }
+
+    #[test]
+    fn pane_operation_mutation_response_must_match_original_key() {
+        let mut bytes = Vec::new();
+        crate::response_protocol::encode_response_payload(
+            &crate::response_protocol::Response {
+                key: KEY,
+                body: crate::response_protocol::ResponseBody::Status(
+                    crate::protocol::OperationStatus::InProgress,
+                ),
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        assert!(response_matches(
+            RequestSchema::PaneOperations(crate::pane_operations_protocol::Request::ZoomSet(
+                crate::pane_operations_protocol::PaneZoomSet {
+                    key: KEY,
+                    expected_layout_revision: 2,
+                    target: TARGET,
+                    zoomed: true,
+                }
+            )),
+            &bytes
+        ));
+        let wrong_key = OperationKey { sequence: 6, ..KEY };
+        assert!(!response_matches(
+            RequestSchema::PaneOperations(crate::pane_operations_protocol::Request::ZoomSet(
+                crate::pane_operations_protocol::PaneZoomSet {
+                    key: wrong_key,
+                    expected_layout_revision: 2,
+                    target: TargetRef {
+                        generation: 3,
+                        ..TARGET
+                    },
+                    zoomed: true,
+                }
+            )),
+            &bytes
+        ));
+    }
+
+    #[test]
+    fn pane_operations_view_response_rejects_noncanonical_shape() {
+        let malformed = [0; crate::pane_operations_protocol::PANE_OPERATIONS_VIEW_BYTES];
+        assert!(!response_matches(
+            RequestSchema::PaneOperations(crate::pane_operations_protocol::Request::ViewQuery),
+            &malformed
+        ));
+    }
+
+    #[test]
+    fn snapshot_reply_guard_preserves_negotiation_and_exact_target() {
+        use crate::screen_checkpoint::{encode, CheckpointMetadata};
+        use crate::terminal::{ScreenSnapshot, TerminalSize};
+        use crate::ui_protocol::{prefix_history_reply_with_wraps, prefix_screen_reply_with_wraps};
+
+        let screen = ScreenSnapshot::try_new(TerminalSize::new(5, 20).unwrap()).unwrap();
+        let metadata = CheckpointMetadata::new(TARGET, 0, 1, 1).unwrap();
+        let checkpoint = encode(&screen, &metadata).unwrap();
+        let wraps = [true, false, false, false, false];
+        for negotiated in [false, true] {
+            let row_wraps = negotiated.then_some(wraps.as_slice());
+            let replies = [
+                (
+                    RequestSchema::UiScreen(TARGET),
+                    prefix_screen_reply_with_wraps(TARGET, 1, checkpoint.clone(), row_wraps)
+                        .unwrap(),
+                ),
+                (
+                    RequestSchema::UiHistory(TARGET),
+                    prefix_history_reply_with_wraps(
+                        TARGET,
+                        1,
+                        1,
+                        false,
+                        false,
+                        checkpoint.clone(),
+                        row_wraps,
+                    )
+                    .unwrap(),
+                ),
+            ];
+            for (schema, bytes) in replies {
+                assert!(snapshot_matches(schema, &bytes, negotiated));
+                if negotiated {
+                    assert!(!snapshot_matches(schema, &bytes, false));
+                }
+                let other = TargetRef {
+                    session: 99,
+                    ..TARGET
+                };
+                assert!(!snapshot_matches(
+                    RequestSchema::UiScreen(other),
+                    &bytes,
+                    true
+                ));
+                assert!(!snapshot_matches(
+                    RequestSchema::UiHistory(other),
+                    &bytes,
+                    true
+                ));
+                assert!(!snapshot_matches(RequestSchema::UiLayout, &bytes, true));
+            }
+        }
+    }
 
     fn close_request_bytes() -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -3854,7 +4661,9 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn persistent_history_writer_failure_does_not_stop_live_shell_input() {
-        use crate::handshake_protocol::{decode_welcome, Hello, CAPABILITY_INPUT, CAPABILITY_READ};
+        use crate::handshake_protocol::{
+            decode_welcome, Hello, CAPABILITY_INPUT, CAPABILITY_READ, CAPABILITY_SCREEN_ROW_WRAPS,
+        };
         use crate::launch::LaunchContext;
         use crate::multi_startup::{StartedMultiServer, StartupLaunch};
         use crate::protocol::{OperationKey, OperationStatus, Outcome};
@@ -3868,7 +4677,8 @@ mod tests {
         use crate::terminal::Key;
         use crate::transport::AuthenticatedStream;
         use crate::ui_protocol::{
-            decode_screen_reply, encode_key_input, encode_screen_query, KeyInput,
+            decode_history_reply_with_wraps, decode_screen_reply_with_wraps, encode_history_query,
+            encode_key_input, encode_screen_query, KeyInput,
         };
         use std::ffi::OsString;
         use std::fs;
@@ -3902,9 +4712,10 @@ mod tests {
         };
         let arguments = vec![
             OsString::from("-c"),
-            OsString::from(
-                "printf 'FAILURE-READY\\r\\n'; IFS= read -r line; printf 'AFTER-FAILURE:%s\\r\\n' \"$line\"; while :; do /bin/sleep 1; done",
-            ),
+            OsString::from(format!(
+                "printf 'FAILURE-READY\\r\\n'; IFS= read -r line; i=1; while [ \"$i\" -le 7 ]; do printf 'HISTORY-%s\\r\\n' \"$i\"; i=$((i + 1)); done; printf '%s\\r\\n' '{}'; printf 'AFTER-FAILURE:%s\\r\\n' \"$line\"; while :; do /bin/sleep 1; done",
+                format_args!("WRAPMARK{}", "W".repeat(70))
+            )),
         ];
         let executable = OsString::from("/bin/sh");
         let started = StartedMultiServer::start(
@@ -3949,7 +4760,7 @@ mod tests {
                     hello: Hello {
                         nonce: 41,
                         required_capabilities: CAPABILITY_READ | CAPABILITY_INPUT,
-                        optional_capabilities: 0,
+                        optional_capabilities: CAPABILITY_SCREEN_ROW_WRAPS,
                     },
                     resume: None,
                 })
@@ -3963,6 +4774,10 @@ mod tests {
                 let welcome = stream.read_frame(deadline()).unwrap();
                 assert_eq!(welcome.kind(), MessageKind::Welcome);
                 let welcome = decode_welcome(welcome.payload()).unwrap();
+                assert_ne!(
+                    welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+                    0
+                );
                 stream.enable_snapshot_reads().unwrap();
                 let mut request_id = 0_u64;
                 let mut send = |payload: &[u8]| {
@@ -4021,7 +4836,7 @@ mod tests {
                 loop {
                     let reply = send(&query);
                     if reply.kind() == MessageKind::Snapshot {
-                        let screen = decode_screen_reply(reply.payload()).unwrap();
+                        let screen = decode_screen_reply_with_wraps(reply.payload(), true).unwrap();
                         let checkpoint = decode_checkpoint(screen.checkpoint()).unwrap();
                         let text = (0..checkpoint.rows())
                             .map(|row| {
@@ -4030,7 +4845,28 @@ mod tests {
                                     .collect::<String>()
                             })
                             .collect::<String>();
-                        if text.contains("AFTER-FAILURE:SURVIVES") {
+                        if text.contains("AFTER-FAILURE:SURVIVES") && text.contains("WRAPMARK") {
+                            assert!(screen.wrap_metadata_available());
+                            assert!(
+                                (0..checkpoint.rows())
+                                    .any(|row| screen.row_wrapped(row) == Some(true)),
+                                "runtime snapshot omitted the child's actual soft-wrap row"
+                            );
+                            let history_query = encode_history_query(target, 1).unwrap();
+                            let history_reply = send(&history_query);
+                            assert_eq!(history_reply.kind(), MessageKind::Snapshot);
+                            let history =
+                                decode_history_reply_with_wraps(history_reply.payload(), true)
+                                    .unwrap();
+                            assert_eq!(history.offset_rows(), 1);
+                            assert!(history.wrap_metadata_available());
+                            let history_checkpoint =
+                                decode_checkpoint(history.checkpoint()).unwrap();
+                            assert!(
+                                (0..history_checkpoint.rows())
+                                    .any(|row| history.row_wrapped(row) == Some(true)),
+                                "history reply did not carry wraps from its requested viewport"
+                            );
                             return text;
                         }
                     }

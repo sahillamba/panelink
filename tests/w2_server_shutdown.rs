@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 const LEASE: u64 = 1;
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 81;
+const SPLIT_CONTENT_ROWS: u16 = ROWS - 2;
+const SPLIT_CONTENT_COLUMNS: u16 = (COLUMNS - 1) / 2 - 2;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture(PathBuf);
@@ -148,10 +150,10 @@ fn driver_drop_signals_both_children_before_shared_escalation_deadlines() {
     let mut journal = Journal::default();
 
     let first_script = br#"
-        trap 'touch "$1/hup-a"; n=0; while [ ! -f "$1/hup-b" ] && [ "$n" -lt 40 ]; do /bin/sleep 0.01; n=$((n+1)); done; if [ ! -f "$1/hup-b" ]; then touch "$1/peer-missing-a"; fi' HUP
-        echo $$ > "$1/pid-a"
-        touch "$1/ready-a"
-        while :; do /bin/sleep 10; done
+        trap 'printf hup >> "$1/hup-a"; n=0; while [ ! -f "$1/hup-b" ] && [ "$n" -lt 40 ]; do read -r -t 0.01 _ || :; n=$((n+1)); done; if [ ! -f "$1/hup-b" ]; then printf missing > "$1/peer-missing-a"; fi' HUP
+        printf '%s\n' "$$" > "$1/pid-a"
+        printf ready > "$1/ready-a"
+        while :; do read -r -t 10 _ || :; done
     "#;
     let first_arguments: [&[u8]; 4] = [b"-c", first_script, b"panelink-w2-shutdown", &root];
     let first_environment = environment(&root);
@@ -180,17 +182,17 @@ fn driver_drop_signals_both_children_before_shared_escalation_deadlines() {
         .expect("first target");
 
     let second_script = br#"
-        trap 'touch "$1/hup-b"; n=0; while [ ! -f "$1/hup-a" ] && [ "$n" -lt 40 ]; do /bin/sleep 0.01; n=$((n+1)); done; if [ ! -f "$1/hup-a" ]; then touch "$1/peer-missing-b"; fi' HUP
-        echo $$ > "$1/pid-b"
-        touch "$1/ready-b"
-        while :; do /bin/sleep 10; done
+        trap 'printf hup >> "$1/hup-b"; n=0; while [ ! -f "$1/hup-a" ] && [ "$n" -lt 40 ]; do read -r -t 0.01 _ || :; n=$((n+1)); done; if [ ! -f "$1/hup-a" ]; then printf missing > "$1/peer-missing-b"; fi' HUP
+        printf '%s\n' "$$" > "$1/pid-b"
+        printf ready > "$1/ready-b"
+        while :; do read -r -t 10 _ || :; done
     "#;
     let second_arguments: [&[u8]; 4] = [b"-c", second_script, b"panelink-w2-shutdown", &root];
     let second_environment = environment(&root);
     let second_request = LaunchRequest {
         key: key(generation, 2),
-        rows: ROWS,
-        columns: 40,
+        rows: SPLIT_CONTENT_ROWS,
+        columns: SPLIT_CONTENT_COLUMNS,
         requested_executable: b"/bin/sh",
         requested_working_directory: &root,
         client_working_directory: &root,

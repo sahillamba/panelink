@@ -250,6 +250,13 @@ impl Server {
         }
         wait_child(&mut self.child, STEP).expect("server stops after SIGTERM")
     }
+
+    fn is_running(&mut self) -> bool {
+        self.child
+            .try_wait()
+            .expect("poll server process")
+            .is_none()
+    }
 }
 
 impl Drop for Server {
@@ -308,6 +315,7 @@ struct Client {
     supervisor: Child,
     status_path: PathBuf,
     release_path: PathBuf,
+    attach_pid_path: PathBuf,
     master: fs::File,
     slave: std::os::fd::OwnedFd,
     initial_termios: Termios,
@@ -343,6 +351,7 @@ impl Client {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let status_path = fixture.root.join(format!("attach-{serial}.status"));
         let release_path = fixture.root.join(format!("release-{serial}"));
+        let attach_pid_path = fixture.root.join(format!("attach-{serial}.pid"));
         let mut command = Command::new("/bin/sh");
         command
             .arg("-c")
@@ -350,6 +359,7 @@ impl Client {
             .arg("panelink-attach-supervisor")
             .arg(&status_path)
             .arg(&release_path)
+            .arg(&attach_pid_path)
             .arg(env!("CARGO_BIN_EXE_panelink"))
             .arg("attach")
             .arg("--directory")
@@ -403,6 +413,7 @@ impl Client {
             supervisor,
             status_path,
             release_path,
+            attach_pid_path,
             master,
             slave,
             initial_termios,
@@ -431,6 +442,50 @@ impl Client {
             assert!(Instant::now() < deadline, "attach did not exit");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn attach_pid(&self) -> Option<u32> {
+        let pid = fs::read_to_string(&self.attach_pid_path)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        (pid > 1 && pid <= i32::MAX as u32 && pid != self.supervisor.id()).then_some(pid)
+    }
+
+    fn wait_attach_pid(&self) -> u32 {
+        let deadline = Instant::now() + STEP;
+        loop {
+            if let Some(pid) = self.attach_pid() {
+                return pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "attach PID marker was not created"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn kill_attach_and_wait(&mut self) -> (u32, i32) {
+        let pid = self.wait_attach_pid();
+        // SAFETY: `pid` came from this fixture's private marker, is positive,
+        // and is distinct from the supervisor process retained for cleanup.
+        let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        assert_eq!(result, 0, "SIGKILL only the owned attach process {pid}");
+        let status = self.wait_attach_exit_within(STEP);
+        assert_ne!(status, 0, "SIGKILL must produce a nonzero attach status");
+        // The supervisor deliberately remains alive to retain the outer PTY
+        // until this fixture explicitly releases it. A killed attach cannot
+        // restore termios, so this scenario can release it immediately.
+        fs::write(&self.release_path, b"release\n").expect("release killed-client supervisor");
+        let supervisor_status = wait_child(&mut self.supervisor, STEP)
+            .expect("supervisor exits after recording killed attach status");
+        assert!(
+            supervisor_status.success(),
+            "supervisor status: {supervisor_status}"
+        );
+        (pid, status)
     }
 
     fn write(&mut self, bytes: &[u8]) {
@@ -554,9 +609,10 @@ impl Drop for Client {
 const ATTACH_SUPERVISOR: &str = r#"
 status_path=$1
 release_path=$2
-shift 2
+attach_pid_path=$3
+shift 3
 trap ':' HUP INT TERM
-"$@"
+/bin/sh -c 'printf "%s\n" "$$" > "$1.tmp" && /bin/mv "$1.tmp" "$1"; shift; exec "$@"' panelink-attach-wrapper "$attach_pid_path" "$@"
 code=$?
 printf '%s\n' "$code" > "$status_path.tmp" && /bin/mv "$status_path.tmp" "$status_path"
 while [ ! -f "$release_path" ]; do /bin/sleep 0.05; done
@@ -594,6 +650,33 @@ fn read_until_contains(fixture: &Fixture, context: &str, target: &str, marker: &
         let text = fixture.read_pane(context, target);
         text.contains(marker).then_some(text)
     })
+}
+
+fn wait_file_pid(path: &Path, what: &str) -> u32 {
+    wait_control(what, || {
+        let text = fs::read_to_string(path).ok()?;
+        let pid = text.trim().parse::<u32>().ok()?;
+        (pid > 1 && pid <= i32::MAX as u32).then_some(pid.to_string())
+    })
+    .parse()
+    .expect("validated PID")
+}
+
+fn wait_pid_absent(pid: u32) {
+    let deadline = Instant::now() + STEP;
+    loop {
+        // SAFETY: signal zero only probes the exact child PID captured from
+        // the managed pane's own shell.
+        let result = unsafe { libc::kill(pid as i32, 0) };
+        if result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "managed child PID {pid} still exists"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn rendered_pane_contains(parser: &vt100::Parser, rect: PaneRect, needle: &str) -> bool {
@@ -861,6 +944,7 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
     let capture = client.capture();
     for mode in [
         &b"\x1b[?1006l"[..],
+        b"\x1b[?1002l",
         b"\x1b[?1000l",
         b"\x1b[?1049l",
         b"\x1b[?2004l",
@@ -886,4 +970,147 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
     }
     drop(client);
     assert_eq!(server.sigterm_and_wait().code(), Some(0));
+}
+
+#[test]
+fn killed_attach_client_reattaches_to_same_live_child_without_replaying_input() {
+    let fixture = Fixture::new();
+    let (mut server, target) = Server::start(&fixture)
+        .expect("pathname server fixture must be available for abrupt-client acceptance");
+    fixture.init_target("crash-reconnect.ctx", &target);
+
+    let ready_marker = format!("ABRUPT_READY_{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let child_pid_path = fixture.root.join("managed-child.pid");
+    let mut first = Client::spawn(&fixture);
+    first.wait_raw_mode();
+    let attach_pid = first.wait_attach_pid();
+    first.wait_screen("initial child readiness", |screen| {
+        screen.contains("PANE1-READY")
+    });
+
+    // The ready marker is split across printf arguments so terminal command
+    // echo cannot satisfy the assertion before the shell executes it.
+    let child_pid_path_text = child_pid_path.to_string_lossy();
+    let initial_command = format!(
+        "printf 'ABRUPT_' ; printf 'READY_{}\\n'; printf '%s\\n' \"$$\" > '{}'\r",
+        ready_marker.trim_start_matches("ABRUPT_READY_"),
+        child_pid_path_text
+    );
+    first.type_slowly(initial_command.as_bytes());
+    first.wait_screen("unique ready marker from managed child", |screen| {
+        screen.contains(&ready_marker)
+    });
+    let initial_screen =
+        read_until_contains(&fixture, "crash-reconnect.ctx", &target, &ready_marker);
+    assert_eq!(
+        initial_screen.matches(&ready_marker).count(),
+        1,
+        "{initial_screen}"
+    );
+    let child_pid = wait_file_pid(&child_pid_path, "managed child PID marker");
+    // SAFETY: signal zero probes only the attach PID recorded by this client.
+    assert_eq!(
+        unsafe { libc::kill(attach_pid as i32, 0) },
+        0,
+        "owned attach process is live"
+    );
+    assert!(server.is_running(), "server is alive before attach SIGKILL");
+
+    let (killed_pid, attach_status) = first.kill_attach_and_wait();
+    assert_eq!(
+        killed_pid, attach_pid,
+        "killed the verified live attach PID"
+    );
+    assert_ne!(attach_status, 0);
+    drop(first); // also close the dead client's outer PTY before reattaching
+    assert!(
+        server.is_running(),
+        "server remains alive after attach SIGKILL"
+    );
+    let (describe_code, description) = fixture.control("crash-reconnect.ctx", &["describe"]);
+    assert_eq!(
+        describe_code, 0,
+        "describe after client SIGKILL: {description}"
+    );
+    assert_eq!(
+        field(&description, "child_exited"),
+        Some("false"),
+        "{description}"
+    );
+    let after_kill_layout = fixture.layout("crash-reconnect.ctx");
+    assert_eq!(
+        targets(&after_kill_layout),
+        vec![target.clone()],
+        "{after_kill_layout}"
+    );
+
+    // The same fixture root keeps attach context metadata across independent
+    // outer PTYs. No input is sent while client ownership is uncertain.
+    let mut second = Client::spawn(&fixture);
+    second.wait_raw_mode();
+    second.wait_screen("previous child output after reattach", |screen| {
+        screen.contains(&ready_marker)
+    });
+    let reattached_layout = fixture.layout("crash-reconnect.ctx");
+    assert_eq!(
+        targets(&reattached_layout),
+        vec![target.clone()],
+        "{reattached_layout}"
+    );
+    let retained = fixture.read_pane("crash-reconnect.ctx", &target);
+    assert!(
+        retained.contains(&ready_marker),
+        "prior child output missing: {retained}"
+    );
+
+    let observed_pid_path = fixture.root.join("reattached-child.pid");
+    let observed_pid_path_text = observed_pid_path.to_string_lossy();
+    second
+        .type_slowly(format!("printf '%s\\n' \"$$\" > '{}'\r", observed_pid_path_text).as_bytes());
+    let observed_pid = wait_file_pid(&observed_pid_path, "reattached child PID marker");
+    assert_eq!(
+        observed_pid, child_pid,
+        "reattach reached the same managed child"
+    );
+
+    // This marker also cannot appear in the echoed command because its two
+    // halves are separate printf arguments. It is sent once, after reattach.
+    let post_marker = format!("AFTER_KILL_{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let post_command = format!(
+        "printf 'AFTER_' ; printf 'KILL_{}\\n'\r",
+        post_marker.trim_start_matches("AFTER_KILL_"),
+    );
+    second.type_slowly(post_command.as_bytes());
+    let after_input = read_until_contains(&fixture, "crash-reconnect.ctx", &target, &post_marker);
+    assert_eq!(
+        after_input.matches(&post_marker).count(),
+        1,
+        "{after_input}"
+    );
+    assert_eq!(
+        after_input.matches(&ready_marker).count(),
+        1,
+        "old input must not replay after reattachment: {after_input}"
+    );
+
+    second.write(b"\x18");
+    assert_eq!(
+        second.wait_attach_exit(),
+        0,
+        "reattached client exits cleanly on Ctrl-X"
+    );
+    second.termios_restored();
+    let (describe_code, description) = fixture.control("crash-reconnect.ctx", &["describe"]);
+    assert_eq!(
+        describe_code, 0,
+        "describe before server stop: {description}"
+    );
+    assert_eq!(
+        field(&description, "child_exited"),
+        Some("false"),
+        "{description}"
+    );
+
+    assert_eq!(server.sigterm_and_wait().code(), Some(0));
+    wait_pid_absent(child_pid);
 }

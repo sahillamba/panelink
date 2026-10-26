@@ -52,7 +52,11 @@ pub const MIN_NORMAL_COLUMNS: u16 = 24;
 pub const COMPACT_ROWS: u16 = ROW_COUNT as u16 + 1;
 /// Shortest viewport in which the menu is interactive: enough rows for every
 /// selectable row. Anything shorter is [`OverlayMode::TooSmall`].
-pub const MIN_MENU_ROWS: u16 = ROW_COUNT as u16;
+pub const MIN_MENU_ROWS: u16 = if MIN_PANE_ROWS > ROW_COUNT as u16 {
+    MIN_PANE_ROWS
+} else {
+    ROW_COUNT as u16
+};
 /// Narrowest viewport in which the menu is interactive: the terminal-core
 /// pane minimum. Anything narrower is [`OverlayMode::TooSmall`].
 pub const MIN_MENU_COLUMNS: u16 = MIN_PANE_COLUMNS;
@@ -1040,6 +1044,8 @@ fn reason_for(error: LayoutError, direction: SplitDirection, pane: Rect) -> Disa
         | LayoutError::InvalidDimensions
         | LayoutError::TargetScopeMismatch
         | LayoutError::TargetIdentityConflict
+        | LayoutError::InvalidDividerIndex
+        | LayoutError::DividerNotAncestor
         | LayoutError::InvalidLayoutState => DisabledReason::Unavailable,
     }
 }
@@ -1329,55 +1335,55 @@ mod tests {
     }
 
     #[test]
-    fn column_threshold_is_41_and_reason_names_both_sizes() {
-        let menu = open_keyboard(&single(11, 41));
+    fn column_threshold_is_45_and_reason_names_both_sizes() {
+        let menu = open_keyboard(&single(15, 45));
         assert_eq!(availability(&menu), [Availability::Enabled; ITEM_COUNT]);
 
-        let menu = open_keyboard(&single(11, 40));
+        let menu = open_keyboard(&single(15, 44));
         assert_eq!(
             reason_text(&menu, 0),
-            "Split Left needs 41 columns; this pane has 40"
+            "Split Left needs 45 columns; this pane has 44"
         );
         assert_eq!(
             reason_text(&menu, 1),
-            "Split Right needs 41 columns; this pane has 40"
+            "Split Right needs 45 columns; this pane has 44"
         );
         assert_eq!(availability(&menu)[2], Availability::Enabled);
         assert_eq!(availability(&menu)[3], Availability::Enabled);
         assert_eq!(menu.selected(), Some(SplitDirection::Up));
 
-        let menu = open_keyboard(&single(11, 38));
+        let menu = open_keyboard(&single(15, 42));
         assert_eq!(
             reason_text(&menu, 0),
-            "Split Left needs 41 columns; this pane has 38"
+            "Split Left needs 45 columns; this pane has 42"
         );
     }
 
     #[test]
-    fn row_threshold_is_11_and_reason_names_both_sizes() {
-        let menu = open_keyboard(&single(10, 41));
+    fn row_threshold_is_15_and_reason_names_both_sizes() {
+        let menu = open_keyboard(&single(14, 45));
         assert_eq!(availability(&menu)[0], Availability::Enabled);
         assert_eq!(availability(&menu)[1], Availability::Enabled);
         assert_eq!(
             reason_text(&menu, 2),
-            "Split Up needs 11 rows; this pane has 10"
+            "Split Up needs 15 rows; this pane has 14"
         );
         assert_eq!(
             reason_text(&menu, 3),
-            "Split Down needs 11 rows; this pane has 10"
+            "Split Down needs 15 rows; this pane has 14"
         );
 
-        let menu = open_keyboard(&single(9, 41));
+        let menu = open_keyboard(&single(13, 45));
         assert_eq!(
             reason_text(&menu, 2),
-            "Split Up needs 11 rows; this pane has 9"
+            "Split Up needs 15 rows; this pane has 13"
         );
     }
 
     #[test]
     fn menu_availability_agrees_with_layout_can_split_across_a_size_sweep() {
-        for rows in [5, 6, 9, 10, 11, 12, 21, 79, 80] {
-            for columns in [20, 21, 39, 40, 41, 42, 81, 239, 240] {
+        for rows in [7, 8, 14, 15, 16, 21, 79, 80] {
+            for columns in [22, 23, 43, 44, 45, 46, 81, 239, 240] {
                 let layout = single(rows, columns);
                 let menu = open_keyboard(&layout);
                 for item in menu.items().expect("open") {
@@ -1455,7 +1461,7 @@ mod tests {
         );
         assert_eq!(
             reason_for(LayoutError::LayoutTooSmall, SplitDirection::Up, pane).to_string(),
-            "Split Up needs 11 rows; this pane has 9"
+            "Split Up needs 15 rows; this pane has 9"
         );
     }
 
@@ -1593,7 +1599,7 @@ mod tests {
 
     #[test]
     fn activating_a_disabled_item_stays_open_and_shows_its_reason() {
-        let mut menu = open_keyboard(&single(10, 41));
+        let mut menu = open_keyboard(&single(14, 45));
         assert_eq!(menu.handle(MenuInput::Letter('U')), MenuResponse::Consumed);
         assert!(menu.is_open());
         assert_eq!(menu.selected(), Some(SplitDirection::Up));
@@ -1602,7 +1608,7 @@ mod tests {
         assert_eq!(status.style(), OverlayStyle::Status);
         assert!(status
             .text()
-            .contains("Split Up needs 11 rows; this pane has 10"));
+            .contains("Split Up needs 15 rows; this pane has 14"));
         assert_eq!(menu.handle(MenuInput::Activate), MenuResponse::Consumed);
         assert!(menu.is_open());
     }
@@ -1784,36 +1790,36 @@ mod tests {
     }
 
     #[test]
-    fn compact_overlay_uses_six_item_rows_at_6x20_and_adds_status_at_7_rows() {
-        let layout = single(6, 20);
+    fn compact_overlay_uses_six_item_rows_at_7x22_and_adds_status_at_8_rows() {
+        let layout = single(7, 22);
         let mut menu = MenuState::new();
-        menu.open_at_pointer(&layout, 19, 5, 6, 20).expect("open");
+        menu.open_at_pointer(&layout, 21, 6, 7, 22).expect("open");
         assert_eq!(menu.mode(), Some(OverlayMode::Compact));
         assert_eq!(
             menu.overlay_rect(),
             Some(Rect {
                 x: 0,
                 y: 0,
-                rows: 6,
-                columns: 20
+                rows: 7,
+                columns: 22
             })
         );
         assert_line_invariants(&menu);
         let lines = menu.overlay_lines();
         let texts: Vec<&str> = lines.as_slice().iter().map(|line| line.text()).collect();
-        assert_eq!(texts[0], "> Split Left [L] ...");
-        assert_eq!(texts[1], "  Split Right [R]...");
-        assert_eq!(texts[2], "  Split Up [U] - ...");
-        assert_eq!(texts[3], "  Split Down [D] ...");
-        assert_eq!(texts[4], "  Close pane        ");
-        assert_eq!(texts[5], "  No previous lay...");
+        assert_eq!(texts[0], "> Split Left [L] - ...");
+        assert_eq!(texts[1], "  Split Right [R] -...");
+        assert_eq!(texts[2], "  Split Up [U] - di...");
+        assert_eq!(texts[3], "  Split Down [D] - ...");
+        assert_eq!(texts[4], "  Close pane          ");
+        assert_eq!(texts[5], "  No previous layou...");
         assert_eq!(lines.as_slice()[1].style(), OverlayStyle::Disabled);
         assert_eq!(lines.as_slice()[4].style(), OverlayStyle::Normal);
         assert_eq!(lines.as_slice()[5].style(), OverlayStyle::Disabled);
 
         // One more row adds the status row.
         let mut tall = MenuState::new();
-        tall.open_at_pointer(&single(7, 20), 0, 0, 7, 20)
+        tall.open_at_pointer(&single(8, 22), 0, 0, 8, 22)
             .expect("open");
         assert_eq!(tall.mode(), Some(OverlayMode::Compact));
         assert_eq!(
@@ -1822,7 +1828,7 @@ mod tests {
         );
         assert_line_invariants(&tall);
         let lines = tall.overlay_lines();
-        assert_eq!(lines.as_slice()[6].text(), "Split Left needs ...");
+        assert_eq!(lines.as_slice()[6].text(), "Split Left needs 45...");
         assert_eq!(lines.as_slice()[6].style(), OverlayStyle::Status);
 
         // Clicking the second compact row selects Right and stays open (disabled).
@@ -1833,7 +1839,7 @@ mod tests {
         };
         assert_eq!(menu.handle(press), MenuResponse::Consumed);
         assert_eq!(menu.selected(), Some(SplitDirection::Right));
-        // The status row (7-row viewport) is chrome.
+        // The status row (inside the seven-row overlay) is chrome.
         let status = MenuInput::MousePress {
             x: 3,
             y: 6,
@@ -1899,7 +1905,7 @@ mod tests {
 
     #[test]
     fn below_terminal_minimum_viewport_never_activates() {
-        assert_eq!((MIN_MENU_ROWS, MIN_MENU_COLUMNS), (6, 20));
+        assert_eq!((MIN_MENU_ROWS, MIN_MENU_COLUMNS), (7, 22));
         let layout = single(24, 81);
         let blocked = [
             MenuInput::Letter('r'),
@@ -1918,7 +1924,7 @@ mod tests {
                 right: false,
             },
         ];
-        for (rows, columns) in [(6, 19), (5, 40)] {
+        for (rows, columns) in [(7, 21), (6, 40)] {
             let mut menu = MenuState::new();
             menu.open_at_pointer(&layout, 0, 0, rows, columns)
                 .expect("open");
@@ -1932,7 +1938,7 @@ mod tests {
         }
 
         let mut menu = MenuState::new();
-        menu.open_at_pointer(&layout, 0, 0, 6, 20).expect("open");
+        menu.open_at_pointer(&layout, 0, 0, 7, 22).expect("open");
         assert_eq!(menu.mode(), Some(OverlayMode::Compact));
         assert_eq!(
             menu.handle(MenuInput::Letter('r')),
@@ -2079,7 +2085,7 @@ mod tests {
         ));
         // Compact: the fifth row is Close.
         let mut menu = MenuState::new();
-        menu.open_at_pointer(&single(6, 20), 0, 0, 6, 20)
+        menu.open_at_pointer(&single(7, 22), 0, 0, 7, 22)
             .expect("open");
         let press = MenuInput::MousePress {
             x: 1,

@@ -71,6 +71,9 @@ impl ScreenSnapshot {
         self.cursor_hidden = checkpoint.cursor_hidden();
         self.application_cursor = false;
         self.bracketed_paste = false;
+        // Persisted checkpoints contain no authoritative line-wrap metadata.
+        // A negotiated live reply may apply matching flags after this load.
+        self.clear_row_wraps();
         Ok(())
     }
 }
@@ -130,6 +133,18 @@ mod tests {
         assert!(loaded.cursor_hidden());
         assert!(!loaded.alternate_screen());
         assert!(loaded.cells().len() <= 80 * 240);
+    }
+
+    #[test]
+    fn checkpoint_load_clears_preexisting_volatile_wraps_without_changing_record() {
+        let source = snapshot_from("abcdefghijklmnopqrstuvwxyz", 5, 20);
+        assert_eq!(source.row_wrapped(0), Some(true));
+        let record = encode(&source, &metadata()).unwrap();
+        let mut loaded = snapshot_from("old", 5, 20);
+        loaded.apply_row_wraps(&[true; 5]).unwrap();
+        loaded.load_checkpoint(&decode(&record).unwrap()).unwrap();
+        assert_eq!(loaded.row_wraps(), None);
+        assert_eq!(encode(&loaded, &metadata()).unwrap(), record);
     }
 
     #[test]

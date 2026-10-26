@@ -125,9 +125,26 @@ impl Fixture {
             .is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
     }
 
+    fn verified_server_pid(&self) -> Option<i32> {
+        let record = fs::read_to_string(self.state.join("server.pid")).ok()?;
+        let mut fields = record.split_whitespace();
+        let pid: i32 = fields.next()?.parse().ok()?;
+        let recorded_start: u64 = fields.next()?.parse().ok()?;
+        if pid <= 0 || fields.next().is_some() {
+            return None;
+        }
+        let info = process_info(pid)?;
+        // SAFETY: geteuid has no arguments or memory effects.
+        if info.pbi_uid != unsafe { libc::geteuid() } || info.pbi_status == libc::SZOMB {
+            return None;
+        }
+        let start = info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec;
+        (start == recorded_start).then_some(pid)
+    }
+
     fn wait_server_gone(&self) {
         let deadline = Instant::now() + STEP;
-        while self.socket().exists() || self.server_alive() {
+        while self.socket().exists() || self.server_pid().is_some_and(|pid| !process_exited(pid)) {
             assert!(Instant::now() < deadline, "server did not exit");
             thread::sleep(Duration::from_millis(20));
         }
@@ -137,7 +154,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = self.stop();
-        if let Some(pid) = self.server_pid() {
+        if let Some(pid) = self.verified_server_pid() {
             // SAFETY: best-effort cleanup of this test's own server.
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
@@ -166,6 +183,60 @@ fn wait_child(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// A zombie has exited even if its parent has not reaped it yet.
+fn process_info(pid: i32) -> Option<libc::proc_bsdinfo> {
+    // SAFETY: proc_bsdinfo is plain data; zeroed is a valid initial value.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: the output pointer and byte count describe `info` exactly.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast(),
+            i32::try_from(size).expect("proc_bsdinfo size fits i32"),
+        )
+    };
+    (usize::try_from(written).ok() == Some(size)).then_some(info)
+}
+
+fn process_exited(pid: i32) -> bool {
+    if let Some(info) = process_info(pid) {
+        return info.pbi_status == libc::SZOMB;
+    }
+
+    // A missing PID is exited; inaccessible or otherwise uncertain identity
+    // remains live for this bounded check rather than being treated as done.
+    // SAFETY: signal 0 only checks existence and does not signal the process.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+fn wait_process_exit(pid: i32, what: &str) {
+    let deadline = Instant::now() + STEP;
+    while !process_exited(pid) {
+        assert!(Instant::now() < deadline, "{what} did not exit");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn first_target(json: &str) -> Option<&str> {
+    let start = json.find("\"target\":\"")? + "\"target\":\"".len();
+    let rest = &json[start..];
+    Some(&rest[..rest.find('"')?])
+}
+
+fn target_generation(target: &str) -> u64 {
+    assert_eq!(target.split(':').count(), 5, "full target: {target}");
+    target
+        .split(':')
+        .next()
+        .expect("target generation")
+        .parse()
+        .expect("numeric target generation")
 }
 
 /// The attach client on a private outer PTY with a continuous drain thread.
@@ -487,7 +558,9 @@ fn bare_panelink_starts_splits_detaches_reattaches_and_stops() {
     let mut client = open_client(&fixture);
     assert!(fixture.socket().exists(), "server socket created");
     client.type_slowly(b"echo ACK$((40+1))\r");
-    client.wait_screen("ACK41", |screen| screen.contains("\nACK41"));
+    client.wait_screen("ACK41", |screen| {
+        screen.lines().any(|line| line.trim() == "ACK41")
+    });
 
     // Right-click opens the split menu; `r` splits right.
     client.write(b"\x1b[<2;10;5M\x1b[<2;10;5m");
@@ -587,28 +660,153 @@ fn last_shell_exit_closes_the_workspace_and_the_client() {
 fn killed_server_leaves_a_stale_socket_that_the_next_open_recovers() {
     let fixture = Fixture::new();
     let mut client = open_client(&fixture);
+
+    // Bind the old control context and full target to this server generation.
+    let (code, old_context) = fixture.control("old.ctx", &["init"]);
+    assert_eq!(code, 0, "old context init: {old_context}");
+    let old_generation: u64 = field(&old_context, "generation")
+        .expect("old context generation")
+        .parse()
+        .expect("numeric old context generation");
+    let (code, old_panes) = fixture.control("old.ctx", &["panes"]);
+    assert_eq!(code, 0, "old panes: {old_panes}");
+    let old_target = first_target(&old_panes)
+        .expect("old full target")
+        .to_owned();
+    assert_eq!(target_generation(&old_target), old_generation);
+    let old_context_bytes = fs::read(fixture.root.join("old.ctx")).unwrap();
+
+    let child_pid_path = fixture.root.join("cooperative-child.pid");
+    let side_effect_path = fixture.root.join("old-side-effect.log");
+    let fixture_name = fixture.root.file_name().unwrap().to_string_lossy();
+    let old_marker = format!("P3A_OLD_LIVE_{fixture_name}");
+    let side_effect = format!("P3A_SIDE_EFFECT_{fixture_name}");
+    let expected_side_effect = format!("{side_effect}\n");
+    let child_pid_arg = child_pid_path.to_string_lossy();
+    let side_effect_arg = side_effect_path.to_string_lossy();
+    // The output marker is assembled by two printf calls so the echoed input
+    // cannot satisfy the live-output observation.
+    let command = format!(
+        "trap 'exit 0' HUP; print -r -- $$ > '{child_pid_arg}'; printf '{side_effect}\\n' >> '{side_effect_arg}'; printf 'P3A_OLD_'; printf 'LIVE_{fixture_name}\\n'"
+    );
+    client.type_slowly(command.as_bytes());
+    client.type_slowly(b"\r");
+    client.wait_screen("cooperative old live output", |screen| {
+        screen.contains(&old_marker)
+    });
+    let shell_pid: i32 = fs::read_to_string(&child_pid_path)
+        .expect("fixture shell wrote its pid")
+        .trim()
+        .parse()
+        .expect("numeric fixture shell pid");
+    assert!(shell_pid > 0);
+    assert_ne!(shell_pid, fixture.server_pid().unwrap());
+    assert!(
+        !process_exited(shell_pid),
+        "fixture shell is live before death"
+    );
+    assert_eq!(
+        fs::read(&side_effect_path).unwrap(),
+        expected_side_effect.as_bytes()
+    );
+
     detach(&mut client);
     drop(client);
-    let pid = fixture.server_pid().expect("server pid recorded");
+    let pid = fixture
+        .verified_server_pid()
+        .expect("server PID, owner and kernel start time match private record");
+    assert!(pid > 0);
+    assert!(
+        !process_exited(pid),
+        "fixture server is live before SIGKILL"
+    );
     // SAFETY: SIGKILL to this test's own background server.
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
-    let deadline = Instant::now() + STEP;
-    while fixture.server_alive() {
-        assert!(Instant::now() < deadline, "server not killed");
-        thread::sleep(Duration::from_millis(20));
-    }
+    let signal_result = unsafe { libc::kill(pid, libc::SIGKILL) };
+    assert_eq!(
+        signal_result,
+        0,
+        "SIGKILL fixture-owned server: {}",
+        io::Error::last_os_error()
+    );
+    wait_process_exit(pid, "SIGKILLed fixture server");
     assert!(
         fixture.socket().exists(),
         "SIGKILL leaves the socket behind"
     );
+    wait_process_exit(shell_pid, "cooperative HUP-trapped fixture shell");
+    assert_eq!(
+        fs::read(&side_effect_path).unwrap(),
+        expected_side_effect.as_bytes()
+    );
 
     let mut client = open_client(&fixture);
-    assert_ne!(fixture.server_pid(), Some(pid), "a new server was started");
-    client.type_slowly(b"echo BACK$((1+2))\r");
-    client.wait_screen("BACK3", |screen| screen.contains("BACK3"));
+    let replacement_pid = fixture
+        .server_pid()
+        .expect("replacement server pid recorded");
+    assert_ne!(replacement_pid, pid, "a new server was started");
+
+    // The old generation-bound context must be refused against the replacement.
+    let (code, stale_output) = fixture.control("old.ctx", &["layout"]);
+    assert_ne!(code, 0, "old context unexpectedly worked: {stale_output}");
+    assert!(stale_output.contains("\"ok\":false"), "{stale_output}");
+    assert_eq!(
+        fs::read(fixture.root.join("old.ctx")).unwrap(),
+        old_context_bytes,
+        "rejected context is preserved rather than silently initialized"
+    );
+
+    let (code, fresh_context) = fixture.control("fresh.ctx", &["init"]);
+    assert_eq!(code, 0, "fresh context init: {fresh_context}");
+    let fresh_generation: u64 = field(&fresh_context, "generation")
+        .expect("fresh context generation")
+        .parse()
+        .expect("numeric fresh context generation");
+    assert!(
+        fresh_generation > old_generation,
+        "old={old_context} fresh={fresh_context}"
+    );
+    let (code, fresh_panes) = fixture.control("fresh.ctx", &["panes"]);
+    assert_eq!(code, 0, "fresh panes: {fresh_panes}");
+    let fresh_target = first_target(&fresh_panes).expect("fresh full target");
+    assert_eq!(target_generation(fresh_target), fresh_generation);
+    assert_ne!(
+        fresh_target, old_target,
+        "fresh target has a new generation"
+    );
+    let (code, fresh_read) = fixture.control("fresh.ctx", &["read", fresh_target]);
+    assert_eq!(code, 0, "fresh read: {fresh_read}");
+    assert!(
+        !fresh_read.contains(&old_marker),
+        "old output absent from fresh read"
+    );
+    assert_eq!(
+        fs::read(&side_effect_path).unwrap(),
+        expected_side_effect.as_bytes()
+    );
+    assert!(
+        !client.screen().contains(&old_marker),
+        "dead shell output was not replayed into the fresh shell"
+    );
+
+    let new_marker = format!("P3A_NEW_LIVE_{fixture_name}");
+    let command = format!("printf 'P3A_NEW_'; printf 'LIVE_{fixture_name}\\n'");
+    client.type_slowly(command.as_bytes());
+    client.type_slowly(b"\r");
+    client.wait_screen("replacement live output", |screen| {
+        screen.contains(&new_marker)
+    });
+    let (code, new_read) = fixture.control("fresh.ctx", &["read", fresh_target]);
+    assert_eq!(code, 0, "replacement read: {new_read}");
+    assert_eq!(new_read.matches(&new_marker).count(), 1, "{new_read}");
     detach(&mut client);
+    assert_eq!(
+        fs::read(&side_effect_path).unwrap(),
+        expected_side_effect.as_bytes()
+    );
+    drop(client);
+    let (code, output) = fixture.stop();
+    assert_eq!(code, 0, "stop replacement: {output}");
+    fixture.wait_server_gone();
 }
 
 #[test]

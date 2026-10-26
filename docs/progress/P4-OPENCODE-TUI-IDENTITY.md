@@ -1,5 +1,9 @@
 # P4 OpenCode 1.19.0 private-PTY identity experiment
 
+Historical1.19.0 evidence. The installed CLI is now2.0.32; see the
+[current V2 preflight](P4-V2-IDENTITY-RESULT.md). This result is not V2
+compatibility or identity proof.
+
 Status: **not proven** — the local TUI plugin loaded and captured the initial
 session route in all three repetitions, but one of the two controlled idle
 session switches was not observed in each repetition. No selected-session

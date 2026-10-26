@@ -1,6 +1,23 @@
 # Pane layout and four-direction split plan
 
-Status: proposed design for the confirmed right-click-menu requirement and the user's four-direction split request. This document is planning only: it defines no implemented UI, command, wire schema, or runtime behavior. The wider workspace, tab, sidebar, and session-lifetime choices remain open.
+## Current prototype amendment, 2026-10-24
+
+The delivered prototype now reserves one blank cell on every side inside each
+pane's outer rectangle. PTY dimensions, snapshots and child mouse coordinates
+use the inset content rectangle; dividers and pane hit testing use the outer
+rectangle. The minimum content remains 5 rows by 20 columns, so the minimum
+outer pane is 7 rows by 22 columns. Equal splits therefore need at least
+45 outer columns or 15 outer rows. The managed root maximum remains 80 by
+240 outer cells. These values supersede the unpadded geometry below.
+
+Normal-screen wheel scrolling reads a bounded, separate history viewport.
+An alternate-screen application receives wheel input only when it has enabled
+mouse reporting and the client passes ordinary input admission checks. An
+alternate screen without mouse reporting stays at its live view; hidden shell
+history is not presented as application history. History viewing does not
+replay terminal effects or change the authoritative live screen.
+
+Historical proposal follows. Its geometry is superseded by the current prototype amendment above. Wider workspace, tab, sidebar, and session-lifetime choices remain open.
 
 Execution priority2026-10-18: the user inserted
 [Phase3A](progress/P3A-RIGHT-CLICK-SPLITS.md) before the next lifecycle/stop

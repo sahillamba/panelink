@@ -1,5 +1,9 @@
 # Main/stash conflict resolution — 2026-10-22
 
+Historical execution report. Subsequent commits `70f589c` and `bd84625` resolved
+the recorded index boundary. Current status is in [SESSION.md](SESSION.md);
+the permission failures and original test results below remain historical evidence.
+
 Scope: combine main at `e2725af` with the reapplied local layout-hardening and
 async-launch stash. No new phase, commit or push is part of this task.
 

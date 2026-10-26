@@ -471,7 +471,7 @@ fn interrupt_delivers_sigint_after_a_ready_marker() {
 }
 
 #[test]
-fn pty_reads_are_sanitized_utf8_bounded_and_scrollback_is_rejected() {
+fn pty_reads_are_sanitized_utf8_bounded_and_live_scrollback_is_available() {
     let directory = TempDir::new();
     let script = concat!(
         "printf 'SAFE-P3-漢字-🧭\\033]52;c;CLIPBOARD-SECRET\\007\\n'; ",
@@ -486,7 +486,7 @@ fn pty_reads_are_sanitized_utf8_bounded_and_scrollback_is_rejected() {
             max_bytes: 1_000,
             max_lines: 8,
         }),
-        Err(RejectionCode::Unsupported)
+        Ok(())
     );
 
     let too_long = "x".repeat(32_769);
@@ -527,4 +527,48 @@ fn pty_reads_are_sanitized_utf8_bounded_and_scrollback_is_rejected() {
         effects.read(ReadSource::Screen, MAX_READ_TEXT_BYTES + 1, 1),
         Err(Outcome::Failed)
     );
+    assert_eq!(
+        effects.read(ReadSource::LiveScrollback, MAX_READ_TEXT_BYTES + 1, 1),
+        Err(Outcome::Failed)
+    );
+    assert_eq!(
+        effects.read(ReadSource::LiveScrollback, MAX_READ_TEXT_BYTES, 0),
+        Err(Outcome::Failed)
+    );
+}
+
+#[test]
+fn live_scrollback_reads_recent_normal_rows_while_alt_screen_is_active() {
+    let directory = TempDir::new();
+    let script = concat!(
+        "printf 'HIST-00\\nHIST-01\\nHIST-02\\nHIST-03\\nHIST-04\\nHIST-05\\n",
+        "HIST-06\\nHIST-07\\nHIST-08\\nHIST-09\\nHIST-10\\nHIST-11\\n",
+        "\\033[?1049hALT-ONLY\\n'; ",
+        "sleep 10"
+    );
+    let mut effects = PtyEffects::new(shell(script, directory.path()));
+    let deadline = Instant::now() + IO_DEADLINE;
+    loop {
+        effects.poll().expect("make bounded PTY progress");
+        let visible = effects
+            .read(ReadSource::Screen, MAX_READ_TEXT_BYTES, 8)
+            .expect("read the visible alternate screen");
+        if visible.text.contains("ALT-ONLY") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "alternate-screen marker timed out"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let history = effects
+        .read(ReadSource::LiveScrollback, MAX_READ_TEXT_BYTES, 3)
+        .expect("read the current normal-history tail through the live PTY effect");
+    let rows: Vec<_> = history.text.split('\n').map(str::trim_end).collect();
+    assert_eq!(rows, ["HIST-02", "HIST-03", "HIST-04"]);
+    assert_eq!(history.text.matches('\n').count(), 2);
+    assert!(history.truncated, "older retained rows exceeded max_lines");
+    assert!(!history.text.contains("ALT-ONLY"));
 }

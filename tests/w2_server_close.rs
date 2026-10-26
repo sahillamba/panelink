@@ -30,6 +30,8 @@ const NOW: u64 = 10;
 const LAUNCH_LEASE: u64 = 1;
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 81;
+const SPLIT_CONTENT_ROWS: u16 = ROWS - 2;
+const SPLIT_CONTENT_COLUMNS: u16 = (COLUMNS - 1) / 2 - 2;
 
 struct Fixture(PathBuf);
 
@@ -340,8 +342,8 @@ fn hup_ignoring_close_keeps_real_sibling_pty_readable_and_writable() {
     let second_script = b"trap '' HUP; printf 'W2-CLOSE-READY\\n'; while :; do /bin/sleep 10; done";
     let launch = LaunchRequest {
         key: key(generation, 2),
-        rows: ROWS,
-        columns: 40,
+        rows: SPLIT_CONTENT_ROWS,
+        columns: SPLIT_CONTENT_COLUMNS,
         requested_executable: b"/bin/sh",
         requested_working_directory: &dir,
         client_working_directory: &dir,

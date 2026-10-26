@@ -306,17 +306,31 @@ fn serve_binary_splits_over_the_pathname_socket_and_stops_on_sigterm() {
     assert!(layout.contains(&second_target));
 
     // Fill the remaining capacity (SESSION_CAPACITY = MAX_PANES) through the
-    // CLI. one.ctx is pinned to the first pane, so it keeps splitting that pane
-    // down: its 24x39 area halves to 11 rows, then 5, both >= the 5-row minimum.
+    // CLI, splitting each full-height column once. Each outer child retains
+    // at least 7 rows, including its one-cell margins.
     let capacity = panelink::session_registry::SESSION_CAPACITY;
     let mut pane_count = 2;
     let mut revision = 2;
     let mut extra_targets = Vec::new();
     while pane_count < capacity {
+        let source = if pane_count == 2 {
+            &first
+        } else {
+            &second_target
+        };
+        let context = if pane_count == 2 {
+            "one.ctx"
+        } else {
+            "extra.ctx"
+        };
+        if pane_count != 2 {
+            let (code, initialized) = control(&fixture, context, &["init", source]);
+            assert_eq!(code, 0, "initialize extra split context: {initialized}");
+        }
         let (code, extra) = control(
             &fixture,
-            "one.ctx",
-            &["split", &first, &revision.to_string(), "down"],
+            context,
+            &["split", source, &revision.to_string(), "down"],
         );
         assert_eq!(code, 0, "split within capacity: {extra}");
         assert_eq!(field(&extra, "outcome"), Some("applied"), "{extra}");
@@ -354,9 +368,9 @@ fn serve_binary_splits_over_the_pathname_socket_and_stops_on_sigterm() {
     );
     assert_eq!(code, 1, "{full}");
     assert_eq!(field(&full, "error"), Some("split_unavailable"));
-    // `first` is now only 5 rows tall, so that refusal is geometric. Prove the
-    // capacity contract itself with a pane that still has room (the 24x40
-    // second pane): the server refuses and nothing changes.
+    // The padded four-pane grid cannot fit another split. A second context
+    // sees the same refusal and unchanged layout. The independent runtime
+    // fixture covers server capacity admission with a larger root.
     let (code, init) = control(&fixture, "cap.ctx", &["init", &second_target]);
     assert_eq!(code, 0, "init pane 2 for capacity probe: {init}");
     let (code, over) = control(
@@ -365,8 +379,7 @@ fn serve_binary_splits_over_the_pathname_socket_and_stops_on_sigterm() {
         &["split", &second_target, &revision.to_string(), "down"],
     );
     assert_eq!(code, 1, "{over}");
-    assert_eq!(field(&over, "outcome"), Some("failed"), "{over}");
-    assert_eq!(field(&over, "new_target"), Some("null"), "{over}");
+    assert_eq!(field(&over, "error"), Some("split_unavailable"), "{over}");
     let (code, layout) = control(&fixture, "one.ctx", &["layout"]);
     assert_eq!(code, 0, "layout after refusal: {layout}");
     assert_eq!(

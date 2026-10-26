@@ -35,19 +35,31 @@ reattach to it.
 | ...then close focused pane | `x`, then `y` to confirm; the last pane ends the workspace |
 | ...then leave NAV mode | Esc (or wait 4 seconds); Ctrl-X detaches |
 | Focus a pane | Click it |
+| Scroll a pane | Use the mouse wheel over its content; typing returns normal history to live output |
+| Copy text | Drag across pane content and release; copying requires negotiated row-wrap metadata |
+| Keyboard copy mode | Ctrl-B then `c`; move with arrows or `h`/`j`/`k`/`l`, press Space to set/clear an anchor, then Enter or `y` to copy a non-empty range |
+| Zoom a pane | Ctrl-B then `z`; the selected pane's PTY resizes to fill the current workspace view |
+| Swap pane locations | Ctrl-B then `m`; choose another pane with arrows or `h`/`j`/`k`/`l`, then Enter; Esc cancels |
+| Adjust a divider | Ctrl-B then `e`; Tab chooses an ancestor divider, arrows preview its position, Enter applies it, Esc cancels |
 | Close pane from the menu | Right-click the pane, choose Close pane, then press `y` to confirm |
 | List/close panes from a shell | `panelink panes`; `panelink close 1` (or `2`) |
 | Detach (shells keep running) | Ctrl-X |
-| Reattach | `panelink` |
+| Reattach to the legacy Default/Main workspace | `panelink` |
 | Close the workspace | `exit` in every shell, or `panelink stop` |
 
-Current limits: at most four panes, no tabs. The attach client forwards ordinary
+Current limits: at most four panes per workspace. The attach client forwards ordinary
 Ctrl-letter keys, Alt/Meta characters when delivered by the host, F1–F12,
 Delete/Insert/Page Up/Page Down and Shift-Tab. Ctrl-B remains navigation and
 Ctrl-X detaches; Ctrl-C goes to the focused child. Modified function/navigation
-keys and application mouse pass-through remain unsupported. Help consumes
-typing, paste and mouse actions while open. There is no provider (OpenCode)
-session recovery. The older disposable probe retains its narrower input map.
+keys and application pointer clicks remain unsupported. Wheel events reach
+alternate-screen applications that enable mouse reporting; without that mode,
+Panelink reports the limitation. Normal screens scroll through retained live
+history. Panes have a one-cell blank margin on each side. Help consumes
+typing, paste and mouse actions while open. An experimental pinned OpenCode
+adapter is available only through a dedicated `serve --opencode-bridge` launch,
+with explicit prepare/resume commands; see the [provider guide](docs/progress/P4-MANUAL-RECOVERY.md).
+Scoped pinned managed acceptance passes; see the [integrated result](docs/progress/P4-INTEGRATED-RESULT.md). The older disposable probe retains its
+narrower input map.
 
 Local help, navigation and Ctrl-X remain available while the attach client
 waits for the server. If typing backs up, a busy status appears. Ctrl-X still
@@ -60,9 +72,125 @@ resize and close may report busy until the pending split finishes. A launch
 storage failure leaves existing shells running and prevents further launches
 until the workspace is restarted.
 
+Agents and scripts can use `panelink pane list --json` to discover panes and
+`panelink events --json --timeout 30` to watch activity and layout changes.
+`events --pane N` follows the pane selected when the command starts; closing it
+does not switch the stream to a replacement at that index. See the
+[agent CLI contract](docs/progress/P3-AGENT-CLI.md) for commands and limits.
+
+If an agent cannot write Panelink's default caller-context directory, give it
+a stable writable directory for its private operation metadata:
+
+```sh
+export PANELINK_AGENT_CONTEXT_DIR="$PWD/.panelink-agent-contexts"
+panelink pane list --json
+panelink pane read 2 --lines 80 --json
+```
+
+The CLI creates the directory with mode 0700. Keep using the same directory so
+uncertain operations can be reconciled. The agent also needs permission to
+connect to Panelink's local control socket.
+
+`pane list --json` also reports `input_owner_info`: the server-issued owner
+ID, whether it is your caller context, its revision and server-clock expiry.
+Other holders are labeled clients; names and agent roles are not inferred.
+Ownership changes still require the server's normal claim/release checks.
+
+To start a command in a new pane of an already running workspace:
+
+```sh
+panelink pane run --pane 1 --direction down --json -- /bin/zsh -f
+```
+
+The command uses your invoking shell's environment and working directory; add
+`--cwd DIR` before `--` to choose another directory. Everything after `--` is
+literal child argv. The result gives the new full pane/session target, rather
+than a permanent pane number. A successful launch does not mean the command
+has finished. The workspace still supports at most four panes.
+
 Workspace state lives in `~/Library/Application Support/Panelink` (private,
 mode 0700). Set `PANELINK_HOME` to use a different directory. The background
 server's output goes to `server.log` there.
+
+Projects can group separately running workspace tabs through the opt-in CLI:
+
+```sh
+panelink workspace list
+panelink workspace project create Editors Main
+panelink workspace tab create 2 Review
+panelink workspace select 2 4
+panelink workspace open 2 4
+panelink workspace stop 2 4
+panelink workspace remove 2 4
+```
+
+Use the IDs printed by `workspace list`; the example assumes a fresh registry.
+`workspace open` without IDs uses the saved selection. Explicit IDs open that
+exact workspace. Each workspace has its own server, panes, history and client
+contexts; detaching leaves its processes running. Remove requires a stopped
+workspace and removes its registry entry while retaining saved files. Plain
+`panelink` and existing commands such as `stop`, `panes` and `history` keep
+addressing the original Default/Main workspace. Registry initialization adds
+that workspace in place; its entry cannot be removed while legacy commands
+remain supported. Projects are named groups; no project-root discovery
+is included. The opt-in `workspace open` client has a persistent project/tab
+row at the top: click the project control to open its chooser, click a tab to
+request it, or press Ctrl-B then `w` for the chooser,
+`n`/`p` for next/previous tab, and `[`/`]` for previous/next project. The
+chooser reads a bounded registry snapshot; refresh keeps the active snapshot
+visible if its route was removed. This UI does not create, remove, or stop
+projects or tabs. Plain `panelink` and raw attach remain on the legacy
+headerless route. See the [routing result](docs/progress/P5-WORKSPACE-ROUTING-RESULT-2026-10-25.md)
+and [tab integration evidence](docs/progress/P5-TAB-INTEGRATION-2026-10-25.md).
+
+Drag copying freezes the source at mouse press, preserving it while output
+continues. Resizing, switching buffers or history views, and opening a modal
+cancel the drag. Copy runs asynchronously in the attached client and reports
+fixed status messages. A peer without row-wrap metadata disables drag copying.
+Automated checks use fake clipboard sinks; real Apple Terminal/clipboard
+acceptance remains open.
+
+Keyboard copy mode (`Ctrl-B c`) is a bounded prototype for the pane's currently
+visible live or history view. It moves a local caret and copies the anchored
+range from a frozen snapshot, so ordinary live output does not replace the
+view being selected. Enter or `y` with no anchor exits without copying; Esc
+cancels, and Ctrl-X detaches. Other keys, paste, and mouse input stay local
+while the mode is active. Resize, focus, buffer/view, route, modal, or wrap
+identity changes cancel it. The existing attached-client clipboard queue is
+used. `Ctrl-B c` remains a prototype shortcut assumption. Typed-protocol
+Repeat events for Enter/`y` are guarded; classic streams that report repeats
+as indistinguishable Press events cannot provide the same repeat guarantee.
+Automated client, compositor and clipboard-free PTY checks pass. Real
+Apple Terminal/clipboard acceptance remains open. See the [keyboard copy
+result](docs/progress/P5-KEYBOARD-COPY-RESULT-2026-10-25.md).
+
+Pane controls are bounded prototypes. Zoom is server-authoritative per
+workspace and resizes the selected pane's actual PTY; other panes and their
+processes keep running at their existing PTY sizes. Unzoom restores the exact
+underlying split geometry for the current root size. Swapping changes two
+panes' locations in the same workspace without moving or replacing their
+processes. Divider preview is local; the chosen absolute position is sent once
+on Enter. Split/layout changes are refused while zoom is active; unzoom first.
+If a captured pane target or layout revision becomes stale, the local chooser
+cancels. Results are asynchronous and an uncertain operation is reported with
+a fixed status; it is never replayed automatically. These operation ratios and
+zoom state do not establish physical-reboot restoration and do not change the
+saved-observation codec. The bindings are prototype choices, not a final
+shortcut configuration. Typed Enter/Esc repeat and release events are handled
+locally; classic streams that expose repeats as indistinguishable press events
+cannot provide the same repeat guard. See the [pane operations contract](docs/progress/P5-PANE-OPERATIONS-CONTRACT-2026-10-25.md)
+and [specification](docs/SPEC.md#bounded-pane-operations-prototype).
+Automated verification includes the full serial Rust suite (1,399 passed,
+15 ignored), final client123/0 and outer-terminal3/0 checks, plus real four-PTY
+process continuity. Human Apple Terminal, real clipboard, physical reboot and
+representative workload acceptance remain open; see
+[the integration evidence](docs/progress/P5-PANE-OPERATIONS-INTEGRATION-2026-10-26.md).
+
+After an abrupt server kill, a later `panelink` invocation can recover its stale
+socket and start a new workspace generation. This starts fresh processes;
+saved history is separate. An uncatchable kill cannot run graceful cleanup or
+flush pending captures, and arbitrary descendants may survive it. Use
+`panelink stop` for orderly workspace shutdown.
 
 The server now saves its latest sanitized visible normal and alternate screen
 checkpoints per pane in the private `server/history/` directory (under
@@ -71,7 +199,10 @@ state or a complete transcript. An initial `serve` response reports whether
 capture started; writes run in a bounded background worker, so saved content
 can lag the live screen. A later write or shutdown failure appears in
 `server.log` while shells continue running. Normal scrollback rows are saved within a 1,024-row/8 MiB
-per-session limit. `panelink history list` lists saved target IDs;
+per-session limit. For a running pane, `panelink pane read 1 --scrollback --lines 100 --json`
+reads the live normal-buffer history tail, excluding visible screen rows.
+It reports truncation within the current emulator epoch and does not read
+saved files. `panelink history list` lists saved target IDs;
 `panelink history show TARGET` reads retained rows and latest normal/alternate
 screens; `panelink history search TARGET TEXT` searches that saved content,
 labeled by source. `TARGET` is the five-number ID printed by `history list`.
@@ -255,6 +386,12 @@ initialized caller context explicitly if Events are needed; the CLI never
 replaces an old context silently. Input remains separately opt-in on the server.
 Socketpair/private-PTY live-watch checks pass locally; the expanded actual CLI
 pathname fixture remains a separate external acceptance check.
+
+`panelink pane list --json` includes current managed-child cwd and executable
+path (`command` excludes arguments), sample time and per-field availability.
+Refresh reflects shell `cd` and direct `exec`; foreground descendants are not
+inferred. Workspace event observers renew their existing lease before expiry
+and keep their event cursor. See [the agent CLI notes](docs/progress/P3-AGENT-CLI.md).
 
 ## Low-level split panes (`serve` + `attach`)
 

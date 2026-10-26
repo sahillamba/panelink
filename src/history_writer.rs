@@ -2937,9 +2937,25 @@ mod tests {
         control.schedule(Call::Load, Behavior::BlockThenPanic(Arc::clone(&gate)));
         let (_storage, mut writer, target) = fake_writer(&fixture, control);
         let diagnostics = writer.diagnostics();
-        let mut receipt = writer
-            .try_submit(empty_batch(target, 1, 1))
-            .expect("admit batch while startup is gated");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut batch = empty_batch(target, 1, 1);
+        let mut receipt = loop {
+            match writer.try_submit(batch) {
+                Ok(receipt) => break receipt,
+                Err(error)
+                    if error.capacity_reason() == Some(CapacityReason::Contended)
+                        && Instant::now() < deadline =>
+                {
+                    batch = error.into_batch();
+                    thread::yield_now();
+                }
+                Err(error) => panic!(
+                    "initial batch admission failed: reason={:?}, capacity={:?}",
+                    error.reason(),
+                    error.capacity_reason()
+                ),
+            }
+        };
         gate.wait_until_entered();
         gate.release();
         assert_eq!(wait_receipt(&mut receipt), CommitStatus::Failed);

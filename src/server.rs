@@ -84,6 +84,12 @@ pub trait EffectSink {
     /// Report whether the managed child has exited.
     fn child_exited(&self) -> bool;
 
+    /// Return the opaque identity captured for this direct managed child.
+    /// Sinks without process metadata remain compatible and report none.
+    fn process_identity(&self) -> Option<crate::process_metadata::ProcessIdentity> {
+        None
+    }
+
     /// Return the current nonzero screen revision when metadata tracking works.
     /// Existing sinks default to no event capability.
     fn screen_revision(&self) -> Option<u64> {
@@ -765,7 +771,21 @@ impl GlobalAuthority {
         let expires_secs = now_secs
             .checked_add(LEASE_TTL_SECS)
             .ok_or(ServerError::Protocol(ProtocolError::TimeOverflow))?;
-        let available = self.available_capabilities(session) & capability_mask;
+        // Only the multi-session owner includes the workspace bit in its
+        // mask. Workspace observations have an independent journal and do
+        // not depend on a particular pane's notification health.
+        let workspace = capability_mask & crate::handshake_protocol::CAPABILITY_WORKSPACE_EVENTS;
+        let pane_metadata = capability_mask & crate::handshake_protocol::CAPABILITY_PANE_METADATA;
+        let screen_row_wraps =
+            capability_mask & crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS;
+        let pane_operations =
+            capability_mask & crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS;
+        let available = (self.available_capabilities(session)
+            | workspace
+            | pane_metadata
+            | screen_row_wraps
+            | pane_operations)
+            & capability_mask;
 
         let (lease, capabilities) = match hello.resume {
             Some(resume) => {
@@ -819,6 +839,65 @@ impl GlobalAuthority {
             Connection {
                 generation: self.generation,
                 lease,
+                selected_capabilities: welcome.selected_capabilities,
+            },
+            welcome,
+        ))
+    }
+
+    /// Resume an existing lease solely for its original workspace observer
+    /// after the pane that issued it has retired. This cannot mint authority
+    /// or change the grant's target or capability set.
+    pub(crate) fn resume_workspace_observer(
+        &mut self,
+        target: TargetRef,
+        hello: &SessionHello,
+        now_secs: u64,
+    ) -> Result<(Connection, Welcome), ServerError> {
+        hello.validate()?;
+        let requested = hello.hello.required_capabilities | hello.hello.optional_capabilities;
+        let workspace_only =
+            CAPABILITY_READ | crate::handshake_protocol::CAPABILITY_WORKSPACE_EVENTS;
+        if requested != workspace_only {
+            return Err(ServerError::UnknownContext);
+        }
+        let resume = hello.resume.ok_or(ServerError::UnknownContext)?;
+        if resume.generation != self.generation {
+            return Err(ServerError::UnknownContext);
+        }
+        let grant = self
+            .grants
+            .get(&resume.lease)
+            .copied()
+            .ok_or(ServerError::UnknownContext)?;
+        if now_secs >= grant.expires_secs
+            || grant.target != target
+            || grant.capabilities & workspace_only != workspace_only
+        {
+            return Err(ServerError::UnknownContext);
+        }
+        let welcome = negotiate(
+            &hello.hello,
+            grant.capabilities & workspace_only,
+            self.generation,
+            resume.lease,
+        )?;
+        let expires_secs = now_secs
+            .checked_add(LEASE_TTL_SECS)
+            .ok_or(ServerError::Protocol(ProtocolError::TimeOverflow))?;
+        self.ledger.renew_lease(resume.lease, now_secs)?;
+        self.grants.insert(
+            resume.lease,
+            LeaseGrant {
+                capabilities: grant.capabilities,
+                target: grant.target,
+                expires_secs,
+            },
+        );
+        Ok((
+            Connection {
+                generation: self.generation,
+                lease: resume.lease,
                 selected_capabilities: welcome.selected_capabilities,
             },
             welcome,
@@ -1251,13 +1330,13 @@ impl<'a, E: EffectSink> SessionHandler<'a, E> {
         match self.global.ledger.admit(request.key, payload, now_secs) {
             Ok(Admission::Execute) => {}
             Ok(Admission::InProgress) => {
-                return self.status_response(request.key, OperationStatus::InProgress)
+                return self.status_response(request.key, OperationStatus::InProgress);
             }
             Ok(Admission::Completed(outcome)) => {
-                return self.status_response(request.key, OperationStatus::Completed(outcome))
+                return self.status_response(request.key, OperationStatus::Completed(outcome));
             }
             Err(error) if is_capacity_error(&error) => {
-                return self.rejected(request.key, RejectionCode::Capacity)
+                return self.rejected(request.key, RejectionCode::Capacity);
             }
             Err(error) => return Err(ServerError::Protocol(error)),
         }
@@ -1327,13 +1406,13 @@ impl<'a, E: EffectSink> SessionHandler<'a, E> {
         match self.global.ledger.admit(request.key, payload, now_secs) {
             Ok(Admission::Execute) => {}
             Ok(Admission::InProgress) => {
-                return self.status_response(request.key, OperationStatus::InProgress)
+                return self.status_response(request.key, OperationStatus::InProgress);
             }
             Ok(Admission::Completed(outcome)) => {
-                return self.status_response(request.key, OperationStatus::Completed(outcome))
+                return self.status_response(request.key, OperationStatus::Completed(outcome));
             }
             Err(error) if is_capacity_error(&error) => {
-                return self.rejected(request.key, RejectionCode::Capacity)
+                return self.rejected(request.key, RejectionCode::Capacity);
             }
             Err(error) => return Err(ServerError::Protocol(error)),
         }
@@ -1435,17 +1514,17 @@ impl<'a, E: EffectSink> SessionHandler<'a, E> {
             Ok(Admission::InProgress) => {
                 return self
                     .status_response(key, OperationStatus::InProgress)
-                    .map(SessionReply::Payload)
+                    .map(SessionReply::Payload);
             }
             Ok(Admission::Completed(outcome)) => {
                 return self
                     .status_response(key, OperationStatus::Completed(outcome))
-                    .map(SessionReply::Payload)
+                    .map(SessionReply::Payload);
             }
             Err(error) if is_capacity_error(&error) => {
                 return self
                     .rejected(key, RejectionCode::Capacity)
-                    .map(SessionReply::Payload)
+                    .map(SessionReply::Payload);
             }
             Err(error) => return Err(ServerError::Protocol(error)),
         }
@@ -1753,6 +1832,10 @@ mod tests {
     use crate::session_protocol::{encode_session_request, LeaseRef};
     use std::cell::Cell;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     const GENERATION: u64 = 7;
     const WORKSPACE: u64 = 11;
@@ -1844,6 +1927,59 @@ mod tests {
 
         fn screen_revision(&self) -> Option<u64> {
             self.screen_revision
+        }
+    }
+
+    struct BlockingValidationSink {
+        validation_calls: Arc<AtomicUsize>,
+        input_calls: Arc<AtomicUsize>,
+        reached_validation: SyncSender<(u64, String)>,
+        release_validation: Mutex<Receiver<()>>,
+    }
+
+    impl EffectSink for BlockingValidationSink {
+        fn validate(&self, command: Command<'_>) -> Result<(), RejectionCode> {
+            let validation_index = self.validation_calls.fetch_add(1, Ordering::SeqCst);
+            if validation_index == 0 {
+                let Command::Submit {
+                    owner_revision,
+                    text,
+                } = command
+                else {
+                    return Err(RejectionCode::Unsupported);
+                };
+                self.reached_validation
+                    .send((owner_revision, text.to_owned()))
+                    .map_err(|_| RejectionCode::Capacity)?;
+                self.release_validation
+                    .lock()
+                    .expect("validation release lock poisoned")
+                    .recv()
+                    .map_err(|_| RejectionCode::Capacity)?;
+            }
+            Ok(())
+        }
+
+        fn read(
+            &mut self,
+            _source: ReadSource,
+            _max_text_bytes: usize,
+            _max_lines: u16,
+        ) -> Result<ReadResult, Outcome> {
+            Err(Outcome::Failed)
+        }
+
+        fn input(&mut self, _command: Command<'_>) -> Outcome {
+            self.input_calls.fetch_add(1, Ordering::SeqCst);
+            Outcome::Applied
+        }
+
+        fn poll(&mut self) -> Result<(), Outcome> {
+            Ok(())
+        }
+
+        fn child_exited(&self) -> bool {
+            false
         }
     }
 
@@ -2114,6 +2250,89 @@ mod tests {
             Err(ServerError::Protocol(ProtocolError::OperationConflict))
         ));
         assert_eq!(owner.effects().inputs, 1);
+    }
+
+    #[test]
+    fn submit_validation_barrier_precedes_admission_and_duplicate_does_not_replay() {
+        let (reached_validation_tx, reached_validation_rx) = sync_channel(1);
+        let (release_validation_tx, release_validation_rx) = sync_channel(1);
+        let validation_calls = Arc::new(AtomicUsize::new(0));
+        let input_calls = Arc::new(AtomicUsize::new(0));
+        let sink = BlockingValidationSink {
+            validation_calls: Arc::clone(&validation_calls),
+            input_calls: Arc::clone(&input_calls),
+            reached_validation: reached_validation_tx,
+            release_validation: Mutex::new(release_validation_rx),
+        };
+        let mut owner = StateOwner::new(GENERATION, target(), sink, true).unwrap();
+        let connection = owner
+            .connect(&hello(CAPABILITY_READ, CAPABILITY_INPUT), 1)
+            .unwrap()
+            .0;
+        let claim_key = operation_key(connection.lease(), 1);
+        let claim_payload = session_payload(SessionRequest::Claim {
+            key: claim_key,
+            target: target(),
+            expected_owner_revision: owner.owner_snapshot().revision,
+            ttl_seconds: 30,
+        });
+        let SessionReply::Payload(claim_reply) = owner
+            .handle_session(&connection, &claim_payload, 2)
+            .unwrap()
+        else {
+            panic!("claim must return an operation result");
+        };
+        assert_eq!(
+            response(&claim_reply).body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        let owner_revision = owner.owner_snapshot().revision;
+        let key = operation_key(connection.lease(), 2);
+        let text = "barrier-before-admission";
+        let payload = control_payload(
+            key,
+            target(),
+            Command::Submit {
+                owner_revision,
+                text,
+            },
+        );
+
+        let worker = std::thread::spawn(move || {
+            let result = owner.handle_control(&connection, &payload, 3);
+            (owner, result, payload)
+        });
+
+        let observed = reached_validation_rx.recv_timeout(Duration::from_secs(2));
+        let no_input_at_barrier = input_calls.load(Ordering::SeqCst) == 0;
+        // Always release the test sink before asserting, so a failed barrier
+        // observation cannot leave the worker blocked.
+        let _ = release_validation_tx.send(());
+        let (mut owner, first_result, payload) = worker.join().unwrap();
+        let (observed_revision, observed_text) =
+            observed.expect("Submit must reach the blocking validation boundary");
+        assert_eq!(observed_revision, owner_revision);
+        assert_eq!(observed_text, text);
+        assert!(
+            no_input_at_barrier,
+            "input ran before validation was released"
+        );
+        assert_eq!(validation_calls.load(Ordering::SeqCst), 1);
+
+        let first = first_result.unwrap();
+        assert_eq!(
+            response(&first).body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        assert_eq!(input_calls.load(Ordering::SeqCst), 1);
+
+        let duplicate = owner.handle_control(&connection, &payload, 3).unwrap();
+        assert_eq!(
+            response(&duplicate).body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        assert_eq!(input_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(validation_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -3193,6 +3412,25 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(fresh.selected_capabilities(), CAPABILITY_READ);
+    }
+
+    #[test]
+    fn legacy_single_session_owner_does_not_offer_multi_session_wrap_capability() {
+        use crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS;
+
+        let mut owner = state();
+        let requested = hello(CAPABILITY_READ, CAPABILITY_SCREEN_ROW_WRAPS);
+        let (connection, welcome) = owner.connect(&requested, 1).unwrap();
+        assert_eq!(welcome.selected_capabilities, CAPABILITY_READ);
+        assert_eq!(connection.selected_capabilities(), CAPABILITY_READ);
+
+        let mut resume = requested;
+        resume.resume = Some(LeaseRef {
+            generation: GENERATION,
+            lease: connection.lease(),
+        });
+        let (_, resumed) = owner.connect(&resume, 2).unwrap();
+        assert_eq!(resumed.selected_capabilities, CAPABILITY_READ);
     }
 
     #[test]

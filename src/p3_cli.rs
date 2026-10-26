@@ -20,12 +20,16 @@ use panelink::event_journal::EventCursor;
 use panelink::event_protocol::{decode_event, Event, EventBody};
 use panelink::handshake_protocol::{
     validate_welcome, Hello, Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT, CAPABILITY_READ,
+    CAPABILITY_WORKSPACE_EVENTS,
 };
 use panelink::launch::{Environment, LaunchContext};
 use panelink::managed_launch_protocol::LaunchRequest;
 use panelink::multi_runtime::{decode_pane_reply, encode_pane_query, PaneReply};
 use panelink::multi_startup::{StartedMultiServer, StartupLaunch};
 use panelink::pane_layout::SplitDirection;
+use panelink::pane_metadata_protocol::{
+    self as pane_metadata, Observation as ProcessObservation, PathStatus, CAPABILITY_PANE_METADATA,
+};
 use panelink::protocol::{OperationKey, OperationStatus, Outcome};
 use panelink::protocol_wire::{Frame, MessageKind};
 use panelink::response_protocol::{decode_response_payload, RejectionCode, ResponseBody};
@@ -43,6 +47,11 @@ use panelink::ui_protocol::KeyInput;
 use panelink::watch_protocol::{
     decode_reconciliation, decode_watch_end, encode_watch_request, Reconciliation, WatchEnd,
     WatchRequest, WatchStatus, MAX_WATCH_EVENTS, MAX_WATCH_WAIT_MS,
+};
+use panelink::workspace_watch_protocol::{
+    self as workspace_watch, Reconciliation as WorkspaceReconciliation,
+    Request as WorkspaceWatchRequest, WatchReply as WorkspaceWatchReply, WorkspaceCursor,
+    MAX_WORKSPACE_WATCH_EVENTS,
 };
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as FmtWrite;
@@ -87,6 +96,7 @@ struct ServerProbe {
     terminfo: PathBuf,
     initialize: bool,
     allow_input: bool,
+    opencode_bridge: bool,
     executable: OsString,
     arguments: Vec<OsString>,
 }
@@ -205,7 +215,11 @@ fn parse(args: Vec<OsString>) -> Result<CliCommand, ()> {
         return Err(());
     };
     if first == OsStr::new("server-probe") {
-        parse_server_probe(&args[1..]).map(CliCommand::ServerProbe)
+        let request = parse_server_probe(&args[1..])?;
+        if request.opencode_bridge {
+            return Err(());
+        }
+        Ok(CliCommand::ServerProbe(request))
     } else if first == OsStr::new("serve") {
         parse_server_probe(&args[1..]).map(CliCommand::Serve)
     } else if first == OsStr::new("control") {
@@ -240,10 +254,12 @@ fn parse_server_probe(args: &[OsString]) -> Result<ServerProbe, ()> {
     let terminfo = next_path(args, &mut index)?;
     let mut initialize = false;
     let mut allow_input = false;
+    let mut opencode_bridge = false;
     while args.get(index).is_some_and(|arg| arg != OsStr::new("--")) {
         match args[index].to_str() {
             Some("--initialize") if !initialize => initialize = true,
             Some("--allow-input") if !allow_input => allow_input = true,
+            Some("--opencode-bridge") if !opencode_bridge => opencode_bridge = true,
             _ => return Err(()),
         }
         index += 1;
@@ -264,6 +280,7 @@ fn parse_server_probe(args: &[OsString]) -> Result<ServerProbe, ()> {
         terminfo,
         initialize,
         allow_input,
+        opencode_bridge,
         executable,
         arguments,
     })
@@ -856,7 +873,7 @@ fn handshake_mode(
     resume: Option<panelink::client_context::ClientContext>,
     require_events: bool,
 ) -> Result<Welcome, &'static str> {
-    handshake_full(stream, resume, require_events, None)
+    handshake_full(stream, resume, require_events, None, 0)
 }
 
 /// Fresh or resumed Hello with an optional schema-8 AttachTarget trailer.
@@ -868,7 +885,7 @@ fn handshake_attach(
     resume: Option<panelink::client_context::ClientContext>,
     target: Option<TargetRef>,
 ) -> Result<Welcome, &'static str> {
-    handshake_full(stream, resume, false, target)
+    handshake_full(stream, resume, false, target, 0)
 }
 
 fn handshake_full(
@@ -876,12 +893,18 @@ fn handshake_full(
     resume: Option<panelink::client_context::ClientContext>,
     require_events: bool,
     target: Option<TargetRef>,
+    observation_capabilities: u64,
 ) -> Result<Welcome, &'static str> {
     let hello = Hello {
         nonce: fresh_nonce(),
         required_capabilities: CAPABILITY_READ | if require_events { CAPABILITY_EVENTS } else { 0 },
-        optional_capabilities: CAPABILITY_INPUT
-            | if require_events { 0 } else { CAPABILITY_EVENTS },
+        optional_capabilities: if observation_capabilities == CAPABILITY_PANE_METADATA {
+            CAPABILITY_PANE_METADATA
+        } else {
+            CAPABILITY_INPUT
+                | if require_events { 0 } else { CAPABILITY_EVENTS }
+                | observation_capabilities
+        },
     };
     let session_hello = SessionHello {
         hello,
@@ -916,6 +939,46 @@ fn handshake_full(
         stream
             .enable_metadata_events()
             .map_err(|_| "transport_failed")?;
+    }
+    Ok(welcome)
+}
+
+/// Resume the observer's exact saved lease without an attach target. Request
+/// only its workspace read grant so retirement of the original pane cannot
+/// make pane input/events part of the renewed connection.
+fn handshake_workspace_resume(
+    stream: &mut AuthenticatedStream,
+    resume: panelink::client_context::ClientContext,
+) -> Result<Welcome, &'static str> {
+    let hello = Hello {
+        nonce: fresh_nonce(),
+        required_capabilities: CAPABILITY_READ,
+        optional_capabilities: CAPABILITY_WORKSPACE_EVENTS,
+    };
+    let session_hello = SessionHello {
+        hello,
+        resume: Some(LeaseRef {
+            generation: resume.generation(),
+            lease: resume.lease(),
+        }),
+    };
+    let payload = encode_session_hello(&session_hello).map_err(|_| "handshake_invalid")?;
+    write_frame(stream, MessageKind::Hello, 0, &payload)?;
+    let frame = read_frame(stream)?;
+    if frame.kind() == MessageKind::Error && frame.request_id() == 0 {
+        return Err("server_rejected");
+    }
+    if frame.kind() != MessageKind::Welcome || frame.request_id() != 0 {
+        return Err("handshake_invalid");
+    }
+    let welcome = panelink::handshake_protocol::decode_welcome(frame.payload())
+        .map_err(|_| "handshake_invalid")?;
+    validate_welcome(&hello, &welcome).map_err(|_| "handshake_invalid")?;
+    if welcome.generation != resume.generation() || welcome.lease != resume.lease() {
+        return Err("context_mismatch");
+    }
+    if welcome.selected_capabilities != (CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS) {
+        return Err("workspace_events_unavailable");
     }
     Ok(welcome)
 }
@@ -1403,6 +1466,50 @@ fn history_diagnostic_line(
     line
 }
 
+/// Only fixed bridge state and durable metadata are emitted; never a grant or provider ID.
+fn emit_provider_snapshot(snapshot: panelink::provider_bridge_runtime::RuntimeSnapshot) {
+    use panelink::provider_bridge_runtime::RuntimeStatus;
+    let status = match snapshot.status() {
+        RuntimeStatus::Initializing => "initializing",
+        RuntimeStatus::Unbound => "unbound",
+        RuntimeStatus::Pending => "pending",
+        RuntimeStatus::LastConfirmed => "last_confirmed",
+        RuntimeStatus::Stale => "stale",
+        RuntimeStatus::Ambiguous => "ambiguous",
+        RuntimeStatus::Unavailable => "unavailable",
+        RuntimeStatus::StorageFailed => "storage_failed",
+    };
+    let mut line = String::from("{\"ok\":true,\"action\":\"provider-binding\",\"target\":");
+    push_target(&mut line, snapshot.target());
+    let _ = write!(
+        line,
+        ",\"status\":\"{status}\",\"last_confirmed_revision\":"
+    );
+    match snapshot.last_confirmed_revision() {
+        Some(revision) => {
+            let _ = write!(line, "{revision}");
+        }
+        None => line.push_str("null"),
+    }
+    line.push_str(",\"current_at_crash\":false,\"automatic_resume\":false}");
+    let _ = write_json(&line);
+}
+
+/// Bounded diagnostics writer: a slow log consumer cannot block the PTY owner.
+fn provider_status_reporter(
+) -> Option<std::sync::mpsc::SyncSender<panelink::provider_bridge_runtime::RuntimeSnapshot>> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("panelink-provider-status".into())
+        .spawn(move || {
+            while let Ok(snapshot) = receiver.recv() {
+                emit_provider_snapshot(snapshot);
+            }
+        })
+        .ok()?;
+    Some(sender)
+}
+
 /// Foreground multi-session server: same storage/endpoint semantics as
 /// `server-probe`, but the first child is a managed schema-6 launch and the
 /// runtime routes schemas 1, 2, 5, 6 (status), 7 (split) and 8 (pane UI).
@@ -1428,6 +1535,19 @@ fn run_serve(request: ServerProbe) -> i32 {
         Ok(storage) => storage,
         Err(_) => return emit_failure("server_storage_unavailable"),
     };
+    let mut provider_launch = if request.opencode_bridge {
+        match panelink::provider_bridge_launch::BridgeLaunch::prepare(
+            &request.directory,
+            storage.generation(),
+            &context,
+            &request.executable,
+        ) {
+            Ok(launch) => Some(launch),
+            Err(_) => return emit_failure("provider_bridge_launch_unavailable"),
+        }
+    } else {
+        None
+    };
     let listener = match PrivateListener::bind(&request.directory) {
         Ok(listener) => listener,
         // EPERM/EACCES is reported distinctly so callers can tell an
@@ -1443,18 +1563,23 @@ fn run_serve(request: ServerProbe) -> i32 {
         Err(_) => return emit_failure("signal_registration_failed"),
     };
     let (rows, columns) = host_size();
-    let started = StartedMultiServer::start(
-        storage,
-        &request.terminfo,
-        &StartupLaunch {
-            executable: &request.executable,
-            arguments: &request.arguments,
-            context: &context,
-            rows,
-            columns,
-        },
-        request.allow_input,
-    );
+    let launch = StartupLaunch {
+        executable: &request.executable,
+        arguments: &request.arguments,
+        context: &context,
+        rows,
+        columns,
+    };
+    let started = match provider_launch.as_ref() {
+        Some(provider) => StartedMultiServer::start_with_provider_bridge(
+            storage,
+            &request.terminfo,
+            &launch,
+            request.allow_input,
+            provider.environment(),
+        ),
+        None => StartedMultiServer::start(storage, &request.terminfo, &launch, request.allow_input),
+    };
     drop(context);
     let started = match started {
         Ok(started) => started,
@@ -1462,6 +1587,48 @@ fn run_serve(request: ServerProbe) -> i32 {
     };
     let startup = started.startup();
     let mut driver = started.into_driver();
+    let mut manual_recovery = None;
+    let mut provider_runtime = match (provider_launch.as_mut(), startup.target) {
+        (Some(provider), Some(target)) => {
+            let runtime = provider.binding_path(target).and_then(|path| {
+                let listener = provider.take_listener()?;
+                let scope = panelink::managed_provider_store::ManagedProviderScope::new(
+                    target,
+                    provider.project(),
+                    panelink::provider_bridge::SUPPORTED_PROVIDER_VERSION,
+                    startup.key,
+                    panelink::provider_bridge::SUPPORTED_PROVIDER_FINGERPRINT,
+                    None,
+                )?;
+                let outcome = if startup.outcome == Outcome::Applied {
+                    panelink::managed_provider_store::ManagedLaunchOutcome::Applied
+                } else {
+                    panelink::managed_provider_store::ManagedLaunchOutcome::Unknown
+                };
+                let runtime = panelink::provider_bridge_runtime::ProviderBridgeRuntime::start_managed(
+                    &path, scope.clone(), outcome, listener,
+                )?;
+                manual_recovery = panelink::provider_recovery_runtime::ManualRecovery::start(
+                    &path, &provider.launch_directory().join("manual.sock"), scope,
+                ).ok();
+                if manual_recovery.is_none() {
+                    eprintln!("panelink: explicit provider recovery unavailable; saved history is retained");
+                }
+                Ok(runtime)
+            });
+            match runtime {
+                Ok(runtime) => Some(runtime),
+                Err(_) => {
+                    eprintln!(
+                        "panelink: provider identity unavailable; use explicit manual recovery"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let mut provider_snapshot = None;
     // Capture is best-effort: a history filesystem failure never prevents
     // running shells or their authenticated control socket from starting.
     let history_path = request.directory.join("history");
@@ -1522,6 +1689,9 @@ fn run_serve(request: ServerProbe) -> i32 {
         }
         return 1;
     }
+    let provider_reporter = provider_runtime
+        .as_ref()
+        .and_then(|_| provider_status_reporter());
     let mut failed = false;
     let mut reported_capture_failure = false;
     while !stop.load(Ordering::Relaxed) {
@@ -1532,6 +1702,35 @@ fn run_serve(request: ServerProbe) -> i32 {
         // A per-session poll error (for example one exited child) does not
         // stop the server or its sibling session.
         let _ = driver.tick(&clock);
+        if let Some(runtime) = provider_runtime.as_mut() {
+            let target = runtime.snapshot().target();
+            let live = driver
+                .owner()
+                .pane_statuses()
+                .iter()
+                .flatten()
+                .any(|pane| pane.live && pane.geometry.target == target);
+            if live {
+                let now = Instant::now();
+                runtime.poll(now);
+                if let Some(recovery) = manual_recovery.as_mut() {
+                    recovery.poll(runtime, now);
+                }
+                let snapshot = runtime.snapshot();
+                if provider_snapshot != Some(snapshot)
+                    && provider_reporter
+                        .as_ref()
+                        .is_some_and(|reporter| reporter.try_send(snapshot).is_ok())
+                {
+                    provider_snapshot = Some(snapshot);
+                }
+            } else {
+                // A source may never outlive its exact managed occupant.
+                drop(manual_recovery.take());
+                drop(provider_runtime.take());
+                eprintln!("panelink: provider identity unavailable; managed pane ended");
+            }
+        }
         if driver.history_capture_failed() && !reported_capture_failure {
             eprintln!(
                 "{}",
@@ -1569,6 +1768,10 @@ fn run_serve(request: ServerProbe) -> i32 {
         }
     }
     driver.stop_connections(&clock);
+    drop(manual_recovery.take());
+    if let Some(runtime) = provider_runtime.take() {
+        let _ = runtime.finish(Instant::now() + Duration::from_millis(250));
+    }
     drop(driver);
     drop(listener);
     if history_failure.load(Ordering::Relaxed) {
@@ -2080,6 +2283,7 @@ pub(super) enum CloseFailure {
 /// operation left uncertain on such a lease is unobservable and is reported,
 /// never resent.
 pub(crate) struct WorkspaceLink {
+    directory: PathBuf,
     context: ContextFile,
     stream: AuthenticatedStream,
     next_request: u64,
@@ -2089,6 +2293,84 @@ pub(crate) struct WorkspaceLink {
     /// invocation. This invocation may inspect state but will not substitute a
     /// fresh operation for it.
     pub(crate) settled_uncertain: Option<OperationStatus>,
+    selected_capabilities: u64,
+    lease_schedule: ObserverLeaseSchedule,
+}
+
+/// Safe failure from a managed pane launch. Once a durable key is reserved,
+/// callers retain it in the error so they can report and reconcile that exact
+/// operation without inventing a replacement launch.
+#[derive(Debug)]
+pub(crate) struct RunPaneFailure {
+    pub(crate) code: &'static str,
+    pub(crate) operation: Option<OperationKey>,
+    pub(crate) observed: Option<RunPaneObservation>,
+}
+
+/// Validated creation metadata retained if local acknowledgment fails.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RunPaneObservation {
+    pub(crate) new_target: Option<TargetRef>,
+    pub(crate) committed_layout_revision: u64,
+}
+
+impl From<panelink::split_protocol::SplitResult> for RunPaneObservation {
+    fn from(result: panelink::split_protocol::SplitResult) -> Self {
+        Self {
+            new_target: result.new_target,
+            committed_layout_revision: result.committed_layout_revision,
+        }
+    }
+}
+
+impl From<&'static str> for RunPaneFailure {
+    fn from(code: &'static str) -> Self {
+        Self {
+            code,
+            operation: None,
+            observed: None,
+        }
+    }
+}
+
+const OBSERVER_LEASE_TTL: Duration = Duration::from_secs(1800);
+const OBSERVER_RENEW_MARGIN: Duration = Duration::from_secs(300);
+const OBSERVER_RENEW_RETRY: Duration = Duration::from_secs(15);
+const OBSERVER_RENEW_ATTEMPTS: u8 = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObserverLeaseSchedule {
+    renewed_at: Instant,
+    next_attempt: Instant,
+    attempts: u8,
+}
+
+impl ObserverLeaseSchedule {
+    fn new(renewed_at: Instant) -> Self {
+        Self {
+            renewed_at,
+            next_attempt: renewed_at + (OBSERVER_LEASE_TTL - OBSERVER_RENEW_MARGIN),
+            attempts: 0,
+        }
+    }
+
+    fn due(self, now: Instant) -> bool {
+        now >= self.next_attempt
+    }
+
+    fn expired(self, now: Instant) -> bool {
+        now >= self.renewed_at + OBSERVER_LEASE_TTL
+    }
+
+    fn failed(&mut self, now: Instant) -> bool {
+        self.attempts = self.attempts.saturating_add(1);
+        self.next_attempt = now + OBSERVER_RENEW_RETRY;
+        self.attempts >= OBSERVER_RENEW_ATTEMPTS
+    }
+
+    fn renewed(&mut self, started: Instant) {
+        *self = Self::new(started);
+    }
 }
 
 /// Bounded sanitized live-screen observation returned by the control client.
@@ -2112,7 +2394,7 @@ impl WorkspaceLink {
     /// Resume (or create) the CLI context at `context_path` against the server
     /// in `directory`.
     pub(crate) fn open(directory: &Path, context_path: &Path) -> Result<Self, &'static str> {
-        Self::open_for_target_inner(directory, context_path, None, false)
+        Self::open_for_target_inner(directory, context_path, None, false, 0)
     }
 
     /// Open the reusable context pinned to the exact target, creating a fresh
@@ -2122,7 +2404,7 @@ impl WorkspaceLink {
         context_path: &Path,
         target: TargetRef,
     ) -> Result<Self, &'static str> {
-        Self::open_for_target_inner(directory, context_path, Some(target), false)
+        Self::open_for_target_inner(directory, context_path, Some(target), false, 0)
     }
 
     /// Event watches use the same pinned target connection; the default Hello
@@ -2132,7 +2414,62 @@ impl WorkspaceLink {
         context_path: &Path,
         target: TargetRef,
     ) -> Result<Self, &'static str> {
-        Self::open_for_target_inner(directory, context_path, Some(target), true)
+        Self::open_for_target_inner(directory, context_path, Some(target), true, 0)
+    }
+
+    /// Open a dedicated workspace observation lease. A fresh Hello offers
+    /// capability 8; a resumed Hello repeats the offer only so the server can
+    /// return the lease's unchanged grant, which this client validates.
+    pub(crate) fn open_workspace_events(
+        directory: &Path,
+        context_path: &Path,
+        target: TargetRef,
+    ) -> Result<Self, &'static str> {
+        Self::open_for_target_inner(
+            directory,
+            context_path,
+            Some(target),
+            false,
+            CAPABILITY_WORKSPACE_EVENTS,
+        )
+    }
+
+    /// A separate context prevents an older grant being widened implicitly.
+    pub(crate) fn open_pane_metadata(
+        directory: &Path,
+        context_path: &Path,
+        target: TargetRef,
+    ) -> Result<Self, &'static str> {
+        Self::open_for_target_inner(
+            directory,
+            context_path,
+            Some(target),
+            false,
+            CAPABILITY_PANE_METADATA,
+        )
+    }
+
+    pub(crate) fn process_observation(
+        &mut self,
+        target: TargetRef,
+    ) -> Result<ProcessObservation, &'static str> {
+        self.ensure_target(target)?;
+        if self.selected_capabilities & CAPABILITY_PANE_METADATA == 0 {
+            return Ok(ProcessObservation::unavailable(
+                target,
+                0,
+                PathStatus::Unsupported,
+            ));
+        }
+        let payload = pane_metadata::encode_query(target).map_err(|_| "request_invalid")?;
+        let id = self.request_id();
+        let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
+        let observation =
+            pane_metadata::decode_observation(&bytes).map_err(|_| "response_invalid")?;
+        if observation.target != target {
+            return Err("response_invalid");
+        }
+        Ok(observation)
     }
 
     fn open_for_target_inner(
@@ -2140,7 +2477,9 @@ impl WorkspaceLink {
         context_path: &Path,
         target: Option<TargetRef>,
         require_events: bool,
+        observation_capabilities: u64,
     ) -> Result<Self, &'static str> {
+        let workspace_events = observation_capabilities & CAPABILITY_WORKSPACE_EVENTS != 0;
         let mut discarded_uncertain = false;
         if fs::symlink_metadata(context_path).is_ok() {
             let context = ContextFile::open_existing(
@@ -2148,19 +2487,36 @@ impl WorkspaceLink {
                 deadline_after(CLOSE_CLIENT_DEADLINE + CLIENT_DEADLINE),
             )
             .map_err(|error| context_error_label(&error))?;
+            let handshake_started = Instant::now();
             let mut stream = connect_stream(directory)?;
-            match handshake_mode(&mut stream, Some(context.context()), require_events) {
-                Ok(_) => {
+            match handshake_full(
+                &mut stream,
+                Some(context.context()),
+                require_events,
+                None,
+                observation_capabilities,
+            ) {
+                Ok(welcome) => {
                     let mut link = Self {
+                        directory: directory.to_path_buf(),
                         context,
                         stream,
                         next_request: 1,
                         discarded_uncertain,
                         settled_uncertain: None,
+                        selected_capabilities: welcome.selected_capabilities,
+                        lease_schedule: ObserverLeaseSchedule::new(handshake_started),
                     };
                     link.settled_uncertain = link.settle_uncertain()?;
                     if let Some(expected) = target {
-                        if link.describe_info()?.target != expected {
+                        let observed = link.describe_info()?.target;
+                        let mismatch = if workspace_events {
+                            observed.generation != expected.generation
+                                || observed.workspace != expected.workspace
+                        } else {
+                            observed != expected
+                        };
+                        if mismatch {
                             return Err("context_target_mismatch");
                         }
                     }
@@ -2177,8 +2533,15 @@ impl WorkspaceLink {
                 Err(error) => return Err(error),
             }
         }
+        let handshake_started = Instant::now();
         let mut stream = connect_stream(directory)?;
-        let welcome = handshake_full(&mut stream, None, require_events, target)?;
+        let welcome = handshake_full(
+            &mut stream,
+            None,
+            require_events,
+            target,
+            observation_capabilities,
+        )?;
         let context = ContextFile::create(
             context_path,
             welcome.generation,
@@ -2187,11 +2550,14 @@ impl WorkspaceLink {
         )
         .map_err(|error| context_error_label(&error))?;
         Ok(Self {
+            directory: directory.to_path_buf(),
             context,
             stream,
             next_request: 1,
             discarded_uncertain,
             settled_uncertain: None,
+            selected_capabilities: welcome.selected_capabilities,
+            lease_schedule: ObserverLeaseSchedule::new(handshake_started),
         })
     }
 
@@ -2199,6 +2565,56 @@ impl WorkspaceLink {
         let id = self.next_request;
         self.next_request += 1;
         id
+    }
+
+    fn renew_workspace_lease_at(
+        &mut self,
+        now: Instant,
+        connect: impl FnOnce() -> Result<AuthenticatedStream, &'static str>,
+    ) -> Result<bool, &'static str> {
+        if !self.lease_schedule.due(now) {
+            return Ok(false);
+        }
+        if self.lease_schedule.expired(now)
+            || self.lease_schedule.attempts >= OBSERVER_RENEW_ATTEMPTS
+        {
+            return Err("lease_renewal_failed");
+        }
+
+        let started = now;
+        let renewal = (|| {
+            let mut stream = connect()?;
+            let welcome = handshake_workspace_resume(&mut stream, self.context.context())?;
+            Ok::<_, &'static str>((stream, welcome))
+        })();
+        match renewal {
+            Ok((stream, welcome)) => {
+                self.stream = stream;
+                self.next_request = 1;
+                self.selected_capabilities = welcome.selected_capabilities;
+                self.lease_schedule.renewed(started);
+                Ok(true)
+            }
+            Err(
+                "server_rejected"
+                | "context_mismatch"
+                | "handshake_invalid"
+                | "workspace_events_unavailable",
+            ) => Err("lease_renewal_failed"),
+            Err(error) if error == "transport_unavailable" || error == "transport_failed" => {
+                if self.lease_schedule.failed(now) || self.lease_schedule.expired(now) {
+                    Err("lease_renewal_failed")
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn ensure_workspace_lease(&mut self) -> Result<bool, &'static str> {
+        let directory = self.directory.clone();
+        self.renew_workspace_lease_at(Instant::now(), || connect_stream(&directory))
     }
 
     /// Settle an earlier uncertain key by schema-2 status; never resend it.
@@ -2243,8 +2659,237 @@ impl WorkspaceLink {
         decode_session_info(&bytes).map_err(|_| "response_invalid")
     }
 
+    /// Launch a new managed child beside the exact pane captured by the
+    /// caller. The request is encoded and size-checked before its durable key
+    /// is reserved, then sent exactly once. Any unvalidated reply leaves the
+    /// key uncertain so a later invocation can observe it without relaunching.
+    pub(crate) fn run_pane(
+        &mut self,
+        target: TargetRef,
+        layout_revision: u64,
+        direction: SplitDirection,
+        cwd: Option<PathBuf>,
+        executable: &OsStr,
+        arguments: &[OsString],
+    ) -> Result<panelink::split_protocol::SplitResult, RunPaneFailure> {
+        self.ensure_target(target)?;
+        if self.settled_uncertain.is_some() {
+            return Err("previous_operation_settled".into());
+        }
+        if self.context.context().uncertain().is_some() {
+            return Err("operation_uncertain".into());
+        }
+        if self.selected_capabilities & CAPABILITY_INPUT == 0 {
+            return Err("input_capability_unavailable".into());
+        }
+        if executable.is_empty()
+            || arguments
+                .len()
+                .checked_add(1)
+                .is_none_or(|count| count > 80)
+        {
+            return Err("request_invalid".into());
+        }
+        let argument_bytes = arguments
+            .iter()
+            .try_fold(executable.as_bytes().len(), |total, arg| {
+                total.checked_add(arg.as_bytes().len())
+            });
+        if argument_bytes.is_none_or(|total| total > MAX_CONTROL_ARGUMENT_BYTES) {
+            return Err("request_invalid".into());
+        }
+
+        let client_working_directory =
+            std::env::current_dir().map_err(|_| "launch_context_invalid")?;
+        if !client_working_directory.is_absolute() {
+            return Err("launch_context_invalid".into());
+        }
+        let requested_working_directory = match cwd {
+            Some(path) if path.is_absolute() => path,
+            Some(path) => client_working_directory.join(path),
+            None => client_working_directory.clone(),
+        };
+        let launch_context =
+            filtered_launch_context(requested_working_directory, std::env::vars_os())?;
+
+        // Re-read the layout on this same serialized lease. Never substitute
+        // a new target or revision if the caller's capture became stale.
+        let layout_payload = panelink::ui_protocol::encode_layout_query();
+        let layout_id = self.request_id();
+        let layout_bytes = exchange_with_id(&mut self.stream, layout_id, &layout_payload)?;
+        let layout = panelink::ui_protocol::decode_layout_reply(&layout_bytes)
+            .map_err(|_| "response_invalid")?;
+        if layout.revision != layout_revision {
+            return Err("stale_layout".into());
+        }
+        let (rows, columns) = panelink::ui_protocol::planned_split_size(&layout, target, direction)
+            .map_err(|_| "split_unavailable")?;
+
+        let key = candidate_key(self.context.context());
+        let mut payload = Vec::new();
+        {
+            let executable_bytes = executable.as_bytes();
+            let cwd_bytes = launch_context.working_directory.as_os_str().as_bytes();
+            let client_cwd_bytes = client_working_directory.as_os_str().as_bytes();
+            let argument_slices: Vec<&[u8]> = arguments.iter().map(|arg| arg.as_bytes()).collect();
+            let environment =
+                panelink::multi_startup::environment_entries(&launch_context.environment);
+            let launch = LaunchRequest {
+                key,
+                rows,
+                columns,
+                requested_executable: executable_bytes,
+                requested_working_directory: cwd_bytes,
+                client_working_directory: client_cwd_bytes,
+                arguments: &argument_slices,
+                environment: &environment,
+            };
+            encode_split_request(
+                &SplitRequest {
+                    key,
+                    target,
+                    expected_layout_revision: layout_revision,
+                    direction,
+                    launch: &launch,
+                },
+                &mut payload,
+            )
+            .map_err(|_| "request_invalid")?;
+        }
+        drop(launch_context);
+
+        let reserved = self.reserve_mutation_key(key)?;
+        let mut observed = None;
+        let result = (|| -> Result<panelink::split_protocol::SplitResult, &'static str> {
+            let request_id = self.request_id();
+            let response_bytes = match exchange_with_id(&mut self.stream, request_id, &payload) {
+                Ok(bytes) => bytes,
+                Err("server_rejected") => {
+                    drop(payload);
+                    return match self.reconcile_rejected_mutation(reserved) {
+                        Ok(_) => Err("operation_uncertain"),
+                        Err(error) => Err(error),
+                    };
+                }
+                Err(error) => {
+                    drop(payload);
+                    return Err(error);
+                }
+            };
+            // The encoded request contains caller argv and environment values.
+            drop(payload);
+
+            let result = decode_split_result(&response_bytes).map_err(|_| "response_invalid")?;
+            if result.key != reserved || result.existing_target != target {
+                return Err("response_invalid");
+            }
+            if result.outcome == Outcome::Accepted {
+                return Err("operation_uncertain");
+            }
+            observed = Some(result.into());
+            self.context
+                .ack(reserved)
+                .map_err(|error| context_error_label(&error))?;
+            Ok(result)
+        })();
+        result.map_err(|code| RunPaneFailure {
+            code,
+            operation: Some(reserved),
+            observed,
+        })
+    }
+
     pub(crate) const fn lease(&self) -> u64 {
         self.context.context().lease()
+    }
+
+    /// Whether this dedicated observation lease has workspace event access.
+    pub(crate) const fn has_workspace_events(&self) -> bool {
+        self.selected_capabilities & CAPABILITY_WORKSPACE_EVENTS != 0
+    }
+
+    /// Reconcile layout and its workspace cursor in one owner snapshot.
+    pub(crate) fn reconcile_workspace(
+        &mut self,
+        target: TargetRef,
+    ) -> Result<WorkspaceReconciliation, &'static str> {
+        self.ensure_workspace_lease()?;
+        self.ensure_target(target)?;
+        if !self.has_workspace_events() {
+            return Err("workspace_events_unavailable");
+        }
+        let request = WorkspaceWatchRequest::Reconcile {
+            generation: target.generation,
+            workspace: target.workspace,
+        };
+        let payload = workspace_watch::encode_request(&request).map_err(|_| "request_invalid")?;
+        let id = self.request_id();
+        let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
+        let reply =
+            workspace_watch::decode_reconciliation(&bytes).map_err(|_| "response_invalid")?;
+        if reply.cursor.generation != target.generation
+            || reply.cursor.workspace != target.workspace
+            || reply.revision == 0
+            || reply.layout.is_some_and(|layout| {
+                layout.revision != reply.revision
+                    || layout.panes.iter().flatten().any(|pane| {
+                        pane.target.generation != target.generation
+                            || pane.target.workspace != target.workspace
+                    })
+            })
+        {
+            return Err("response_invalid");
+        }
+        Ok(reply)
+    }
+
+    /// Read one complete bounded workspace watch response.
+    pub(crate) fn watch_workspace(
+        &mut self,
+        target: TargetRef,
+        cursor: WorkspaceCursor,
+        limit: u16,
+        wait_ms: u16,
+    ) -> Result<WorkspaceWatchReply, &'static str> {
+        self.ensure_workspace_lease()?;
+        self.ensure_target(target)?;
+        if !self.has_workspace_events()
+            || cursor.generation != target.generation
+            || cursor.workspace != target.workspace
+            || limit == 0
+            || limit > MAX_WORKSPACE_WATCH_EVENTS as u16
+        {
+            return Err("request_invalid");
+        }
+        let request = WorkspaceWatchRequest::Watch {
+            cursor,
+            limit,
+            wait_ms,
+        };
+        let payload = workspace_watch::encode_request(&request).map_err(|_| "request_invalid")?;
+        let id = self.request_id();
+        let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
+        let reply = workspace_watch::decode_watch_reply(&bytes).map_err(|_| "response_invalid")?;
+        let expected_end = cursor.sequence.checked_add(reply.events.len() as u64);
+        if reply.cursor.generation != target.generation
+            || reply.cursor.workspace != target.workspace
+            || reply.events.len() > limit as usize
+            || reply.events.iter().enumerate().any(|(index, event)| {
+                cursor
+                    .sequence
+                    .checked_add(index as u64 + 1)
+                    .is_none_or(|sequence| event.sequence != sequence)
+            })
+            || (reply.status == WatchStatus::Changed
+                && (expected_end != Some(reply.cursor.sequence)
+                    || reply.cursor.sequence <= cursor.sequence))
+            || (reply.status == WatchStatus::TimedOut && reply.cursor.sequence != cursor.sequence)
+            || (reply.status == WatchStatus::ResyncRequired
+                && reply.cursor.sequence < cursor.sequence)
+        {
+            return Err("response_invalid");
+        }
+        Ok(reply)
     }
 
     /// Read the decoded, sanitized live screen through the existing typed
@@ -3034,7 +3679,7 @@ fn fresh_nonce() -> u64 {
 fn print_help() {
     let _ = writeln!(
         io::stdout().lock(),
-        "Usage:\n  panelink server-probe --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink serve --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink control --directory DIR --context FILE init [TARGET]\n  panelink control --directory DIR --context FILE show|describe|resync|detach\n  panelink control --directory DIR --context FILE layout\n  panelink control --directory DIR --context FILE split TARGET LAYOUT_REV left|right|up|down [--cwd DIR]\n  panelink control --directory DIR --context FILE keys TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE panes\n  panelink control --directory DIR --context FILE close TARGET LAYOUT_REV\n  panelink control --directory DIR --context FILE close-status SEQUENCE\n  panelink control --directory DIR --context FILE read TARGET\n  panelink control --directory DIR --context FILE reconcile TARGET\n  panelink control --directory DIR --context FILE watch TARGET GEN:SEQ LIMIT WAIT_MS\n  panelink control --directory DIR --context FILE claim|release TARGET OWNER_REV\n  panelink control --directory DIR --context FILE handoff TARGET OWNER_REV RECIPIENT_LEASE\n  panelink control --directory DIR --context FILE text|paste|submit TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE interrupt TARGET OWNER_REV\n  panelink control --directory DIR --context FILE status SEQUENCE\n  panelink control --directory DIR --context FILE receipt THROUGH_SEQUENCE\nTARGET is generation:workspace:pane:session:occupant_revision. Use --initialize only for a new empty server directory.\nserve is an experimental server with up to four panes (binary splits; a split needs room for both children). split launches /bin/zsh with this CLI process's own cwd (or --cwd) and environment and needs a serve started with --allow-input. init TARGET pins a new context to one serve pane; layout, split, keys, panes and close work only against serve. close stops one pane's shell (HUP, then KILL after 1 s) and exits 0 only when it exited or was escalated.\n  panelink attach --directory DIR --context-dir CONTEXT_DIR\nattach is an experimental full-screen client for serve (run it inside a terminal): one connection and one private context file per pane under CONTEXT_DIR (created 0700 if missing). Keys go to the focused pane; left-click focuses; right-click or Ctrl-B then s opens the split menu; Ctrl-X detaches (server-owned shells keep running)."
+        "Usage:\n  panelink server-probe --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] -- EXE [ARG...]\n  panelink serve --directory DIR --terminfo TERMINFO [--initialize] [--allow-input] [--opencode-bridge] -- EXE [ARG...]\n  panelink control --directory DIR --context FILE init [TARGET]\n  panelink control --directory DIR --context FILE show|describe|resync|detach\n  panelink control --directory DIR --context FILE layout\n  panelink control --directory DIR --context FILE split TARGET LAYOUT_REV left|right|up|down [--cwd DIR]\n  panelink control --directory DIR --context FILE keys TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE panes\n  panelink control --directory DIR --context FILE close TARGET LAYOUT_REV\n  panelink control --directory DIR --context FILE close-status SEQUENCE\n  panelink control --directory DIR --context FILE read TARGET\n  panelink control --directory DIR --context FILE reconcile TARGET\n  panelink control --directory DIR --context FILE watch TARGET GEN:SEQ LIMIT WAIT_MS\n  panelink control --directory DIR --context FILE claim|release TARGET OWNER_REV\n  panelink control --directory DIR --context FILE handoff TARGET OWNER_REV RECIPIENT_LEASE\n  panelink control --directory DIR --context FILE text|paste|submit TARGET OWNER_REV TEXT\n  panelink control --directory DIR --context FILE interrupt TARGET OWNER_REV\n  panelink control --directory DIR --context FILE status SEQUENCE\n  panelink control --directory DIR --context FILE receipt THROUGH_SEQUENCE\nTARGET is generation:workspace:pane:session:occupant_revision. Use --initialize only for a new empty server directory.\nserve is an experimental server with up to four panes (binary splits; a split needs room for both children). split launches /bin/zsh with this CLI process's own cwd (or --cwd) and environment and needs a serve started with --allow-input. init TARGET pins a new context to one serve pane; layout, split, keys, panes and close work only against serve. close stops one pane's shell (HUP, then KILL after 1 s) and exits 0 only when it exited or was escalated.\n  panelink attach --directory DIR --context-dir CONTEXT_DIR\nattach is an experimental full-screen client for serve (run it inside a terminal): one connection and one private context file per pane under CONTEXT_DIR (created 0700 if missing). Keys go to the focused pane; left-click focuses; right-click or Ctrl-B then s opens the split menu; Ctrl-X detaches (server-owned shells keep running)."
     );
 }
 
@@ -3285,6 +3930,197 @@ mod tests {
         .to_vec()
     }
 
+    fn workspace_renewal_peer(
+        generation: u64,
+        lease: u64,
+        selected_capabilities: u64,
+    ) -> (AuthenticatedStream, thread::JoinHandle<()>) {
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || {
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(header.kind(), MessageKind::Hello);
+            assert_eq!(header.request_id(), 0);
+            let hello = panelink::session_protocol::decode_session_hello(&payload).unwrap();
+            assert_eq!(hello.hello.required_capabilities, CAPABILITY_READ);
+            assert_eq!(
+                hello.hello.optional_capabilities,
+                CAPABILITY_WORKSPACE_EVENTS
+            );
+            assert_eq!(
+                hello.resume,
+                Some(LeaseRef {
+                    generation: 7,
+                    lease: 9
+                })
+            );
+            let welcome = panelink::handshake_protocol::encode_welcome(&Welcome {
+                nonce: hello.hello.nonce,
+                generation,
+                lease,
+                selected_capabilities,
+                ttl_seconds: panelink::handshake_protocol::HANDSHAKE_LEASE_TTL_SECONDS,
+            })
+            .unwrap();
+            write_test_frame(&mut server_socket, MessageKind::Welcome, 0, &welcome);
+        });
+        (AuthenticatedStream::new(client_socket).unwrap(), server)
+    }
+
+    fn observer_link(context: ContextFile, stream: AuthenticatedStream) -> WorkspaceLink {
+        let now = Instant::now();
+        WorkspaceLink {
+            directory: PathBuf::from("/private/tmp/panelink-observer-test"),
+            context,
+            stream,
+            next_request: 4,
+            discarded_uncertain: false,
+            settled_uncertain: None,
+            selected_capabilities: CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS,
+            lease_schedule: ObserverLeaseSchedule::new(now),
+        }
+    }
+
+    #[test]
+    fn observer_lease_schedule_uses_conservative_ttl_and_finite_retries() {
+        let started = Instant::now();
+        let mut schedule = ObserverLeaseSchedule::new(started);
+        assert!(!schedule.due(started + Duration::from_secs(1499)));
+        let renewal_time = started + Duration::from_secs(1500);
+        assert!(schedule.due(renewal_time));
+        assert!(!schedule.expired(renewal_time));
+        assert!(!schedule.failed(renewal_time));
+        assert_eq!(schedule.next_attempt, renewal_time + OBSERVER_RENEW_RETRY);
+        assert!(!schedule.failed(renewal_time + OBSERVER_RENEW_RETRY));
+        assert!(schedule.failed(renewal_time + OBSERVER_RENEW_RETRY * 2));
+        assert!(schedule.expired(started + OBSERVER_LEASE_TTL));
+    }
+
+    #[test]
+    fn observer_renews_same_lease_multiple_times_over_socket_handshakes() {
+        let (directory, _, context) = test_context(false);
+        let (old_client, old_server) = UnixStream::pair().unwrap();
+        drop(old_server);
+        let mut link = observer_link(context, AuthenticatedStream::new(old_client).unwrap());
+        let base = Instant::now();
+        link.lease_schedule = ObserverLeaseSchedule::new(base);
+
+        for renewal_number in 1..=2 {
+            let now = base + Duration::from_secs(1500 * renewal_number);
+            let (stream, server) =
+                workspace_renewal_peer(7, 9, CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS);
+            assert!(link.renew_workspace_lease_at(now, || Ok(stream)).unwrap());
+            server.join().unwrap();
+            assert_eq!(link.lease(), 9);
+            assert_eq!(link.next_request, 1);
+            assert_eq!(link.lease_schedule.renewed_at, now);
+        }
+        drop(link);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn observer_renewal_refuses_generation_change_or_capability_escalation() {
+        let (directory, _, context) = test_context(false);
+        let (old_client, old_server) = UnixStream::pair().unwrap();
+        drop(old_server);
+        let mut link = observer_link(context, AuthenticatedStream::new(old_client).unwrap());
+        let now = link.lease_schedule.renewed_at + Duration::from_secs(1500);
+        let (stream, server) =
+            workspace_renewal_peer(8, 9, CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS);
+        assert_eq!(
+            link.renew_workspace_lease_at(now, || Ok(stream)),
+            Err("lease_renewal_failed")
+        );
+        server.join().unwrap();
+
+        let (stream, server) = workspace_renewal_peer(
+            7,
+            9,
+            CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS | CAPABILITY_INPUT,
+        );
+        assert_eq!(
+            link.renew_workspace_lease_at(now, || Ok(stream)),
+            Err("lease_renewal_failed")
+        );
+        server.join().unwrap();
+        drop(link);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn observer_watch_preserves_cursor_across_renewal_for_server_gap_detection() {
+        let (directory, _, context) = test_context(false);
+        let (old_client, old_server) = UnixStream::pair().unwrap();
+        drop(old_server);
+        let mut link = observer_link(context, AuthenticatedStream::new(old_client).unwrap());
+        let base = Instant::now();
+        link.lease_schedule = ObserverLeaseSchedule::new(base);
+        let now = base + Duration::from_secs(1500);
+        let cursor = WorkspaceCursor {
+            generation: 7,
+            workspace: 2,
+            sequence: 3,
+        };
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || {
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(header.kind(), MessageKind::Hello);
+            let hello = panelink::session_protocol::decode_session_hello(&payload).unwrap();
+            assert_eq!(
+                hello.resume,
+                Some(LeaseRef {
+                    generation: 7,
+                    lease: 9
+                })
+            );
+            let welcome = panelink::handshake_protocol::encode_welcome(&Welcome {
+                nonce: hello.hello.nonce,
+                generation: 7,
+                lease: 9,
+                selected_capabilities: CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS,
+                ttl_seconds: panelink::handshake_protocol::HANDSHAKE_LEASE_TTL_SECONDS,
+            })
+            .unwrap();
+            write_test_frame(&mut server_socket, MessageKind::Welcome, 0, &welcome);
+
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(header.kind(), MessageKind::Request);
+            assert_eq!(header.request_id(), 1);
+            assert_eq!(
+                workspace_watch::decode_request(&payload),
+                Ok(WorkspaceWatchRequest::Watch {
+                    cursor,
+                    limit: 8,
+                    wait_ms: 10,
+                })
+            );
+            let response = workspace_watch::encode_watch_reply(&WorkspaceWatchReply {
+                status: WatchStatus::ResyncRequired,
+                cursor: WorkspaceCursor {
+                    sequence: 5,
+                    ..cursor
+                },
+                events: vec![],
+            })
+            .unwrap();
+            write_test_frame(&mut server_socket, MessageKind::Response, 1, &response);
+        });
+        assert!(link
+            .renew_workspace_lease_at(now, || {
+                Ok(AuthenticatedStream::new(client_socket).unwrap())
+            })
+            .unwrap());
+        assert_eq!(
+            link.watch_workspace(test_target(), cursor, 8, 10)
+                .unwrap()
+                .status,
+            WatchStatus::ResyncRequired
+        );
+        server.join().unwrap();
+        drop(link);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn parser_help_and_maximum_child_arguments_remain_reachable() {
         for command in ["control", "server-probe"] {
@@ -3311,6 +4147,30 @@ mod tests {
         assert_eq!(probe.arguments.len(), 256);
         values.push(OsString::from("extra"));
         assert!(parse(values).is_err());
+    }
+
+    #[test]
+    fn provider_bridge_is_explicit_and_serve_only() {
+        let values = args(&[
+            "serve",
+            "--directory",
+            "/private/tmp/provider-server",
+            "--terminfo",
+            "/private/tmp/terminfo",
+            "--opencode-bridge",
+            "--",
+            "opencode",
+        ]);
+        let CliCommand::Serve(request) = parse(values.clone()).unwrap() else {
+            panic!("expected serve");
+        };
+        assert!(request.opencode_bridge);
+        let mut probe = values.clone();
+        probe[0] = "server-probe".into();
+        assert!(parse(probe).is_err());
+        let mut repeated = values;
+        repeated.insert(6, "--opencode-bridge".into());
+        assert!(parse(repeated).is_err());
     }
 
     #[test]
@@ -3916,6 +4776,538 @@ mod tests {
             context.reserve().unwrap();
         }
         (directory, path, context)
+    }
+
+    fn single_pane_layout(target: TargetRef, revision: u64) -> panelink::ui_protocol::LayoutReply {
+        panelink::ui_protocol::LayoutReply {
+            revision,
+            rows: 24,
+            columns: 80,
+            panes: [
+                Some(panelink::ui_protocol::UiPane {
+                    target,
+                    rect: panelink::pane_layout::Rect {
+                        x: 0,
+                        y: 0,
+                        rows: 24,
+                        columns: 80,
+                    },
+                    pending_confirmed: None,
+                }),
+                None,
+                None,
+                None,
+            ],
+            divider: None,
+            dividers: [None, None, None],
+        }
+    }
+
+    fn run_pane_test_link(
+        context: ContextFile,
+        stream: AuthenticatedStream,
+        capabilities: u64,
+    ) -> WorkspaceLink {
+        let now = Instant::now();
+        WorkspaceLink {
+            directory: PathBuf::from("/private/tmp/panelink-run-pane-test"),
+            context,
+            stream,
+            next_request: 1,
+            discarded_uncertain: false,
+            settled_uncertain: None,
+            selected_capabilities: capabilities,
+            lease_schedule: ObserverLeaseSchedule::new(now),
+        }
+    }
+
+    #[test]
+    fn run_pane_encodes_literal_argv_and_the_full_captured_target() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let server = thread::spawn(move || {
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(header.kind(), MessageKind::Request);
+            assert_eq!(header.request_id(), 1);
+            assert_eq!(payload, panelink::ui_protocol::encode_layout_query());
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                1,
+                &panelink::ui_protocol::encode_layout_reply(&single_pane_layout(target, 6))
+                    .unwrap(),
+            );
+
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(header.kind(), MessageKind::Request);
+            assert_eq!(header.request_id(), 2);
+            let split = panelink::split_protocol::decode_split_request(&payload).unwrap();
+            assert_eq!(
+                split.key(),
+                OperationKey {
+                    generation: 7,
+                    lease: 9,
+                    sequence: 1
+                }
+            );
+            assert_eq!(split.target(), target);
+            assert_eq!(split.expected_layout_revision(), 6);
+            assert_eq!(split.direction(), SplitDirection::Left);
+            let launch = split.launch();
+            assert_eq!(launch.requested_executable(), b"/bin/echo");
+            assert_eq!(launch.requested_working_directory(), b"/tmp");
+            assert_eq!(
+                launch.arguments().collect::<Vec<_>>(),
+                vec![b"two words".as_slice(), b"--as".as_slice()]
+            );
+            assert!(launch.client_working_directory().starts_with(b"/"));
+
+            let result = panelink::split_protocol::SplitResult {
+                key: split.key(),
+                outcome: Outcome::Applied,
+                committed_layout_revision: 7,
+                existing_target: target,
+                new_target: Some(TargetRef {
+                    generation: target.generation,
+                    workspace: target.workspace,
+                    pane: 10,
+                    session: 11,
+                    occupant_revision: 1,
+                }),
+            };
+            let mut bytes = Vec::new();
+            panelink::split_protocol::encode_split_result(&result, &mut bytes).unwrap();
+            write_test_frame(&mut server_socket, MessageKind::Response, 2, &bytes);
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let result = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Left,
+                Some(PathBuf::from("/tmp")),
+                OsStr::new("/bin/echo"),
+                &[OsString::from("two words"), OsString::from("--as")],
+            )
+            .unwrap();
+        assert_eq!(result.outcome, Outcome::Applied);
+        assert_eq!(result.existing_target, target);
+        assert_eq!(link.context.context().next_sequence(), 2);
+        assert_eq!(link.context.context().uncertain(), None);
+        server.join().unwrap();
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_refuses_invalid_arguments_and_missing_capability_before_reserve() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, _server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ,
+        );
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "input_capability_unavailable");
+        assert_eq!(failure.operation, None);
+        link.selected_capabilities |= CAPABILITY_INPUT;
+        let failure = link
+            .run_pane(target, 6, SplitDirection::Right, None, OsStr::new(""), &[])
+            .unwrap_err();
+        assert_eq!(failure.code, "request_invalid");
+        assert_eq!(failure.operation, None);
+        assert_eq!(link.context.context().next_sequence(), 1);
+        assert_eq!(link.context.context().uncertain(), None);
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_rejects_wrong_existing_target_without_acknowledging_key() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let server = thread::spawn(move || {
+            let (header, _) = read_test_frame(&mut server_socket);
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &panelink::ui_protocol::encode_layout_reply(&single_pane_layout(target, 6))
+                    .unwrap(),
+            );
+            let (header, payload) = read_test_frame(&mut server_socket);
+            let split = panelink::split_protocol::decode_split_request(&payload).unwrap();
+            let wrong_target = TargetRef {
+                pane: target.pane + 1,
+                ..target
+            };
+            let result = panelink::split_protocol::SplitResult {
+                key: split.key(),
+                outcome: Outcome::Applied,
+                committed_layout_revision: 7,
+                existing_target: wrong_target,
+                new_target: Some(TargetRef {
+                    pane: target.pane + 2,
+                    session: target.session + 2,
+                    ..wrong_target
+                }),
+            };
+            let mut bytes = Vec::new();
+            panelink::split_protocol::encode_split_result(&result, &mut bytes).unwrap();
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &bytes,
+            );
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "response_invalid");
+        assert_eq!(
+            failure.operation,
+            Some(OperationKey {
+                generation: 7,
+                lease: 9,
+                sequence: 1,
+            })
+        );
+        assert_eq!(link.context.context().next_sequence(), 2);
+        assert!(link.context.context().uncertain().is_some());
+        server.join().unwrap();
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_never_acknowledges_a_nonterminal_accepted_result() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let server = thread::spawn(move || {
+            let (header, _) = read_test_frame(&mut server_socket);
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &panelink::ui_protocol::encode_layout_reply(&single_pane_layout(target, 6))
+                    .unwrap(),
+            );
+            let (header, payload) = read_test_frame(&mut server_socket);
+            let split = panelink::split_protocol::decode_split_request(&payload).unwrap();
+            let result = panelink::split_protocol::SplitResult {
+                key: split.key(),
+                outcome: Outcome::Accepted,
+                committed_layout_revision: 7,
+                existing_target: target,
+                new_target: Some(TargetRef {
+                    pane: target.pane + 1,
+                    session: target.session + 1,
+                    ..target
+                }),
+            };
+            let mut bytes = Vec::new();
+            panelink::split_protocol::encode_split_result(&result, &mut bytes).unwrap();
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &bytes,
+            );
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "operation_uncertain");
+        assert_eq!(
+            failure.operation,
+            Some(OperationKey {
+                generation: 7,
+                lease: 9,
+                sequence: 1,
+            })
+        );
+        assert_eq!(link.context.context().next_sequence(), 2);
+        assert!(link.context.context().uncertain().is_some());
+        server.join().unwrap();
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_lost_ack_stays_uncertain_and_cannot_send_a_second_launch() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let server = thread::spawn(move || {
+            let (header, _) = read_test_frame(&mut server_socket);
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &panelink::ui_protocol::encode_layout_reply(&single_pane_layout(target, 6))
+                    .unwrap(),
+            );
+            let (header, _) = read_test_frame(&mut server_socket);
+            assert_eq!(header.request_id(), 2);
+            // Closing after receiving the launch models a lost acknowledgment.
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "transport_failed");
+        assert_eq!(
+            failure.operation,
+            Some(OperationKey {
+                generation: 7,
+                lease: 9,
+                sequence: 1,
+            })
+        );
+        assert!(link.context.context().uncertain().is_some());
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "operation_uncertain");
+        assert_eq!(failure.operation, None);
+        assert_eq!(link.context.context().next_sequence(), 2);
+        server.join().unwrap();
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_reopened_uncertainty_settles_without_a_replacement_launch() {
+        let (directory, path, context) = test_context(true);
+        let key = context.context().uncertain().unwrap();
+        drop(context);
+        let context = ContextFile::open_existing(&path, deadline_after(CLIENT_DEADLINE)).unwrap();
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || {
+            let (header, payload) = read_test_frame(&mut server_socket);
+            assert_eq!(
+                panelink::session_protocol::decode_session_request(&payload).unwrap(),
+                SessionRequest::OperationStatus { key }
+            );
+            let mut bytes = Vec::new();
+            panelink::response_protocol::encode_response_payload(
+                &panelink::response_protocol::Response {
+                    key,
+                    body: ResponseBody::Status(OperationStatus::Completed(Outcome::Applied)),
+                },
+                &mut bytes,
+            )
+            .unwrap();
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &bytes,
+            );
+            server_socket
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        // This is the same reconciliation performed when WorkspaceLink opens
+        // a durable context on a later CLI invocation.
+        link.settled_uncertain = link.settle_uncertain().unwrap();
+        assert_eq!(link.context.context().uncertain(), None);
+        let failure = link
+            .run_pane(
+                test_target(),
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "previous_operation_settled");
+        assert_eq!(failure.operation, None);
+        assert_eq!(link.context.context().next_sequence(), 2);
+        let mut server_socket = server.join().unwrap();
+        server_socket.set_nonblocking(true).unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            server_socket.read(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_oversized_argv_never_reserves_or_sends() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let failure = link
+            .run_pane(
+                test_target(),
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[OsString::from("x".repeat(MAX_CONTROL_ARGUMENT_BYTES))],
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "request_invalid");
+        assert_eq!(failure.operation, None);
+        assert_eq!(link.context.context().next_sequence(), 1);
+        assert_eq!(link.context.context().uncertain(), None);
+        server_socket.set_nonblocking(true).unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            server_socket.read(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_pane_ack_failure_preserves_the_validated_child_identity() {
+        let (directory, path, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let target = test_target();
+        let child = TargetRef {
+            pane: target.pane + 1,
+            session: target.session + 1,
+            ..target
+        };
+        let server = thread::spawn(move || {
+            let (header, _) = read_test_frame(&mut server_socket);
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &panelink::ui_protocol::encode_layout_reply(&single_pane_layout(target, 6))
+                    .unwrap(),
+            );
+            let (header, payload) = read_test_frame(&mut server_socket);
+            let split = panelink::split_protocol::decode_split_request(&payload).unwrap();
+            // Force local acknowledgment failure after reservation and send,
+            // without corrupting or weakening the server's valid launch reply.
+            fs::remove_file(path).unwrap();
+            let mut bytes = Vec::new();
+            panelink::split_protocol::encode_split_result(
+                &panelink::split_protocol::SplitResult {
+                    key: split.key(),
+                    outcome: Outcome::Applied,
+                    committed_layout_revision: 7,
+                    existing_target: target,
+                    new_target: Some(child),
+                },
+                &mut bytes,
+            )
+            .unwrap();
+            write_test_frame(
+                &mut server_socket,
+                MessageKind::Response,
+                header.request_id(),
+                &bytes,
+            );
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client_socket).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let failure = link
+            .run_pane(
+                target,
+                6,
+                SplitDirection::Right,
+                None,
+                OsStr::new("/bin/echo"),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(
+            failure.operation,
+            Some(OperationKey {
+                generation: 7,
+                lease: 9,
+                sequence: 1
+            })
+        );
+        let observed = failure
+            .observed
+            .expect("validated reply survives local ack failure");
+        assert_eq!(observed.new_target, Some(child));
+        assert_eq!(observed.committed_layout_revision, 7);
+        assert!(link.context.context().uncertain().is_some());
+        server.join().unwrap();
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     fn receipt_peer(

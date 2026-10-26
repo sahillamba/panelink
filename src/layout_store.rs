@@ -615,10 +615,15 @@ impl LayoutStore {
 mod tests {
     use super::*;
     use crate::control_protocol::TargetRef;
-    use crate::pane_layout::{LayoutSnapshot, PaneGeometry, Rect, MIN_PANE_COLUMNS, MIN_PANE_ROWS};
+    use crate::pane_layout::{LayoutSnapshot, PaneGeometry, Rect};
     use crate::saved_layout::LayoutMetadata;
     use std::os::unix::fs::PermissionsExt;
     use std::time::SystemTime;
+
+    // Layout records retain the historical geometry bounds from before live
+    // panes gained a one-cell content inset.
+    const SAVED_MIN_ROWS: u16 = 5;
+    const SAVED_MIN_COLUMNS: u16 = 20;
 
     struct Fixture(PathBuf);
 
@@ -752,8 +757,8 @@ mod tests {
         SavedLayout::from_snapshot(
             meta,
             &snapshot_one(
-                MIN_PANE_ROWS + 1,
-                MIN_PANE_COLUMNS + 5,
+                SAVED_MIN_ROWS + 1,
+                SAVED_MIN_COLUMNS + 5,
                 revision,
                 generation,
                 workspace,
@@ -818,14 +823,14 @@ mod tests {
         let meta = make_metadata(7, 1, 1, 1);
         let first = SavedLayout::from_snapshot(
             meta,
-            &snapshot_one(MIN_PANE_ROWS + 1, MIN_PANE_COLUMNS + 5, 1, 7, 1),
+            &snapshot_one(SAVED_MIN_ROWS + 1, SAVED_MIN_COLUMNS + 5, 1, 7, 1),
         )
         .unwrap();
         store.save(7, 1, &first).unwrap();
         // Same metadata but different dimensions -> different valid bytes, same seq.
         let second = SavedLayout::from_snapshot(
             meta,
-            &snapshot_one(MIN_PANE_ROWS + 2, MIN_PANE_COLUMNS + 5, 1, 7, 1),
+            &snapshot_one(SAVED_MIN_ROWS + 2, SAVED_MIN_COLUMNS + 5, 1, 7, 1),
         )
         .unwrap();
         assert!(store.save(7, 1, &second).is_err());
@@ -1019,7 +1024,7 @@ mod tests {
         let fixture = Fixture::new();
         let store = LayoutStore::open(fixture.path()).unwrap();
         // Create nonempty with rev 1
-        let snap = snapshot_two(MIN_PANE_ROWS, MIN_PANE_COLUMNS + 21, 1, 7, 1);
+        let snap = snapshot_two(SAVED_MIN_ROWS, SAVED_MIN_COLUMNS * 2 + 1, 1, 7, 1);
         let meta = make_metadata(7, 1, 1, 1);
         let nonempty = SavedLayout::from_snapshot(meta, &snap).unwrap();
         store.save(7, 1, &nonempty).unwrap();

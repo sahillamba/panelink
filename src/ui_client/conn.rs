@@ -15,7 +15,7 @@ use panelink::control_protocol::{encode_request_payload, Command, ControlRequest
 use panelink::event_protocol::{decode_event, EventBody};
 use panelink::handshake_protocol::{
     decode_welcome, validate_welcome, Hello, Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT,
-    CAPABILITY_READ,
+    CAPABILITY_PANE_OPERATIONS, CAPABILITY_READ, CAPABILITY_SCREEN_ROW_WRAPS,
 };
 use panelink::protocol::{OperationKey, OperationStatus, Outcome};
 use panelink::protocol_wire::{Frame, MessageKind};
@@ -29,7 +29,9 @@ use panelink::session_protocol::{
 };
 use panelink::terminal::Key;
 use panelink::transport::{AuthenticatedStream, OwnedFrame};
-use panelink::ui_protocol::{encode_attach_target, encode_key_input, KeyInput};
+use panelink::ui_protocol::{
+    encode_attach_target, encode_key_input, encode_mouse_wheel_input, KeyInput, MouseWheelInput,
+};
 use panelink::watch_protocol::WatchStatus;
 
 /// Deadline for exchanges made before the host terminal is taken over.
@@ -128,6 +130,16 @@ pub(crate) enum InputResult {
     Failed(&'static str),
 }
 
+/// Result of one non-replayable mouse-wheel input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MouseInputResult {
+    Applied,
+    NotOwner,
+    /// The server confirmed before admission that the child disabled mouse input.
+    Unsupported,
+    Failed(&'static str),
+}
+
 /// A pane connection: pinned stream, context lock and ownership view.
 pub(crate) struct PaneConn {
     pub(crate) target: TargetRef,
@@ -135,6 +147,10 @@ pub(crate) struct PaneConn {
     stream: Option<AuthenticatedStream>,
     next_request: u64,
     pub(crate) events: bool,
+    /// Schema-13 pane operations selected on the current lease connection.
+    pub(crate) pane_operations: bool,
+    /// Negotiated only by multi-session leases that were originally granted it.
+    pub(crate) screen_row_wraps: bool,
     pub(crate) cursor: u64,
     /// Our input-owner revision when we hold the claim.
     pub(crate) owner_revision: Option<u64>,
@@ -333,6 +349,8 @@ impl PaneConn {
             Err(error) => return Err(error),
         };
         self.events = welcome.selected_capabilities & CAPABILITY_EVENTS != 0;
+        self.screen_row_wraps = welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS != 0;
+        self.pane_operations = welcome.selected_capabilities & CAPABILITY_PANE_OPERATIONS != 0;
         self.stream = Some(stream);
         self.next_request = 1;
         self.lease_schedule.renewed(started);
@@ -355,6 +373,8 @@ impl PaneConn {
             stream: Some(stream),
             next_request: 1,
             events: welcome.selected_capabilities & CAPABILITY_EVENTS != 0,
+            pane_operations: welcome.selected_capabilities & CAPABILITY_PANE_OPERATIONS != 0,
+            screen_row_wraps: welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS != 0,
             cursor: 0,
             owner_revision: None,
             next_claim: renewed_at,
@@ -594,6 +614,47 @@ impl PaneConn {
         })?;
         let outcome = self.settle_response(key, reply)?;
         Ok(self.input_result(outcome))
+    }
+
+    /// Deliver one typed wheel event. This event is never resent.
+    pub(crate) fn send_mouse_wheel(
+        &mut self,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<MouseInputResult, &'static str> {
+        let Some(revision) = self.owner_revision else {
+            return Ok(MouseInputResult::NotOwner);
+        };
+        let target = self.target;
+        let (key, reply) = self.keyed(|key| {
+            encode_mouse_wheel_input(&MouseWheelInput {
+                key,
+                target,
+                expected_owner_revision: revision,
+                column,
+                row,
+                up,
+            })
+            .map(|bytes| bytes.to_vec())
+            .map_err(|_| "request_invalid")
+        })?;
+        let outcome = self.settle_response(key, reply)?;
+        Ok(match outcome {
+            ResponseOutcome::Status(OperationStatus::Completed(Outcome::Applied)) => {
+                MouseInputResult::Applied
+            }
+            ResponseOutcome::Rejected(RejectionCode::Unsupported) => MouseInputResult::Unsupported,
+            ResponseOutcome::Rejected(
+                RejectionCode::InputBusy | RejectionCode::StaleOwner | RejectionCode::ExpiredOwner,
+            ) => {
+                self.owner_revision = None;
+                self.next_claim = Instant::now();
+                MouseInputResult::NotOwner
+            }
+            ResponseOutcome::ServerError(label) => MouseInputResult::Failed(label),
+            _ => MouseInputResult::Failed("mouse input not delivered"),
+        })
     }
 
     /// Deliver one paste through control PASTE; never resent.
@@ -917,7 +978,10 @@ pub(crate) fn handshake(
     let hello = Hello {
         nonce: nonce(),
         required_capabilities: CAPABILITY_READ,
-        optional_capabilities: CAPABILITY_INPUT | CAPABILITY_EVENTS,
+        optional_capabilities: CAPABILITY_INPUT
+            | CAPABILITY_EVENTS
+            | CAPABILITY_SCREEN_ROW_WRAPS
+            | CAPABILITY_PANE_OPERATIONS,
     };
     let mut payload = encode_session_hello(&SessionHello {
         hello,
@@ -994,6 +1058,9 @@ pub(crate) fn server_label(payload: &[u8]) -> &'static str {
         b"target_stale" => "server: target_stale",
         b"lease_expired" => "server: lease_expired",
         b"result_expired" => "server: result_expired",
+        b"invalid_request" | b"unsupported_request_schema" | b"invalid_ui_request" => {
+            "scrolling requires a newer Panelink server; restart it"
+        }
         b"sequence_not_increasing" => "server: sequence_not_increasing",
         _ => "server error",
     }
@@ -1025,6 +1092,68 @@ fn nonce() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_server_reject_label_explains_scroll_compatibility() {
+        for label in [
+            b"invalid_request".as_slice(),
+            b"unsupported_request_schema".as_slice(),
+            b"invalid_ui_request".as_slice(),
+        ] {
+            assert_eq!(
+                server_label(label),
+                "scrolling requires a newer Panelink server; restart it"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_handshake_offers_row_wraps_optionally_and_accepts_selection() {
+        use panelink::handshake_protocol::{encode_welcome, Welcome, CAPABILITY_SCREEN_ROW_WRAPS};
+        use panelink::protocol_wire::{Frame, MessageKind};
+        use panelink::session_protocol::decode_session_hello;
+        use std::os::unix::net::UnixStream;
+
+        let (client_socket, server_socket) = UnixStream::pair().unwrap();
+        let mut client = AuthenticatedStream::new(client_socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut server = AuthenticatedStream::new(server_socket).unwrap();
+            let frame = server
+                .read_frame(Instant::now() + Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(frame.kind(), MessageKind::Hello);
+            let hello = decode_session_hello(frame.payload()).unwrap();
+            assert_ne!(
+                hello.hello.optional_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+                0
+            );
+            assert_eq!(
+                hello.hello.required_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+                0
+            );
+            let welcome = Welcome {
+                nonce: hello.hello.nonce,
+                generation: 7,
+                lease: 9,
+                selected_capabilities: CAPABILITY_READ | CAPABILITY_SCREEN_ROW_WRAPS,
+                ttl_seconds: panelink::handshake_protocol::HANDSHAKE_LEASE_TTL_SECONDS,
+            };
+            let payload = encode_welcome(&welcome).unwrap();
+            server
+                .write_frame(
+                    &Frame::new(MessageKind::Welcome, 0, &payload).unwrap(),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .unwrap();
+        });
+        let welcome = handshake(&mut client, None, None, Duration::from_secs(1)).unwrap();
+        assert_ne!(
+            welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+            0
+        );
+        server.join().unwrap();
+    }
 
     #[test]
     fn lease_renewal_is_scheduled_before_expiry_and_retried_on_failure() {

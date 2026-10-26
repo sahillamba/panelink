@@ -21,7 +21,13 @@ mod p3_cli;
 mod agent_cli;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod provider_cli;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod ui_client;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod workspace_cli;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use panelink::pane_layout;
@@ -102,6 +108,20 @@ where
     let mut arguments = arguments.into_iter().peekable();
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
+        if arguments
+            .peek()
+            .is_some_and(|argument| argument == "workspace")
+        {
+            arguments.next();
+            let mut captured = Vec::new();
+            for argument in arguments {
+                if captured.len() >= 8 || os_str_byte_len(&argument) > 128 {
+                    return report_cli_error(CliError::InvalidArguments);
+                }
+                captured.push(argument);
+            }
+            return workspace_cli::run(captured);
+        }
         // Recovery commands dispatch before any live startup or attach path.
         if arguments
             .peek()
@@ -134,6 +154,14 @@ where
             };
         }
         // `panelink` alone opens (or reattaches to) the user's workspace.
+        if arguments
+            .peek()
+            .is_some_and(|argument| argument == "provider-binding")
+        {
+            arguments.next();
+            let captured: Vec<_> = arguments.take(14).collect();
+            return provider_cli::run(captured);
+        }
         if arguments.peek().is_none() {
             return default_open::open();
         }
@@ -655,6 +683,7 @@ fn print_help() {
     println!("                        the other pane fills the window; closing the last");
     println!("                        pane ends the workspace");
     println!("  panelink pane list|read|claim|release|send|keys|interrupt|close ...");
+    println!("  panelink pane run [--pane N] [--direction left|right|up|down] [--cwd DIR] [--as NAME] [--json] -- COMMAND [ARG ...]");
     println!("  panelink wait <n> --text STRING|--quiet SECS|--exit|--change --timeout SECS");
     println!("  panelink events [--pane N] [--timeout SECS] --json");
     println!();
@@ -664,6 +693,15 @@ fn print_help() {
     println!("Ctrl-X detaches (shells keep running).");
     println!();
     println!("Advanced:");
+    println!("  panelink workspace list");
+    println!("  panelink workspace project create <name> <first-tab-name>");
+    println!("  panelink workspace tab create <project-id> <name>");
+    println!("  panelink workspace select <project-id> <tab-id>");
+    println!("  panelink workspace open [<project-id> <tab-id>]");
+    println!("  panelink workspace stop|remove <project-id> <tab-id>");
+    println!(
+        "    remove requires a stopped workspace; commands without workspace keep the legacy route"
+    );
     println!("  panelink history list|show <target>|search <target> <text>|clear <target>");
     println!("  panelink history cleanup   discard uncommitted history files (workspace stopped)");
     println!("  panelink layout show [--previous]   read-only restart topology");
@@ -676,16 +714,19 @@ fn print_help() {
     println!("  panelink doctor");
     println!("  panelink pty-probe --terminfo <absolute-dir> -- <executable> [arguments...]");
     println!("  panelink server-probe --directory <private-dir> --terminfo <absolute-dir> [--initialize] [--allow-input] -- <executable> [arguments...]");
-    println!("  panelink serve --directory <private-dir> --terminfo <absolute-dir> [--initialize] [--allow-input] -- <executable> [arguments...]");
+    println!("  panelink serve --directory <private-dir> --terminfo <absolute-dir> [--initialize] [--allow-input] [--opencode-bridge] -- <executable> [arguments...]");
     println!("  panelink control --directory <private-dir> --context <absolute-file> <command> [arguments...]");
     println!("  panelink attach --directory <private-dir> --context-dir <private-dir>");
+    println!("  panelink provider-binding show|status --directory DIR --target G:W:P:S:R --project PROJECT");
+    println!("  panelink provider-binding prepare --directory DIR --target G:W:P:S:R --project PROJECT --session ID");
+    println!("  panelink provider-binding resume --directory DIR --target G:W:P:S:R --project PROJECT --ticket HEX --revision N");
     println!();
     println!("pty-probe runs one disposable child on macOS/aarch64.");
     println!("server-probe runs a foreground one-child server; control exchanges typed commands.");
     println!("serve runs an experimental foreground server (up to four panes, zsh splits).");
     println!("attach is an experimental full-screen client for serve; Ctrl-X detaches.");
     println!(
-        "Experimental prototype: up to four panes per workspace; provider recovery is not implemented."
+        "Experimental prototype: up to four panes; opt-in pinned-provider recovery requires explicit prepare and resume."
     );
 }
 

@@ -184,7 +184,12 @@ fn integration_real_store_rotation() {
     );
 
     // Open a new generation by re-creating storage (simulate restart).
-    drop(writer);
+    // Drop is deliberately nonblocking and may retain the singleton while its
+    // worker exits. An orderly restart must wait for the drained shutdown.
+    assert_eq!(
+        writer.shutdown(Duration::from_millis(250)),
+        LayoutShutdownOutcome::Drained
+    );
     drop(storage); // Release the singleton held by the first storage.
     let storage2 = ServerStorage::open(&fixture.0).expect("open next generation");
     let gen2 = storage2.generation();

@@ -11,20 +11,25 @@ use panelink::close_protocol::{
 use panelink::control_protocol::TargetRef;
 use panelink::launch::{Environment, LaunchContext};
 use panelink::managed_launch_protocol::LaunchRequest;
+use panelink::pane_operations_protocol::{
+    self as pane_ops, PaneOperationsView, Request as PaneOperationRequest,
+};
 use panelink::protocol::{OperationKey, OperationStatus, Outcome};
 use panelink::response_protocol::{decode_response_payload, ResponseBody};
 use panelink::split_protocol::{decode_split_result, encode_split_request, SplitRequest};
 use panelink::terminal::Key;
 use panelink::ui_protocol::{
-    decode_layout_reply, decode_resize_reply, decode_screen_reply, encode_layout_query,
-    encode_root_resize, encode_screen_query, LayoutReply, RootResize,
+    decode_history_reply_with_wraps, decode_layout_reply, decode_resize_reply,
+    decode_screen_reply_with_wraps, encode_history_query, encode_layout_query, encode_root_resize,
+    encode_screen_query, HistoryReplyView, LayoutReply, RootResize, MAX_HISTORY_REPLY_BYTES,
 };
 
 use super::conn::{
     connect, context_path, ensure_context_dir, handshake, parse_context_name, Bootstrap,
-    InputResult, LeaseAction, PaneConn, Reply, ResumeError, CLOSE_DEADLINE, DEADLINE, OP_DEADLINE,
-    SPLIT_DEADLINE,
+    InputResult, LeaseAction, MouseInputResult, PaneConn, Reply, ResumeError, CLOSE_DEADLINE,
+    DEADLINE, OP_DEADLINE, SPLIT_DEADLINE,
 };
+use super::pane_operations::{PaneAction, PaneOperationUpdate};
 use super::state::{App, ClosePlan, SplitPlan};
 
 const LAYOUT_INTERVAL: Duration = Duration::from_millis(250);
@@ -45,6 +50,8 @@ pub(crate) struct Net {
     /// Device/inode of the control socket observed at attach.
     endpoint_identity: Option<(u64, u64)>,
     layout: Option<LayoutReply>,
+    pane_operations: Option<PaneOperationsView>,
+    pane_operations_pending: bool,
     screen_revisions: [(Option<TargetRef>, u64); panelink::pane_layout::MAX_PANES],
 }
 
@@ -60,11 +67,33 @@ pub(crate) struct ScreenUpdate {
     pub target: TargetRef,
     pub revision: u64,
     pub checkpoint: Vec<u8>,
+    pub row_wraps: Option<Vec<bool>>,
+}
+
+/// Result of one wheel action. History checkpoints remain independent of the
+/// live screen cache and are applied only while the captured view epoch holds.
+pub(crate) struct ScrollUpdate {
+    pub target: TargetRef,
+    pub epoch: u64,
+    pub result: ScrollResult,
+}
+
+pub(crate) enum ScrollResult {
+    History {
+        revision: u64,
+        offset_rows: u16,
+        checkpoint: Vec<u8>,
+        row_wraps: Option<Vec<bool>>,
+    },
+    MouseDelivered,
+    AlternateScreenNoMouse,
+    Failed(&'static str),
 }
 
 /// Bounded view delta from one worker poll.
 pub(crate) struct NetUpdate {
     pub layout: Option<LayoutReply>,
+    pub pane_operations: Option<PaneOperationsView>,
     pub screens: Vec<ScreenUpdate>,
     pub status: Option<&'static str>,
     pub server_present: bool,
@@ -103,10 +132,12 @@ impl Net {
             resize_sent: None,
             endpoint_identity,
             layout: None,
+            pane_operations: None,
+            pane_operations_pending: false,
             screen_revisions: [(None, 0); panelink::pane_layout::MAX_PANES],
         };
-        let layout = match net.resume_any_context(now)? {
-            Some(layout) => layout,
+        let (layout, pane_operations) = match net.resume_any_context(now)? {
+            Some(state) => state,
             None => {
                 let started = Instant::now();
                 let mut stream = connect(&net.directory, DEADLINE)?;
@@ -128,10 +159,14 @@ impl Net {
                     DEADLINE,
                 )?;
                 net.panes.push(pane);
-                layout
+                let first_pane = net.panes.first_mut().ok_or("server unavailable")?;
+                let (layout, pane_operations) = query_layout_state(first_pane)?;
+                (layout, pane_operations)
             }
         };
         net.layout = Some(layout);
+        net.pane_operations = pane_operations;
+        net.pane_operations_pending = pane_operations.is_some();
         app.set_layout(layout);
         let mut ignored_status = None;
         net.sync_panes(layout, now, DEADLINE, &mut ignored_status);
@@ -143,7 +178,10 @@ impl Net {
 
     /// Resume the first existing context whose pinned pane is still in the
     /// layout; returns that layout. Dead settled contexts are removed.
-    fn resume_any_context(&mut self, now: Instant) -> Result<Option<LayoutReply>, &'static str> {
+    fn resume_any_context(
+        &mut self,
+        now: Instant,
+    ) -> Result<Option<(LayoutReply, Option<PaneOperationsView>)>, &'static str> {
         let Ok(entries) = std::fs::read_dir(&self.context_dir) else {
             return Ok(None);
         };
@@ -160,11 +198,10 @@ impl Net {
                 Ok(pane) => pane,
                 Err(ResumeError::Removed | ResumeError::Other(_)) => continue,
             };
-            let Ok(Reply::Response(bytes)) = pane.request(&encode_layout_query()) else {
-                continue;
-            };
-            let Ok(layout) = decode_layout_reply(&bytes) else {
-                continue;
+            let (layout, pane_operations) = match query_layout_state(&mut pane) {
+                Ok(state) => state,
+                Err(label) if pane.pane_operations => return Err(label),
+                Err(_) => continue,
             };
             let in_layout = layout
                 .panes
@@ -175,7 +212,7 @@ impl Net {
             // `attach` calls find exactly this context again.
             if in_layout && path == context_path(&self.context_dir, pane.target, 0) {
                 self.panes.push(pane);
-                return Ok(Some(layout));
+                return Ok(Some((layout, pane_operations)));
             }
             pane.detach();
         }
@@ -184,6 +221,157 @@ impl Net {
 
     fn pane_mut(&mut self, target: TargetRef) -> Option<&mut PaneConn> {
         self.panes.iter_mut().find(|pane| pane.target == target)
+    }
+
+    /// Inspect current terminal modes with READ only, then either deliver one
+    /// typed wheel operation under the existing owner/dedup path or return a
+    /// pure retained-history checkpoint. Never falls back after uncertain
+    /// input delivery.
+    pub(crate) fn scroll(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        offset_rows: u16,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> ScrollUpdate {
+        let result = (|| {
+            let pane = self.pane_mut(target).ok_or("pane not connected")?;
+            let query =
+                encode_history_query(target, offset_rows).map_err(|_| "history request invalid")?;
+            let bytes = match pane.request(&query)? {
+                Reply::Snapshot(bytes) => bytes,
+                Reply::Error(label) => return Err(label),
+                Reply::Response(_) => return Err("history reply invalid"),
+            };
+            let view = decode_history_reply_with_wraps(&bytes, pane.screen_row_wraps)
+                .map_err(|_| "history reply invalid")?;
+            if view.target() != target {
+                return Err("history reply invalid");
+            }
+            validate_history_checkpoint(&view)?;
+            if view.alternate_screen() && view.mouse_reporting() {
+                if pane.owner_revision.is_none() {
+                    let _ = pane.claim(Instant::now());
+                }
+                return match pane.send_mouse_wheel(column, row, up)? {
+                    MouseInputResult::Applied => Ok(ScrollResult::MouseDelivered),
+                    MouseInputResult::Unsupported => {
+                        // The server explicitly rejected before admission; a
+                        // fresh READ decides whether scrollback is now valid.
+                        let retry = encode_history_query(target, offset_rows)
+                            .map_err(|_| "history request invalid")?;
+                        let retry = match pane.request(&retry)? {
+                            Reply::Snapshot(bytes) => bytes,
+                            Reply::Error(label) => return Err(label),
+                            Reply::Response(_) => return Err("history reply invalid"),
+                        };
+                        let retry = decode_history_reply_with_wraps(&retry, pane.screen_row_wraps)
+                            .map_err(|_| "history reply invalid")?;
+                        if retry.target() != target {
+                            return Err("history reply invalid");
+                        }
+                        validate_history_checkpoint(&retry)?;
+                        history_result(retry)
+                    }
+                    MouseInputResult::NotOwner => {
+                        Err("input is owned by another client; wheel not sent")
+                    }
+                    MouseInputResult::Failed(label) => Err(label),
+                };
+            }
+            history_result(view)
+        })();
+        ScrollUpdate {
+            target,
+            epoch,
+            result: result.unwrap_or_else(ScrollResult::Failed),
+        }
+    }
+
+    /// Execute one captured keyed mutation and reconcile its authoritative view.
+    /// An uncertain key is settled by `PaneConn::keyed`; this method never
+    /// creates a replacement key for a mutation whose result is unknown.
+    pub(crate) fn pane_operation(
+        &mut self,
+        action: PaneAction,
+    ) -> Result<PaneOperationUpdate, &'static str> {
+        let target = action.captured_target();
+        let (view, outcome) = {
+            let pane = self.pane_mut(target).ok_or("pane not connected")?;
+            if !pane.pane_operations {
+                return Err("pane operations are not supported by this server");
+            }
+            let mutation = pane.keyed(|key| {
+                pane_ops::encode_request(&action.request(key)).map_err(|_| "request_invalid")
+            });
+            let (key, reply) = match mutation {
+                Ok(result) => result,
+                Err(label) => {
+                    if !pane.connected() {
+                        pane.disconnect(Instant::now());
+                    }
+                    return Err(label);
+                }
+            };
+            let bytes = match reply {
+                Reply::Response(bytes) => bytes,
+                Reply::Error(label) => return Err(label),
+                Reply::Snapshot(_) => return Err("pane operation reply invalid"),
+            };
+            let response =
+                decode_response_payload(&bytes).map_err(|_| "pane operation reply invalid")?;
+            if response.key != key {
+                return Err("pane operation reply invalid");
+            }
+            let outcome = match response.body {
+                ResponseBody::Rejected(_) => {
+                    pane.ack(key)?;
+                    return Err("pane operation rejected");
+                }
+                ResponseBody::Status(OperationStatus::NotAdmitted) => {
+                    pane.ack(key)?;
+                    return Err("pane operation was not admitted");
+                }
+                ResponseBody::Status(OperationStatus::InProgress) => {
+                    return Err("pane operation outcome pending");
+                }
+                ResponseBody::Status(OperationStatus::Completed(outcome)) => {
+                    pane.ack_admitted(key)?;
+                    outcome
+                }
+                ResponseBody::Read { .. } => return Err("pane operation reply invalid"),
+            };
+            if !matches!(outcome, Outcome::Applied | Outcome::Partial) {
+                return Err(match outcome {
+                    Outcome::Failed => "pane operation failed",
+                    Outcome::Unknown => "pane operation outcome unknown",
+                    Outcome::Accepted => "pane operation outcome pending",
+                    Outcome::Applied | Outcome::Partial => unreachable!(),
+                });
+            }
+            let view = match query_pane_operations_view(pane) {
+                Ok(view) => view,
+                Err(label) => {
+                    if !pane.connected() {
+                        pane.disconnect(Instant::now());
+                    }
+                    return Err(label);
+                }
+            };
+            (view, outcome)
+        };
+
+        self.layout = Some(view.layout);
+        self.pane_operations = Some(view);
+        self.pane_operations_pending = true;
+        for pane in &mut self.panes {
+            pane.needs_screen = true;
+        }
+        let mut status = None;
+        self.sync_panes(view.layout, Instant::now(), OP_DEADLINE, &mut status);
+        Ok(PaneOperationUpdate { view, outcome })
     }
 
     fn any_connected(&mut self) -> Option<&mut PaneConn> {
@@ -198,13 +386,7 @@ impl Net {
         deadline: Duration,
         status: &mut Option<&'static str>,
     ) {
-        self.panes.retain(|pane| {
-            layout
-                .panes
-                .iter()
-                .flatten()
-                .any(|entry| entry.target == pane.target)
-        });
+        retain_layout_panes(&mut self.panes, layout, |pane| pane.target);
         for entry in layout.panes.iter().flatten() {
             if self.panes.iter().any(|pane| pane.target == entry.target) {
                 continue;
@@ -305,6 +487,7 @@ impl Net {
     pub(crate) fn poll(&mut self, view: NetView, now: Instant, stop: &AtomicBool) -> NetUpdate {
         let mut update = NetUpdate {
             layout: None,
+            pane_operations: None,
             screens: Vec::with_capacity(2),
             status: None,
             server_present: self.server_endpoint_present(),
@@ -394,19 +577,24 @@ impl Net {
         let Some(pane) = self.any_connected() else {
             return;
         };
-        let reply = match pane.request(&encode_layout_query()) {
-            Ok(Reply::Response(bytes)) => decode_layout_reply(&bytes).map_err(|_| "layout invalid"),
-            Ok(Reply::Error(label)) => Err(label),
-            Ok(Reply::Snapshot(_)) => Err("layout invalid"),
+        let state = match query_layout_state(pane) {
+            Ok(state) => Ok(state),
             Err(label) => {
-                pane.disconnect(now);
+                if !pane.connected() {
+                    pane.disconnect(now);
+                }
                 Err(label)
             }
         };
-        match reply {
-            Ok(layout) => {
+        match state {
+            Ok((layout, pane_operations)) => {
                 let before = self.layout;
+                let previous_operations = self.pane_operations;
                 self.layout = Some(layout);
+                self.pane_operations = pane_operations;
+                if pane_operations.is_some() && previous_operations != pane_operations {
+                    self.pane_operations_pending = true;
+                }
                 if before != Some(layout) {
                     for pane in &mut self.panes {
                         pane.needs_screen = true;
@@ -424,6 +612,10 @@ impl Net {
                         }
                     }
                     update.layout = Some(layout);
+                }
+                if self.pane_operations_pending {
+                    update.pane_operations = pane_operations;
+                    self.pane_operations_pending = false;
                 }
                 // Also re-attaches panes whose earlier attach failed.
                 self.sync_panes(layout, now, OP_DEADLINE, &mut update.status);
@@ -535,6 +727,108 @@ impl Net {
     }
 }
 
+/// Read schema 13 only when this exact lease selected its capability. A
+/// malformed selected view is an error; it never falls back to legacy layout.
+fn query_layout_state(
+    pane: &mut PaneConn,
+) -> Result<(LayoutReply, Option<PaneOperationsView>), &'static str> {
+    if pane.pane_operations {
+        let view = query_pane_operations_view(pane)?;
+        return Ok((view.layout, Some(view)));
+    }
+    let bytes = match pane.request(&encode_layout_query())? {
+        Reply::Response(bytes) => bytes,
+        Reply::Error(label) => return Err(label),
+        Reply::Snapshot(_) => return Err("layout invalid"),
+    };
+    let layout = decode_layout_reply(&bytes).map_err(|_| "layout invalid")?;
+    Ok((layout, None))
+}
+
+fn query_pane_operations_view(pane: &mut PaneConn) -> Result<PaneOperationsView, &'static str> {
+    let query = pane_ops::encode_request(&PaneOperationRequest::ViewQuery)
+        .map_err(|_| "pane operations request invalid")?;
+    let bytes = match pane.request(&query)? {
+        Reply::Response(bytes) => bytes,
+        Reply::Error(label) => return Err(label),
+        Reply::Snapshot(_) => return Err("pane operations view invalid"),
+    };
+    let view = pane_ops::decode_view(&bytes).map_err(|_| "pane operations view invalid")?;
+    validate_pane_operations_scope(&view, pane.target)?;
+    Ok(view)
+}
+
+/// A live connection authorizes a current workspace view, even when its
+/// pinned occupant has exited and is absent from that view. Every returned
+/// target must still belong to the exact connection generation and workspace.
+fn validate_pane_operations_scope(
+    view: &PaneOperationsView,
+    querying_target: TargetRef,
+) -> Result<(), &'static str> {
+    if view.layout.panes.iter().flatten().all(|entry| {
+        entry.target.generation == querying_target.generation
+            && entry.target.workspace == querying_target.workspace
+    }) {
+        Ok(())
+    } else {
+        Err("pane operations view invalid")
+    }
+}
+
+/// Keep only connections represented by a validated authoritative layout.
+/// Kept generic so the stale-target lifecycle can be exercised without a
+/// live socket or a fabricated authenticated `PaneConn`.
+fn retain_layout_panes<T>(
+    panes: &mut Vec<T>,
+    layout: LayoutReply,
+    target: impl Fn(&T) -> TargetRef,
+) {
+    panes.retain(|pane| {
+        layout
+            .panes
+            .iter()
+            .flatten()
+            .any(|entry| entry.target == target(pane))
+    });
+}
+
+fn validate_history_checkpoint(view: &HistoryReplyView<'_>) -> Result<(), &'static str> {
+    if view.checkpoint().len() > MAX_HISTORY_REPLY_BYTES {
+        return Err("history reply invalid");
+    }
+    panelink::screen_checkpoint::decode(view.checkpoint())
+        .map(|_| ())
+        .map_err(|_| "history checkpoint invalid")
+}
+
+fn history_result(view: HistoryReplyView<'_>) -> Result<ScrollResult, &'static str> {
+    if view.alternate_screen() {
+        return Ok(ScrollResult::AlternateScreenNoMouse);
+    }
+    let checkpoint = panelink::screen_checkpoint::decode(view.checkpoint())
+        .map_err(|_| "history checkpoint invalid")?;
+    let row_wraps = row_wrap_flags(checkpoint.rows(), view.wrap_metadata_available(), |row| {
+        view.row_wrapped(row)
+    });
+    Ok(ScrollResult::History {
+        revision: view.screen_revision(),
+        offset_rows: view.offset_rows(),
+        checkpoint: view.checkpoint().to_vec(),
+        row_wraps,
+    })
+}
+
+fn row_wrap_flags(
+    rows: u16,
+    available: bool,
+    mut row_wrapped: impl FnMut(u16) -> Option<bool>,
+) -> Option<Vec<bool>> {
+    if !available {
+        return None;
+    }
+    (0..rows).map(&mut row_wrapped).collect()
+}
+
 /// How one close reply frame was classified.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum CloseReply {
@@ -585,18 +879,24 @@ fn fetch_screen(
         Reply::Error(label) => return Err(label),
         Reply::Response(_) => return Err("screen reply invalid"),
     };
-    let view = decode_screen_reply(&bytes).map_err(|_| "screen reply invalid")?;
+    let view = decode_screen_reply_with_wraps(&bytes, pane.screen_row_wraps)
+        .map_err(|_| "screen reply invalid")?;
     if view.target() != target {
         return Err("screen reply invalid");
     }
     if known_revision == Some(view.screen_revision()) {
         return Ok(None);
     }
-    panelink::screen_checkpoint::decode(view.checkpoint()).map_err(|_| "screen invalid")?;
+    let checkpoint =
+        panelink::screen_checkpoint::decode(view.checkpoint()).map_err(|_| "screen invalid")?;
+    let row_wraps = row_wrap_flags(checkpoint.rows(), view.wrap_metadata_available(), |row| {
+        view.row_wrapped(row)
+    });
     Ok(Some(ScreenUpdate {
         target,
         revision: view.screen_revision(),
         checkpoint: view.checkpoint().to_vec(),
+        row_wraps,
     }))
 }
 
@@ -830,9 +1130,191 @@ impl Probe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use panelink::pane_layout::Rect;
     use panelink::pane_layout::SplitDirection;
     use panelink::split_protocol::decode_split_request;
+    use panelink::ui_protocol::UiPane;
     use std::ffi::OsString;
+
+    fn target(generation: u64, workspace: u64, pane: u64) -> TargetRef {
+        TargetRef {
+            generation,
+            workspace,
+            pane,
+            session: pane,
+            occupant_revision: 1,
+        }
+    }
+
+    fn view_with_target(target: TargetRef) -> PaneOperationsView {
+        PaneOperationsView {
+            layout: LayoutReply {
+                revision: 9,
+                rows: 24,
+                columns: 80,
+                panes: [
+                    Some(UiPane {
+                        target,
+                        rect: Rect {
+                            x: 0,
+                            y: 0,
+                            rows: 24,
+                            columns: 80,
+                        },
+                        pending_confirmed: None,
+                    }),
+                    None,
+                    None,
+                    None,
+                ],
+                divider: None,
+                dividers: [None; panelink::pane_layout::MAX_PANES - 1],
+            },
+            zoomed_target: None,
+            confirmed_sizes: [Some((22, 78)), None, None, None],
+        }
+    }
+
+    #[test]
+    fn refresh_accepts_survivor_view_over_exited_pane_socket_and_prunes_it() {
+        use panelink::handshake_protocol::{Welcome, CAPABILITY_PANE_OPERATIONS, CAPABILITY_READ};
+        use panelink::protocol_wire::{Frame, MessageKind};
+        use panelink::transport::AuthenticatedStream;
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::net::UnixStream;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        struct PrivateRoot(PathBuf);
+        impl Drop for PrivateRoot {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = PrivateRoot(PathBuf::from(format!(
+            "/private/tmp/panelink-refresh-{}-{serial}",
+            std::process::id()
+        )));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root.0)
+            .unwrap();
+        let exited = target(7, 3, 1);
+        let survivor = target(7, 3, 2);
+        let view = view_with_target(survivor);
+        let now = Instant::now();
+        let mut panes = Vec::new();
+        let mut peers = Vec::new();
+        for (index, target) in [exited, survivor].into_iter().enumerate() {
+            let (client, server) = UnixStream::pair().unwrap();
+            let boot = Bootstrap {
+                stream: AuthenticatedStream::new(client).unwrap(),
+                welcome: Welcome {
+                    nonce: 1,
+                    generation: 7,
+                    lease: 10 + index as u64,
+                    selected_capabilities: CAPABILITY_READ | CAPABILITY_PANE_OPERATIONS,
+                    ttl_seconds: 1800,
+                },
+                used: 0,
+                started: now,
+            };
+            panes.push(
+                PaneConn::attach(
+                    &root.0,
+                    &root.0,
+                    target,
+                    Some(boot),
+                    now,
+                    Duration::from_secs(2),
+                )
+                .unwrap(),
+            );
+            peers.push(AuthenticatedStream::new(server).unwrap());
+        }
+        let mut net = Net {
+            directory: root.0.clone(),
+            context_dir: root.0.clone(),
+            panes,
+            next_layout: now,
+            resize_sent: None,
+            endpoint_identity: None,
+            layout: Some(view_with_target(exited).layout),
+            pane_operations: None,
+            pane_operations_pending: false,
+            screen_revisions: [(None, 0); panelink::pane_layout::MAX_PANES],
+        };
+        std::thread::scope(|scope| {
+            let server = scope.spawn(move || {
+                for mut peer in peers {
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    let query = peer.read_frame(deadline).unwrap();
+                    assert_eq!(query.kind(), MessageKind::Request);
+                    assert_eq!(
+                        pane_ops::decode_request(query.payload()).unwrap(),
+                        PaneOperationRequest::ViewQuery
+                    );
+                    let bytes = pane_ops::encode_view(&view).unwrap();
+                    peer.write_frame(
+                        &Frame::new(MessageKind::Response, query.request_id(), &bytes).unwrap(),
+                        deadline,
+                    )
+                    .unwrap();
+                }
+            });
+            for _ in 0..2 {
+                let mut update = NetUpdate {
+                    layout: None,
+                    pane_operations: None,
+                    screens: Vec::new(),
+                    status: None,
+                    server_present: true,
+                };
+                net.refresh_layout(Instant::now(), &mut update);
+                assert_eq!(update.status, None);
+                assert_eq!(net.layout, Some(view.layout));
+                assert_eq!(net.panes.len(), 1);
+                assert_eq!(net.panes[0].target, survivor);
+            }
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn selected_operations_view_can_retire_its_exited_pinned_target() {
+        let exited = target(7, 3, 1);
+        let survivor = target(7, 3, 2);
+        let view = view_with_target(survivor);
+        let encoded = pane_ops::encode_view(&view).unwrap();
+        let decoded = pane_ops::decode_view(&encoded).unwrap();
+
+        // A current owner view is scoped to the querying connection's exact
+        // server generation and workspace, not to its now-exited occupant.
+        assert_eq!(validate_pane_operations_scope(&decoded, exited), Ok(()));
+
+        // refresh_layout's normal sync step then drops the stale connection
+        // and retains the survivor connection represented in the view.
+        let mut connected = vec![exited, survivor];
+        retain_layout_panes(&mut connected, decoded.layout, |pane| *pane);
+        assert_eq!(connected, vec![survivor]);
+    }
+
+    #[test]
+    fn selected_operations_view_rejects_other_workspace_or_generation() {
+        let querying = target(7, 3, 1);
+
+        assert_eq!(
+            validate_pane_operations_scope(&view_with_target(target(7, 4, 2)), querying),
+            Err("pane operations view invalid")
+        );
+        assert_eq!(
+            validate_pane_operations_scope(&view_with_target(target(8, 3, 2)), querying),
+            Err("pane operations view invalid")
+        );
+    }
 
     #[test]
     fn split_request_carries_captured_target_revision_direction_and_planned_size() {

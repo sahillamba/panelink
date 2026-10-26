@@ -189,8 +189,8 @@ fn split_payload(
     let environment = context.environment();
     let launch = LaunchRequest {
         key: split_key,
-        rows: ROOT_ROWS,
-        columns: PANE_COLUMNS,
+        rows: ROOT_ROWS - 2,
+        columns: PANE_COLUMNS - 2,
         requested_executable: shell.executable,
         requested_working_directory: &context.cwd,
         client_working_directory: &context.cwd,
@@ -552,7 +552,7 @@ impl Harness {
     }
 
     fn assert_size(&mut self, client: &mut Client, pid: i32, rows: u16, columns: u16) {
-        let expected = format!("P3SP-SIZE-{rows}x{columns}");
+        let expected = format!("P3SP-SIZE-{}x{}", rows - 2, columns - 2);
         submit(&mut self.owner, client, "SIZE");
         let screen = wait_for(&mut self.owner, client, &expected, &[]);
         assert_eq!(extract_pid(&screen, &expected), Some(pid));

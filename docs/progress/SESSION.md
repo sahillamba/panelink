@@ -1,5 +1,1455 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Verified pane-operation integration — 2026-10-26 (current)
+
+This section supersedes all active-owner and pending-run lists below. No
+agents or verification commands remain active. Bounded pane-location swap,
+ancestor-divider preview/absolute commit and server-authoritative zoom/unzoom
+are implemented and pass automated integration.
+
+Full locked/offline serial Rust: **1399 passed, 0 failed, 15 ignored**,75 result
+groups at `/private/tmp/panelink-p5-pane-full-r1.log`. Strict Clippy then found
+lint issues and large worker result variants; parent simplified expressions
+and boxed those payloads with existing bounded byte reservations. Final client
+**123/0** and outer-terminal **3/0** pass after that cleanup, at
+`panelink-p5-pane-client-final.log` and `panelink-p5-pane-ui-pty-final.log`.
+The separate actual4PTY protocol continuity fixture passes1/0 at
+`panelink-p5-pane-pty-r7.log`. Focused reruns do not invent a second full-suite
+pass; the integration note preserves earlier compiler/test/Clippy failures.
+
+All seven supporting checks pass: decoder39/0, component source fingerprints,
+rootfmt, strict all-target Clippy, isolated build, Python232run/231pass/1opt-in
+skip, and final docs374/0. Logs `/private/tmp/panelink-p5-pane-` with
+`decoder-final`, `fingerprints-final`, `fmt-final`, `clippy-r2`, `build-final`,
+`python-final`, `docs-final` suffixes. Integration evidence:
+P5-PANE-OPERATIONS-INTEGRATION-2026-10-26.md.
+
+Independent review found and the parent verified the pane-exit refresh fix
+through actual socket-pair Net::refresh_layout requests. Other parent repairs
+include last-pane zoom cleanup, effective resize retry, pending-screen
+composition, fixture focus/pane-local geometry and same-lease idle resume.
+No terminal input or uncertain mutation was replayed.
+
+Phase3 human four-pane Apple Terminal and Phase5 native host/real clipboard,
+physical reboot/layout recovery and representative workload gates stay open.
+Scoped pane-operation checkbox is complete; the full phases are not. No
+phase-completion commit or push. Active target/debug/panelink remains the
+previous binary; no installed runtime activation, clipboard operation or
+physical reboot occurred. Preserve all dirty source and unrelated .DS_Store.
+
+## Pane operations verification in progress — 2026-10-26 (current)
+
+All workers released source/tests. Outer terminal target passes3/0 at
+`/private/tmp/panelink-p5-pane-ui-pty-r2.log`; parent removed two unused fixture
+bindings afterward. This includes tab navigation, clipboard-free copy and
+actual pane keyboard controls. Client123/0 includes a parent socket-pair
+full refresh-path regression after exited-query-target removal. Actual4PTY
+protocol fixture1/0 remains separate evidence.
+
+Full source-frozen serial Rust run active:
+`/private/tmp/panelink-p5-pane-full-r1.log`. No full result claimed yet.
+Supporting checks passed: Python232run/231pass/1opt-in skip, rootfmt and
+component fingerprints. Remaining decoder/strictClippy/build/finaldocs run
+serially after Cargo completes. Final integration note:
+P5-PANE-OPERATIONS-INTEGRATION-2026-10-26.md.
+
+Active target/debug/panelink SHA remains
+3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e.
+Isolated /private/tmp verification binary SHA:
+4b6965f17efa08f3f557eedd92fd1c2913f9e549ef92b3e193911513a65e4105.
+No current active agents. No clipboard, physical reboot, activation, commit or
+push. Phases3/5 remain open for distinct host/clipboard/reboot/workload gates.
+
+## Pane client acceptance and exit-refresh correction — 2026-10-26 (current)
+
+Parent focused client120/0 at `/private/tmp/panelink-p5-pane-client-ui-r3.log`.
+Fixed borrowed KeyEvent/fixture borrow compiler issues and a pending-resize
+render guard that supplied a wrong-sized snapshot to compositor; regression
+covers divider preview and pending zoom with old actual snapshots.
+Actual4PTY protocol acceptance passes1/0 in2.84s at
+`/private/tmp/panelink-p5-pane-pty-r7.log`. Confirms stable PIDs/state/fullrefs,
+stty dimensions, hidden output, root resize, unzoom, dedup/conflict and
+unnegotiated denial. Earlier marker-width, key-count, idle socket and helper
+compile failures remain recorded. Same-lease resume before final idle-client
+checks preserves sequences without replay. Not a native/outer UI pass.
+
+Independent client review found an exit-refresh defect: view validation
+required the querying target to remain in the layout, rejecting a legitimate
+workspace view after that pane exits and blocking sync away of the stale
+connection. Current exclusive Luna High/default owners:
+- `resume-20261026-pane-client-transport-r2` completed and parent extended
+  with actual socket-pair Net::refresh_layout regression; client123/0.
+  Only net.rs and transport note;
+  generation/workspace scope validation and network refresh regression.
+- `resume-20261026-pane-ui-pty-r2` active after r1 parent result2pass/1fail
+  at premature split-focus/whole-row marker assumptions. R2 corrects
+  pane-local parsed checks, padded sizes, axis arrows and true-divider detection.
+  Only tests/p5_workspace_tabs.rs and new
+  P5-PANE-UI-PTY note; real outer-terminal keyboard controls acceptance.
+- `resume-20261026-pane-docs-r1` completed and parent reviewed; only README/SPEC/DISCOVERY; documented
+  prototype controls and distinct proof/restore/manual gates. Parent clarified
+  that1356 full-tree copy evidence predates pane operations; docs372/0.
+
+No worker Cargo/build/tests. Parent full serial Cargo/supporting checks after
+all source/test owners release; historical1356 full-tree baseline predates
+pane changes. Source offer64 enabled only on multi-session path after reviewed
+owner/runtime library871/0/4ignored; no installed binary activation, real
+clipboard, reboot, commit or push.
+
+## Live pane integration and client UI — 2026-10-26 (current)
+
+Owner runtime_helper12/0 and full library871/0/4ignored passed after parent
+corrections; independent Luna source review found no material owner/runtime
+issues. Its gaps were explicit zoom split/close regression cases and live
+unnegotiated refusal. Client transport released; parent exported module and
+added temporary host result plumbing. Focused client109/0 passes with dead-code
+warnings for controls not yet wired. No strict Clippy pass on this slice yet.
+
+Parent enabled cap64 in multi-session offer and shared grant-builder mask
+only; single-session offer stays unchanged. Actual4PTY r2 stopped at missing
+grant-mask selection (fixed); r3 negotiated successfully but timed out at a
+later socket exchange. Backtrace recheck located the oversized post-divider state marker. Parent
+shortened markers to fit narrowed panes. r4 progressed past swap/divider then
+failed encoding the long hidden-output producer (InvalidKeyCount). Parent
+helper now chunks MAX_KEYS with fresh keys per chunk and final Enter only;
+rerun pending UI source release. Logs at
+`/private/tmp/panelink-p5-pane-pty-{backtrace-r3,r4}.log`.
+Logs `panelink-p5-pane-pty-r{2,3}.log` preserve failures; no live pass claimed.
+
+Current exclusive Luna High/default owner `resume-20261026-pane-client-ui-r1`:
+state.rs/state_tests.rs/keys.rs/host.rs/worker.rs and new UI note only. Implements
+captured swap chooser, local divider preview/absolute commit, authoritative
+zoom display plus geometry/input mapping, exact result matching and tests.
+No worker Cargo/build/tests. Net/conn/protocol/server/PTY files released.
+Parent continues fixture diagnosis in separate files; serialized Cargo resumes
+after UI release. No activation, clipboard, reboot, commit or push.
+
+## Pane owner correction and client transport — 2026-10-26 (current)
+
+This section supersedes active owner lists below. No current full-tree pass
+is claimed beyond the historical keyboard-copy checkpoint1356/0/15ignored.
+Geometry27/0, wire6/0 and actual pathname startup2/0 passed separately.
+Parent reviewed completed owner/runtime/PTY source. Initial combined build
+failed at nonexhaustive OperationClass runtime match; parent now matches exact
+schema13 Request variants. `--lib pane_` passed58/0, but broader
+runtime_helper_tests passed9/failed2: failed-resize retry used a single-pane
+no-size-change fixture, and unzoom unnecessarily resized already-correct PTYs.
+Logs `/private/tmp/panelink-p5-pane-owner-r{1,2}.log` and
+`panelink-p5-pane-owner-all-r1.log`. Both failures remain open pending fixes.
+
+Parent r2 run9pass/3fail exposed the outer collapse-loop early return on
+last-pane exit plus fixture sequencing and equal-size assumptions. Parent
+fixed these directly. All runtime_helper_tests now12/0 at
+`/private/tmp/panelink-p5-pane-owner-all-r3.log`; full library passed871/0/4ignored at
+`/private/tmp/panelink-p5-pane-lib-r1.log` (17.37s). No live offer yet.
+Independent read-only review `resume-20261026-pane-owner-review-r1` active.
+
+Current T3 GPT-6-Luna High/default owners, all no Cargo/build/tests:
+- `resume-20261026-pane-owner-r2` completed, parent fixes above: server/multi_session.rs, pane_layout.rs,
+  tests/p5_pane_operations.rs and owner note; effective pending versus
+  underlying observation, no-op resize, exit cleanup and boundary coverage.
+- `resume-20261026-pane-pty-r2`: only new real-PTY fixture and its note;
+  correct pinned screen/split scope, PID readiness, move ownership,
+  pending metadata comparisons and hidden-output synchronization.
+- `resume-20261026-pane-client-transport-r1`: conn/net/worker/worker tests,
+  new client pane_operations.rs and transport note; bounded async transport,
+  explicit authoritative view and all-target polling. Parent owns module
+  export, host result matching and subsequent App/keys/render integration.
+
+Capability64 is still not offered by production owner connect. Parent enables
+only after owner/runtime focused checks and then runs real4PTY acceptance.
+No push, phase completion, activation, clipboard operation or reboot.
+
+## Verified tabs and keyboard copy; remaining pane operations — 2026-10-25 (current)
+
+This section supersedes status/owner lists below. Current source-frozen tree
+passes **1356 Rust/0 failed/15 ignored**, 71 result groups:
+`/private/tmp/panelink-p5-copy-full-final.log`. Focused client108/0,
+compositor25/0 and clipboard-free actual PTY2/0 also pass. All seven supporting
+checks pass: decoder39, fingerprints, fmt, strict all-target Clippy, isolated
+build, Python232run/1opt-in skip, docs363/0 after final evidence updates.
+Logs `/private/tmp/panelink-p5-copy-{decoder,fingerprints,fmt,clippy,build,python}-final.log`
+and `panelink-p5-copy-docs-r1.log`. Final documentation recheck: 363 files, zero findings; the plan date had trailing whitespace, now corrected.
+
+No real clipboard operation occurred. The first PTY fixture stopped at its
+initial caret wait; corrected input uses only no-space/no-y redirection and
+unanchored Enter while copy mode owns input. Rendered mode-exit barriers
+precede all normal shell commands, including after Escape. See the copy
+result and PTY evidence for prior failed attempts and parent corrections.
+
+Remaining audit confirms accepted M2 pane move, interactive divider resize and
+zoom are still required outcomes; existing split/focus/close/viewport resize
+must not be relabeled as those features. Plan-r1 completed. Current exclusive
+T3 GPT-6-Luna High/default owners:
+- `resume-20261025-pane-geometry-r1` completed; parent focused geometry27/0
+  after fixing assertion Debug requirements and split-menu exhaustive mapping.
+  Logs `/private/tmp/panelink-p5-pane-geometry-r{1,2}.log`; only `src/pane_layout.rs` and new
+  `P5-PANE-GEOMETRY-2026-10-25.md`; pure exact-target swap and absolute
+  revision-bound ancestor-divider adjustment. No zoom or snapshot shape change.
+- `resume-20261025-pane-contract-audit-r1`: only new
+  `P5-PANE-OPERATIONS-CONTRACT-2026-10-25.md`; all source read-only, exact
+  protocol/root authority/zoom representation review before server/client work.
+
+- `resume-20261025-history-startup-acceptance-r1` completed; parent actual
+  pathname startup2/0 after fixing test Metadata permission accessor.
+  Logs `/private/tmp/panelink-p5-history-startup-r{1,2}.log`; only new
+  `tests/p5_history_cleanup_startup.rs` and
+  `P5-HISTORY-STARTUP-ACCEPTANCE-2026-10-25.md`; actual private pathname
+  startup cleanup/capture fixture, existing source read-only.
+
+Contract audit completed and parent reviewed it. Parent refined wire: new
+schema13 module, existing status responses plus view query, explicit confirmed
+PTY sizes, legacy pending-size meaning unchanged. See contract's parent
+refinement, which supersedes its initial reply/size proposal.
+- `resume-20261025-pane-wire-r1` completed; parent exported module, corrected
+  actual-size content upper bounds and verified wire6/0. Only handshake, new pane-operations codec,
+  new wire integration test and evidence; capability64 vocabulary only until
+  runtime implements it. Parent owns lib export and dispatch.
+
+Current owner `resume-20261025-pane-owner-r1` exclusively edits
+server/multi_session.rs, pane_layout.rs, new tests/p5_pane_operations.rs and
+P5-PANE-OPERATIONS-OWNER-2026-10-25.md. Implements exact-ledger owner mutations,
+zoom revision/effective PTY resizing and view; runtime capability offer remains
+disabled until parent dispatch integration.
+Runtime owner `resume-20261025-pane-runtime-r1` completed; parent reviewed
+strict classify and repeated capability gating; unit tests await owner release. It exclusively edited
+multi_runtime.rs and a new runtime note: schema13 classifier/dispatch and
+response validation, capability-gated through the same serialized worker.
+It consumes the fixed owner APIs; parent enables the server offer only after
+both owners release and integration checks pass. No client source owner yet.
+PTY acceptance owner `resume-20261025-pane-pty-r1` exclusively creates
+`tests/p5_pane_operations_pty.rs` and its evidence note. Actual 4PTY
+identity/size/hidden-output continuity and unnegotiated refusal; no existing
+source edits. Requires integrated capability offer before parent execution.
+
+No worker Cargo/build/tests; parent serial verification after source release.
+The existing tree already retains proportional first/total cell spans, so
+reuse that behavior rather than assuming resize recreates equal halves.
+Graph search returned Transport closed; direct-source fallback used.
+Audit also recommends a real pathname
+startup/temp-cleanup fixture to replace the historical listener blocker.
+
+Phase3/5 remain open for those M2 outcomes and separate human Apple Terminal,
+real clipboard, physical reboot and representative workload gates. No phase
+completion commit or push. Active binary SHA remains
+`3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e`;
+isolated verified copy checkpoint binary SHA is
+`a63fba9afb409fc9b656ba1398b0e4c5a9adbc694b033463eeb7c0799f311817`.
+Preserve existing dirty work and unrelated .DS_Store files.
+
+## Verified workspace-tab checkpoint; keyboard copy active — 2026-10-25 (current)
+
+This section supersedes active-owner/status lists below. Workspace-tab
+integration is independently verified: full locked/offline serial Rust
+**1344passed/0failed/15ignored**, 71 result groups, at
+`/private/tmp/panelink-p5-tabs-full-final.log`. Complete binary target190/0
+and immediate two-project/tab private-PTY switching passes3/3 without the
+temporary shell-response probe. Registry Locked reads now wait boundedly on
+the route worker instead of reporting missing registration; corrupt, unsafe
+or missing data still fails closed. Temporary trace hooks are removed.
+
+Supporting checks pass: decoder39/0, fingerprints match, root fmt, strict
+all-target Clippy, isolated build, Python232run/231pass/1opt-in skip and
+Markdown359/0. Logs `/private/tmp/panelink-p5-tabs-{decoder,fingerprints,python}.log`
+and `panelink-p5-tabs-{fmt,clippy,build,docs}-final.log`. Earlier history receipt
+timeout, compile failures, immediate-switch failures and probe-assisted passes
+remain recorded in the tab integration/contention notes; none were waived.
+
+Current exclusive T3 GPT-6-Luna High/default owner:
+`resume-20261025-keyboard-copy-r2` completed ownership of keys.rs, state.rs, selection.rs,
+state_tests.rs, terminal/compose.rs and new keyboard-copy result note only.
+Implement the reviewed bounded visible-view keyboard-copy plan; no worker
+Cargo, dependencies, real clipboard, commits or activation. Parent owns shared
+docs/integration and serial verification after release. The1344/0 tab
+checkpoint does not cover these in-flight keyboard-copy edits.
+
+R1 source released; parent client compile found a Rect/Option mismatch and
+borrowed temporary checkpoint buffers in new tests. Focused compositor run
+24pass/1fail at wide-caret continuation style. Logs
+`/private/tmp/panelink-p5-copy-{client,compose}-r1.log`. R2 also addresses
+copy-mode recovery probing, status overlays hiding the caret and protocol
+repeat/release events leaking after copy exit. No copy-mode pass yet.
+
+Parent focused copy-mode checks now **108 client/0 failed** and
+**25 compositor/0 failed**, `/private/tmp/panelink-p5-copy-client-r5.log` and
+`/private/tmp/panelink-p5-copy-compose-r2.log`. Parent added the missing event
+kind import, removed an unused decode, corrected fixture byte order and
+anchor-toggle/key-flush setup, and checked the header's actual existing style.
+The repeat latch now clears on an explicit new Press, allowing a new gesture.
+Current owners: `resume-20261025-copy-pty-r2` owns only
+tests/p5_workspace_tabs.rs and new keyboard-copy PTY note (no clipboard write);
+`resume-20261025-copy-docs-r1` completed README/SPEC/DISCOVERY; parent reviewed
+the documented keys, local-input scope, repeat limitation and open host gates. Parent will run
+serial integration/full/supporting checks after both release their files.
+
+PTY r1 parent run failed before its input phase at an incorrect hardware
+cursor-based caret wait; workspace navigation passed. Parent additionally
+found the proposed touch command unsafe for this test because spaces/y are
+copy-mode controls. That phase was never reached, so no clipboard operation
+occurred. R2 must scan inverse pane cells, use a no-space/no-y redirection and
+wait for rendered mode exit before sending normal shell text (including after
+lone Escape). Log `/private/tmp/panelink-p5-copy-pty-r1.log`.
+
+Active target/debug/panelink SHA remains
+`3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e`.
+Isolated verified tab binary SHA:
+`0be9185913f7647a9c36dfa6cc53a9c1d7bf62e64f59189d0deef2c1503cf3c0`.
+Git remains based on054ac3b; no commit/push. Preserve unrelated .DS_Store files.
+Phase3/Phase5 remain open: human Apple Terminal/four-pane/clipboard proof,
+physical reboot and representative workload gates are separate.
+
+## Verified selection and workspace CLI batch — 2026-10-25 (current)
+
+User resumed after freeing storage. The scoped registry/routing and selection
+batch is implemented; Phase3/Phase5 remain open. Read
+[P5-RESUMED-INTEGRATION-2026-10-25.md](P5-RESUMED-INTEGRATION-2026-10-25.md)
+for scope, prior failures, review corrections and evidence classes.
+
+Parent full locked/offline serial Rust run: **1304passed/0failed/15ignored**,
+70 result groups, `/private/tmp/panelink-p5-parent-full-final.log`. After
+style-only lint fixes, client74/0, live wrap transport1/0 and focused host9/0
+plus routing6/0 pass. All seven supporting checks pass: decoder39, fingerprints,
+repository fmt, strict all-target Clippy, isolated build, Python232run/231pass/
+1opt-in skip, Markdown348/0. Logs include `panelink-p5-parent-focused-final.log`
+and `panelink-p5-parent-supporting-pass.log`. Earlier six-of-seven verifier
+runs remain preserved; no failure was counted as a pass.
+No real clipboard, physical reboot or user configuration change was performed.
+
+All implementation/review owners from the previous batch are completed.
+The header/model foundation owners have also released their files. Parent
+focused runs now pass **24 compositor/0 failed** and **8 model/0 failed**:
+`/private/tmp/panelink-p5-header-parent-r3.log` and
+`/private/tmp/panelink-p5-tab-view-parent-r3.log`. The r2 run exposed swapped
+row/column coordinates in two modal fixtures, an allegedly empty project
+that still had a tab, and a Unicode fixture exceeding the registry name
+limit. Parent corrected those test setups; no runtime behavior changed.
+The final switch contract r2 is reviewed: no metadata IO during installation,
+nonjoining cancellation/cleanup, and asynchronous selection save after install.
+
+Current exclusive Luna High owners (no worker Cargo):
+
+- `resume-20261025-tab-registry-contention-r1` completed: default_open.rs and
+  routes.rs plus new contention note. Parent traced the immediate return
+  failure to route validation reporting missing registration while the
+  selection metadata worker can hold the exclusive registry lock. Preserve
+  StoreError::Locked and retry only that read failure with a bounded off-host
+  wait; corruption/unsafe/missing data must still fail closed. Temporary
+  navigation/error tracing has been removed from source and fixture.
+
+Post-contention parent results: complete binary target **190/0** and immediate
+live workspace switching **3 consecutive passes**, without the shell-response
+probe. Logs `panelink-p5-tabs-binary-final-r3.log` and
+`panelink-p5-tabs-contention-live-{1,2,3}.log` under `/private/tmp`. Parent
+corrected a callback result mismatch and test generic inference errors caught
+by compilation; no source-only worker result counted as a pass. Current full
+serial run: `/private/tmp/panelink-p5-tabs-full-final.log` (in progress).
+
+Full rerun r2 passed **1342/0/15ignored**, 71 result groups, including the
+probe-assisted live fixture. First r1 library timeout remains recorded.
+Removing the probe reproduces the live failure (acceptance-r4 and trace repeat
+2), so that pass is not immediate-readiness proof. The fixture now requires
+alternate-screen mode and no longer has the shell-response probe. Parent
+will rerun serial verification after the contention owner releases files.
+
+Parent current results: client **98/0** (`panelink-p5-tabs-client-r4.log`),
+live workspace fixture **1/0** with the one-time destination shell response
+probe (`panelink-p5-tabs-acceptance-r3.log`), strict all-target Clippy passes
+(`panelink-p5-tabs-clippy-r2.log`). First Clippy found four style issues;
+parent corrected those without behavior changes. Python232run/1skip and
+component fingerprints pass. Current full run r1 stopped at a preexisting
+history receipt gate timeout (853pass/1fail/4ignored); isolated recheck passes
+without source changes and full r2 is running. Preserve both logs. First
+docs check ran during the docs owner edit and found its not-yet-created link
+target; rerun after that owner releases. No combined final pass yet.
+
+- `resume-20261025-tab-docs-r1` completed: README/SPEC/DISCOVERY and new tab
+  integration note only; describe opt-in behavior and honest evidence limits.
+- `resume-20261025-copy-mode-plan-r1` completed: new keyboard-copy plan only;
+  read-only source design for the next bounded Phase5 selection slice.
+
+- `resume-20261025-tab-live-debug-r1` completed: host/state/keys/state_tests and
+  p5_workspace_tabs.rs, plus new debug note. Real acceptance failed twice at
+  post-picker Tools-to-Editors return (fixture line768). Logs
+  `/private/tmp/panelink-p5-tabs-acceptance-r{1,2}.log`; r2 has backtrace. No
+  source cause established. A one-time Tools shell response marker now gates
+  the next shortcut, giving the next parent run a more precise failure point.
+- `resume-20261025-tab-metadata-r3` completed: routes.rs and controller note only.
+  Fix potential lost catalog wake with rendezvous channel, admit bounded
+  save/refresh jobs reliably, and add injected stalled-metadata tests.
+
+Previous owners below have released files. Parent client suite now **93/0**,
+`/private/tmp/panelink-p5-tabs-client-r2.log`. First run91pass/2fail: transition
+test string mismatch and snapshot fixture passed inner instead of outer size.
+Parent corrected those and grouped decoder with compositor/output to retain
+the seven-argument event loop. The live acceptance failures remain unresolved.
+
+- `resume-20261025-tab-state-r2` completed: state.rs, state_tests.rs, keys.rs and its
+  state note. R1 source complete; parent review requests checked row-zero
+  subtraction, parsed-cell rendering tests, viewport-aware picker scrolling,
+  prefix cleanup and freeze-safe catalog refresh/recovery/flush seams. Parent
+  confirms the added update_workspace_catalog/take_catalog_refresh_request
+  APIs and corrected two new test setups (missing pane layout and help still
+  open before an intended picker action). Serial validation remains pending.
+- `resume-20261025-tab-controller-r2` completed: default_open.rs, host.rs, new routes.rs
+  and controller note. R1 complete; parent requests freeze-aware resize polling,
+  explicit busy admission across running work, cancellation preservation,
+  grouped host route state and deterministic stalled-save/cleanup acceptance.
+  Parent owns ui_client.rs exports and the nonblocking worker detach helper.
+- `resume-20261025-tab-acceptance-r2` completed: new p5_workspace_tabs.rs and acceptance
+  note only. First source is complete; parent review found tab-name-only waits
+  could return before switching because both names remain in the strip. R2
+  must observe selected vt100 cells, correct a temporary-string borrow and
+  align picker evidence/cleanup. Worker reports these corrected; parent
+  compile/runtime review remains pending.
+
+Parent added the workspace-aware ui_client module wrapper and routes export,
+plus WorkerHandle::try_detach_nonblocking using try_lock and try_send only.
+The new worker regression holds the accounting lock and fills its budget to
+verify detach admission returns locally without waiting. Scoped formatting
+and whitespace checks pass; no Cargo run while source owners are active.
+
+The following foundation assignments are historical and completed:
+Parent reviewed the completed `P5-WORKSPACE-TAB-UI-PLAN-2026-10-25.md` and
+started these exclusive Luna High tasks (shared checkout, no worker Cargo):
+
+- `resume-20261025-header-compositor-r2`: only `terminal/compose.rs` and new
+  header result note. Add fixed bounded `HeaderCell` and optional persistent
+  header render API, with old APIs unchanged and commit-after-write semantics.
+- `resume-20261025-tab-view-r2`: only new `src/workspace_tabs.rs` plus view
+  note. Pure typed route/header geometry/hit/navigation model, no IO/TargetRef.
+  Parent added its `lib.rs` export. It consumes the shared HeaderCell API.
+- Switch contract r1 completed, code read-only. Parent review remains before
+  controller implementation; r2 subsequently resolved nonblocking selection
+  persistence and cancellation/adoption semantics.
+
+First header run22pass/1fail: raw-contiguous Project assertion mismatched its
+per-cell renderer. Parent also found full-clear header loss and removal/modal
+layering issues; r2 corrects them with actual-screen assertions. Model first
+compile stopped at shadowed layout function in tests; r2 also corrects a
+Unicode width disagreement between scalar-derived Glyph and HeaderCell after
+variation selectors. These initial failures preceded the passing r3 component
+runs above. Logs are
+`/private/tmp/panelink-p5-{header,tab-view}-parent.log`.
+
+Review integration and execute focused checks only after owners release files;
+the1304/0 baseline above does not cover in-flight UI integration. Parent
+refinement: prepare the destination off the event loop while the old route
+stays visible with child input frozen; on preparation failure it remains the
+actual active route and reports failure (it was never retired). On success,
+restore/cleanup old client state and adopt a fresh destination attachment;
+never retarget unsent or uncertain input. No in-client tabs are enabled yet.
+The graph connector again returned Transport closed; direct reads are the
+documented fallback. No new top-level thread, activation or checkout.
+
+Git remains based on `054ac3b` with the prior and new dirty work retained;
+no phase-completion commit or push. The active `target/debug/panelink` SHA
+remains `3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e`.
+The isolated checked binary SHA is
+`d57ef321a8bac05019732b3a793ce92ac3a9429fd50d86652b3fc338dac6ca9f`.
+Preserve unrelated newly observed untracked `vendor/.DS_Store` files.
+
+Remaining gates: in-client workspace tab UI/switching, keyboard copy mode,
+human Apple Terminal four-pane/drag/clipboard evidence, physical reboot and
+representative workload acceptance. Continue independent implementation with
+Luna; do not count private-PTY/fake-clipboard/restart tests as those gates.
+
+## Storage recovery and orchestration resumed — 2026-10-25 (current)
+
+User freed storage and authorized continuation. This section supersedes the
+active-owner list below; older assignments are historical. The first parent
+build failed with ENOSPC in a new temporary target. The three T3 Luna r1
+tasks ended with generic `Provider turn failed`; none produced a result or
+accepted verification. No source rollback was performed.
+
+The r2 tasks below completed. Current live T3 GPT-6-Luna High owners:
+
+- `resume-20261025-selection-r3`: same client files as r2; correct parent
+  review findings: restore before clipboard cleanup (including unwind),
+  preserve alternate-screen selection on ordinary revisions, verify import
+  and correct binary-target evidence commands.
+  Completed; parent corrected a remaining callback mutable-borrow conflict,
+  restored the worker-test helper import and removed an unused assignment.
+  Fresh binary client74/0; private-PTY four-pane2/0, scroll2/0 and attach5/0
+  (including70 attach/detach cycles). Logs `panelink-p5-parent-client-r4.log`
+  and `panelink-p5-parent-host.log` under `/private/tmp`.
+- `resume-20261025-routing-fix-r2`: main/default_open/workspace_cli and its
+  result note only; fix first compile errors, read-only list root validation,
+  canonical macOS alias handling and ambiguous stop/remove state guards.
+  Completed; parent additionally corrected the missing-namespace remove/open
+  race by acquiring a materialized per-route lifecycle lock before metadata
+  removal. Server/context symlink validation is also enforced. See result note.
+- `resume-20261025-routing-acceptance-r2`: routing integration test plus new
+  acceptance note only; actual two-server route/stop isolation and legacy
+  preservation, bounded fixture cleanup. No production edits or Cargo.
+
+The first routing implementation completed but its parent compile failed at
+Result inference, nonexistent EndpointState::Missing and route_exists tail
+iterator lifetime; see `/private/tmp/panelink-p5-parent-components-r3.log`.
+That attempt also caught an in-progress host closure-borrow error belonging
+to the active selection r3 owner; no integrated acceptance pass is claimed.
+
+Completed r2 ownership, now released:
+
+- `selection`: client state/tests/host/selection/clipboard/module only; finish
+  frozen drag and attached-only asynchronous clipboard lifecycle.
+- `store`: workspace index/model/codec/store and their tests/evidence only;
+  review atomic persistence, stable identities and additive migration.
+- `routing-design`: new routing-plan note only; code read-only.
+
+Parent exclusively runs Cargo serially using the existing
+`/private/tmp/panelink-p4-bridge-store-target` cache and
+`CARGO_HOME=/private/tmp/panelink-p4-cargo-home`. Workers must not build new
+target trees. Free space recovered from1.7GiB to13GiB during restart.
+Fresh compositor unit checks:19 passed/0 failed. Component integration compile
+found the preexisting selection `mouse_button` import and mutable-borrow
+errors in `state.rs`; no component acceptance is claimed from that attempt.
+Logs: `/private/tmp/panelink-p5-parent-{compose,components}.log`.
+Initial parent store unit check failed at the post-rename fault assertion:
+`self.fault.take()` at the pre-rename check consumes an `AfterRename` fault
+before its intended injection point. Store owner must preserve it until the
+matching point. Actual log: `/private/tmp/panelink-p5-parent-store-unit.log`.
+Parent fixed the fault consumption after the store worker released its files.
+Fresh store unit checks now2pass/0fail, including symlink/hardlink temporary
+substitution refusals; log `/private/tmp/panelink-p5-parent-store-unit-r2.log`.
+UI reply codec unit checks freshly pass21/0.
+Additional parent checks: actual live wrap transport1/0, new negotiation and
+exact-target reply-guard regression1/0, Python232run/231pass/1opt-in skip,
+component fingerprints pass; Markdown344/0 before new routing note.
+Client binary target freshly73pass/0fail (r2 source, before r3 changes), log
+`/private/tmp/panelink-p5-parent-client.log`. Component retry r2 stopped at the missing
+`mouse_button` import while the client owner was editing; the borrow error
+was already corrected. Do not rerun integrated Cargo until owners release
+their files. Source changes are uncommitted; no phase-completion claim.
+Full library-only parent serial run:841passed/0failed/4ignored in18.79s,
+`/private/tmp/panelink-p5-parent-lib.log`. This excludes the binary and
+integration targets; source-frozen combined verification still required.
+The refreshed code graph later returned `Transport closed`; source-read
+fallback is in use. Keep all Phase3 human-host and Phase5 reboot/workload
+gates open; no push, activation or real clipboard action.
+
+## Phase 3 and Phase 5 resumed — 2026-10-25 (current)
+
+User explicitly requested completing both phases after Phase4 commit `054ac3b`.
+Confirmed hierarchy: **Project → workspace tabs → split panes**. Tabs ARE
+workspaces; no nested second tab layer. Discovery/spec record this decision.
+Parent orchestrates GPT-6-Luna High with exclusive ownership and independent
+review. Phase3/5 remain open; Phase4's scoped completion remains intact.
+
+Completed and independently checked by parent:
+
+- Phase3 private-PTY four-pane/killed-client target:2 passed in11.39s. The
+  sole explicit remaining Phase3 gate is human Apple Terminal four-pane proof.
+- Selection model:13 passed, including parent-requested correction preserving
+  spaces across soft wraps, stale-view rejection, frozen source and byte bounds.
+- Composite layout/history recovery:1 passed in2.94s. Orderly process/store
+  restart evidence only, not physical reboot or abrupt death.
+- Clipboard worker:7 passed in1.01s using fake/in-memory sinks only. No real
+  clipboard accessed. Host lifecycle is not wired; unused-code warnings remain.
+- Snapshot-wrap metadata:3 PTY tests passed; checkpoint loader clear/unchanged
+  saved-byte regression:3 passed. UI codec:21 passed, strict legacy/negotiated
+  extension validation; existing checkpoint format unchanged.
+
+Current active exclusive owners:
+
+- `p35-20261025-wrap-transport-r5`: handshake/server/multi-session/runtime and
+  client conn/net/worker/state metadata paths completed, including the legacy
+  response-guard fix identified below. Parent reviewed the fix and reran the
+  previously failing focused p3a attach case via its existing test executable:
+  1 passed in3.52s, including1002 checks; no skip. A Cargo invocation first
+  failed at the in-progress store module declaration, not this acceptance.
+  Repeat final source-frozen Cargo acceptance after component completion.
+- `p35-20261025-host-acceptance-diagnose-r6`: diagnose failed outer-PTY
+  p3a_attach_host acceptance; edits only attach fixture tests/new evidence note,
+  production readonly. Host-mode r5 completed unit checks host3/keys4, but its
+  outer-PTY run had2 failures and was interrupted; focused retry lost connection.
+  This change has NOT passed native acceptance. Concurrent model compile errors
+  were also reported; separate those from actual fixture/runtime failures.
+- `p35-20261025-workspace-codec-r7`: new nested pure registry codec/tests and
+  module declaration only completed; parent independently reran6/0. Model9/0
+  also independently passed. `p35-20261025-workspace-store-r8` now owns new
+  store module/tests and declaration only: private lock/atomic registry saves,
+  allocation watermark/revision checks and additive legacy initialization.
+- `p35-20261025-selection-compositor-r8`: additive frozen selected-cell
+  highlight/render API and tests in compose only, no client/state edits.
+- `p35-20261025-selection-client-resume-r10`: now owns state/state_tests/host and
+  clipboard lifecycle plus optional private selection helper/module declaration.
+  Connect drag begin/extend/release, immutable source, cancellation/highlight and
+  attached-only async clipboard service; no production clipboard tests.
+  Prior r9 failed with generic provider-turn error after partial App/helper
+  edits, without tests/report or host lifecycle wiring. Parent inspected and
+  preserved the partial files, then assigned this fresh bounded continuation
+  with original brief and remaining work. No rollback or pass claim for r9.
+
+Other prior audit/model/review/composite/design/codec tasks are completed.
+Parent reviewed workspace-tab design and selected one existing server/storage/
+context domain per tab with additive legacy-default migration; no TargetRef
+reinterpretation. Future tab removal requires stopped-workspace validation,
+not hiding/orphaning live processes. This is architecture direction, not a
+runtime feature already delivered. No project-root discovery/sidebar implied.
+
+Next: review transport and host-mode components, implement client drag state,
+Parent identified a concrete transport review issue while transport r5 owns
+the file: `multi_runtime::snapshot_matches` still invokes legacy screen/history
+decoders, which reject the new marked trailers. This can drop the connection
+at the outgoing-reply guard before a client receives its first screen. Fix
+the guard using the connection's negotiated capability and add negotiated vs
+legacy delivery tests before rerunning host acceptance; do not weaken fixture
+assertions. The diagnosis task itself confirmed only pre-marker connection loss.
+frozen-cell highlight and copy-on-release lifecycle; then workspace registry/
+routing/tab UI slices after model review. Workload budgets and physical reboot
+acceptance remain separate gates; never substitute process tests for them.
+No push, activation, physical reboot, user configuration or actual clipboard
+change has been performed. Phase-completion commit authorization remains
+subject to required checks; no incomplete phase completion claim or commit.
+
+## Phase 4 complete — 2026-10-25 (read first)
+
+The user resumed this checkout from `f1d7af9` with GPT-6-Luna implementation
+and audit agents, parent orchestration and independent verification. All
+scoped Phase4 roadmap gates now pass. The completion commit is recorded in
+Git history; no push or live activation is authorized or performed.
+
+Managed native acceptance passes both Luna and an independent parent run:
+A-B-A while passive B stays at revision1, API-created new root, imported
+nonempty-history fork and return, Home stale/return, actual foreign project
+selection, visible structured manual refusal with A preserved, and guarded
+same-TUI return to A with exact runtime/disk revision8 (previously7).
+Parent observer sequences are foreign135, post-refusal foreign138, returnA152.
+The CLI refusal is `manual_selection_required` / `provider_project_mismatch`,
+without a ticket or navigation. Both runs submit zero prompts, verify absence
+of user messages, enforce loopback-only sandboxing, and complete cleanup.
+
+Durable sanitized reports are in [p4-evidence](p4-evidence/managed-native-parent-2026-10-25.json)
+and [the Luna report](p4-evidence/managed-native-luna-2026-10-25.json).
+The integrated result is [P4-INTEGRATED-RESULT.md](P4-INTEGRATED-RESULT.md).
+No agents remain active; prior assignments below are historical.
+
+Parent verification: locked/offline serial Rust **1231pass/0fail/15ignored**,
+63 result groups; all seven supporting checks pass, decoder39, component
+fingerprints, fmt, strict all-target Clippy, isolated build, Python **232run /
+231pass /1 opt-in native skip**, Markdown **332/0**. Logs are under
+`/private/tmp/panelink-p4-20261025`; final documentation changes also pass
+Markdown and whitespace checks. The explicit native run closes the gate
+separately from the intentionally skipped opt-in unittest. Luna final review
+found no material issues; parent reviewed the query/observer/refusal gates.
+
+The accepted isolated binary SHA is
+`1723ccece8d9c39662b8f0833455747f8ac7951de4d9e8d22a73cac4cf92f357`;
+the active workspace binary remains
+`3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e`.
+The exact pinned native OpenCode2.0.32 SHA remains
+`e43ec2df6f36842fd17d1a71a866acb9a84884b489988376c19bf9a7250dabbf`;
+launcher used `~/.opencode/bin/opencode` after PATH lookup. No Rust, shipped
+plugin or dependency changes were needed after the implementation checkpoint.
+
+Earlier failed attempts and corrections remain in the dated P4 startup,
+plugin-merge, picker, observer, exact-query, modal-rows, foreign-refusal and
+exact-return notes. They are not relabeled as passes. The harness now keeps
+server initialization directories empty, composes both plugins, continuously
+drains attach output, uses stable fresh modal reads, bounds actual result
+rows, and uses the supported exact-ID native picker query for return.
+
+Next: follow Phase5's remaining hierarchy/interaction and full V-HISTORY
+acceptance work in ROADMAP.md. Preserve unresolved product decisions. The
+separate Phase3 human four-pane Apple Terminal acceptance remains open.
+Phase4 completion does not close M1, imply overall readiness, prove a machine
+reboot/power-loss boundary, guarantee current-at-crash identity, or enable
+automatic resume/replay. No push or user configuration changes.
+
+## Phase 4 resumed — 2026-10-24 (read first)
+
+The user resumed continuous Luna slices until Phase4 completion after checkpoint
+`f1d7af9`. This revokes the pause below. Current owners: managed picker probe
+(private fixture input/keybind only), managed transition fixture helper/review,
+and parent integration/review/final verification. Historical acceptance remains
+1231Rustpass/15ignored, Python200(one opt-in live skip), docs319/0; no automatic
+resume/current-at-crash guarantee. Finish real managed normal UI transitions;
+explicit manual recovery and native bridge-failure gates already pass Luna and
+independent parent. Keep building in the isolated P4 target. No push or live
+activation. See P4-CONTINUOUS-TASK.md and the preserved paused handoff for detail.
+
+
+## PAUSED by user — 2026-10-24 (read first)
+
+User requested a pause and durable handoff. All active agents were stopped.
+Read [P4-PAUSED-HANDOFF-2026-10-24.md](P4-PAUSED-HANDOFF-2026-10-24.md)
+for the exact stopping point and next bounded slice. Do not resume until asked.
+Latest full serial Rust **1231pass/0fail/15ignored** and strict all-target Clippy
+pass. Native explicit recovery and bridge-failure acceptance both pass Luna plus
+independent parent runs. Managed normal UI transitions remain open: the native
+Ctrl-X leader collides with attach's detach key; the test's Ctrl-O/P session-list
+assumption was wrong. The user subsequently requested a checkpoint commit of
+the accumulated work; this is not phase completion or permission to resume.
+No push or live activation. The historical in-progress
+section below records the preceding work and is superseded by this pause note.
+
+
+
+## Phase 4 continuous completion in progress — 2026-10-24 (read first)
+
+User requested continued Luna slices until the phase is complete. See
+[P4-CONTINUOUS-TASK.md](P4-CONTINUOUS-TASK.md). Do not stop after two slices.
+Parent integrates and reviews; workers own bounded exclusive modules. No new
+commit or push. Existing dirty Phase3/Phase4 work and active binary are retained.
+
+Implemented since the previous full1157 baseline: the fresh challenge-bound
+bridge, pinned plugin/private launch configuration, asynchronous joint
+managed/provider store, scoped historical CLI and explicit prepare/resume/status
+flow. The owner validates before prepare, saves a one-shot choice, requires a
+separate resume, durably spends before navigation, and confirms only after a
+fresh selected snapshot and joint mapping save. No automatic recovery/replay or
+current-at-crash claim.
+
+Current verification snapshot: full locked/offline serial Rust1230passed,
+0failed,15ignored; all seven supporting checks pass, decoder39, Python196
+with one intentionally opt-in live test skipped, docs316/0. Endpoint drop/gate
+and runtime receipt-clock review corrections have additional focused checks;
+final source freeze verification remains required. Active binary SHA remains
+`3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e`.
+
+Native managed manual acceptance now passes both Luna and an independent
+parent run: missing/deleted classification, prepare preserves A, explicit
+resume selects/saves B, replay refusal, historical joint record, imported
+nonempty fork-root acceptance, foreign-project and linked-child refusal. The
+binary used was `1497ac732020573d633df85d38fdd594a92b31d7f1b8ee29d06e0087e52ec9ee`.
+The native bridge-failure fixture also passes Luna: an exactly verified owned
+TUI PID is paused, owner readiness revokes, PTY/serve remain alive, source A
+stays at revision1, preparation is refused before and after SIGCONT, and no
+implicit source recovery occurs. Parent independent failure run is underway.
+
+Managed native keyboard acceptance remains open. Earlier incidental heading
+predicates were too weak; do not count their A-B-A observations as safe keyboard
+acceptance. The current stricter guard withholds title/Enter until a real native
+modal is established. Luna is diagnosing key/query/terminal behavior. New/fork/
+project transitions through normal provider UI remain distinct from the passing
+explicit manual-recovery route. Standalone native cases passed independently;
+these do not close managed UI acceptance.
+
+See [native recovery](P4-NATIVE-MANUAL-RECOVERY.md),
+[native failure](P4-NATIVE-BRIDGE-FAILURE.md),
+[managed bridge](P4-MANAGED-BRIDGE.md) and
+[operator flow](P4-MANUAL-RECOVERY.md). Preserve separate Phase3 human host gate.
+
+
+## Phase 4 bridge wire/channel verified — 2026-10-24 (read first)
+
+Two GPT-6 Luna High owners delivered the independent wire codec and grant-scoped
+Unix endpoints. Parent review, Frame accessors, combined tests and full serial
+verification are complete. **1157 Rust tests passed,0 failed,15 ignored** in
+188.292s; library762, main binary148, integration247. Focused bridge31/0 and
+new combined IPC target2/0 pass. All seven supporting checks pass: strict
+all-target Clippy, formatting, build, decoder39, source fingerprints, Python160
+(no skips,8.182s) and docs299/0. See
+[result](P4-BRIDGE-TRANSPORT-RESULT.md),
+[task](P4-BRIDGE-TRANSPORT-TASK.md), [wire](P4-BRIDGE-WIRE.md) and
+[channel](P4-BRIDGE-CHANNEL.md).
+
+The `PLBRDG01` envelope is separate from the existing control protocol, with a
+32-byte header and4388-byte total bound. Exact lengths/tags/metadata are checked
+before bounded body allocation. Both Unix endpoints check kernel peer UID
+before bytes, then match a one-use issuer grant for full target/project/exact
+provider version/source instance. OS-random grants now have an explicit typed
+Hello provisioning method. Streams stay private and nonblocking; one absolute
+deadline spans each whole message, and errors permanently poison/shut down.
+This is possession plus same-user authentication, not provider executable
+attestation, hostile same-UID isolation or a global replay/revocation service.
+
+The parent private0700/0600 pathname fixture passes handshake → A/B admission
+→ synchronized binding saves → Home invalidation, followed by stale reopen.
+A second fixture deliberately fragments valid metadata then sends an oversized
+header; rejection precedes body read, the channel remains poisoned and explicit
+owner-side failure handling preserves the last saved binding while marking the
+receiver unavailable. Actual different-UID process acceptance was not added;
+the existing peer-credential unit mismatch gate is separate evidence.
+
+Initial module/compile/test/lint/format failures and parent corrections are
+preserved in the notes/result. All final Rust source was present before the
+passing serial run. No dependencies or lockfile changes. The full Cargo command
+ran separately with a360s deadline and supporting checks separately; not an
+unmodified combined-verifier8/8 claim. Cache/build isolation remains
+`/private/tmp/panelink-p4-cargo-home` and
+`/private/tmp/panelink-p4-bridge-store-target`. The activated binary hash stays
+`3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e`.
+No live provider/workspace/launcher/configuration changed.
+
+Next: opt-in owner/worker wiring, trusted grant delivery/revocation and explicit
+fresh-snapshot reconciliation, bounded queues and ordered durable completions.
+The channel proves receipt and grant scope, not when a provider observed a route;
+buffered metadata is not a fresh-reconciliation or selection barrier. Keep
+slow IO outside the owner. Production heartbeat policy, managed-session atomic
+linkage, cross-generation/manual recovery and remaining identity cases stay
+open, along with the separate human Phase3 host gate. No automatic resume or
+current-at-crash guarantee. Preserve accumulated dirty work. No commit or push.
+
+
+## Phase 4 bridge/store components verified — 2026-10-24 (read first)
+
+Two GPT-6 Luna High owners delivered `provider_bridge` and
+`provider_binding_store` with exclusive ownership; the parent reviewed,
+integrated and verified them. Full serial locked/offline Rust:
+**1136 passed,0 failed,15 ignored**,191.629s including isolated compilation.
+Final focused provider library37/0 and combined integration4/0 pass. All seven
+supporting checks pass: Clippy, formatting, build, decoder39, source fingerprints,
+Python160 (no skips,8.287s) and docs295/0. See
+[result](P4-BRIDGE-STORE-RESULT.md), [task](P4-BRIDGE-STORE-TASK.md),
+[bridge contract](P4-BRIDGE-CONTRACT.md) and [store](P4-BINDING-STORE.md).
+
+The typed protocol-v1 receiver owns the binding core and gates exact pinned
+provider identity on target/project/instance, contiguous source sequence,
+monotonic receipt expiry and explicit fresh reconciliation. Duplicates do not
+renew. Child/Home/unknown/rejected identity cannot confirm. The host supplies
+a separate verification Unix timestamp and must tick idle receivers and check
+freshness after blocking IO. Source authentication, transport and production
+heartbeat policy remain future integration work.
+
+The store uses existing bounded codec bytes, one private caller-selected
+per-target directory, lifetime exclusive lock and inode checks. File sync →
+rename → directory sync precedes success. Ambiguous sync failure latches the
+store until reopen; unsafe/corrupt files are preserved, and interrupted temps
+are never promoted. The parent proved that a save failure blocks confirmation
+and expired pending state cannot invoke the writer.
+
+Actual subprocess SIGKILL tests cover before storage, after storage/before
+acknowledgment and after acknowledgment, with ready handshakes and reaping.
+Before-write reopen sees old revision; both later cases see the new record.
+All restore stale. This exposes lost-ack uncertainty and proves neither the
+provider's current-at-crash identity nor full machine/power-loss recovery.
+No joint managed-session transaction is implemented.
+
+The old P2 Cargo cache was empty. The parent copied only the installed registry
+into `/private/tmp/panelink-p4-cargo-home`; builds use
+`/private/tmp/panelink-p4-bridge-store-target`. Initial compile/lint/format
+failures and final corrections are recorded in the result. Full Cargo ran
+separately under a360s deadline; seven supporting checks ran separately, not an
+unmodified combined verifier8/8. The activated `target/debug/panelink` hash
+remains `3b67218515bc482d2a1d016e7e344291fb97cee6b3dcdc39cc11baa2642a669e`.
+No live provider/workspace/launcher/configuration changed; prior private live
+identity fixtures remain separate evidence.
+
+Next: bounded bridge wire encoding/handshake and source/target authentication,
+then opt-in owner/worker wiring with ordered storage completion and visible
+expiry/reconciliation/failure states. Cross-generation linkage, last-confirmed
+manual recovery and remaining provider identity cases stay open, along with
+the separate Phase3 human host gate. No automatic resume/current-at-crash
+claim. Preserve all accumulated dirty work. No commit or push.
+
+
+## Phase 4 linked-child and project isolation verified — 2026-10-24 (read first)
+
+The next two slices were implemented by two GPT-6 Luna High owners, integrated
+and independently verified by the parent. **Both pass3/3 fresh live runs** on
+pinned native OpenCode2.0.32 with loopback-only sandboxing. Full Python suite:
+**160 passed**, no failures/skips, in8.269s. Eight changed Python modules
+compile and whitespace passes. See [result](P4-V2-ISOLATION-RESULT.md) and
+[task](P4-V2-ISOLATION-TASK.md). No Rust/build changes; the separate1111/0/15
+ignored baseline was not rerun for this tooling work.
+
+A third TUI selects a linked child, reports it as non-top-level, then returns
+to its exact parent through the keyboard picker. Original observer streams
+advance and preserve their identities. An empty-parent copied-history fork
+returns400; linked creation does not prove a nonempty history fork. The other
+slice attaches a third TUI to a second private directory, verifies exact
+identity there, and rejects those rows in the original directory's scope.
+This is separate-client directory isolation, not same-client project switching
+or distinct Git repository identity. Every final run verifies empty user
+messages and all three TUI/PTY plus server cleanup. No prompts or user state.
+
+Parent review corrected draining/freshness, warm-up and invalid records,
+ownership checks and late failure downgrades. Two failed child diagnostics are
+preserved: canonicalizing the provider query path returned an empty list.
+Queries now retain the created fixture's path spelling; identity comparisons
+remain canonical. A symlink-alias lifecycle regression passes. Current result
+contains the timings, receipts and exact scope. Documentation verification:291 Markdown files checked, zero findings.
+
+Next: version and integrate the opt-in bridge for supported top-level
+observations with ordering/expiry/reconciliation, then durable last-confirmed
+store/acknowledgment and crash tests against the existing core/codec. New
+conversation ID, nonempty fork, same-client project switch and current-at-crash
+remain open. Preserve unsupported-state/manual fallback and the separate
+Phase3 human host gate. Activated worktree/binary and all accumulated dirty
+work are retained. No commit or push.
+
+
+## Phase 4 next two Luna slices verified — 2026-10-24 (read first)
+
+Opposite-client/new-route outcome and observer-health slices pass **3/3 fresh
+runs each** on pinned native OpenCode2.0.32. Two Luna High owners implemented
+disjoint files; parent review/integration and permitted live runs verified the
+results. Parent full Python suite: **143 passed**, no skips, in8.403s; focused
+suite61/0; changed Python compiles. No Rust/build input changes. See
+[P4-V2-EXTENDED-RESULT.md](P4-V2-EXTENDED-RESULT.md) and
+[task](P4-V2-EXTENDED-TASK.md). Docs287/0; tracked whitespace and ten
+affected/untracked files pass. The in-memory graph was refreshed without an
+artifact.
+
+Physical TUI2 switches B-A-B with TUI1 fresh on A. Ctrl-X N then produces
+Home with no selected session ID; this does not prove allocation timing or
+new-conversation identity. Both sessions have empty user-message reads and all
+process groups/PTYs/server receive cleanup receipts. The health case pauses
+only plugin record delivery: both TUIs/server stay alive, passive B stays fresh,
+active receipt expires, and transport resume alone cannot revive eligibility.
+A further row after explicit reconciliation restores only in-memory observed
+identity; durability stays false. The1s threshold is diagnostic policy only.
+
+Parent corrected precreated empty control files, runtime caps while paused,
+batched/late receipt handling, unknown identity inside batches and fail-closed
+new-control checks. Failed diagnostic evidence is retained. No prompt, user
+account, implicit background service, live Panelink pane or launcher was changed.
+Preserve the activated worktree/binary and all accumulated uncommitted work.
+
+Next: remaining new-ID/fork/child/project cases, then the versioned real bridge
+and durable binding/store acknowledgment work, retaining last-confirmed/manual
+fallback and pre/post-ack crash tests. Full Phase4 and the separate Phase3 human
+host gate remain open. No commit or push.
+
+
+## Phase 4 selected-route/two-client gate passes — 2026-10-24 (read first)
+
+Two Luna High owners built the V2 fixture/harness. Parent review and live
+integration corrected a direct-file loader assumption, a mistaken legacy-config
+hypothesis, warm-up parsing and the picker background-header guard. The final
+pinned2.0.32 gate passes **3/3 fresh runs**: two simultaneous TUIs in the same
+private project, initial A/B identities, keyboard A-B-A in the first while the
+second stays fresh on B, zero missed/extra/rejected observations, verified empty
+user messages and both cleanup receipts. No provider account/model work or live
+Panelink pane input. See [results](P4-V2-TUI-RESULT.md) and [task](P4-V2-TUI-TASK.md).
+
+Parent verification: **121 Python tests pass**, no skips, in6.962s; focused39/0.
+Compilation and tracked/untracked whitespace pass; docs285/0. The in-memory
+code graph was refreshed without writing an artifact.
+No Rust/build changes; prior Phase3 source baseline remains1111/0/15 ignored.
+The earlier approval-service usage failure resolved through normal review after
+its stated retry time; no live test remains blocked by it.
+
+Actual current CLI config uses plural `plugins` pointing to a directory with a
+`tui` entry. Direct files are skipped. Singular `plugin` is legacy migration,
+not the current schema. Do not repeat either failed configuration. Valid startup
+rows can have unknown project/cache fields; they do not count as identity proof.
+Require strict observations after initial identity is ready. Raw output, IDs,
+paths, bodies and secrets are absent from reports. Polling remains no crash
+barrier; this is development-fixture proof, not a production provider bridge.
+
+Next: opposite-client/new/fork/child isolation and bridge-loss/staleness gates,
+then live bridge integration and durable binding acknowledgments using the
+existing pure core/codec. Preserve last-confirmed/manual fallback. Full Phase4
+and the separate Phase3 human host gate remain open. No commit/push.
+
+
+## Phase 4 V2 identity gate — 2026-10-24 (read first)
+
+The user requested Phase 4. Two GPT-6 Luna High owners delivered an old-probe
+correlation correction and a separate exact 2.0.32 bootstrap preflight. Parent
+review and independent verification: **95 Python tests pass**; changed Python
+modules compile. No Rust/build changes were made in this slice. Current result:
+[P4-V2-IDENTITY-RESULT.md](P4-V2-IDENTITY-RESULT.md).
+
+The current installed binary hash/version are pinned. Initial anonymous access
+returned HTTP401. A bounded source audit found the supported fixture-local
+Basic-auth mechanism; the final parent run **passed authenticated bootstrap**
+in 587.354ms: exact owned child PID/version, two empty top-level sessions
+created/listed and cleanup completed under enforced loopback-only sandboxing.
+Zero prompts; no user/provider credentials. The probe refuses redirects and
+sends its fresh credential only after listener ownership verification. Exit2
+remains intentional because selected TUI identity is not proven. No TUI adapter
+or identity-switch proof is claimed.
+
+Next gate: implement and validate the selected-route adapter on this verified
+fixture-local transport, including ordered keyboard A-B-A and two concurrent
+agents in the same project. Existing binding core/codec are pure
+components, not runtime persistence/resume. Preserve current-at-crash/manual
+fallback boundaries, the activated workspace and all accumulated dirty work.
+Full Phase 4 and the separate Phase3 human host gate remain open. No commit/push.
+
+
+## Verified build activated — 2026-10-24 (read first)
+
+The user explicitly selected **Activate and restart workspace**. The parent
+verified the accepted binary hash, atomically switched `~/.local/bin/panelink`
+to this worktree's launcher, and ran supported `panelink stop` (exit0,
+workspace stopped). A fresh default workspace is now running on the worktree
+binary (observed PID95331). Read-only pane list/read both pass with the explicit
+private `.panelink-agent-contexts` root and permitted socket access. No pane
+input was sent. The noninteractive open's UI exit1 is not an interactive attach
+pass. See [activation evidence](P3-USABILITY-FIXES-RESULT.md).
+
+Keep worktree7060 and its built binary in place: the PATH launcher now resolves
+here. Activation is complete; earlier pending-choice and old-PATH observations
+below are historical. Existing history remains; ended processes/provider
+conversations were not resumed. Final source verification remains1111/0/15
+ignored plus seven supporting checks. Full Phase3 human four-pane host
+acceptance remains open. No commit or push.
+
+
+## Phase3 continuation preflight — 2026-10-24 (read first)
+
+The user requested Phase3 continuation after the usability result. The parent
+rechecked current Git history/status and index (no unmerged entries), verified
+that the built binary hash still matches the accepted 1111/0/15-ignored tree,
+and confirmed PATH still targets the separate main checkout. Read-only pane
+discovery currently sees one live pane. No new source edit, commit, push,
+input or process stop was performed.
+
+The accepted Phase3 code scope is delivered. Activation is prepared; a concise
+restart choice is pending because stopping the live workspace ends its pane
+processes. Preserve it while that answer is absent. Human four-pane Apple
+Terminal acceptance remains open and cannot be replaced with the passing
+private outer-PTY tests. The remaining-gates audit now marks its older test
+counts/line references as historical and points to the usability result.
+
+## User-reported pane usability repairs — 2026-10-24 (read first)
+
+The user supplied a real three-pane screenshot and reported agent access failing
+with `context_directory_unavailable`, nonworking scrolling, and cramped pane
+edges. This reopens usability implementation; the older 1091-test baseline
+below predates these changes. Three bounded GPT-6 Luna High workers implemented
+and cross-reviewed private agent-context selection, typed scroll/history paths,
+and one-cell pane padding. Parent integration verification passed:
+**1111 passed/0 failed/15 ignored in164.34s**, plus all seven supporting
+checks (decoder39/Python77/docs281/0). Actual private outer-PTY tests cover
+normal wheel history and alternate-screen app mouse input with inset coordinates.
+The parent fixed startup output loss by launching directly at the content size,
+and an observed rotation fixture race by waiting for drained writer shutdown.
+See [result](P3-USABILITY-FIXES-RESULT.md) and [task](P3-USABILITY-FIXES-TASK.md).
+All ownership is released. Full Phase3 remains open; no commit or push.
+
+A read-only live check using this worktree's binary and an explicit private
+context root successfully listed three panes and read pane 2 with permitted
+local-socket access. The same calls in the restricted sandbox could not connect;
+the context override does not bypass socket permissions. No pane input was sent. A final refresh saw one current pane, correctly refused
+now-absent pane2, and successfully read pane1; terminal contents were not printed.
+
+The PATH launcher still points to `/Users/sahillamba/panelink/bin/panelink`,
+not this checkout. The running workspace uses older server code. No user server
+or child has been stopped or restarted; new scrolling/padding need a server
+running the new build. Native Terminal computer-use controls are unavailable
+in this session. The user's screenshot is partial host feedback, not a complete
+four-pane acceptance record. Preserve all dirty work; no commit or push.
+
+
+## Phase3 Luna orchestration and integrated verification — 2026-10-24 (read first)
+
+Three native GPT-6 Luna High workers audited the remaining required gates,
+reviewed PTY interruption semantics, and independently reviewed accumulated
+source/test changes. No actionable source findings or additional required
+production task were identified. A proposed fake waiter-disconnect test was
+removed because its test-created channel did not exercise the production
+waiter. The existing internal validation barrier and real-CLI pre-delivery
+regressions are preserved with their limited claims. All worker ownership is
+released; native collaboration launcher, no cost telemetry.
+
+Parent frozen-source verification: complete locked/offline serial Cargo
+**1091 passed/0 failed/15 ignored in182.72s** (library713/binary142/
+integration236 across53 targets). All seven supporting checks pass:
+decoder39/Python77/fingerprints/package fmt/strict all-target Clippy/build/docs279/0.
+No timeout or failed check in this run; ignored cases remain separate from
+acceptance. See [result](P3-ORCHESTRATION-RESULT.md),
+[remaining gates](P3-REMAINING-GATES-2026-10-24.md) and
+[PTY audit](P3-PTY-INTERRUPTION-AUDIT.md).
+
+The sole explicit remaining Phase3 gate is human four-pane Apple Terminal
+evidence, unavailable in this run. No manual chore is assigned and no automated
+proxy is promoted to human acceptance. The accepted bounded implementation is
+delivered; do not schedule more optional synthetic input windows as required
+Phase3 work. Review actual host evidence if it becomes available before full
+phase closure. Provider/reboot/Phase4/Phase5 and crash observation limits remain
+separate. Preserve the dirty tree based on checkpoint8ad9bd6; no commit/push.
+
+## Phase3 handler-boundary validation test delivered — 2026-10-23 (read first)
+
+Added `server::tests::submit_validation_barrier_precedes_admission_and_duplicate_does_not_replay`
+using a test-only blocking `EffectSink::validate`. It observes the Submit
+revision/text at the deterministic barrier, confirms input count zero before
+release, then verifies one `Completed(Applied)` effect and no replay for an
+exact duplicate. Parent focused rerun: 1 passed/0 failed, 716 filtered out.
+This tests internal handler ordering only: no socket ingress, real CLI death,
+or admitted owner-pending/PTy interruption. See
+[feasibility and result](P3-POST-DISPATCH-FEASIBILITY.md).
+
+The subsequent admitted owner-pending/PTy audit is complete and recorded above.
+It identified an observation limit, not an additional required Phase3 task.
+Do not infer client cancellation or add production hooks. Preserve separate
+real-CLI pre-delivery, human four-pane, provider and reboot evidence.
+
+## Phase3 post-dispatch barrier feasibility audited — 2026-10-23 (read first)
+
+The real-CLI integration fixture cannot deterministically stop inside server
+validation before ledger admission: it launches the production server as a
+separate process, while the proxy boundary is either before upstream delivery
+or after the server reply. Forwarding Submit and killing by timing would not
+establish dispatch. An in-crate fake `EffectSink::validate` can block the
+`StateOwner` handler at that internal point, but does not prove socket ingress
+or real CLI death. No production hook is justified by this coverage gap. See
+[P3-POST-DISPATCH-FEASIBILITY.md](P3-POST-DISPATCH-FEASIBILITY.md).
+
+The narrow deterministic handler-boundary test is delivered above and is
+labeled as internal dispatch/admission evidence only. Keep the real-CLI
+pre-delivery test as the separate process-death evidence. All existing dirty
+work remains intact and uncommitted.
+
+## Phase3 pre-delivery client-death acceptance delivered — 2026-10-23 (read first)
+
+The new real-CLI regression pauses the exact decoded Submit at the private
+authenticated proxy before forwarding it to the production server. It SIGKILLs
+and reaps the exact submitting Child, then verifies durable uncertain-key
+state, server `NotAdmitted`, same-context resync without sending the request,
+zero controlled-shell effect, unchanged target/PID and explicit server cleanup.
+See [task](P3-PRE-ADMISSION-CLIENT-DEATH-TASK.md) and
+[result](P3-PRE-ADMISSION-CLIENT-DEATH-RESULT.md).
+
+Parent reran the full focused target serially: 2 passed/0 failed/0 ignored in
+1.21s, including the existing post-completion/pre-ack case. Rustfmt check,
+diff whitespace and docs check pass (274 Markdown files/0 findings). Luna's
+initial fixture readiness-marker mismatch was corrected before its passing
+focused rerun. No full Cargo suite was run for this test-only change. No
+production code or input policy changed; full Phase3 remains open.
+
+The pre-delivery client-death acceptance remains distinct. Post-dispatch test
+feasibility and the next narrow handler-boundary test are recorded above. Keep
+admitted owner-pending/PTy interruption, human four-pane, provider and reboot
+gates separate.
+
+## Phase3 intermittent acceptance stabilization delivered — 2026-10-23 (read first)
+
+The recorded history-writer admission and attach-host ACK42 flakes are
+stabilized with bounded, test-only admission retry on the exact `Contended`
+reason and an attach-client focus acknowledgment before ACK42 is typed. The
+client now changes its status from “waiting for layout” to “new pane focused”
+when a later layout completes a pending split focus. No production admission,
+input routing, replay, wire or storage policy changed. See
+[result](P3-INTERMITTENT-ACCEPTANCE-RESULT.md).
+
+The history panic case passed20/20 serial repetitions; the delayed-layout focus
+unit test passed1/1; the ACK42 attach-host case passed1/1, then10/10 serial
+repetitions. Complete locked/offline serial Cargo passed 1089/0/15 ignored in
+179.27s across 53 integration targets. All seven supporting checks passed in
+the permitted environment (decoder39/Python77/docs273/0). An initial restricted
+support run lacked offline crate-index entries and loopback binding; it is not
+counted as passing. Earlier failures and raw logs are preserved in the result
+note. Repeated success is not a timing guarantee.
+
+Two GPT-6-Luna High read-only audits identified the acceptance assumptions;
+parent reviewed and implemented the bounded repairs. No cost telemetry is
+available. FullPhase3 remains open. The pre-delivery client-death acceptance
+is recorded above. Next, determine whether a post-dispatch/pre-admission barrier
+can be tested in-process without a production hook. Do not claim current
+owner-pending or PTY interruption coverage or change production input/retry
+policy. Human four-pane/provider/reboot gates remain separate.
+No commit or push; the existing `8ad9bd6` checkpoint remains the base.
+
+## User-authorized Phase3 checkpoint — 2026-10-23 (read first)
+
+The user explicitly requested committing the accumulated verified work. This
+checkpoint includes live scrollback, managed pane run, neutral owner discovery,
+client/server-death acceptance, runtime contract reconciliation, and killed
+input-client recovery acceptance plus their documentation/evidence. The latest
+full serial result is1089passed/0failed/15ignored with all seven supporting
+checks passing; details and prior failures remain below. This is a checkpoint,
+not fullPhase3 completion. No push is authorized. Git history records its ID.
+This checkpoint predates the intermittent-acceptance stabilization recorded
+above. Preserve the separate original source checkout and unresolved
+host/provider/reboot gates.
+
+## Phase3 killed input-client acceptance delivered — 2026-10-23 (read first)
+
+A real `control submit` Child is SIGKILLed once a test-owned authenticated proxy
+holds its matching terminal Completed(Applied) response without forwarding it.
+The exact key remains uncertain on disk after death; read-only status preserves
+it, resync clears it, and repeated resync leaves generation/lease/next sequence
+unchanged. The same controlled shell/full target reports one handled token,
+confirmed by a private append record and ordered CHECK. Explicit SIGTERM reaps
+the owned serve Child and removes its socket. See [task](P3-INFLIGHT-CLIENT-TASK.md),
+[audit](P3-INFLIGHT-BARRIER-AUDIT.md), [review](P3-INFLIGHT-CLIENT-REVIEW.md)
+and [result](P3-INFLIGHT-CLIENT-RESULT.md).
+
+Complete locked/offline serial Cargo: **1089 passed/0 failed/15 ignored** in
+157.19s (library712/binary142/integration235 across53 targets). Seven supporting
+checks pass:decoder39/Python77/fmt/strict all-target Clippy/build/fingerprints/
+final docs272/0. Parent final targeted1/1 in0.84s. Worker startup denied pathname
+bind before scenario; parent fixture runs exposed newline-sensitive output
+assertion and wrong default-workspace stop usage for directly launched serve.
+These were corrected; failures and logs remain in the result note, not counted
+as passing runs. No Cargo deadline expired. At that checkpoint, ACK42 and
+history-writer intermittency remained unresolved; the later investigation and
+stabilization are recorded above.
+
+Only new tests/p3_inflight_client.rs changes executable test behavior this
+slice. All156 pre-existing source/test/script hashes match the turn-start
+snapshot; production policy, wire/storage, dependencies and prior dirty work
+are unchanged. This covers post-server-completion/pre-client-ack death, not
+before admission or while owner-pending, and implies no provider/reboot or
+arbitrary descendant cleanup guarantee. FullPhase3 remains open.
+
+User renewed Luna cost routing for suitable tasks. Native Luna High implemented
+the exclusive test and independently audited/reviewed it; Luna Medium drafted
+evidence. Parent specified, corrected/reviewed and verified. No cost telemetry;
+all worker ownership released; native collaboration launcher; ms-rust absent.
+Next investigate the recorded history-writer startup admission contention and
+attach-host ACK42 intermittency with bounded tasks, without changing permitted
+nonblocking semantics or asserting an unproved production fix. Keep human
+four-pane acceptance distinct; no manual chores handed to the user.
+Preserve accumulated uncommitted work on codex/p3-scrollback-integration based
+on9f3d8a0. No commit/push; original source checkout untouched. Source graph is
+ephemeral; refresh before code exploration as needed.
+
+## Phase3 runtime reconciliation and pathname acceptance delivered — 2026-10-23 (read first)
+
+Parent and two independent native Luna High source/document audits found the
+broad event/watch/launch/layout implementation checkbox stale. Accepted finite
+pane/workspace watches, reconciliation/gap recovery, four-pane lifecycle and
+managed pane run are delivered. ROADMAP now records that exact scoped closure;
+fullPhase3 remains open. Direct schema6 launch, indefinite subscriptions and
+large Snapshot queues are outside these accepted bounded contracts, not missing
+implementation inferred from an older proposal. Spec revision0.24 and
+agent-control notes distinguish current behavior from historical one-child
+text. See [audit](P3-RUNTIME-CONTRACT-AUDIT.md),
+[review](P3-RUNTIME-SCOPE-REVIEW.md) and [result](P3-RUNTIME-CONTRACT-RESULT.md).
+
+The audit identified an old pending CLI acceptance we could run directly:
+`cargo test --locked --offline --test p3_pathname pathname_server_cli_context_reuse
+-- --exact --ignored --test-threads=1` passed1/1 in1.20s with sockets enabled.
+This covers expanded reconcile/watch/context-preservation/same-child reconnect
+and socket lifecycle assertions. The standard ignore attribute remains; this
+explicit result is separate from the prior1088pass/15ignored full run below,
+not an additional combined-suite count. No source/test/script edits or full
+suite rerun this slice. Source hashes match the turn-start snapshot. Final
+document/link check:268 files/0 findings; diff whitespace check passes.
+
+Next specify deterministic client death during an in-flight input request under
+the existing admission/status/nonreplay contract. Identify an observable barrier
+and exact fixture-owned process before implementation; no timing-inferred
+outcome or input replay. Human four-pane acceptance remains a distinct gate;
+provider/reboot and arbitrary descendant cleanup remain separate. No manual
+chores are assigned to the user. Prior test intermittency remains unresolved.
+All worker ownership released; native collaboration launcher; ms-rust absent.
+Preserve accumulated uncommitted work on codex/p3-scrollback-integration based
+on9f3d8a0. No commit/push; original source checkout untouched.
+
+## Phase3 bounded server-death acceptance delivered — 2026-10-23 (read first)
+
+Strengthened the existing default-open SIGKILL test: a cooperative HUP-trapped
+zsh exits, the socket remains, explicit reopen replaces it with a new durable
+generation/full target, and the old control context is refused without changing
+its bytes. An external once-only append record stays unchanged through fresh
+input/detach; the replacement live pane has no old marker and produces its new
+marker once. Explicit replacement stop cleans up. Intentional and fixture
+failure-cleanup signals validate PID, owner and kernel start time. See
+[contract](P3-SERVER-DEATH-TASK.md), [audit](P3-SERVER-DEATH-AUDIT.md),
+[review](P3-SERVER-DEATH-REVIEW.md) and [result](P3-SERVER-DEATH-RESULT.md).
+
+Complete serial locked/offline Cargo: **1088 passed/0 failed/15 ignored** in
+153.17s (library712/binary142/integration234 across52 targets). Seven supporting
+checks pass, decoder39/Python77/final docs265/0. Formatting and strict all-target
+Clippy pass after review corrections. Parent targeted runs1/1 in3.81s and final
+reviewed1/1 in3.73s. Worker restricted startup failed before new assertions;
+its server log was removed by fixture cleanup, so the root cause is unproved.
+Record it separately; no skipped acceptance counted as pass. Prior ACK42 and
+history-writer intermittency remains unresolved, despite this full pass.
+No Cargo deadline expired.
+
+Only tests/p3a_default_open.rs changed executable test behavior this slice.
+Prior application and pane-run/scrollback/client-lifetime source hashes match.
+No production crash policy, dependency, wire/storage format or supervisor was
+added. Canonical spec revision0.23 records that SIGKILL runs no graceful
+cleanup or final flush; arbitrary descendants may survive. Cooperative-shell
+exit does not establish orphan-free crash, in-flight-request recovery, provider
+or physical reboot acceptance. Full Phase3 remains open.
+
+Native Luna High workers completed exclusive implementation and independent
+read-only audit/review. Parent specified, corrected/reviewed and verified; all
+ownership is released. Native collaboration was the launcher; ms-rust remains
+absent. Next reconcile the remaining broad Phase3 event/watch/launch/layout
+checklist with current contracts/evidence and identify a concrete unmet runtime
+requirement before new work. Human four-pane acceptance stays distinct; no
+manual chores are handed to the user. Source graph is ephemeral; refresh as
+needed before code exploration. Preserve all accumulated uncommitted work on
+codex/p3-scrollback-integration based on9f3d8a0; no phase-completion commit or
+push. Original source checkout untouched.
+
+## Phase3 owner discovery and client lifetime delivered — 2026-10-23 (read first)
+
+`pane list` exposes neutral server-issued generation:lease identity, caller
+comparison, owner revision and raw server-clock deadline from the same sample.
+No inferred agent/provider roles or authorization widening. A real private
+outer-PTY regression SIGKILLs the exact live attach process, reattaches to the
+same full target/child PID/output, checks one-shot input, then explicitly stops
+the server and verifies child cleanup. Orderly terminal restoration is asserted
+only for the second client. See [contract](P3-OWNER-IDENTITY-TASK.md),
+[owner review](P3-OWNER-IDENTITY-REVIEW.md),
+[lifetime review](P3-CLIENT-LIFETIME-REVIEW.md) and
+[final evidence](P3-OWNER-LIFETIME-RESULT.md).
+
+Complete serial locked/offline Cargo: **1088 passed/0 failed/15 ignored** in
+156.25s (library712/binary142/integration234 across52 targets). Seven supporting
+checks pass, decoder39/Python77/final docs261/0; formatting and strict all-target
+Clippy pass after the final diagnostic assertion. Prior source/test hashes for
+scrollback are unchanged. Earlier two full runs stopped at the existing
+attach-host ACK42 timeout; a third stopped at existing history-writer startup
+admission Full. Isolated and final complete reruns pass; no production fix or
+resolved intermittency is claimed. Fixture corrections and raw-log locations
+are preserved in the result note. No Cargo deadline expired.
+
+Native Luna workers completed exclusive implementation/acceptance/review tasks;
+parent reviewed, corrected fixtures and verified the combined tree. All file
+ownership is released; no worker must survive to resume. Native collaboration
+was the launcher; ms-rust remains absent. Source graph is fast/nonpersistent
+and ephemeral; verify freshness before the next code exploration.
+
+Next: specify/audit server-death cleanup and stale endpoint/context behavior,
+then add bounded automated acceptance under its documented policy. Use the
+[closure audit](P3-CLOSURE-AUDIT.md); preserve distinct human four-pane, in-flight
+request, provider identity and reboot gates. Full Phase3 remains open. All
+scrollback/pane-run/owner/lifetime work remains uncommitted on
+`codex/p3-scrollback-integration` based on9f3d8a0; no phase-completion commit or
+push. The original source checkout is untouched. Preserve this dirty tree.
+
+## Managed pane run completed — 2026-10-23 (read first)
+
+Delivered and parent-reviewed: `panelink pane run [--pane N] [--direction
+left|right|up|down] [--cwd DIR] [--as NAME] [--json] -- COMMAND [ARG ...]`.
+Raw Unix argv and invoking-client cwd/env feed the existing serialized schema7
+split/embedded launch worker; no shell input substitution, new server route,
+wire/storage format, dependency, manifest or vendor change. Exact anchor and
+layout are pinned; INPUT negotiation, four-pane/geometry bounds and the existing
+launch journal/deduplication remain authoritative. Applied means launched,
+not ready/completed. No automatic resend or replacement key after uncertainty.
+
+The independent review's two output findings were fixed: post-reservation
+errors retain the key, and ack failure retains validated new target/revision
+with unknown outcome. The error stores only compact validated metadata.
+Parent added lost-ack/context-reopen/no-send bounds and deterministic local
+ack-failure tests; strengthened real CLI geometry/context/failure/cleanup
+assertions. See [accepted contract](P3-PANE-RUN-TASK.md),
+[independent review](P3-PANE-RUN-REVIEW.md) and
+[final evidence](P3-PANE-RUN-RESULT.md).
+
+Final frozen-source full serial Cargo: **1084passed/0failed/15ignored** in148.24s
+(library712/binary140/integration232 across51 targets). Seven non-Cargo checks
+pass separately: decoder39/Python77/fingerprints/fmt/strict all-target Clippy/
+build/docs256/0. Focused transport8/8 and parser/JSON9/9 pass; real CLI3/3 is
+included in the full run. Pre-fix full runs1082 and1084 passed separately;
+intermediate Clippy6/7 at large error size and temporary API/test compile
+mismatches are preserved in the result note, not relabeled as passing runs.
+No full Cargo deadline expired.
+
+Three native GPT-6-Luna High workers had exclusive files; parent owned design,
+review/integration and final verification. All ownership is released; no live
+worker is needed to resume. Source graph refreshed fast/nonpersistent for
+worktree7060 after freeze; it is ephemeral, so verify freshness next time.
+The requested ms-rust skill remains absent. Previous scrollback source/tests
+are hash-unchanged. The main source checkout is untouched.
+
+Next: review/specify richer owner identity in discovery under existing
+lease/target authority. Full Phase3, wider host/lifetime gates, provider identity
+and physical reboot remain open. Changes remain uncommitted on
+`codex/p3-scrollback-integration` based on9f3d8a0; no phase-completion commit
+or push is claimed. Preserve all current work on continuation.
+
+## Live-scrollback integration — 2026-10-23 (read first)
+
+The integration branch `codex/p3-scrollback-integration` starts at `9f3d8a0`
+and includes the separate live normal-scrollback patch from
+`/Users/sahillamba/panelink`. That checkout's uncommitted work is preserved.
+Managed-child metadata, observer renewal and workspace notifications remain
+included. Parent reviewed the patch and a bounded GPT-6-Luna High reviewer
+reported no actionable findings; native collaboration was the launcher. All
+worker ownership is released. No dependencies, vendor source, manifest,
+wire schema, or persisted format changed. The ms-rust skill remains absent.
+
+Focused adapter tests pass 6/6; combined agent CLI/detach/workspace-event
+integration tests pass 11/11. The seven non-Cargo verifier checks pass.
+Final full serial Cargo:1064passed/0failed/15ignored in122.73s (library712,
+binary123, integration229 across50 targets). Docs253/0 after final evidence
+updates. The first full run was1063pass/1fail/15ignored: the unchanged final
+shutdown fixture missed its second HUP marker. Its isolated rerun and final
+full rerun pass without changes; cause remains unestablished, no fix claimed.
+See [the integration evidence](P3-LIVE-SCROLLBACK-RESULT.md) and
+[review](P3-LIVE-SCROLLBACK-REVIEW.md). Earlier source-checkout attach timing
+failure and 180-second Cargo timeout remain historical failed/incomplete runs.
+
+Next: specify/review managed `pane run`,
+using explicit cwd/argv/client environment, the existing launch worker and
+deduplication, and returned full targets. Do not implement this as text sent to
+an existing shell. Richer owner identity and host/lifetime gates remain open.
+Full Phase 3, provider identity and physical reboot acceptance remain open.
+The integration remains uncommitted; Phase3 is unfinished and no phase-completion
+commit is claimed. No push is authorized.
+
+## Phase 3 managed-child metadata and observer renewal — 2026-10-23 (read first)
+
+Completed and parent-reviewed: schema12/capability16 private current managed-child
+cwd/executable queries, bounded isolated sampler/deadline/busy recovery,
+exact-target authorization and publication revalidation, CLI sample/status
+output, and same-lease workspace renewal after original-pane retirement.
+The prior workspace-events slice is included in this checkpoint. User explicitly
+authorized committing the completed verified slice; no push is authorized.
+Branch: `codex/p3-integration-layout-events`; use Git history for commit identity.
+
+Final full serial Cargo **1059passed/0failed/15ignored** in152.92s:
+library709, binary123, integration227 across50 targets. Decoder39/Python77,
+strict all-target Clippy, fmt, build, fingerprints and docs251/0 pass separately.
+Initial default-parallel standard verifier7/8 stopped in the library at
+707pass/2fail/4ignored (existing history-writer timing admission and immediate
+post-spawn metadata sampling); this is preserved as failed evidence. The sampler
+test now waits within a finite bound; the full serial run passes both.
+See [final result](P3-PANE-METADATA-RESULT.md) and
+[parent review](P3-PANE-METADATA-REVIEW.md) for commands, raw-log paths and limits.
+All Luna ownership is released; no live agent is needed to resume.
+
+Full Phase3 remains open. Next: review/integrate the separate live-scrollback
+slice in `/Users/sahillamba/panelink`, which this continuation did not modify or
+integrate. Preserve that checkout's attach timing and180s deadline evidence.
+Managed pane run, richer owner identity, wider host/lifetime contracts, Phase4
+provider proof and broader Phase5 recovery remain open. Ignored tests, logical
+clock renewals, synthetic birth mismatch and private automated PTYs are not
+human host, physical reboot, kernel PID-reuse or representative load proof.
+
+## Historical Phase 3 baseline and layout notifications — 2026-10-23
+
+The prior index blocker is resolved by integration commits `70f589c` and
+`bd84625`. This continuation began clean on detached HEAD at `bd84625` and
+created `codex/p3-integration-layout-events`. Scoped changes below remain
+uncommitted; no push was made. The parent Phase 3 is not complete, so no
+phase-completion commit is claimed. Historical merge reports below retain
+their original failed commands, not the current index state.
+
+Delivered and parent-reviewed: schema 11/capability 8 workspace layout
+notifications, 64-record volatile journal, atomic snapshot/cursor reconciliation,
+finite watches sharing the existing eight-watch cap, and agent CLI gap recovery
+and full-target pinning. Pane screen/owner/exit events continue during quiet
+workspace watches. No dependencies or persisted history format changed.
+See [the complete result](P3-LAYOUT-EVENTS-RESULT.md),
+[accepted contract](P3-LAYOUT-EVENTS-TASK.md), and
+[independent review](P3-LAYOUT-EVENTS-REVIEW.md).
+
+Final actual combined verifier: **8/8**. Root Cargo **1,036 passed / 0 failed /
+15 ignored** (library691, binary119, integration226 across50 targets); decoder39
+and Python77 pass; strict all-target Clippy, fmt, build and component fingerprints
+pass; docs243/0. The real CLI gap test observes readiness, pauses only its test
+observer, commits70 resizes, resumes and observes exactly one `layout_resync`
+plus the quiet deadline. CLI target4/4. Four normally ignored Phase3 pathname
+peer/authentication/descriptor-race/context cases pass separately. Ignored tests
+and human Apple Terminal acceptance are not inferred passes.
+
+The original restricted sweep reproduced 989 passed / 28 failed / 15 ignored.
+Direct socket probes established EPERM only in the sandbox. All nine previously
+failing integration targets passed in the permitted context before new product
+changes:35/0/1ignored. Initial verifier compile/format failures during concurrent
+edits are preserved in the result note and superseded by the final frozen-tree
+run, not relabeled as passing executions.
+
+User-authorized GPT-6 Luna Medium/High workers had exclusive files; parent
+owned design, integration and independent verification. All ownership is
+released; no live agent is needed to resume. The worktree graph was refreshed
+fast/nonpersistent as `Users-sahillamba-.codex-worktrees-6730-panelink` after
+source/test freeze. Source/tests remain authoritative.
+
+Next: define and expose safe live pane cwd/executable metadata (currently null),
+without arguments or environment values. Broader Phase3 live scrollback,
+managed `pane run`, owner identity and host/lifetime contracts remain open.
+The dedicated workspace observer does not proactively renew its30-minute
+lease. Phase4 provider identity, Phase5 hierarchy/selection/reboot, human host
+acceptance and active-agent load are not closed by this slice.
+
 ## CI setup — 2026-10-24
 
 The user selected standard GitHub-hosted runners after confirming the repository
@@ -451,7 +1901,7 @@ All these are design/acceptance requirements, not current application behavior.
 
 This turn ran existing geometry filter17 and owner filter50:67passed/0failed/
 0ignored. Component fingerprints match, docs174files/0findings and diff checks
-pass;96 baseline Rust/test/manifest files and13 reports have unchanged hashes.
+pass;96 baseline Rust/test/manifest files and 13 reports have unchanged hashes.
 The first independent-note docs check found one trailing-whitespace line; it
 was corrected before the final check. Full verifier/integration was not rerun
 for docs-only work; previous7/8 and86passed/17failed/11ignored retain their
@@ -491,7 +1941,7 @@ eleven cannot start the server before raw mode, and one is the known host stderr
 assertion. Strict Clippy/fmt/build/rustdoc, Python45, decoder39, fingerprints,
 doctest command(0cases), diff and docs171/0 pass. Fixture development corrections
 are recorded in the parent/owner results. All65 baseline source/manifest files
-and13 prior raw/provenance reports have unchanged hashes. No new workload run.
+and 13 prior raw/provenance reports have unchanged hashes. No new workload run.
 
 Next: design bounded saved-layout/restart metadata for the current two-pane
 prototype; preserve pending hierarchy and provider decisions. Full machine

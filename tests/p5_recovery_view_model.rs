@@ -233,23 +233,23 @@ fn regular_two_pane_plans_keep_divider_order_and_floor_rounding() {
         assert_eq!(panes[1].x, first + 1);
     }
 
-    let plan = plan_viewport(&view(LayoutAxis::Stacked, 11, 82, 2), 11, 82, 0);
+    let plan = plan_viewport(&view(LayoutAxis::Stacked, 15, 82, 2), 15, 82, 0);
     let DisplayPlan::Panes { panes, divider, .. } = plan else {
         panic!("expected regular stacked plan")
     };
-    assert_eq!((panes[0].rows, panes[1].rows), (5, 5));
-    assert_eq!(panes[1].y, 6);
+    assert_eq!((panes[0].rows, panes[1].rows), (7, 7));
+    assert_eq!(panes[1].y, 8);
     assert_eq!(divider.unwrap().rows, 1);
 }
 
 #[test]
 fn exact_minimum_leaves_fit_and_one_cell_short_uses_overview() {
-    let fits = plan_viewport(&view(LayoutAxis::SideBySide, 5, 41, 2), 5, 41, 0);
+    let fits = plan_viewport(&view(LayoutAxis::SideBySide, 7, 45, 2), 7, 45, 0);
     assert!(matches!(fits, DisplayPlan::Panes { .. }));
 
-    let narrow = plan_viewport(&view(LayoutAxis::SideBySide, 11, 82, 2), 5, 40, 0);
+    let narrow = plan_viewport(&view(LayoutAxis::SideBySide, 11, 82, 2), 7, 44, 0);
     assert!(matches!(narrow, DisplayPlan::Overview { .. }));
-    let short = plan_viewport(&view(LayoutAxis::Stacked, 11, 82, 2), 10, 82, 0);
+    let short = plan_viewport(&view(LayoutAxis::Stacked, 15, 82, 2), 14, 82, 0);
     assert!(matches!(short, DisplayPlan::Overview { .. }));
 }
 

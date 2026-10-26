@@ -78,8 +78,10 @@ impl Fixture {
                 executable: &executable,
                 arguments: &arguments,
                 context: &context,
-                rows: 8,
-                columns: 60,
+                // Startup's one-cell content inset keeps the PTY at the
+                // original 8x60 test size.
+                rows: 10,
+                columns: 62,
             },
             false,
         )
@@ -124,7 +126,7 @@ fn checkpoint_text(store: &HistoryStore, target: TargetRef, buffer: ScreenBuffer
         .unwrap_or_default()
 }
 
-fn pump_until(driver: &mut MultiServerDriver, mut ready: impl FnMut() -> bool) {
+fn pump_until(driver: &mut MultiServerDriver, phase: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         let _ = driver.tick(|| 1);
@@ -135,7 +137,9 @@ fn pump_until(driver: &mut MultiServerDriver, mut ready: impl FnMut() -> bool) {
         }
         assert!(
             Instant::now() < deadline,
-            "public driver capture did not settle"
+            "public driver capture did not settle during {phase}; failed={}, diagnostics={:?}",
+            driver.history_capture_failed(),
+            driver.history_diagnostics().snapshot()
         );
         thread::sleep(Duration::from_millis(2));
     }
@@ -145,7 +149,8 @@ fn pump_until(driver: &mut MultiServerDriver, mut ready: impl FnMut() -> bool) {
 fn live_driver_saves_rows_and_both_buffers_before_natural_exit() {
     let fixture = Fixture::new();
     let (mut driver, target) = fixture.start(
-        "for n in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'ROW-%s\\r\\n' \"$n\"; done; \
+        "stty size > \"$1/initial-size\"; \
+         for n in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'ROW-%s\\r\\n' \"$n\"; done; \
          printf 'NORMAL-HOLD\\r\\n'; \
          while [ ! -f \"$1/enter-alt\" ]; do /bin/sleep 0.01; done; \
          printf '\\033[?1049hALT-HOLD'; \
@@ -153,15 +158,22 @@ fn live_driver_saves_rows_and_both_buffers_before_natural_exit() {
          printf '\\033[?1049l\\r\\nNORMAL-FINAL\\r\\n'",
     );
     let store = fixture.store();
-    pump_until(&mut driver, || {
+    pump_until(&mut driver, "normal screen", || {
         checkpoint_text(&store, target, ScreenBuffer::Normal).contains("NORMAL-HOLD")
     });
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("initial-size"))
+            .unwrap()
+            .trim(),
+        "8 60",
+        "the child must start directly at its content size"
+    );
     fs::write(fixture.root.join("enter-alt"), b"go").unwrap();
-    pump_until(&mut driver, || {
+    pump_until(&mut driver, "alternate screen", || {
         checkpoint_text(&store, target, ScreenBuffer::Alternate).contains("ALT-HOLD")
     });
     fs::write(fixture.root.join("leave-alt"), b"go").unwrap();
-    pump_until(&mut driver, || {
+    pump_until(&mut driver, "final rows", || {
         store
             .load_rows(target)
             .unwrap()
@@ -195,7 +207,7 @@ fn driver_drop_stops_live_child_then_persists_final_history() {
          printf 'DROP-READY\\r\\n'; while :; do /bin/sleep 1; done",
     );
     let store = fixture.store();
-    pump_until(&mut driver, || {
+    pump_until(&mut driver, "drop screen", || {
         checkpoint_text(&store, target, ScreenBuffer::Normal).contains("DROP-READY")
     });
     let failed = driver.history_failure_signal();

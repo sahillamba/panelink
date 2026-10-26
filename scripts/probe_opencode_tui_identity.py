@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import pty
@@ -138,32 +139,76 @@ def correlate_switches(
                     if record["session_id_hash"] == initial_hash), None)
     transitions: list[dict[str, Any]] = []
     previous_hash = initial_hash
-    last_seq = int(initial["seq"]) if initial else -1
+    last_match_seq = int(initial["seq"]) if initial else -1
+    last_marker_seq = -1
+    last_marker_ms = -1.0
+    attempted_count = min(len(target_hashes), len(issued))
+    unissued_count = max(0, len(target_hashes) - attempted_count)
+    extra_marker_count = max(0, len(issued) - len(target_hashes))
+    invalid_marker_count = 0
+    missed_attempt_count = 0
     for index, target in enumerate(target_hashes):
-        marker = issued[index] if index < len(issued) else {"after_seq": last_seq, "issued_ms": 0.0}
-        after_seq = int(marker.get("after_seq", last_seq))
-        issued_ms = float(marker.get("issued_ms", 0.0))
-        later = [record for record in session_records if int(record["seq"]) > after_seq]
-        later = [record for record in later
-                 if float(record["monotonic_ms"]) >= issued_ms]
-        matched = next((record for record in later if record["session_id_hash"] == target), None)
+        if index >= attempted_count:
+            transitions.append({
+                "attempted": False,
+                "observed": False,
+                "latency_ms": None,
+                "within_latency_bound": False,
+                "extra_transition_count": 0,
+            })
+            continue
+        marker = issued[index]
+        after_seq_value = marker.get("after_seq") if isinstance(marker, dict) else None
+        issued_ms_value = marker.get("issued_ms") if isinstance(marker, dict) else None
+        issued_ms = None
+        if (isinstance(issued_ms_value, (int, float))
+                and not isinstance(issued_ms_value, bool)):
+            try:
+                candidate_ms = float(issued_ms_value)
+                if math.isfinite(candidate_ms) and candidate_ms >= 0:
+                    issued_ms = candidate_ms
+            except (OverflowError, ValueError):
+                pass
+        marker_valid = (
+            isinstance(after_seq_value, int) and not isinstance(after_seq_value, bool)
+            and after_seq_value >= max(-1, last_match_seq, last_marker_seq)
+            and issued_ms is not None and issued_ms >= last_marker_ms
+        )
+        matched = None
         extras = []
-        if matched:
-            extras = [record["session_id_hash"] for record in later
-                      if int(record["seq"]) < int(matched["seq"])
-                      and record["session_id_hash"] not in (previous_hash, target)]
-            latency = float(matched["monotonic_ms"]) - issued_ms
-            last_seq = int(matched["seq"])
-        else:
+        if not marker_valid:
+            invalid_marker_count += 1
             latency = None
+            missed_attempt_count += 1
+        else:
+            after_seq = int(after_seq_value)
+            last_marker_seq = after_seq
+            last_marker_ms = issued_ms
+            # A later control marker can be stale or regress. Its transition
+            # must still follow the observation that satisfied the prior one.
+            lower_bound_seq = max(after_seq, last_match_seq)
+            later = [record for record in session_records
+                     if int(record["seq"]) > lower_bound_seq
+                     and float(record["monotonic_ms"]) >= issued_ms]
+            matched = next((record for record in later
+                            if record["session_id_hash"] == target), None)
+            if matched:
+                extras = [record["session_id_hash"] for record in later
+                          if int(record["seq"]) < int(matched["seq"])
+                          and record["session_id_hash"] not in (previous_hash, target)]
+                latency = float(matched["monotonic_ms"]) - issued_ms
+                last_match_seq = int(matched["seq"])
+                previous_hash = target
+            else:
+                latency = None
+                missed_attempt_count += 1
         transitions.append({
+            "attempted": True,
             "observed": matched is not None,
             "latency_ms": round(latency, 3) if latency is not None else None,
             "within_latency_bound": latency is not None and 0 <= latency <= max_latency_ms,
             "extra_transition_count": len(extras),
         })
-        if matched:
-            previous_hash = target
     route_changes: list[str] = []
     for record in session_records:
         value = record["session_id_hash"]
@@ -180,10 +225,26 @@ def correlate_switches(
             expected_index += 1
         else:
             extra_transition_count += 1
-    missed_transition_count = max(0, len(expected) - expected_index)
-    switch_order_observed = (initial is not None and expected_index == len(expected)
-                             and callback_sequence_ok)
-    latency_ok = all(transition["within_latency_bound"] for transition in transitions)
+    missed_transition_count = missed_attempt_count
+    switch_order_observed = (
+        initial is not None
+        and bool(target_hashes)
+        and attempted_count > 0
+        and attempted_count == len(target_hashes)
+        and unissued_count == 0
+        and extra_marker_count == 0
+        and invalid_marker_count == 0
+        and all(transition["observed"] for transition in transitions)
+        and expected_index == len(expected)
+        and callback_sequence_ok
+    )
+    latency_ok = (
+        attempted_count > 0
+        and attempted_count == len(target_hashes)
+        and extra_marker_count == 0
+        and invalid_marker_count == 0
+        and all(transition["within_latency_bound"] for transition in transitions)
+    )
     no_extras = extra_transition_count == 0 and all(
         transition["extra_transition_count"] == 0 for transition in transitions
     )
@@ -191,7 +252,12 @@ def correlate_switches(
         "initial_route_captured": initial is not None,
         "switch_A_B_A_observed": switch_order_observed and missed_transition_count == 0,
         "latency_bounds_passed": latency_ok,
-        "no_extra_transitions": extra_transition_count == 0,
+        "no_extra_transitions": no_extras,
+        "attempted_control_count": attempted_count,
+        "unissued_control_count": unissued_count,
+        "missed_attempt_count": missed_attempt_count,
+        "extra_marker_count": extra_marker_count,
+        "invalid_marker_count": invalid_marker_count,
         "missed_transition_count": missed_transition_count,
         "extra_transition_count": extra_transition_count,
         "transitions": transitions,
@@ -487,6 +553,11 @@ def rep_result(executable: str, launcher: str, repetition: int) -> dict[str, Any
         "initial_route_captured": False,
         "switch_A_B_A_observed": False,
         "latency_bounds_passed": False,
+        "attempted_control_count": 0,
+        "unissued_control_count": 0,
+        "missed_attempt_count": 0,
+        "extra_marker_count": 0,
+        "invalid_marker_count": 0,
         "missed_transition_count": 0,
         "extra_transition_count": 0,
         "route_change_callback_api": "tui.session.select_event_with_route_poll_fallback",
