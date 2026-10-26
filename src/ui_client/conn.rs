@@ -15,7 +15,7 @@ use panelink::control_protocol::{encode_request_payload, Command, ControlRequest
 use panelink::event_protocol::{decode_event, EventBody};
 use panelink::handshake_protocol::{
     decode_welcome, validate_welcome, Hello, Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT,
-    CAPABILITY_READ,
+    CAPABILITY_PANE_OPERATIONS, CAPABILITY_READ, CAPABILITY_SCREEN_ROW_WRAPS,
 };
 use panelink::protocol::{OperationKey, OperationStatus, Outcome};
 use panelink::protocol_wire::{Frame, MessageKind};
@@ -147,6 +147,10 @@ pub(crate) struct PaneConn {
     stream: Option<AuthenticatedStream>,
     next_request: u64,
     pub(crate) events: bool,
+    /// Schema-13 pane operations selected on the current lease connection.
+    pub(crate) pane_operations: bool,
+    /// Negotiated only by multi-session leases that were originally granted it.
+    pub(crate) screen_row_wraps: bool,
     pub(crate) cursor: u64,
     /// Our input-owner revision when we hold the claim.
     pub(crate) owner_revision: Option<u64>,
@@ -345,6 +349,8 @@ impl PaneConn {
             Err(error) => return Err(error),
         };
         self.events = welcome.selected_capabilities & CAPABILITY_EVENTS != 0;
+        self.screen_row_wraps = welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS != 0;
+        self.pane_operations = welcome.selected_capabilities & CAPABILITY_PANE_OPERATIONS != 0;
         self.stream = Some(stream);
         self.next_request = 1;
         self.lease_schedule.renewed(started);
@@ -367,6 +373,8 @@ impl PaneConn {
             stream: Some(stream),
             next_request: 1,
             events: welcome.selected_capabilities & CAPABILITY_EVENTS != 0,
+            pane_operations: welcome.selected_capabilities & CAPABILITY_PANE_OPERATIONS != 0,
+            screen_row_wraps: welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS != 0,
             cursor: 0,
             owner_revision: None,
             next_claim: renewed_at,
@@ -970,7 +978,10 @@ pub(crate) fn handshake(
     let hello = Hello {
         nonce: nonce(),
         required_capabilities: CAPABILITY_READ,
-        optional_capabilities: CAPABILITY_INPUT | CAPABILITY_EVENTS,
+        optional_capabilities: CAPABILITY_INPUT
+            | CAPABILITY_EVENTS
+            | CAPABILITY_SCREEN_ROW_WRAPS
+            | CAPABILITY_PANE_OPERATIONS,
     };
     let mut payload = encode_session_hello(&SessionHello {
         hello,
@@ -1094,6 +1105,54 @@ mod tests {
                 "scrolling requires a newer Panelink server; restart it"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_handshake_offers_row_wraps_optionally_and_accepts_selection() {
+        use panelink::handshake_protocol::{encode_welcome, Welcome, CAPABILITY_SCREEN_ROW_WRAPS};
+        use panelink::protocol_wire::{Frame, MessageKind};
+        use panelink::session_protocol::decode_session_hello;
+        use std::os::unix::net::UnixStream;
+
+        let (client_socket, server_socket) = UnixStream::pair().unwrap();
+        let mut client = AuthenticatedStream::new(client_socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut server = AuthenticatedStream::new(server_socket).unwrap();
+            let frame = server
+                .read_frame(Instant::now() + Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(frame.kind(), MessageKind::Hello);
+            let hello = decode_session_hello(frame.payload()).unwrap();
+            assert_ne!(
+                hello.hello.optional_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+                0
+            );
+            assert_eq!(
+                hello.hello.required_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+                0
+            );
+            let welcome = Welcome {
+                nonce: hello.hello.nonce,
+                generation: 7,
+                lease: 9,
+                selected_capabilities: CAPABILITY_READ | CAPABILITY_SCREEN_ROW_WRAPS,
+                ttl_seconds: panelink::handshake_protocol::HANDSHAKE_LEASE_TTL_SECONDS,
+            };
+            let payload = encode_welcome(&welcome).unwrap();
+            server
+                .write_frame(
+                    &Frame::new(MessageKind::Welcome, 0, &payload).unwrap(),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .unwrap();
+        });
+        let welcome = handshake(&mut client, None, None, Duration::from_secs(1)).unwrap();
+        assert_ne!(
+            welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+            0
+        );
+        server.join().unwrap();
     }
 
     #[test]

@@ -509,7 +509,7 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     client.wait_screen("pane 1 READY", |screen| screen.contains("PANE1-READY"));
     let capture = client.capture();
     for mode in [
-        &b"\x1b[?1000h"[..],
+        &b"\x1b[?1002h"[..],
         b"\x1b[?1006h",
         b"\x1b[?1049h",
         b"\x1b[?2004h",
@@ -519,6 +519,8 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
             "{mode:?} enabled"
         );
     }
+    assert!(!capture.windows(8).any(|w| w == b"\x1b[?1000h"));
+    assert!(!capture.windows(8).any(|w| w == b"\x1b[?1003h"));
 
     // The client resizes the server root to the host and claims pane 1.
     wait_control("root resize and pane-1 claim", || {
@@ -612,6 +614,7 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     let capture = client.capture();
     for mode in [
         &b"\x1b[?1006l"[..],
+        b"\x1b[?1002l",
         b"\x1b[?1000l",
         b"\x1b[?1049l",
         b"\x1b[?2004l",
@@ -621,6 +624,26 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
             "{mode:?} disabled"
         );
     }
+    let capture = client.capture();
+    let mouse_1006 = capture
+        .windows(8)
+        .position(|w| w == b"\x1b[?1006l")
+        .expect("SGR reporting disabled");
+    let mouse_1002 = capture
+        .windows(8)
+        .position(|w| w == b"\x1b[?1002l")
+        .expect("button-motion reporting disabled");
+    let conservative_mouse = capture
+        .windows(8)
+        .position(|w| w == b"\x1b[?1000l")
+        .expect("conservative mouse mode disabled");
+    let alternate_screen = capture
+        .windows(8)
+        .position(|w| w == b"\x1b[?1049l")
+        .expect("alternate screen restored");
+    assert!(mouse_1006 < mouse_1002);
+    assert!(mouse_1002 < conservative_mouse);
+    assert!(conservative_mouse < alternate_screen);
     client.termios_restored();
     let (code, layout) = fixture.control("one.ctx", &["layout"]);
     assert_eq!(code, 0, "{layout}");
@@ -700,7 +723,7 @@ fn ctrl_x_restores_the_terminal_promptly_when_the_server_is_stalled() {
     let from = client.capture().len();
     let pressed = Instant::now();
     client.write(b"\x18");
-    let restored = wait_bytes(&client, from, b"\x1b[?1000l", Duration::from_secs(3))
+    let restored = wait_bytes(&client, from, b"\x1b[?1002l", Duration::from_secs(3))
         .expect("restore sequence written");
     assert!(
         restored <= Duration::from_secs(1),

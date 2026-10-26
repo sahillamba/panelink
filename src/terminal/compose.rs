@@ -8,8 +8,10 @@
 use std::io::{self, Write};
 
 use super::render::{paint_row, paint_row_diff, validate_snapshot, Placement};
-use super::{io_error, ScreenSnapshot, TerminalError, TerminalSize};
+use super::{io_error, ScreenSnapshot, SnapshotCell, TerminalError, TerminalSize};
 use crate::pane_layout::{content_rect, Rect};
+use crate::terminal_selection::Point;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Largest pane or overlay height accepted by the compositor.
 pub const MAX_RECT_ROWS: u16 = 80;
@@ -19,6 +21,97 @@ pub const MAX_RECT_COLUMNS: u16 = 240;
 const MAX_ROWS: usize = MAX_RECT_ROWS as usize;
 const MAX_COLUMNS: usize = MAX_RECT_COLUMNS as usize;
 const MAX_OVERLAY_CELLS: usize = MAX_ROWS * MAX_COLUMNS;
+
+/// One sanitized cell in the persistent, fixed top row.
+///
+/// Glyph text is kept inline so the compositor can retain committed and
+/// pending headers without allocating or borrowing caller-owned labels.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct HeaderCell {
+    text: [u8; 32],
+    len: u8,
+    width: u8,
+    selected: bool,
+    continuation: bool,
+}
+
+impl std::fmt::Debug for HeaderCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeaderCell")
+            .field("len", &self.len)
+            .field("width", &self.width)
+            .field("selected", &self.selected)
+            .field("continuation", &self.continuation)
+            .finish()
+    }
+}
+
+impl HeaderCell {
+    /// Construct a sanitized single- or double-width UTF-8 glyph.
+    pub fn glyph(text: &str, selected: bool) -> Option<Self> {
+        if text.is_empty() || text.len() > 32 || text.chars().any(char::is_control) {
+            return None;
+        }
+        if text
+            .chars()
+            .next()
+            .is_some_and(|character| UnicodeWidthChar::width(character).unwrap_or(0) == 0)
+        {
+            return None;
+        }
+        let width = UnicodeWidthStr::width(text);
+        if !(1..=2).contains(&width) {
+            return None;
+        }
+        let mut bytes = [0; 32];
+        bytes[..text.len()].copy_from_slice(text.as_bytes());
+        Some(Self {
+            text: bytes,
+            len: text.len() as u8,
+            width: width as u8,
+            selected,
+            continuation: false,
+        })
+    }
+
+    /// Construct a visible blank cell.
+    pub const fn blank(selected: bool) -> Self {
+        Self {
+            text: [0; 32],
+            len: 0,
+            width: 1,
+            selected,
+            continuation: false,
+        }
+    }
+
+    /// Construct the second cell occupied by a wide glyph.
+    pub const fn continuation(selected: bool) -> Self {
+        Self {
+            text: [0; 32],
+            len: 0,
+            width: 0,
+            selected,
+            continuation: true,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        // Construction is private and glyph() accepts valid UTF-8 only.
+        std::str::from_utf8(&self.text[..usize::from(self.len)])
+            .expect("validated UTF-8 header cell")
+    }
+
+    pub const fn is_wide(&self) -> bool {
+        !self.continuation && self.width == 2
+    }
+    pub const fn is_continuation(&self) -> bool {
+        self.continuation
+    }
+    pub const fn selected(&self) -> bool {
+        self.selected
+    }
+}
 
 /// Content shown inside one pane rectangle.
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +131,35 @@ pub struct PaneView<'a> {
     pub rect: Rect,
     /// What to draw inside the rectangle.
     pub content: PaneContent<'a>,
+}
+
+/// Frozen selected cells to paint over one live pane snapshot.
+///
+/// The source is borrowed and never modified. The compositor copies selected
+/// cell presentation into its own pending frame, so live updates outside the
+/// range continue to render and a later render without this overlay restores
+/// the current live view.
+#[derive(Clone, Copy, Debug)]
+pub struct SelectionOverlay<'a> {
+    /// Stable slot in [`ComposeFrame::panes`].
+    pub slot: usize,
+    /// Immutable snapshot captured when selection began.
+    pub frozen: &'a ScreenSnapshot,
+    /// First endpoint in zero-based pane-content coordinates.
+    pub anchor: Point,
+    /// Current endpoint in zero-based pane-content coordinates.
+    pub end: Point,
+}
+
+/// One local keyboard caret painted over a frozen pane snapshot.
+#[derive(Clone, Copy, Debug)]
+pub struct CopyCaretOverlay<'a> {
+    /// Stable slot in [`ComposeFrame::panes`].
+    pub slot: usize,
+    /// Immutable snapshot captured when copy mode began.
+    pub frozen: &'a ScreenSnapshot,
+    /// Caret in zero-based pane-content coordinates.
+    pub point: Point,
 }
 
 /// Presentation of one overlay row.
@@ -137,6 +259,7 @@ struct FrameMeta {
     divider: Option<Rect>,
     dividers: [Option<Rect>; crate::pane_layout::MAX_PANES - 1],
     overlay: Option<Rect>,
+    header_present: bool,
     overlay_styles: [OverlayStyle; MAX_ROWS],
     cursor: CursorState,
 }
@@ -149,6 +272,7 @@ impl FrameMeta {
         divider: None,
         dividers: [None; crate::pane_layout::MAX_PANES - 1],
         overlay: None,
+        header_present: false,
         overlay_styles: [OverlayStyle::Normal; MAX_ROWS],
         cursor: CursorState::Hidden,
     };
@@ -174,6 +298,8 @@ pub struct Compositor {
     target: [Option<ScreenSnapshot>; crate::pane_layout::MAX_PANES],
     displayed_overlay: Box<[u8]>,
     target_overlay: Box<[u8]>,
+    displayed_header: [HeaderCell; MAX_COLUMNS],
+    target_header: [HeaderCell; MAX_COLUMNS],
     displayed_meta: FrameMeta,
     pending_meta: FrameMeta,
     valid: bool,
@@ -209,6 +335,8 @@ impl Compositor {
             target: std::array::from_fn(|_| None),
             displayed_overlay: overlay_buffer()?,
             target_overlay: overlay_buffer()?,
+            displayed_header: [HeaderCell::blank(false); MAX_COLUMNS],
+            target_header: [HeaderCell::blank(false); MAX_COLUMNS],
             displayed_meta: FrameMeta::EMPTY,
             pending_meta: FrameMeta::EMPTY,
             valid: false,
@@ -238,6 +366,7 @@ impl Compositor {
             }
         }
         std::mem::swap(&mut self.displayed_overlay, &mut self.target_overlay);
+        std::mem::swap(&mut self.displayed_header, &mut self.target_header);
         self.displayed_meta = self.pending_meta;
         self.valid = true;
         self.pending_ready = false;
@@ -252,9 +381,77 @@ impl Compositor {
     /// pane rectangle or divider change clears and repaints everything;
     /// otherwise only differences against the committed baseline are written.
     pub fn render<W: Write>(&mut self, frame: &ComposeFrame<'_>, output: &mut W) -> io::Result<()> {
+        self.render_with_selection(frame, None, output)
+    }
+
+    /// Render a frame with an optional persistent header occupying host row 0.
+    /// The header must contain exactly one cell per host column. Existing
+    /// overlays remain independent and are validated to stay below the row.
+    pub fn render_with_header<W: Write>(
+        &mut self,
+        frame: &ComposeFrame<'_>,
+        selection: Option<SelectionOverlay<'_>>,
+        header: Option<&[HeaderCell]>,
+        output: &mut W,
+    ) -> io::Result<()> {
+        self.render_inner(frame, selection, None, header, output)
+    }
+
+    /// Validate and render a frame with an optional frozen-cell selection.
+    ///
+    /// The selected pane must still contain a snapshot with the frozen
+    /// snapshot's dimensions and buffer. Invalid selection geometry is
+    /// rejected before staging or writing any bytes. A menu overlay in the
+    /// frame keeps priority and suppresses the selection presentation.
+    pub fn render_with_selection<W: Write>(
+        &mut self,
+        frame: &ComposeFrame<'_>,
+        selection: Option<SelectionOverlay<'_>>,
+        output: &mut W,
+    ) -> io::Result<()> {
+        self.render_inner(frame, selection, None, None, output)
+    }
+
+    /// Render frozen selection and a local copy caret, optionally below a
+    /// persistent header. Existing rendering entry points remain unchanged.
+    pub fn render_with_copy_mode<W: Write>(
+        &mut self,
+        frame: &ComposeFrame<'_>,
+        selection: Option<SelectionOverlay<'_>>,
+        caret: CopyCaretOverlay<'_>,
+        header: Option<&[HeaderCell]>,
+        output: &mut W,
+    ) -> io::Result<()> {
+        self.render_inner(frame, selection, Some(caret), header, output)
+    }
+
+    fn render_inner<W: Write>(
+        &mut self,
+        frame: &ComposeFrame<'_>,
+        selection: Option<SelectionOverlay<'_>>,
+        caret: Option<CopyCaretOverlay<'_>>,
+        header: Option<&[HeaderCell]>,
+        output: &mut W,
+    ) -> io::Result<()> {
         self.pending_ready = false;
-        validate_frame(frame, self.padded)?;
-        self.stage(frame);
+        validate_frame(frame, self.padded, header.is_some())?;
+        if let Some(header) = header {
+            validate_header(header, frame.host_columns)?;
+        }
+        let selection = if frame.overlay.is_some() {
+            None
+        } else {
+            selection
+        };
+        let caret = if frame.overlay.is_some() { None } else { caret };
+        if let Some(selection) = selection {
+            validate_selection(frame, selection)?;
+        }
+        if let Some(caret) = caret {
+            validate_copy_caret(frame, caret)?;
+        }
+        let selection = selection.filter(|selection| selection.anchor != selection.end);
+        self.stage(frame, selection, caret, header);
         match self.write_frame(output) {
             Ok(()) => {
                 self.pending_ready = true;
@@ -267,7 +464,13 @@ impl Compositor {
         }
     }
 
-    fn stage(&mut self, frame: &ComposeFrame<'_>) {
+    fn stage(
+        &mut self,
+        frame: &ComposeFrame<'_>,
+        selection: Option<SelectionOverlay<'_>>,
+        caret: Option<CopyCaretOverlay<'_>>,
+        header: Option<&[HeaderCell]>,
+    ) {
         let mut meta = FrameMeta::EMPTY;
         meta.host_rows = frame.host_rows;
         meta.host_columns = frame.host_columns;
@@ -301,6 +504,18 @@ impl Compositor {
                             target.copy_from(snapshot);
                             self.target[slot] = Some(target);
                         }
+                    }
+                    if let Some(selection) = selection.filter(|selection| selection.slot == slot) {
+                        let target = self.target[slot]
+                            .as_mut()
+                            .expect("snapshot target was allocated or reused");
+                        paint_selection(target, selection);
+                    }
+                    if let Some(caret) = caret.filter(|caret| caret.slot == slot) {
+                        let target = self.target[slot]
+                            .as_mut()
+                            .expect("snapshot target was allocated or reused");
+                        paint_copy_caret(target, caret.point);
                     }
                 }
                 PaneContent::Placeholder(text) => {
@@ -336,9 +551,15 @@ impl Compositor {
                 }
             }
         }
+        if let Some(header) = header {
+            meta.header_present = true;
+            self.target_header[..header.len()].copy_from_slice(header);
+        } else {
+            self.target_header[..usize::from(frame.host_columns)].fill(HeaderCell::blank(false));
+        }
 
-        meta.cursor = match (frame.overlay, frame.focused) {
-            (None, Some(slot)) => match frame.panes.get(slot).copied().flatten() {
+        meta.cursor = match (frame.overlay, selection, caret, frame.focused) {
+            (None, None, None, Some(slot)) => match frame.panes.get(slot).copied().flatten() {
                 Some(PaneView {
                     rect,
                     content: PaneContent::Snapshot(snapshot),
@@ -363,6 +584,7 @@ impl Compositor {
         !self.valid
             || pending.host_rows != displayed.host_rows
             || pending.host_columns != displayed.host_columns
+            || pending.header_present != displayed.header_present
             || pending.divider != displayed.divider
             || pending.dividers != displayed.dividers
             || pending
@@ -385,6 +607,12 @@ impl Compositor {
         let cells = rows * usize::from(rect.columns);
         pending.overlay_styles[..rows] == displayed.overlay_styles[..rows]
             && self.target_overlay[..cells] == self.displayed_overlay[..cells]
+    }
+
+    fn header_unchanged(&self) -> bool {
+        let columns = usize::from(self.pending_meta.host_columns);
+        self.pending_meta.header_present == self.displayed_meta.header_present
+            && self.target_header[..columns] == self.displayed_header[..columns]
     }
 
     fn pane_work(&self, slot: usize, overlay_moved: bool) -> PaneWork {
@@ -434,7 +662,8 @@ impl Compositor {
         let work: [PaneWork; crate::pane_layout::MAX_PANES] =
             std::array::from_fn(|slot| self.pane_work(slot, overlay_moved));
 
-        if !overlay_changed && work.iter().all(|work| *work == PaneWork::None) {
+        let header_changed = !self.header_unchanged();
+        if !overlay_changed && !header_changed && work.iter().all(|work| *work == PaneWork::None) {
             return write_cursor_update(output, displayed.cursor, pending.cursor);
         }
 
@@ -458,6 +687,9 @@ impl Compositor {
         if overlay_changed {
             self.paint_overlay(output)?;
         }
+        if header_changed {
+            self.paint_header(output, false)?;
+        }
         self.finish(output)
     }
 
@@ -471,6 +703,9 @@ impl Compositor {
         }
         self.paint_divider(output, None)?;
         self.paint_overlay(output)?;
+        if self.pending_meta.header_present {
+            self.paint_header(output, true)?;
+        }
         self.finish(output)
     }
 
@@ -678,6 +913,155 @@ impl Compositor {
         }
         Ok(())
     }
+
+    fn paint_header<W: Write>(&self, output: &mut W, repaint_all: bool) -> io::Result<()> {
+        let columns = usize::from(self.pending_meta.host_columns);
+        let active = self.pending_meta.header_present;
+        let mut column = 0;
+        while column < columns {
+            let changed = repaint_all
+                || !self.valid
+                || self.target_header[column] != self.displayed_header[column]
+                || self.pending_meta.header_present != self.displayed_meta.header_present;
+            if !changed {
+                column += 1;
+                continue;
+            }
+            let selected = active && self.target_header[column].selected();
+            write_position(output, 0, column as u16)?;
+            output.write_all(if selected { b"\x1b[0;7m" } else { b"\x1b[0m" })?;
+            let cell = self.target_header[column];
+            if active && !cell.is_continuation() && !cell.text().is_empty() {
+                output.write_all(cell.text().as_bytes())?;
+            } else {
+                output.write_all(b" ")?;
+            }
+            column += if active && cell.is_wide() { 2 } else { 1 };
+        }
+        output.write_all(b"\x1b[0m")
+    }
+}
+
+fn validate_selection(frame: &ComposeFrame<'_>, selection: SelectionOverlay<'_>) -> io::Result<()> {
+    let invalid_selection = || invalid("selection overlay does not match its pane snapshot");
+    let Some(Some(PaneView {
+        content: PaneContent::Snapshot(live),
+        ..
+    })) = frame.panes.get(selection.slot).copied()
+    else {
+        return Err(invalid_selection());
+    };
+    validate_snapshot(selection.frozen, live.rows(), live.columns())?;
+    if selection.frozen.rows() != live.rows()
+        || selection.frozen.columns() != live.columns()
+        || selection.frozen.alternate_screen() != live.alternate_screen()
+        || selection.anchor.row >= live.rows()
+        || selection.anchor.column >= live.columns()
+        || selection.end.row >= live.rows()
+        || selection.end.column >= live.columns()
+    {
+        return Err(invalid_selection());
+    }
+    Ok(())
+}
+
+fn validate_copy_caret(frame: &ComposeFrame<'_>, caret: CopyCaretOverlay<'_>) -> io::Result<()> {
+    let invalid_caret = || invalid("copy caret does not match its pane snapshot");
+    let Some(Some(PaneView {
+        content: PaneContent::Snapshot(live),
+        ..
+    })) = frame.panes.get(caret.slot).copied()
+    else {
+        return Err(invalid_caret());
+    };
+    validate_snapshot(caret.frozen, live.rows(), live.columns())?;
+    if caret.frozen.rows() != live.rows()
+        || caret.frozen.columns() != live.columns()
+        || caret.frozen.alternate_screen() != live.alternate_screen()
+        || caret.point.row >= live.rows()
+        || caret.point.column >= live.columns()
+    {
+        return Err(invalid_caret());
+    }
+    Ok(())
+}
+
+fn paint_copy_caret(target: &mut ScreenSnapshot, point: Point) {
+    let column = if target
+        .cell(point.row, point.column)
+        .is_some_and(SnapshotCell::is_wide_continuation)
+        && point.column > 0
+    {
+        point.column - 1
+    } else {
+        point.column
+    };
+    let index = usize::from(point.row) * usize::from(target.columns()) + usize::from(column);
+    target.cells[index].inverse = true;
+    if target.cells[index].wide && column + 1 < target.columns() {
+        let continuation = index + 1;
+        target.cells[continuation].inverse = true;
+    }
+}
+
+fn paint_selection(target: &mut ScreenSnapshot, selection: SelectionOverlay<'_>) {
+    let frozen = selection.frozen;
+    let (start, end) = ordered_points(selection.anchor, selection.end);
+    for row in start.row..=end.row {
+        let mut first = if row == start.row { start.column } else { 0 };
+        let mut last = if row == end.row {
+            end.column
+        } else {
+            target.columns() - 1
+        };
+        if frozen
+            .cell(row, first)
+            .is_some_and(SnapshotCell::is_wide_continuation)
+            && first > 0
+        {
+            first -= 1;
+        }
+        if frozen.cell(row, last).is_some_and(SnapshotCell::is_wide) && last + 1 < frozen.columns()
+        {
+            last += 1;
+        }
+        for column in first..=last {
+            let index = usize::from(row) * usize::from(target.columns()) + usize::from(column);
+            target.cells[index] = *frozen.cell(row, column).expect("validated cell geometry");
+            target.cells[index].inverse = true;
+        }
+        // A live wide glyph can straddle a frozen/live boundary. Clear an
+        // orphan half only when it touches this selected range; unrelated live
+        // cells retain their normal renderer fallback behavior.
+        let base = usize::from(row) * usize::from(target.columns());
+        for column in 0..target.columns() {
+            let index = base + usize::from(column);
+            let selected = (first..=last).contains(&column);
+            let left_selected = column > 0 && (first..=last).contains(&(column - 1));
+            let right_selected =
+                column + 1 < target.columns() && (first..=last).contains(&(column + 1));
+            if target.cells[index].wide {
+                let paired =
+                    column + 1 < target.columns() && target.cells[index + 1].wide_continuation;
+                if !paired && (selected || right_selected) {
+                    target.cells[index] = SnapshotCell::default();
+                }
+            } else if target.cells[index].wide_continuation
+                && (column == 0 || !target.cells[index - 1].wide)
+                && (selected || left_selected)
+            {
+                target.cells[index] = SnapshotCell::default();
+            }
+        }
+    }
+}
+
+fn ordered_points(a: Point, b: Point) -> (Point, Point) {
+    if (a.row, a.column) <= (b.row, b.column) {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 fn overlay_buffer() -> Result<Box<[u8]>, TerminalError> {
@@ -778,6 +1162,29 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
+fn validate_header(header: &[HeaderCell], host_columns: u16) -> io::Result<()> {
+    if header.len() != usize::from(host_columns) || header.len() > MAX_COLUMNS {
+        return Err(invalid("header length does not match host columns"));
+    }
+    for (index, cell) in header.iter().enumerate() {
+        if cell.is_continuation() {
+            if index == 0
+                || !header[index - 1].is_wide()
+                || header[index - 1].selected() != cell.selected()
+            {
+                return Err(invalid("header continuation has no matching wide glyph"));
+            }
+        } else if cell.is_wide()
+            && (index + 1 == header.len()
+                || !header[index + 1].is_continuation()
+                || header[index + 1].selected() != cell.selected())
+        {
+            return Err(invalid("wide header glyph has no matching continuation"));
+        }
+    }
+    Ok(())
+}
+
 /// Clip a rectangle's right and bottom edges to the host viewport. The origin
 /// is kept, so overlay lines stay anchored to the requested top-left cell.
 fn clip_to_host(rect: Rect, frame: &ComposeFrame<'_>) -> Rect {
@@ -817,7 +1224,7 @@ fn pane_content_rect(rect: Rect, padded: bool) -> Option<Rect> {
     }
 }
 
-fn validate_frame(frame: &ComposeFrame<'_>, padded: bool) -> io::Result<()> {
+fn validate_frame(frame: &ComposeFrame<'_>, padded: bool, header: bool) -> io::Result<()> {
     let (host_rows, host_columns) = (frame.host_rows, frame.host_columns);
     if host_rows == 0 || host_columns == 0 {
         return Err(invalid("compose host viewport is empty"));
@@ -829,6 +1236,9 @@ fn validate_frame(frame: &ComposeFrame<'_>, padded: bool) -> io::Result<()> {
         }
         if !within_limits(pane.rect) {
             return Err(invalid("pane rectangle exceeds terminal bounds"));
+        }
+        if header && pane.rect.y == 0 {
+            return Err(invalid("pane overlaps persistent header row"));
         }
         let content = pane_content_rect(pane.rect, padded)
             .ok_or_else(|| invalid("pane rectangle is smaller than the minimum content size"))?;
@@ -860,6 +1270,9 @@ fn validate_frame(frame: &ComposeFrame<'_>, padded: bool) -> io::Result<()> {
         {
             return Err(invalid("divider rectangle is invalid"));
         }
+        if header && divider.y == 0 {
+            return Err(invalid("divider overlaps persistent header row"));
+        }
     }
     let mut covered = [false; MAX_RECT_ROWS as usize * MAX_RECT_COLUMNS as usize];
     for pane in frame.panes.iter().flatten() {
@@ -880,6 +1293,20 @@ fn validate_frame(frame: &ComposeFrame<'_>, padded: bool) -> io::Result<()> {
                     return Err(invalid("divider rectangles overlap"));
                 }
             }
+        }
+    }
+    if let Some(overlay) = frame.overlay {
+        let clipped = clip_to_host(overlay.rect, frame);
+        if overlay.rect.x >= host_columns
+            || overlay.rect.y >= host_rows
+            || overlay.rect.rows == 0
+            || overlay.rect.columns == 0
+            || !within_limits(clipped)
+        {
+            return Err(invalid("overlay rectangle is invalid"));
+        }
+        if header && overlay.rect.y == 0 {
+            return Err(invalid("overlay overlaps persistent header row"));
         }
     }
     if frame.panes.iter().flatten().count() <= 2 {
@@ -920,17 +1347,6 @@ fn validate_frame(frame: &ComposeFrame<'_>, padded: bool) -> io::Result<()> {
         }
     }
 
-    if let Some(overlay) = frame.overlay {
-        let clipped = clip_to_host(overlay.rect, frame);
-        if overlay.rect.x >= host_columns
-            || overlay.rect.y >= host_rows
-            || overlay.rect.rows == 0
-            || overlay.rect.columns == 0
-            || !within_limits(clipped)
-        {
-            return Err(invalid("overlay rectangle is invalid"));
-        }
-    }
     Ok(())
 }
 
@@ -1008,6 +1424,53 @@ mod tests {
 
     fn fresh_render(frame: &ComposeFrame<'_>) -> Vec<u8> {
         rendered(&mut Compositor::try_new().unwrap(), frame)
+    }
+
+    fn selection_rendered_committed(
+        compositor: &mut Compositor,
+        frame: &ComposeFrame<'_>,
+        selection: Option<SelectionOverlay<'_>>,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        compositor
+            .render_with_selection(frame, selection, &mut bytes)
+            .unwrap();
+        assert!(compositor.commit());
+        bytes
+    }
+
+    fn copy_mode_rendered_committed(
+        compositor: &mut Compositor,
+        frame: &ComposeFrame<'_>,
+        selection: Option<SelectionOverlay<'_>>,
+        caret: CopyCaretOverlay<'_>,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        compositor
+            .render_with_copy_mode(frame, selection, caret, None, &mut bytes)
+            .unwrap();
+        assert!(compositor.commit());
+        bytes
+    }
+
+    fn single_pane(snapshot: &ScreenSnapshot) -> ComposeFrame<'_> {
+        ComposeFrame {
+            host_rows: snapshot.rows() + 2,
+            host_columns: snapshot.columns() + 2,
+            panes: [
+                Some(PaneView {
+                    rect: rect(0, 0, snapshot.rows() + 2, snapshot.columns() + 2),
+                    content: PaneContent::Snapshot(snapshot),
+                }),
+                None,
+                None,
+                None,
+            ],
+            divider: None,
+            dividers: [None; crate::pane_layout::MAX_PANES - 1],
+            focused: None,
+            overlay: None,
+        }
     }
 
     fn screen(bytes: &[u8], frame: &ComposeFrame<'_>) -> Parser {
@@ -1690,5 +2153,478 @@ mod tests {
         compositor.render(&frame, &mut sink).unwrap();
         assert!(sink.0 > 0);
         assert!(sink.0 <= 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn frozen_selection_drag_updates_clear_incrementally_and_tracks_live_cells() {
+        let frozen = snapshot_from("abcdefgh", 10, 20);
+        let live_before = snapshot_from("abcdefgh", 10, 20);
+        let live_during = snapshot_from("aXcdefgh", 10, 20);
+        let mut compositor = Compositor::try_new().unwrap();
+        let initial = single_pane(&live_before);
+        let mut parser = Parser::new(initial.host_rows, initial.host_columns, 0);
+        parser.process(&rendered_committed(&mut compositor, &initial));
+
+        let forward = SelectionOverlay {
+            slot: 0,
+            frozen: &frozen,
+            anchor: Point { row: 0, column: 1 },
+            end: Point { row: 0, column: 3 },
+        };
+        let frame = single_pane(&live_during);
+        let start = selection_rendered_committed(&mut compositor, &frame, Some(forward));
+        assert!(!contains(&start, b"\x1b[2J"));
+        parser.process(&start);
+        assert_eq!(cell_text(&parser, 1, 2), "b");
+        assert!(parser.screen().cell(1, 2).unwrap().inverse());
+        assert_eq!(cell_text(&parser, 1, 5), "e");
+        assert!(!parser.screen().cell(1, 5).unwrap().inverse());
+        assert_eq!(cell_text(&parser, 1, 3), "c");
+
+        let extended = SelectionOverlay {
+            end: Point { row: 0, column: 5 },
+            ..forward
+        };
+        parser.process(&selection_rendered_committed(
+            &mut compositor,
+            &frame,
+            Some(extended),
+        ));
+        let reverse = SelectionOverlay {
+            anchor: Point { row: 0, column: 5 },
+            end: Point { row: 0, column: 2 },
+            ..forward
+        };
+        parser.process(&selection_rendered_committed(
+            &mut compositor,
+            &frame,
+            Some(reverse),
+        ));
+        let cleared = selection_rendered_committed(&mut compositor, &frame, None);
+        assert!(!contains(&cleared, b"\x1b[2J"));
+        parser.process(&cleared);
+        assert_same_screen(&parser, &screen(&fresh_render(&frame), &frame), &frame);
+        assert_eq!(cell_text(&parser, 1, 2), "X");
+        assert!(!parser.screen().cell(1, 2).unwrap().inverse());
+        assert_eq!(cell_text(&parser, 1, 4), "d");
+    }
+
+    #[test]
+    fn copy_caret_moves_clears_and_recovers_after_writer_failure() {
+        let frozen = snapshot_from("abc", 10, 20);
+        let frame = single_pane(&frozen);
+        let mut compositor = Compositor::try_new().unwrap();
+        let caret = |column| CopyCaretOverlay {
+            slot: 0,
+            frozen: &frozen,
+            point: Point { row: 0, column },
+        };
+        let first = copy_mode_rendered_committed(&mut compositor, &frame, None, caret(0));
+        let mut parser = screen(&first, &frame);
+        assert_eq!(cell_text(&parser, 1, 1), "a");
+        assert!(parser.screen().cell(1, 1).unwrap().inverse());
+
+        let moved = copy_mode_rendered_committed(&mut compositor, &frame, None, caret(1));
+        parser.process(&moved);
+        assert_eq!(cell_text(&parser, 1, 1), "a");
+        assert!(!parser.screen().cell(1, 1).unwrap().inverse());
+        assert_eq!(cell_text(&parser, 1, 2), "b");
+        assert!(parser.screen().cell(1, 2).unwrap().inverse());
+
+        let cleared = rendered_committed(&mut compositor, &frame);
+        parser.process(&cleared);
+        assert!(!parser.screen().cell(1, 2).unwrap().inverse());
+        assert_eq!(cell_text(&parser, 1, 2), "b");
+
+        struct FailAfter(usize);
+        impl Write for FailAfter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                }
+                let count = self.0.min(bytes.len());
+                self.0 -= count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = compositor
+            .render_with_copy_mode(&frame, None, caret(2), None, &mut FailAfter(5))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(!compositor.commit());
+        let recovery = copy_mode_rendered_committed(&mut compositor, &frame, None, caret(2));
+        assert!(contains(&recovery, b"\x1b[2J"));
+        let parser = screen(&recovery, &frame);
+        assert!(parser.screen().cell(1, 3).unwrap().inverse());
+        assert!(!parser.screen().cell(1, 2).unwrap().inverse());
+
+        let wide = snapshot_from("界x", 10, 20);
+        let wide_frame = single_pane(&wide);
+        let mut wide_compositor = Compositor::try_new().unwrap();
+        let wide_caret = CopyCaretOverlay {
+            slot: 0,
+            frozen: &wide,
+            point: Point { row: 0, column: 1 },
+        };
+        let output =
+            copy_mode_rendered_committed(&mut wide_compositor, &wide_frame, None, wide_caret);
+        let parser = screen(&output, &wide_frame);
+        assert!(parser.screen().cell(1, 1).unwrap().is_wide());
+        assert!(parser.screen().cell(1, 1).unwrap().inverse());
+        assert!(parser.screen().cell(1, 2).unwrap().is_wide_continuation());
+        // The VT parser models the continuation topology but does not expose
+        // its rendition separately. Prove the emitted wide glyph itself is
+        // preceded by inverse SGR, which styles the glyph's full host width.
+        assert!(contains(&output, b"\x1b[0;7;39;49m\xE7\x95\x8C"));
+    }
+
+    #[test]
+    fn selection_preserves_unicode_combining_and_wide_topology_at_edges() {
+        let frozen = snapshot_from("界e\u{301}z", 10, 20);
+        let live = snapshot_from("界e\u{301}z", 10, 20);
+        let frame = single_pane(&live);
+        let mut compositor = Compositor::try_new().unwrap();
+        let range = SelectionOverlay {
+            slot: 0,
+            frozen: &frozen,
+            anchor: Point { row: 0, column: 1 }, // continuation normalizes to the lead
+            end: Point { row: 0, column: 2 },
+        };
+        let bytes = selection_rendered_committed(&mut compositor, &frame, Some(range));
+        let parser = screen(&bytes, &frame);
+        assert_eq!(cell_text(&parser, 1, 1), "界");
+        assert!(parser.screen().cell(1, 1).unwrap().is_wide());
+        assert!(parser.screen().cell(1, 2).unwrap().is_wide_continuation());
+        assert!(parser.screen().cell(1, 1).unwrap().inverse());
+
+        let combining_range = SelectionOverlay {
+            anchor: Point { row: 0, column: 2 },
+            end: Point { row: 0, column: 3 },
+            ..range
+        };
+        let mut combining_compositor = Compositor::try_new().unwrap();
+        let bytes =
+            selection_rendered_committed(&mut combining_compositor, &frame, Some(combining_range));
+        let parser = screen(&bytes, &frame);
+        assert_eq!(cell_text(&parser, 1, 3), "e\u{301}");
+        assert!(parser.screen().cell(1, 3).unwrap().inverse());
+
+        // Replacing only a live wide lead with a single frozen cell clears
+        // the now-orphaned live continuation in the composed presentation.
+        let frozen_narrow = snapshot_from("ab", 10, 20);
+        let live_wide = snapshot_from("\x1b[1;2H界x", 10, 20);
+        let frame = single_pane(&live_wide);
+        let range = SelectionOverlay {
+            slot: 0,
+            frozen: &frozen_narrow,
+            anchor: Point { row: 0, column: 0 },
+            end: Point { row: 0, column: 1 },
+        };
+        let mut compositor = Compositor::try_new().unwrap();
+        let bytes = selection_rendered_committed(&mut compositor, &frame, Some(range));
+        let parser = screen(&bytes, &frame);
+        assert_eq!(cell_text(&parser, 1, 1), "a");
+        assert_eq!(cell_text(&parser, 1, 2), "b");
+        assert_blank(&parser, 1, 3);
+        assert_eq!(cell_text(&parser, 1, 4), "x");
+        assert_eq!(live_wide.cell(0, 1).unwrap().text(), "界");
+        assert!(live_wide.cell(0, 2).unwrap().is_wide_continuation());
+    }
+
+    #[test]
+    fn selection_rejects_invalid_geometry_before_output_and_menu_keeps_priority() {
+        let frozen = snapshot_from("frozen", 10, 20);
+        let live = snapshot_from("live", 10, 20);
+        let frame = single_pane(&live);
+        let mut compositor = Compositor::try_new().unwrap();
+        let invalid_range = SelectionOverlay {
+            slot: 0,
+            frozen: &frozen,
+            anchor: Point { row: 0, column: 0 },
+            end: Point { row: 10, column: 0 },
+        };
+        let mut output = Vec::new();
+        let error = compositor
+            .render_with_selection(&frame, Some(invalid_range), &mut output)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(output.is_empty());
+
+        let collapsed = SelectionOverlay {
+            slot: 0,
+            frozen: &frozen,
+            anchor: Point { row: 0, column: 0 },
+            end: Point { row: 0, column: 0 },
+        };
+        let bytes = selection_rendered_committed(&mut compositor, &frame, Some(collapsed));
+        let parser = screen(&bytes, &frame);
+        assert_eq!(cell_text(&parser, 1, 1), "l");
+        assert!(!parser.screen().cell(1, 1).unwrap().inverse());
+
+        let lines = [OverlayLine {
+            text: "MENU",
+            style: OverlayStyle::Selected,
+        }];
+        let mut menu = frame;
+        menu.overlay = Some(OverlayView {
+            rect: rect(1, 1, 1, 4),
+            lines: &lines,
+        });
+        let selection = SelectionOverlay {
+            slot: 0,
+            frozen: &frozen,
+            anchor: Point { row: 0, column: 0 },
+            end: Point { row: 0, column: 5 },
+        };
+        let bytes = selection_rendered_committed(&mut compositor, &menu, Some(selection));
+        let parser = screen(&bytes, &menu);
+        assert_eq!(cell_text(&parser, 1, 1), "M");
+        assert_eq!(cell_text(&parser, 1, 5), " ");
+    }
+
+    fn header_frame<'a>(overlay: Option<OverlayView<'a>>) -> ComposeFrame<'a> {
+        ComposeFrame {
+            host_rows: 6,
+            host_columns: 20,
+            panes: [None; crate::pane_layout::MAX_PANES],
+            divider: None,
+            dividers: [None; crate::pane_layout::MAX_PANES - 1],
+            focused: None,
+            overlay,
+        }
+    }
+
+    fn header_with_label(label: &str, selected: bool) -> [HeaderCell; 20] {
+        let mut cells = [HeaderCell::blank(false); 20];
+        for (index, byte) in label.bytes().enumerate() {
+            cells[index] =
+                HeaderCell::glyph(std::str::from_utf8(&[byte]).unwrap(), selected).unwrap();
+        }
+        cells
+    }
+
+    #[test]
+    fn header_changes_are_incremental_committed_and_removable() {
+        let frame = header_frame(None);
+        let first = header_with_label("Project", true);
+        let second = header_with_label("Workspace", false);
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut bytes = Vec::new();
+        compositor
+            .render_with_header(&frame, None, Some(&first), &mut bytes)
+            .unwrap();
+        assert!(contains(&bytes, b"\x1b[2J"));
+        let mut complete_output = bytes.clone();
+        assert!(compositor.commit());
+
+        bytes.clear();
+        compositor
+            .render_with_header(&frame, None, Some(&second), &mut bytes)
+            .unwrap();
+        assert!(!contains(&bytes, b"\x1b[2J"));
+        complete_output.extend_from_slice(&bytes);
+        assert!(compositor.commit());
+
+        bytes.clear();
+        compositor
+            .render_with_header(&frame, None, Some(&second), &mut bytes)
+            .unwrap();
+        assert!(bytes.is_empty());
+        assert!(compositor.commit());
+
+        bytes.clear();
+        let lines = [OverlayLine {
+            text: "modal content",
+            style: OverlayStyle::Selected,
+        }];
+        let modal_at_header = header_frame(Some(OverlayView {
+            rect: rect(0, 1, 1, 14),
+            lines: &lines,
+        }));
+        compositor
+            .render_with_header(&modal_at_header, None, None, &mut bytes)
+            .unwrap();
+        assert!(!bytes.is_empty());
+        assert!(contains(&bytes, b"\x1b[2J"));
+        complete_output.extend_from_slice(&bytes);
+        let parser = screen(&complete_output, &modal_at_header);
+        assert_blank(&parser, 0, 0);
+        assert_eq!(cell_text(&parser, 0, 1), "m");
+        assert_eq!(cell_text(&parser, 0, 2), "o");
+        assert_blank(&parser, 0, 14);
+    }
+
+    #[test]
+    fn full_repaint_restores_an_unchanged_header_after_geometry_change() {
+        let frame = header_frame(None);
+        let resized = ComposeFrame {
+            host_rows: frame.host_rows - 1,
+            ..frame
+        };
+        let cells = header_with_label("Project", true);
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut complete_output = Vec::new();
+        compositor
+            .render_with_header(&frame, None, Some(&cells), &mut complete_output)
+            .unwrap();
+        assert!(compositor.commit());
+
+        let mut resized_output = Vec::new();
+        compositor
+            .render_with_header(&resized, None, Some(&cells), &mut resized_output)
+            .unwrap();
+        assert!(contains(&resized_output, b"\x1b[2J"));
+        complete_output.extend_from_slice(&resized_output);
+
+        let parser = screen(&complete_output, &resized);
+        assert_eq!(cell_text(&parser, 0, 0), "P");
+        assert_eq!(cell_text(&parser, 0, 6), "t");
+    }
+
+    #[test]
+    fn modal_overlay_composes_below_the_persistent_header() {
+        let lines = [OverlayLine {
+            text: "modal content",
+            style: OverlayStyle::Selected,
+        }];
+        let frame = header_frame(Some(OverlayView {
+            rect: rect(2, 1, 1, 14),
+            lines: &lines,
+        }));
+        let cells = header_with_label("Project", true);
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut bytes = Vec::new();
+        compositor
+            .render_with_header(&frame, None, Some(&cells), &mut bytes)
+            .unwrap();
+        let parser = screen(&bytes, &frame);
+        assert_eq!(cell_text(&parser, 0, 0), "P");
+        assert_eq!(cell_text(&parser, 0, 1), "r");
+        assert_eq!(cell_text(&parser, 0, 6), "t");
+        assert_eq!(cell_text(&parser, 2, 1), "m");
+        assert_eq!(cell_text(&parser, 2, 2), "o");
+        assert_eq!(cell_text(&parser, 2, 13), "t");
+    }
+
+    #[test]
+    fn header_validates_wide_topology_and_rejects_row_overlap_before_output() {
+        let frame = header_frame(None);
+        let mut cells = [HeaderCell::blank(false); 20];
+        cells[0] = HeaderCell::glyph("界", false).unwrap();
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut output = Vec::new();
+        assert_eq!(
+            compositor
+                .render_with_header(&frame, None, Some(&cells), &mut output)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(output.is_empty());
+
+        cells[1] = HeaderCell::continuation(false);
+        compositor
+            .render_with_header(&frame, None, Some(&cells), &mut output)
+            .unwrap();
+        assert!(compositor.commit());
+
+        let overlapping = ComposeFrame {
+            panes: [
+                Some(PaneView {
+                    rect: rect(0, 0, 3, 20),
+                    content: PaneContent::Placeholder("x"),
+                }),
+                None,
+                None,
+                None,
+            ],
+            ..frame
+        };
+        output.clear();
+        assert_eq!(
+            compositor
+                .render_with_header(&overlapping, None, Some(&cells), &mut output)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(output.is_empty());
+
+        let lines = [OverlayLine {
+            text: "modal",
+            style: OverlayStyle::Normal,
+        }];
+        let overlapping_modal = ComposeFrame {
+            overlay: Some(OverlayView {
+                rect: rect(0, 0, 1, 5),
+                lines: &lines,
+            }),
+            ..frame
+        };
+        assert_eq!(
+            compositor
+                .render_with_header(&overlapping_modal, None, Some(&cells), &mut output)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(output.is_empty());
+
+        assert!(HeaderCell::glyph("\u{1b}", false).is_none());
+        assert!(HeaderCell::glyph("\u{301}", false).is_none());
+        assert!(HeaderCell::glyph("\u{301}a", false).is_none());
+        assert_eq!(
+            HeaderCell::glyph("a\u{301}", false).unwrap().text(),
+            "a\u{301}"
+        );
+        assert!(HeaderCell::glyph("abcdefghijklmnopqrstuvwxyzABCDEFG", false).is_none());
+    }
+
+    #[test]
+    fn header_baseline_advances_only_after_commit_or_complete_write() {
+        struct FailAfter(usize);
+        impl Write for FailAfter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::other("injected writer failure"));
+                }
+                let count = bytes.len().min(self.0);
+                self.0 -= count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let frame = header_frame(None);
+        let cells = header_with_label("A", true);
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut first = Vec::new();
+        compositor
+            .render_with_header(&frame, None, Some(&cells), &mut first)
+            .unwrap();
+        let mut replay = Vec::new();
+        compositor
+            .render_with_header(&frame, None, Some(&cells), &mut replay)
+            .unwrap();
+        assert_eq!(first, replay, "uncommitted header changes must replay");
+        assert!(compositor.commit());
+
+        assert!(compositor
+            .render_with_header(&frame, None, None, &mut FailAfter(5))
+            .is_err());
+        let mut retry = Vec::new();
+        compositor
+            .render_with_header(&frame, None, None, &mut retry)
+            .unwrap();
+        assert!(
+            contains(&retry, b"\x1b[2J"),
+            "a partial write invalidates the baseline"
+        );
+        assert!(compositor.commit());
     }
 }

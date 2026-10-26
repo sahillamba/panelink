@@ -6,6 +6,7 @@ use crossterm_input::{
 };
 use panelink::split_menu::{ConfirmInput, MenuInput};
 use panelink::terminal::Key;
+use panelink::workspace_tabs::TabNavigation;
 
 /// What one key press means while the menu is closed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +19,95 @@ pub(crate) enum KeyAction {
     Prefix,
     /// Not representable as a typed key; dropped locally.
     Ignore,
+}
+
+/// Keys consumed by the bounded local keyboard copy mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CopyModeKey {
+    MoveLeft,
+    MoveRight,
+    MoveUp,
+    MoveDown,
+    ToggleAnchor,
+    Copy,
+    Cancel,
+    Detach,
+    Ignore,
+}
+
+/// Bounded prototype pane actions accepted after Ctrl-B.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PaneOperationKey {
+    Zoom,
+    Swap,
+    Divider,
+}
+
+pub(crate) fn pane_operation_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<PaneOperationKey> {
+    let plain = modifiers.is_empty() || modifiers == KeyModifiers::SHIFT;
+    if !plain {
+        return None;
+    }
+    match code {
+        KeyCode::Char('z' | 'Z') => Some(PaneOperationKey::Zoom),
+        KeyCode::Char('m' | 'M') => Some(PaneOperationKey::Swap),
+        KeyCode::Char('e' | 'E') => Some(PaneOperationKey::Divider),
+        _ => None,
+    }
+}
+
+/// Interpret one event while copy mode owns input. Unsupported combinations,
+/// releases, paste, and mouse are intentionally handled as local Ignore.
+pub(crate) fn copy_mode_key(key: KeyEvent) -> CopyModeKey {
+    if key.kind == KeyEventKind::Release {
+        return CopyModeKey::Ignore;
+    }
+    if key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('x' | 'X')) {
+        return CopyModeKey::Detach;
+    }
+    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return CopyModeKey::Ignore;
+    }
+    let plain = key.modifiers.is_empty();
+    let plain_char = plain || key.modifiers == KeyModifiers::SHIFT;
+    match key.code {
+        KeyCode::Left if plain => CopyModeKey::MoveLeft,
+        KeyCode::Right if plain => CopyModeKey::MoveRight,
+        KeyCode::Up if plain => CopyModeKey::MoveUp,
+        KeyCode::Down if plain => CopyModeKey::MoveDown,
+        KeyCode::Char('h' | 'H') if plain_char => CopyModeKey::MoveLeft,
+        KeyCode::Char('l' | 'L') if plain_char => CopyModeKey::MoveRight,
+        KeyCode::Char('k' | 'K') if plain_char => CopyModeKey::MoveUp,
+        KeyCode::Char('j' | 'J') if plain_char => CopyModeKey::MoveDown,
+        KeyCode::Char(' ') if plain && key.kind == KeyEventKind::Press => CopyModeKey::ToggleAnchor,
+        KeyCode::Enter if plain && key.kind == KeyEventKind::Press => CopyModeKey::Copy,
+        KeyCode::Char('y' | 'Y') if plain_char && key.kind == KeyEventKind::Press => {
+            CopyModeKey::Copy
+        }
+        KeyCode::Esc if plain && key.kind == KeyEventKind::Press => CopyModeKey::Cancel,
+        _ => CopyModeKey::Ignore,
+    }
+}
+
+/// Workspace navigation shortcuts accepted after Ctrl-B.
+pub(crate) fn workspace_navigation(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<TabNavigation> {
+    let plain = modifiers.is_empty() || modifiers == KeyModifiers::SHIFT;
+    if !plain {
+        return None;
+    }
+    match code {
+        KeyCode::Char('n' | 'N') => Some(TabNavigation::NextTab),
+        KeyCode::Char('p' | 'P') => Some(TabNavigation::PreviousTab),
+        KeyCode::Char(']') => Some(TabNavigation::NextProject),
+        KeyCode::Char('[') => Some(TabNavigation::PreviousProject),
+        _ => None,
+    }
 }
 
 /// Map one key event, mirroring `p2_probe::dispatch_key`.
@@ -243,6 +333,131 @@ mod tests {
     }
 
     #[test]
+    fn workspace_commands_require_plain_navigation_keys() {
+        assert_eq!(
+            workspace_navigation(KeyCode::Char('n'), KeyModifiers::NONE),
+            Some(TabNavigation::NextTab)
+        );
+        assert_eq!(
+            workspace_navigation(KeyCode::Char('P'), KeyModifiers::SHIFT),
+            Some(TabNavigation::PreviousTab)
+        );
+        assert_eq!(
+            workspace_navigation(KeyCode::Char(']'), KeyModifiers::NONE),
+            Some(TabNavigation::NextProject)
+        );
+        assert_eq!(
+            workspace_navigation(KeyCode::Char('['), KeyModifiers::NONE),
+            Some(TabNavigation::PreviousProject)
+        );
+        assert_eq!(
+            workspace_navigation(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            None
+        );
+    }
+
+    #[test]
+    fn pane_operation_prototypes_require_plain_prefix_keys() {
+        assert_eq!(
+            pane_operation_key(KeyCode::Char('z'), KeyModifiers::NONE),
+            Some(PaneOperationKey::Zoom)
+        );
+        assert_eq!(
+            pane_operation_key(KeyCode::Char('M'), KeyModifiers::SHIFT),
+            Some(PaneOperationKey::Swap)
+        );
+        assert_eq!(
+            pane_operation_key(KeyCode::Char('e'), KeyModifiers::NONE),
+            Some(PaneOperationKey::Divider)
+        );
+        assert_eq!(
+            pane_operation_key(KeyCode::Char('z'), KeyModifiers::CONTROL),
+            None
+        );
+    }
+
+    #[test]
+    fn copy_mode_keys_are_local_and_one_shot_actions_ignore_repeats() {
+        let key = |code, modifiers, kind| KeyEvent::new_with_kind(code, modifiers, kind);
+        assert_eq!(
+            copy_mode_key(key(KeyCode::Left, KeyModifiers::NONE, KeyEventKind::Press)),
+            CopyModeKey::MoveLeft
+        );
+        assert_eq!(
+            copy_mode_key(key(
+                KeyCode::Char('h'),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            )),
+            CopyModeKey::MoveLeft
+        );
+        assert_eq!(
+            copy_mode_key(key(
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            CopyModeKey::ToggleAnchor
+        );
+        assert_eq!(
+            copy_mode_key(key(
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            )),
+            CopyModeKey::Ignore
+        );
+        assert_eq!(
+            copy_mode_key(key(
+                KeyCode::Char('y'),
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            CopyModeKey::Copy
+        );
+        assert_eq!(
+            copy_mode_key(key(
+                KeyCode::Char('y'),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            )),
+            CopyModeKey::Ignore
+        );
+        assert_eq!(
+            copy_mode_key(key(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            )),
+            CopyModeKey::Ignore
+        );
+        assert_eq!(
+            copy_mode_key(key(KeyCode::Left, KeyModifiers::SHIFT, KeyEventKind::Press)),
+            CopyModeKey::Ignore
+        );
+        assert_eq!(
+            copy_mode_key(key(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Release)),
+            CopyModeKey::Ignore
+        );
+        assert_eq!(
+            copy_mode_key(key(
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press
+            )),
+            CopyModeKey::Detach
+        );
+        assert_eq!(
+            copy_mode_key(key(
+                KeyCode::Char('q'),
+                KeyModifiers::ALT,
+                KeyEventKind::Press
+            )),
+            CopyModeKey::Ignore
+        );
+    }
+
+    #[test]
     fn sgr_mouse_and_menu_keys_map_to_menu_inputs() {
         assert_eq!(
             menu_input(&decode(b"\x1b[<2;10;5M")),
@@ -268,6 +483,13 @@ mod tests {
                 right: false
             }
         );
+        match decode(b"\x1b[<32;10;5M") {
+            Event::Mouse(mouse) => {
+                assert_eq!(mouse.kind, MouseEventKind::Drag(MouseButton::Left));
+                assert_eq!((mouse.column, mouse.row), (9, 4));
+            }
+            event => panic!("expected SGR left drag, got {event:?}"),
+        }
         assert_eq!(menu_input(&decode(b"\x1b[<64;1;1M")), MenuInput::Other);
         assert_eq!(menu_input(&decode(b"\x1b")), MenuInput::Cancel);
         assert_eq!(menu_input(&decode(b"\r")), MenuInput::Activate);

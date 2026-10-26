@@ -776,8 +776,16 @@ impl GlobalAuthority {
         // not depend on a particular pane's notification health.
         let workspace = capability_mask & crate::handshake_protocol::CAPABILITY_WORKSPACE_EVENTS;
         let pane_metadata = capability_mask & crate::handshake_protocol::CAPABILITY_PANE_METADATA;
-        let available =
-            (self.available_capabilities(session) | workspace | pane_metadata) & capability_mask;
+        let screen_row_wraps =
+            capability_mask & crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS;
+        let pane_operations =
+            capability_mask & crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS;
+        let available = (self.available_capabilities(session)
+            | workspace
+            | pane_metadata
+            | screen_row_wraps
+            | pane_operations)
+            & capability_mask;
 
         let (lease, capabilities) = match hello.resume {
             Some(resume) => {
@@ -3404,6 +3412,25 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(fresh.selected_capabilities(), CAPABILITY_READ);
+    }
+
+    #[test]
+    fn legacy_single_session_owner_does_not_offer_multi_session_wrap_capability() {
+        use crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS;
+
+        let mut owner = state();
+        let requested = hello(CAPABILITY_READ, CAPABILITY_SCREEN_ROW_WRAPS);
+        let (connection, welcome) = owner.connect(&requested, 1).unwrap();
+        assert_eq!(welcome.selected_capabilities, CAPABILITY_READ);
+        assert_eq!(connection.selected_capabilities(), CAPABILITY_READ);
+
+        let mut resume = requested;
+        resume.resume = Some(LeaseRef {
+            generation: GENERATION,
+            lease: connection.lease(),
+        });
+        let (_, resumed) = owner.connect(&resume, 2).unwrap();
+        assert_eq!(resumed.selected_capabilities, CAPABILITY_READ);
     }
 
     #[test]

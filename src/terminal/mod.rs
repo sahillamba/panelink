@@ -481,6 +481,8 @@ pub struct ScreenSnapshot {
     application_cursor: bool,
     bracketed_paste: bool,
     cells: Vec<SnapshotCell>,
+    row_wraps: [bool; 80],
+    row_wraps_available: bool,
 }
 
 impl fmt::Debug for ScreenSnapshot {
@@ -494,6 +496,7 @@ impl fmt::Debug for ScreenSnapshot {
             .field("application_cursor", &self.application_cursor)
             .field("bracketed_paste", &self.bracketed_paste)
             .field("cell_count", &self.cells.len())
+            .field("row_wraps_available", &self.row_wraps_available)
             .field("text", &"<redacted>")
             .finish()
     }
@@ -530,6 +533,8 @@ impl ScreenSnapshot {
             application_cursor: false,
             bracketed_paste: false,
             cells,
+            row_wraps: [false; 80],
+            row_wraps_available: false,
         })
     }
 
@@ -547,6 +552,8 @@ impl ScreenSnapshot {
         self.cells
             .resize_with(source.cells.len(), SnapshotCell::default);
         self.cells.copy_from_slice(&source.cells);
+        self.row_wraps = source.row_wraps;
+        self.row_wraps_available = source.row_wraps_available;
     }
 
     fn refresh(&mut self, screen: &Screen, size: TerminalSize) {
@@ -561,6 +568,11 @@ impl ScreenSnapshot {
         self.cursor_hidden = screen.hide_cursor();
         self.application_cursor = screen.application_cursor();
         self.bracketed_paste = screen.bracketed_paste();
+        self.row_wraps.fill(false);
+        for row in 0..size.rows {
+            self.row_wraps[usize::from(row)] = screen.row_wrapped(row);
+        }
+        self.row_wraps_available = true;
         for row in 0..size.rows {
             for col in 0..size.columns {
                 if let Some(cell) = screen.cell(row, col) {
@@ -610,6 +622,31 @@ impl ScreenSnapshot {
     /// Visible cells in row-major order.
     pub fn cells(&self) -> &[SnapshotCell] {
         &self.cells
+    }
+    /// Authoritative soft-wrap state for a visible row, when known.
+    pub fn row_wrapped(&self, row: u16) -> Option<bool> {
+        (self.row_wraps_available && row < self.rows).then(|| self.row_wraps[usize::from(row)])
+    }
+    /// Borrow all authoritative visible-row wrap flags, when known.
+    pub fn row_wraps(&self) -> Option<&[bool]> {
+        self.row_wraps_available
+            .then(|| &self.row_wraps[..usize::from(self.rows)])
+    }
+    /// Apply authoritative wrap metadata after loading a screen checkpoint.
+    /// The input must contain exactly one flag for each visible row.
+    pub fn apply_row_wraps(&mut self, wraps: &[bool]) -> Result<(), TerminalError> {
+        if wraps.len() != usize::from(self.rows) || self.rows > 80 {
+            return Err(TerminalError::InvalidSize);
+        }
+        self.row_wraps.fill(false);
+        self.row_wraps[..wraps.len()].copy_from_slice(wraps);
+        self.row_wraps_available = true;
+        Ok(())
+    }
+    /// Mark wrap metadata unavailable, as for a checkpoint without a bitmap.
+    pub fn clear_row_wraps(&mut self) {
+        self.row_wraps.fill(false);
+        self.row_wraps_available = false;
     }
     /// Cell at a zero-based visible position.
     pub fn cell(&self, row: u16, column: u16) -> Option<&SnapshotCell> {

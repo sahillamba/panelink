@@ -27,6 +27,9 @@ mod provider_cli;
 mod ui_client;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod workspace_cli;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use panelink::pane_layout;
 
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
@@ -105,6 +108,20 @@ where
     let mut arguments = arguments.into_iter().peekable();
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
+        if arguments
+            .peek()
+            .is_some_and(|argument| argument == "workspace")
+        {
+            arguments.next();
+            let mut captured = Vec::new();
+            for argument in arguments {
+                if captured.len() >= 8 || os_str_byte_len(&argument) > 128 {
+                    return report_cli_error(CliError::InvalidArguments);
+                }
+                captured.push(argument);
+            }
+            return workspace_cli::run(captured);
+        }
         // Recovery commands dispatch before any live startup or attach path.
         if arguments
             .peek()
@@ -676,6 +693,15 @@ fn print_help() {
     println!("Ctrl-X detaches (shells keep running).");
     println!();
     println!("Advanced:");
+    println!("  panelink workspace list");
+    println!("  panelink workspace project create <name> <first-tab-name>");
+    println!("  panelink workspace tab create <project-id> <name>");
+    println!("  panelink workspace select <project-id> <tab-id>");
+    println!("  panelink workspace open [<project-id> <tab-id>]");
+    println!("  panelink workspace stop|remove <project-id> <tab-id>");
+    println!(
+        "    remove requires a stopped workspace; commands without workspace keep the legacy route"
+    );
     println!("  panelink history list|show <target>|search <target> <text>|clear <target>");
     println!("  panelink history cleanup   discard uncommitted history files (workspace stopped)");
     println!("  panelink layout show [--previous]   read-only restart topology");

@@ -78,3 +78,14 @@ on the reversed parser tuple; the corrected run passed 3/3. Final integrated
 strict Clippy passed after the benchmark's type alias resolved the earlier
 owner-blocking finding. Current integrated limits are in
 [INTEGRATION.md](INTEGRATION.md).
+
+## Actual pathname startup follow-up — 2026-10-25
+
+The historical listener-permission blocker above is superseded for this
+fixture. Parent ran the production `serve` path in private directories:
+**2 passed, 0 failed**, including orphan deletion before post-readiness capture
+and unsafe-temp refusal with the shell server still running. See
+[P5-HISTORY-STARTUP-ACCEPTANCE-2026-10-25.md](P5-HISTORY-STARTUP-ACCEPTANCE-2026-10-25.md)
+for the initial test compile correction, final log, source ordering and limits.
+This proves startup integration in the current environment; physical reboot
+and power-loss durability remain separate gates.

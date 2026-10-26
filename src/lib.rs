@@ -19,6 +19,7 @@ pub mod managed_launch_protocol;
 pub mod managed_provider_store;
 pub mod pane_layout;
 pub mod pane_metadata_protocol;
+pub mod pane_operations_protocol;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod private_record_store;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -60,7 +61,10 @@ pub mod session_protocol;
 pub mod session_registry;
 pub mod split_menu;
 pub mod split_protocol;
+pub mod terminal_selection;
 pub mod watch_protocol;
+pub mod workspace_index;
+pub mod workspace_tabs;
 
 #[cfg(unix)]
 pub mod workspace_event_journal;

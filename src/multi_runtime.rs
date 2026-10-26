@@ -22,8 +22,8 @@ use crate::close_protocol::{
 use crate::control_protocol::TargetRef;
 use crate::event_protocol::{encode_event, Event};
 use crate::handshake_protocol::{
-    encode_welcome, validate_welcome, Welcome, CAPABILITY_EVENTS, CAPABILITY_READ,
-    CAPABILITY_WORKSPACE_EVENTS,
+    encode_welcome, validate_welcome, Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT,
+    CAPABILITY_READ, CAPABILITY_WORKSPACE_EVENTS,
 };
 use crate::history_capture::{lock_capture, HistoryCaptureCoordinator, SharedHistoryCapture};
 use crate::history_diagnostics::{HistoryDiagnostics, HistoryReason};
@@ -60,8 +60,9 @@ use crate::session_registry::SessionState;
 use crate::split_protocol::{decode_split_request, decode_split_result};
 use crate::transport::{AuthenticatedStream, OwnedFrame};
 use crate::ui_protocol::{
-    decode_attach_target, decode_history_reply, decode_layout_reply, decode_resize_reply,
-    decode_screen_reply, decode_ui_request, UiRequest, ATTACH_TARGET_BYTES,
+    decode_attach_target, decode_history_reply_with_wraps, decode_layout_reply,
+    decode_resize_reply, decode_screen_reply_with_wraps, decode_ui_request, UiRequest,
+    ATTACH_TARGET_BYTES,
 };
 use crate::watch_protocol::WatchStatus;
 use crate::workspace_watch_protocol as workspace_watch;
@@ -1779,9 +1780,61 @@ fn dispatch(
                 }
                 Err(_) => reply(MultiReply::Error("invalid_workspace_watch_request")),
             },
+            Some([0, 13]) => dispatch_pane_operations(owner, connection, payload, now),
             _ => reply(MultiReply::Error("unsupported_request_schema")),
         },
     }
+}
+
+fn dispatch_pane_operations(
+    owner: &mut MultiSessionOwner<PtyEffects>,
+    connection: &Connection,
+    payload: &[u8],
+    now: u64,
+) -> DispatchResult {
+    use crate::pane_operations_protocol::{self as pane_ops, Request};
+
+    let request = match pane_ops::decode_request(payload) {
+        Ok(request) => request,
+        Err(_) => return reply(MultiReply::Error("invalid_pane_operations_request")),
+    };
+    if !pane_operations_capability_allowed(request, connection.selected_capabilities()) {
+        return reply(MultiReply::Error("capability_denied"));
+    }
+    match request {
+        Request::ViewQuery => match owner.pane_operations_view(connection, now) {
+            Ok(Some(view)) => match pane_ops::encode_view(&view) {
+                Ok(bytes) => reply(MultiReply::Response(bytes.to_vec())),
+                Err(_) => reply(MultiReply::Error("invalid_pane_operations_view")),
+            },
+            Ok(None) => reply(MultiReply::Error("no_layout")),
+            Err(error) => self::error(&error),
+        },
+        mutation => match owner.handle_pane_operation(
+            connection,
+            mutation,
+            payload,
+            now,
+            |effects, rows, columns| effects.resize(rows, columns),
+        ) {
+            Ok(bytes) => reply(MultiReply::Response(bytes)),
+            Err(error) => self::error(&error),
+        },
+    }
+}
+
+fn pane_operations_capability_allowed(
+    request: crate::pane_operations_protocol::Request,
+    selected: u64,
+) -> bool {
+    let required = crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS
+        | match request {
+            crate::pane_operations_protocol::Request::ViewQuery => CAPABILITY_READ,
+            crate::pane_operations_protocol::Request::Swap(_)
+            | crate::pane_operations_protocol::Request::DividerSet(_)
+            | crate::pane_operations_protocol::Request::ZoomSet(_) => CAPABILITY_INPUT,
+        };
+    selected & required == required
 }
 
 fn dispatch_session(
@@ -1989,8 +2042,15 @@ fn dispatch_ui(
                 .map_err(|_| "invalid_screen")?;
                 let checkpoint = crate::screen_checkpoint::encode(effects.screen(), &metadata)
                     .map_err(|_| "invalid_screen")?;
-                crate::ui_protocol::prefix_screen_reply(target, revision, checkpoint)
-                    .map_err(|_| "invalid_screen")
+                let wraps = (connection.selected_capabilities()
+                    & crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS
+                    != 0)
+                    .then(|| effects.screen().row_wraps())
+                    .flatten();
+                crate::ui_protocol::prefix_screen_reply_with_wraps(
+                    target, revision, checkpoint, wraps,
+                )
+                .map_err(|_| "invalid_screen")
             });
             match captured {
                 Ok(Ok(bytes)) => reply(MultiReply::Snapshot(bytes)),
@@ -2014,13 +2074,19 @@ fn dispatch_ui(
                 .map_err(|_| "invalid_history")?;
                 let checkpoint = crate::screen_checkpoint::encode(&snapshot, &metadata)
                     .map_err(|_| "invalid_history")?;
-                crate::ui_protocol::prefix_history_reply(
+                let wraps = (connection.selected_capabilities()
+                    & crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS
+                    != 0)
+                    .then(|| snapshot.row_wraps())
+                    .flatten();
+                crate::ui_protocol::prefix_history_reply_with_wraps(
                     target,
                     revision,
                     offset_rows,
                     effects.alternate_screen_active(),
                     effects.mouse_reporting_enabled(),
                     checkpoint,
+                    wraps,
                 )
                 .map_err(|_| "invalid_history")
             });
@@ -2392,6 +2458,8 @@ enum RequestSchema {
     UiKeys(OperationKey),
     UiMouseWheel(OperationKey),
     UiResize(OperationKey),
+    /// Schema-13 authoritative pane view query or keyed mutation.
+    PaneOperations(crate::pane_operations_protocol::Request),
     /// Schema-9 close request or close status query for this key.
     Close(OperationKey),
     /// Schema-9 pane status query.
@@ -2446,6 +2514,9 @@ fn classify(payload: &[u8]) -> Option<RequestSchema> {
         [0, 12] => pane_metadata::decode_query(payload)
             .ok()
             .map(RequestSchema::Metadata),
+        [0, 13] => crate::pane_operations_protocol::decode_request(payload)
+            .ok()
+            .map(RequestSchema::PaneOperations),
         _ => None,
     }
 }
@@ -2493,14 +2564,28 @@ fn response_matches(schema: RequestSchema, payload: &[u8]) -> bool {
         RequestSchema::Workspace(request) => workspace_response_matches(request, payload),
         RequestSchema::Metadata(target) => pane_metadata::decode_observation(payload)
             .is_ok_and(|observation| observation.target == target),
+        RequestSchema::PaneOperations(request) => match request {
+            crate::pane_operations_protocol::Request::ViewQuery => {
+                crate::pane_operations_protocol::decode_view(payload).is_ok()
+            }
+            crate::pane_operations_protocol::Request::Swap(value) => {
+                decode_response_payload(payload).is_ok_and(|response| response.key == value.key)
+            }
+            crate::pane_operations_protocol::Request::DividerSet(value) => {
+                decode_response_payload(payload).is_ok_and(|response| response.key == value.key)
+            }
+            crate::pane_operations_protocol::Request::ZoomSet(value) => {
+                decode_response_payload(payload).is_ok_and(|response| response.key == value.key)
+            }
+        },
     }
 }
 
-fn snapshot_matches(schema: RequestSchema, payload: &[u8]) -> bool {
+fn snapshot_matches(schema: RequestSchema, payload: &[u8], wraps_negotiated: bool) -> bool {
     matches!(schema, RequestSchema::UiScreen(target)
-        if decode_screen_reply(payload).is_ok_and(|view| view.target() == target))
+        if decode_screen_reply_with_wraps(payload, wraps_negotiated).is_ok_and(|view| view.target() == target))
         || matches!(schema, RequestSchema::UiHistory(target)
-            if decode_history_reply(payload).is_ok_and(|view| view.target() == target))
+            if decode_history_reply_with_wraps(payload, wraps_negotiated).is_ok_and(|view| view.target() == target))
 }
 
 fn workspace_response_matches(request: workspace_watch::Request, payload: &[u8]) -> bool {
@@ -2672,6 +2757,14 @@ fn run_worker(
             }
             continue;
         }
+        if let RequestSchema::PaneOperations(request) = schema {
+            if !pane_operations_capability_allowed(request, connection.selected_capabilities()) {
+                if write_error(&mut stream, request_id, "capability_denied", stop).is_err() {
+                    return;
+                }
+                continue;
+            }
+        }
         // A close's bounded stop runs inside the owner tick; wait longer.
         let reply_deadline = if matches!(schema, RequestSchema::Close(_)) {
             CLOSE_REPLY_DEADLINE
@@ -2711,7 +2804,15 @@ fn run_worker(
                     stop,
                 )
             }
-            MultiReply::Snapshot(payload) if snapshot_matches(schema, &payload) => {
+            MultiReply::Snapshot(payload)
+                if snapshot_matches(
+                    schema,
+                    &payload,
+                    connection.selected_capabilities()
+                        & crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS
+                        != 0,
+                ) =>
+            {
                 write_frame_until(
                     &mut stream,
                     MessageKind::Snapshot,
@@ -2921,6 +3022,159 @@ mod tests {
         lease: 4,
         sequence: 5,
     };
+
+    #[test]
+    fn pane_operations_classifier_and_capability_classes_are_strict() {
+        use crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS;
+        use crate::pane_operations_protocol::{self as pane_ops, PaneSwap, Request};
+
+        let query = pane_ops::encode_request(&Request::ViewQuery).unwrap();
+        assert!(matches!(
+            classify(&query),
+            Some(RequestSchema::PaneOperations(Request::ViewQuery))
+        ));
+        assert!(!pane_operations_capability_allowed(
+            Request::ViewQuery,
+            CAPABILITY_PANE_OPERATIONS
+        ));
+        assert!(pane_operations_capability_allowed(
+            Request::ViewQuery,
+            CAPABILITY_PANE_OPERATIONS | CAPABILITY_READ
+        ));
+
+        let swap = Request::Swap(PaneSwap {
+            key: KEY,
+            expected_layout_revision: 2,
+            source: TARGET,
+            destination: TargetRef {
+                pane: 3,
+                session: 3,
+                ..TARGET
+            },
+        });
+        let mutation = pane_ops::encode_request(&swap).unwrap();
+        assert!(
+            matches!(classify(&mutation), Some(RequestSchema::PaneOperations(value)) if value == swap)
+        );
+        assert!(!pane_operations_capability_allowed(
+            swap,
+            CAPABILITY_PANE_OPERATIONS | CAPABILITY_READ
+        ));
+        assert!(pane_operations_capability_allowed(
+            swap,
+            CAPABILITY_PANE_OPERATIONS | CAPABILITY_INPUT
+        ));
+
+        let mut trailing = query;
+        trailing.push(0);
+        assert!(classify(&trailing).is_none());
+    }
+
+    #[test]
+    fn pane_operation_mutation_response_must_match_original_key() {
+        let mut bytes = Vec::new();
+        crate::response_protocol::encode_response_payload(
+            &crate::response_protocol::Response {
+                key: KEY,
+                body: crate::response_protocol::ResponseBody::Status(
+                    crate::protocol::OperationStatus::InProgress,
+                ),
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        assert!(response_matches(
+            RequestSchema::PaneOperations(crate::pane_operations_protocol::Request::ZoomSet(
+                crate::pane_operations_protocol::PaneZoomSet {
+                    key: KEY,
+                    expected_layout_revision: 2,
+                    target: TARGET,
+                    zoomed: true,
+                }
+            )),
+            &bytes
+        ));
+        let wrong_key = OperationKey { sequence: 6, ..KEY };
+        assert!(!response_matches(
+            RequestSchema::PaneOperations(crate::pane_operations_protocol::Request::ZoomSet(
+                crate::pane_operations_protocol::PaneZoomSet {
+                    key: wrong_key,
+                    expected_layout_revision: 2,
+                    target: TargetRef {
+                        generation: 3,
+                        ..TARGET
+                    },
+                    zoomed: true,
+                }
+            )),
+            &bytes
+        ));
+    }
+
+    #[test]
+    fn pane_operations_view_response_rejects_noncanonical_shape() {
+        let malformed = [0; crate::pane_operations_protocol::PANE_OPERATIONS_VIEW_BYTES];
+        assert!(!response_matches(
+            RequestSchema::PaneOperations(crate::pane_operations_protocol::Request::ViewQuery),
+            &malformed
+        ));
+    }
+
+    #[test]
+    fn snapshot_reply_guard_preserves_negotiation_and_exact_target() {
+        use crate::screen_checkpoint::{encode, CheckpointMetadata};
+        use crate::terminal::{ScreenSnapshot, TerminalSize};
+        use crate::ui_protocol::{prefix_history_reply_with_wraps, prefix_screen_reply_with_wraps};
+
+        let screen = ScreenSnapshot::try_new(TerminalSize::new(5, 20).unwrap()).unwrap();
+        let metadata = CheckpointMetadata::new(TARGET, 0, 1, 1).unwrap();
+        let checkpoint = encode(&screen, &metadata).unwrap();
+        let wraps = [true, false, false, false, false];
+        for negotiated in [false, true] {
+            let row_wraps = negotiated.then_some(wraps.as_slice());
+            let replies = [
+                (
+                    RequestSchema::UiScreen(TARGET),
+                    prefix_screen_reply_with_wraps(TARGET, 1, checkpoint.clone(), row_wraps)
+                        .unwrap(),
+                ),
+                (
+                    RequestSchema::UiHistory(TARGET),
+                    prefix_history_reply_with_wraps(
+                        TARGET,
+                        1,
+                        1,
+                        false,
+                        false,
+                        checkpoint.clone(),
+                        row_wraps,
+                    )
+                    .unwrap(),
+                ),
+            ];
+            for (schema, bytes) in replies {
+                assert!(snapshot_matches(schema, &bytes, negotiated));
+                if negotiated {
+                    assert!(!snapshot_matches(schema, &bytes, false));
+                }
+                let other = TargetRef {
+                    session: 99,
+                    ..TARGET
+                };
+                assert!(!snapshot_matches(
+                    RequestSchema::UiScreen(other),
+                    &bytes,
+                    true
+                ));
+                assert!(!snapshot_matches(
+                    RequestSchema::UiHistory(other),
+                    &bytes,
+                    true
+                ));
+                assert!(!snapshot_matches(RequestSchema::UiLayout, &bytes, true));
+            }
+        }
+    }
 
     fn close_request_bytes() -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -4407,7 +4661,9 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn persistent_history_writer_failure_does_not_stop_live_shell_input() {
-        use crate::handshake_protocol::{decode_welcome, Hello, CAPABILITY_INPUT, CAPABILITY_READ};
+        use crate::handshake_protocol::{
+            decode_welcome, Hello, CAPABILITY_INPUT, CAPABILITY_READ, CAPABILITY_SCREEN_ROW_WRAPS,
+        };
         use crate::launch::LaunchContext;
         use crate::multi_startup::{StartedMultiServer, StartupLaunch};
         use crate::protocol::{OperationKey, OperationStatus, Outcome};
@@ -4421,7 +4677,8 @@ mod tests {
         use crate::terminal::Key;
         use crate::transport::AuthenticatedStream;
         use crate::ui_protocol::{
-            decode_screen_reply, encode_key_input, encode_screen_query, KeyInput,
+            decode_history_reply_with_wraps, decode_screen_reply_with_wraps, encode_history_query,
+            encode_key_input, encode_screen_query, KeyInput,
         };
         use std::ffi::OsString;
         use std::fs;
@@ -4455,9 +4712,10 @@ mod tests {
         };
         let arguments = vec![
             OsString::from("-c"),
-            OsString::from(
-                "printf 'FAILURE-READY\\r\\n'; IFS= read -r line; printf 'AFTER-FAILURE:%s\\r\\n' \"$line\"; while :; do /bin/sleep 1; done",
-            ),
+            OsString::from(format!(
+                "printf 'FAILURE-READY\\r\\n'; IFS= read -r line; i=1; while [ \"$i\" -le 7 ]; do printf 'HISTORY-%s\\r\\n' \"$i\"; i=$((i + 1)); done; printf '%s\\r\\n' '{}'; printf 'AFTER-FAILURE:%s\\r\\n' \"$line\"; while :; do /bin/sleep 1; done",
+                format_args!("WRAPMARK{}", "W".repeat(70))
+            )),
         ];
         let executable = OsString::from("/bin/sh");
         let started = StartedMultiServer::start(
@@ -4502,7 +4760,7 @@ mod tests {
                     hello: Hello {
                         nonce: 41,
                         required_capabilities: CAPABILITY_READ | CAPABILITY_INPUT,
-                        optional_capabilities: 0,
+                        optional_capabilities: CAPABILITY_SCREEN_ROW_WRAPS,
                     },
                     resume: None,
                 })
@@ -4516,6 +4774,10 @@ mod tests {
                 let welcome = stream.read_frame(deadline()).unwrap();
                 assert_eq!(welcome.kind(), MessageKind::Welcome);
                 let welcome = decode_welcome(welcome.payload()).unwrap();
+                assert_ne!(
+                    welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+                    0
+                );
                 stream.enable_snapshot_reads().unwrap();
                 let mut request_id = 0_u64;
                 let mut send = |payload: &[u8]| {
@@ -4574,7 +4836,7 @@ mod tests {
                 loop {
                     let reply = send(&query);
                     if reply.kind() == MessageKind::Snapshot {
-                        let screen = decode_screen_reply(reply.payload()).unwrap();
+                        let screen = decode_screen_reply_with_wraps(reply.payload(), true).unwrap();
                         let checkpoint = decode_checkpoint(screen.checkpoint()).unwrap();
                         let text = (0..checkpoint.rows())
                             .map(|row| {
@@ -4583,7 +4845,28 @@ mod tests {
                                     .collect::<String>()
                             })
                             .collect::<String>();
-                        if text.contains("AFTER-FAILURE:SURVIVES") {
+                        if text.contains("AFTER-FAILURE:SURVIVES") && text.contains("WRAPMARK") {
+                            assert!(screen.wrap_metadata_available());
+                            assert!(
+                                (0..checkpoint.rows())
+                                    .any(|row| screen.row_wrapped(row) == Some(true)),
+                                "runtime snapshot omitted the child's actual soft-wrap row"
+                            );
+                            let history_query = encode_history_query(target, 1).unwrap();
+                            let history_reply = send(&history_query);
+                            assert_eq!(history_reply.kind(), MessageKind::Snapshot);
+                            let history =
+                                decode_history_reply_with_wraps(history_reply.payload(), true)
+                                    .unwrap();
+                            assert_eq!(history.offset_rows(), 1);
+                            assert!(history.wrap_metadata_available());
+                            let history_checkpoint =
+                                decode_checkpoint(history.checkpoint()).unwrap();
+                            assert!(
+                                (0..history_checkpoint.rows())
+                                    .any(|row| history.row_wrapped(row) == Some(true)),
+                                "history reply did not carry wraps from its requested viewport"
+                            );
                             return text;
                         }
                     }

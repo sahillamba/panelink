@@ -22,17 +22,21 @@ use rustix::termios::{
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 
+use super::clipboard::{ClipboardStatus, ClipboardWriter};
 use super::net::{Net, NetView};
+use super::routes::{MetadataResult, RouteController, RouteRequest, RouteResult};
 use super::state::{App, Flow};
 use super::worker::{ClientResult, WorkerHandle};
 use panelink::recovery_view::RecoverySlot;
+use panelink::workspace_index::WorkspaceIndex;
+use panelink::workspace_tabs::WorkspaceRouteId;
 
-/// Enter: alternate screen, hide cursor, bracketed paste, button mouse
-/// reporting (1000) with SGR coordinates (1006).
-pub(crate) const ENTER_SEQUENCE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1006h";
-/// Restore in reverse: mouse off first, then p2_probe's restore sequence.
+/// Enter: alternate screen, hide cursor, bracketed paste, button-motion mouse
+/// reporting (1002) with SGR coordinates (1006).
+pub(crate) const ENTER_SEQUENCE: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1002h\x1b[?1006h";
+/// Restore in reverse: mouse off first, then p2_probe's visual restore.
 pub(crate) const RESTORE_SEQUENCE: &[u8] =
-    b"\x1b[?1006l\x1b[?1000l\x1b[0m\x1b[?7h\x1b[?2004l\x1b[?25h\x1b[?1049l";
+    b"\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?7h\x1b[?2004l\x1b[?25h\x1b[?1049l";
 const INPUT_CHUNK_BYTES: usize = 1024;
 const INPUT_WORK_BUDGET: Duration = Duration::from_millis(5);
 const ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
@@ -148,6 +152,25 @@ impl HostGuard {
     fn discard_pending_input(&self) -> Result<(), HostError> {
         tcflush(&self.tty, QueueSelector::IFlush).map_err(|_| HostError::InputRead)
     }
+
+    fn restore_and_drop(&mut self) -> Result<(), HostError> {
+        self.restore()?;
+        self.discard_pending_input()?;
+        let replacement = open(
+            "/dev/tty",
+            OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| HostError::Open)?;
+        let inert = Self {
+            tty: File::from(replacement),
+            original: self.original.clone(),
+            restore_needed: false,
+            restored: true,
+        };
+        drop(std::mem::replace(self, inert));
+        Ok(())
+    }
 }
 
 impl Drop for HostGuard {
@@ -252,14 +275,40 @@ impl Output {
 pub(crate) fn run(directory: PathBuf, context_dir: PathBuf) -> i32 {
     std::panic::set_hook(Box::new(|_| {}));
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_inner(directory, context_dir)
+        run_inner(directory, context_dir, None)
     })) {
         Ok(code) => code,
         Err(_) => fail("internal error (terminal restored)"),
     }
 }
 
-fn run_inner(directory: PathBuf, context_dir: PathBuf) -> i32 {
+/// Run the workspace-aware client. The initial catalog and route are already
+/// validated by `default_open`; raw `run` remains the legacy attachment API.
+pub(crate) fn run_workspace(
+    directory: PathBuf,
+    context_dir: PathBuf,
+    app_root: PathBuf,
+    index: WorkspaceIndex,
+    current: WorkspaceRouteId,
+) -> i32 {
+    std::panic::set_hook(Box::new(|_| {}));
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_inner(directory, context_dir, Some((app_root, index, current)))
+    })) {
+        Ok(code) => code,
+        Err(_) => fail("internal error (terminal restored)"),
+    }
+}
+
+fn run_inner(
+    directory: PathBuf,
+    context_dir: PathBuf,
+    workspace: Option<(PathBuf, WorkspaceIndex, WorkspaceRouteId)>,
+) -> i32 {
+    // Declared before HostGuard so unwind drop order restores the terminal
+    // before either worker handle can perform blocking cleanup.
+    let mut clipboard = ClipboardWriter::new().ok();
+    let mut net: Option<WorkerHandle>;
     let mut host = match HostGuard::open() {
         Ok(host) => host,
         Err(error) => return fail(error.message()),
@@ -279,6 +328,9 @@ fn run_inner(directory: PathBuf, context_dir: PathBuf) -> i32 {
         Ok(app) => app,
         Err(_) => return fail(HostError::Frame.message()),
     };
+    if let Some((_, index, current)) = workspace.as_ref() {
+        app.install_workspace_tabs(index.clone(), *current);
+    }
     let mut compositor = match Compositor::try_new() {
         Ok(compositor) => compositor,
         Err(_) => return fail(HostError::Frame.message()),
@@ -288,31 +340,58 @@ fn run_inner(directory: PathBuf, context_dir: PathBuf) -> i32 {
         Err(error) => return fail(error.message()),
     };
     let mut decoder = Decoder::new();
-    let net = match Net::connect(directory, context_dir, &mut app, Instant::now()) {
+    if clipboard.is_none() {
+        app.report_clipboard_unavailable(Instant::now());
+    }
+    let connection = match Net::connect(directory, context_dir, &mut app, Instant::now()) {
         Ok(net) => net,
         Err(label) => return fail(label),
     };
-    let mut net = Some(WorkerHandle::start(net));
+    net = Some(WorkerHandle::start(connection));
+    let routes = workspace
+        .as_ref()
+        .map(|(root, _, _)| RouteController::start(root.clone()));
+    let mut route_state = RouteLoopState {
+        controller: routes.as_ref(),
+        pending: None,
+        ready: None,
+        next_request_id: 1,
+        host_size: (rows, columns),
+    };
     let result = host.enter().and_then(|()| {
         event_loop(
             &mut host,
             &mut app,
             &mut net,
-            &mut compositor,
-            &mut output,
-            &mut decoder,
+            (&mut compositor, &mut output, &mut decoder),
+            clipboard.as_ref(),
             &stop,
+            &mut route_state,
         )
     });
+    app.cancel_for_detach();
     let abandoned_keys = app.abandon_pending_keys();
-    // Restore-first: the host terminal leaves raw/mouse/alternate-screen mode
-    // before any further network work, so a stalled server can never hold
-    // the user's terminal. (`HostGuard::drop` also restores on unwind.)
-    let restored = restore_then_detach(
+    // Cancellation is just an atomic flag and queue close. Restore the host
+    // before joining the clipboard worker or doing network cleanup.
+    let restored = restore_then_cleanup(
+        &mut clipboard,
+        |clipboard| {
+            if let Some(writer) = clipboard.as_mut() {
+                writer.request_shutdown();
+            }
+        },
         || host.restore(),
-        || {
+        |clipboard| {
+            if let Some(writer) = clipboard.as_mut() {
+                writer.shutdown();
+            }
             if let Some(worker) = net.take() {
-                worker.detach_after_restore();
+                if routes.is_some() {
+                    let mut worker = worker;
+                    worker.try_detach_nonblocking();
+                } else {
+                    worker.detach_after_restore();
+                }
             }
         },
     );
@@ -339,8 +418,19 @@ fn run_inner(directory: PathBuf, context_dir: PathBuf) -> i32 {
     1
 }
 
-/// Exit ordering: restore the host terminal first, then do the bounded
-/// network release work (children keep running either way).
+/// Request prompt cancellation, restore the host, then run potentially
+/// blocking cleanup such as joining the clipboard writer.
+fn restore_then_cleanup<C, R>(
+    context: &mut C,
+    request_cancel: impl FnOnce(&mut C),
+    restore: impl FnOnce() -> R,
+    cleanup: impl FnOnce(&mut C),
+) -> R {
+    request_cancel(context);
+    restore_then_detach(restore, || cleanup(context))
+}
+
+/// Restore terminal modes before any potentially blocking worker release.
 pub(crate) fn restore_then_detach<R>(restore: impl FnOnce() -> R, detach: impl FnOnce()) -> R {
     let restored = restore();
     detach();
@@ -413,19 +503,28 @@ fn previous_layout_availability(server_dir: &std::path::Path) -> Availability {
     }
 }
 
+struct RouteLoopState<'a> {
+    controller: Option<&'a RouteController>,
+    pending: Option<u64>,
+    ready: Option<u64>,
+    next_request_id: u64,
+    host_size: (u16, u16),
+}
+
 fn event_loop(
     host: &mut HostGuard,
     app: &mut App,
     worker_slot: &mut Option<WorkerHandle>,
-    compositor: &mut Compositor,
-    output: &mut Output,
-    decoder: &mut Decoder,
+    frame: (&mut Compositor, &mut Output, &mut Decoder),
+    clipboard: Option<&ClipboardWriter>,
     stop: &AtomicBool,
+    routes: &mut RouteLoopState<'_>,
 ) -> Result<i32, HostError> {
-    let Some(worker) = worker_slot.as_mut() else {
+    let (compositor, output, decoder) = frame;
+    let Some(initial_worker) = worker_slot.as_ref() else {
         return Err(HostError::Setup);
     };
-    let server_dir = worker.server_directory().to_path_buf();
+    let mut server_dir = initial_worker.server_directory().to_path_buf();
     let mut chunk = [0_u8; INPUT_CHUNK_BYTES];
     let (mut start, mut end) = (0_usize, 0_usize);
     let mut last_input_at: Option<Instant> = None;
@@ -436,6 +535,9 @@ fn event_loop(
         if stop.load(Ordering::Relaxed) {
             break Ok(130);
         }
+        let Some(worker) = worker_slot.as_mut() else {
+            return Err(HostError::Setup);
+        };
         let now = Instant::now();
         if start == end {
             start = 0;
@@ -482,6 +584,42 @@ fn event_loop(
                         break;
                     }
                     Flow::Continue => {}
+                }
+                if let Some(destination) = app.take_route_request() {
+                    routes.host_size = host.size()?;
+                    app.set_host(routes.host_size.0, routes.host_size.1);
+                    if let Some(controller) = routes.controller {
+                        match routes.next_request_id.checked_add(1) {
+                            Some(next) => {
+                                let request_id = routes.next_request_id;
+                                routes.next_request_id = next;
+                                match controller.prepare(RouteRequest {
+                                    request_id,
+                                    destination,
+                                    host_size: routes.host_size,
+                                }) {
+                                    Ok(()) => routes.pending = Some(request_id),
+                                    Err(label) => {
+                                        app.finish_route_switch(true, Instant::now());
+                                        app.set_status(label, Instant::now());
+                                    }
+                                }
+                            }
+                            None => {
+                                app.finish_route_switch(true, Instant::now());
+                                app.set_status("workspace switch unavailable", Instant::now());
+                            }
+                        }
+                    } else {
+                        app.finish_route_switch(true, Instant::now());
+                    }
+                }
+                if app.take_catalog_refresh_request() {
+                    if let Some(controller) = routes.controller {
+                        if controller.queue_catalog_refresh().is_err() {
+                            app.set_status("workspace catalog busy", Instant::now());
+                        }
+                    }
                 }
             }
             if decoder.pending_bytes() > 0 {
@@ -548,6 +686,40 @@ fn event_loop(
                                 // A lone Esc never opens the viewer; ignore.
                                 Flow::Continue | Flow::ViewRecovery => {}
                             }
+                            if let Some(destination) = app.take_route_request() {
+                                routes.host_size = host.size()?;
+                                app.set_host(routes.host_size.0, routes.host_size.1);
+                                if let Some(controller) = routes.controller {
+                                    let request_id = routes.next_request_id;
+                                    if let Some(next) = request_id.checked_add(1) {
+                                        routes.next_request_id = next;
+                                        match controller.prepare(RouteRequest {
+                                            request_id,
+                                            destination,
+                                            host_size: routes.host_size,
+                                        }) {
+                                            Ok(()) => routes.pending = Some(request_id),
+                                            Err(label) => {
+                                                app.finish_route_switch(true, Instant::now());
+                                                app.set_status(label, Instant::now());
+                                            }
+                                        }
+                                    } else {
+                                        app.finish_route_switch(true, Instant::now());
+                                        app.set_status(
+                                            "workspace switch unavailable",
+                                            Instant::now(),
+                                        );
+                                    }
+                                }
+                            }
+                            if app.take_catalog_refresh_request() {
+                                if let Some(controller) = routes.controller {
+                                    if controller.queue_catalog_refresh().is_err() {
+                                        app.set_status("workspace catalog busy", Instant::now());
+                                    }
+                                }
+                            }
                         }
                         Ok(None) => {}
                         Err(_) => break Err(HostError::InputDecode),
@@ -566,6 +738,7 @@ fn event_loop(
         if now.duration_since(last_resize_check) >= RESIZE_INTERVAL {
             last_resize_check = now;
             let (rows, columns) = host.size()?;
+            routes.host_size = (rows, columns);
             app.set_host(rows, columns);
         }
         if stop.load(Ordering::Relaxed) {
@@ -573,7 +746,11 @@ fn event_loop(
         }
         worker.poll(NetView {
             focus: app.focus(),
-            desired_root: app.desired_root(),
+            desired_root: if app.route_switching() || app.pane_mutations_blocked() {
+                None
+            } else {
+                app.desired_root()
+            },
         });
         let mut server_ended = false;
         while let Some(envelope) = worker.try_result() {
@@ -595,9 +772,12 @@ fn event_loop(
                 ClientResult::Close { id, target, result } => {
                     app.complete_close(id, target, result, now);
                 }
+                ClientResult::PaneOperation { id, action, result } => {
+                    app.complete_pane_operation(id, action, result.map(|update| *update), now)
+                }
                 ClientResult::Poll(update) => {
                     let present = update.server_present;
-                    app.apply_net_update(update, now);
+                    app.apply_net_update(*update, now);
                     if !present {
                         server_ended = true;
                     }
@@ -605,8 +785,36 @@ fn event_loop(
                 ClientResult::Detached => {}
             }
         }
+        if let Some(clipboard) = clipboard {
+            while let Some(status) = clipboard.poll_result() {
+                app.report_worker_status(status.label(), now);
+            }
+        }
+        if let Some(text) = app.take_copy_text() {
+            match clipboard {
+                Some(clipboard) => {
+                    if let Err(status) = clipboard.try_send(text) {
+                        app.report_worker_status(status.label(), now);
+                    }
+                }
+                None => app.report_worker_status(ClipboardStatus::Unavailable.label(), now),
+            }
+        }
         if app.retry_pending_keys() {
             app.flush(now, worker);
+        }
+        if let Some(controller) = routes.controller {
+            while let Some(result) = controller.try_metadata_result() {
+                match result {
+                    MetadataResult::Catalog(index) => {
+                        app.update_workspace_catalog(index);
+                    }
+                    MetadataResult::CatalogError => {
+                        app.set_status("workspace catalog unavailable", now);
+                    }
+                    MetadataResult::SaveError(label) => app.set_status(label, now),
+                }
+            }
         }
         if server_ended {
             break Ok(SERVER_ENDED_EXIT);
@@ -644,7 +852,98 @@ fn event_loop(
             }
         }
         thread::sleep(Duration::from_millis(1));
+        if let Some(controller) = routes.controller {
+            while let Some(result) = controller.try_result() {
+                match result {
+                    RouteResult::Ready { request_id } if routes.pending == Some(request_id) => {
+                        routes.ready = Some(request_id);
+                    }
+                    RouteResult::Failed { request_id, label }
+                        if routes.pending == Some(request_id) =>
+                    {
+                        routes.pending = None;
+                        routes.ready = None;
+                        app.finish_route_switch(true, Instant::now());
+                        app.set_status(label, Instant::now());
+                    }
+                    RouteResult::Ready { request_id } | RouteResult::Failed { request_id, .. } => {
+                        controller.cancel(request_id);
+                    }
+                }
+            }
+            if let Some(request_id) = routes.ready {
+                if routes.pending == Some(request_id) {
+                    if let Some(prepared) = controller.try_take_prepared(request_id) {
+                        let now = Instant::now();
+                        // Move raw Net ownership directly onto its IO
+                        // worker before any fallible host transition.
+                        let next_route = prepared.route;
+                        let next_worker = WorkerHandle::start(prepared.net);
+                        let next_app = prepared.app;
+                        let fresh_compositor =
+                            Compositor::try_new().map_err(|_| HostError::Frame)?;
+                        let fresh_output = Output::new()?;
+                        app.cancel_for_detach();
+                        let abandoned = app.abandon_pending_keys();
+                        let fresh_host = ordered_route_transition(
+                            || host.restore_and_drop(),
+                            || {
+                                if let Some(mut old_worker) = worker_slot.take() {
+                                    old_worker.try_detach_nonblocking();
+                                }
+                            },
+                            || {
+                                *compositor = fresh_compositor;
+                                *output = fresh_output;
+                                *decoder = Decoder::new();
+                                start = 0;
+                                end = 0;
+                                Ok(())
+                            },
+                            || {
+                                let mut fresh = HostGuard::open()?;
+                                fresh.enter()?;
+                                Ok(fresh)
+                            },
+                        )?;
+                        *host = fresh_host;
+                        *app = next_app;
+                        *worker_slot = Some(next_worker);
+                        server_dir = worker_slot
+                            .as_ref()
+                            .map(|worker| worker.server_directory().to_path_buf())
+                            .ok_or(HostError::Setup)?;
+                        app.finish_route_switch(false, now);
+                        if controller.queue_selection_save(next_route).is_err() {
+                            app.set_status("selection not saved", now);
+                        }
+                        if abandoned {
+                            app.set_status("unsent queued keys discarded", now);
+                        }
+                        routes.pending = None;
+                        routes.ready = None;
+                        last_render = None;
+                        last_input_at = None;
+                        last_key_at = None;
+                        app.mark_dirty();
+                        continue;
+                    }
+                }
+            }
+        }
     }
+}
+
+fn ordered_route_transition<R, T, E>(
+    restore: impl FnOnce() -> Result<R, E>,
+    detach_old: impl FnOnce(),
+    reset_client: impl FnOnce() -> Result<(), E>,
+    open_destination: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let _restored = restore()?;
+    detach_old();
+    reset_client()?;
+    open_destination()
 }
 
 #[cfg(test)]
@@ -659,17 +958,74 @@ mod tests {
     }
 
     #[test]
+    fn route_transition_restores_resets_then_opens_destination() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let result = ordered_route_transition(
+            || {
+                order.borrow_mut().push("restore old guard");
+                Ok::<_, ()>(())
+            },
+            || order.borrow_mut().push("nonblocking old worker detach"),
+            || {
+                order.borrow_mut().push("replace output decoder compositor");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("open and enter fresh guard");
+                Ok(7)
+            },
+        );
+        assert_eq!(result, Ok(7));
+        assert_eq!(
+            *order.borrow(),
+            [
+                "restore old guard",
+                "nonblocking old worker detach",
+                "replace output decoder compositor",
+                "open and enter fresh guard"
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_old_guard_restore_never_enters_destination_transition() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let result = ordered_route_transition(
+            || {
+                order.borrow_mut().push("restore old guard");
+                Err::<(), _>(HostError::Restore)
+            },
+            || order.borrow_mut().push("detach old worker"),
+            || {
+                order.borrow_mut().push("reset");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("open destination guard");
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(HostError::Restore)));
+        assert_eq!(*order.borrow(), ["restore old guard"]);
+    }
+
+    #[test]
     fn exit_restores_the_terminal_before_any_network_detach_work() {
         let order = std::cell::RefCell::new(Vec::new());
-        let result = restore_then_detach(
+        let result = restore_then_cleanup(
+            &mut (),
+            |_| order.borrow_mut().push("cancel"),
             || {
                 order.borrow_mut().push("restore");
                 7
             },
-            || order.borrow_mut().push("detach"),
+            |_| order.borrow_mut().push("clipboard shutdown and detach"),
         );
         assert_eq!(result, 7);
-        assert_eq!(*order.borrow(), ["restore", "detach"]);
+        assert_eq!(
+            *order.borrow(),
+            ["cancel", "restore", "clipboard shutdown and detach"]
+        );
     }
 
     #[test]
@@ -678,7 +1034,7 @@ mod tests {
             (&b"\x1b[?1049h"[..], &b"\x1b[?1049l"[..]),
             (b"\x1b[?25l", b"\x1b[?25h"),
             (b"\x1b[?2004h", b"\x1b[?2004l"),
-            (b"\x1b[?1000h", b"\x1b[?1000l"),
+            (b"\x1b[?1002h", b"\x1b[?1002l"),
             (b"\x1b[?1006h", b"\x1b[?1006l"),
         ] {
             assert!(ENTER_SEQUENCE.windows(enable.len()).any(|w| w == enable));
@@ -687,7 +1043,15 @@ mod tests {
                 .any(|w| w == disable));
         }
         // Mouse reporting stops before the alternate screen is left.
-        let mouse = RESTORE_SEQUENCE
+        let mouse_1006 = RESTORE_SEQUENCE
+            .windows(8)
+            .position(|w| w == b"\x1b[?1006l")
+            .unwrap();
+        let mouse_1002 = RESTORE_SEQUENCE
+            .windows(8)
+            .position(|w| w == b"\x1b[?1002l")
+            .unwrap();
+        let conservative_mouse = RESTORE_SEQUENCE
             .windows(8)
             .position(|w| w == b"\x1b[?1000l")
             .unwrap();
@@ -695,6 +1059,10 @@ mod tests {
             .windows(8)
             .position(|w| w == b"\x1b[?1049l")
             .unwrap();
-        assert!(mouse < screen);
+        assert!(mouse_1006 < mouse_1002);
+        assert!(mouse_1002 < conservative_mouse);
+        assert!(conservative_mouse < screen);
+        assert!(!ENTER_SEQUENCE.windows(8).any(|w| w == b"\x1b[?1000h"));
+        assert!(!ENTER_SEQUENCE.windows(8).any(|w| w == b"\x1b[?1003h"));
     }
 }

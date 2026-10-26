@@ -25,7 +25,7 @@ use crate::event_journal::{EventCursor, EventJournal};
 use crate::event_protocol::Event;
 use crate::handshake_protocol::{
     Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT, CAPABILITY_PANE_METADATA, CAPABILITY_READ,
-    CAPABILITY_WORKSPACE_EVENTS,
+    CAPABILITY_SCREEN_ROW_WRAPS, CAPABILITY_WORKSPACE_EVENTS,
 };
 use crate::input_owner::{InputOwner, Owner};
 use crate::managed_launch::{LaunchJournalPort, ManagedLaunchCoordinator, ManagedLaunchError};
@@ -34,6 +34,10 @@ use crate::multi_runtime::PaneExit;
 use crate::pane_layout::PaneGeometry;
 use crate::pane_layout::{LayoutError, LayoutSnapshot, PaneLayout};
 use crate::pane_metadata_protocol::{decode_query, PathStatus};
+use crate::pane_operations_protocol::{
+    self, PaneDividerSet, PaneOperationsView, PaneSwap, PaneZoomSet,
+    Request as PaneOperationRequest,
+};
 use crate::process_metadata::ProcessIdentity;
 use crate::protocol::{
     Admission, Ledger, OperationKey, OperationStatus, Outcome, ProtocolError, MAX_ACTIVE_LEASES,
@@ -161,6 +165,8 @@ pub struct MultiSessionOwner<E: EffectSink> {
     /// Bounded per-pane size state keyed by full target: last confirmed
     /// absolute PTY size and, while a resize is pending, the desired size.
     pane_sizes: [Option<PaneSizeState>; crate::pane_layout::MAX_PANES],
+    /// Display-only projection state; the underlying split tree remains intact.
+    zoomed_target: Option<TargetRef>,
     /// One schema-7 split whose prepare/spawn/journal work is outside the
     /// owner thread. All authority and topology remain here.
     active_async_split: Option<Box<ActiveAsyncSplit>>,
@@ -507,6 +513,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             close_results: Vec::new(),
             active_closes: Vec::new(),
             pane_sizes: [None; crate::pane_layout::MAX_PANES],
+            zoomed_target: None,
             active_async_split: None,
             async_emergency_effect: None,
         })
@@ -1376,6 +1383,47 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             .map_err(LayoutResizeError::Layout)?;
         self.record_workspace_layout();
         let retry_pending_only = snapshot.revision == before;
+        if let Some(zoomed) = self.zoomed_target {
+            let root =
+                crate::pane_layout::content_rect(full_root_rect(snapshot.rows, snapshot.columns))
+                    .ok_or(LayoutResizeError::Layout(LayoutError::InvalidDimensions))?;
+            let zoom_size = (root.rows, root.columns);
+            let mut failed = [false; crate::pane_layout::MAX_PANES];
+            for (index, pane) in snapshot.panes.into_iter().enumerate() {
+                let Some(pane) = pane else {
+                    continue;
+                };
+                let Some(underlying) = crate::pane_layout::content_rect(pane.rect) else {
+                    failed[index] = true;
+                    continue;
+                };
+                let under_size = (underlying.rows, underlying.columns);
+                if pane.target == zoomed {
+                    let confirmed = self
+                        .pane_state(zoomed)
+                        .map_or(under_size, |state| state.confirmed);
+                    let pending = self
+                        .pane_state(zoomed)
+                        .is_some_and(|state| state.desired == Some(zoom_size));
+                    if !retry_pending_only || confirmed != zoom_size || pending {
+                        failed[index] =
+                            !self.apply_effective_size(zoomed, zoom_size, snapshot, &mut resize);
+                    }
+                } else {
+                    let confirmed = self
+                        .pane_state(pane.target)
+                        .map_or(under_size, |state| state.confirmed);
+                    self.record_pane_size(pane.target, confirmed, None);
+                }
+            }
+            if failed.contains(&true) {
+                return Err(LayoutResizeError::ResizePending {
+                    snapshot: Box::new(snapshot),
+                    failed,
+                });
+            }
+            return Ok(snapshot);
+        }
         let mut failed = [false; crate::pane_layout::MAX_PANES];
         for (index, pane) in snapshot.panes.into_iter().enumerate() {
             let Some(pane) = pane else {
@@ -1431,6 +1479,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         &self,
         request: &crate::split_protocol::SplitRequestView<'_>,
     ) -> Result<(crate::pane_layout::SplitPreview, TargetRef), SplitFailure> {
+        if self.zoomed_target.is_some() {
+            return Err(SplitFailure::Layout(LayoutError::InvalidLayoutState));
+        }
         let layout = self.layout.as_ref().ok_or(SplitFailure::NoLayout)?;
         let current = layout.snapshot();
         let target = request.target();
@@ -1518,6 +1569,13 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             return false;
         };
         let desired = (content.rows, content.columns);
+        if self
+            .pane_state(target)
+            .is_some_and(|state| state.confirmed == desired)
+        {
+            self.record_pane_size(target, desired, None);
+            return true;
+        }
         let applied = match self.launches.session_mut(target) {
             Ok(session) => resize(&mut session.effects, content.rows, content.columns).is_ok(),
             Err(_) => false,
@@ -1525,9 +1583,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         if applied {
             self.record_pane_size(target, desired, None);
         } else {
-            let confirmed = self
-                .pane_state(target)
-                .map_or(desired, |state| state.confirmed);
+            let Some(confirmed) = self.pane_state(target).map(|state| state.confirmed) else {
+                return false;
+            };
             self.record_pane_size(target, confirmed, Some(desired));
         }
         applied
@@ -1611,6 +1669,8 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 | CAPABILITY_INPUT
                 | CAPABILITY_EVENTS
                 | CAPABILITY_PANE_METADATA
+                | CAPABILITY_SCREEN_ROW_WRAPS
+                | crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS
                 | workspace_capability,
         )
     }
@@ -2029,6 +2089,343 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         Ok(self
             .layout_snapshot()
             .map(|layout| (layout, self.pending_resizes())))
+    }
+
+    /// Return the schema-13 pane-operation view without changing owner state.
+    pub fn pane_operations_view(
+        &self,
+        connection: &Connection,
+        now_secs: u64,
+    ) -> Result<Option<PaneOperationsView>, ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        if connection.selected_capabilities
+            & (CAPABILITY_READ | crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS)
+            != (CAPABILITY_READ | crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS)
+        {
+            return Err(ServerError::Unauthorized);
+        }
+        self.pane_operations_view_unchecked()
+    }
+
+    fn pane_operations_view_unchecked(&self) -> Result<Option<PaneOperationsView>, ServerError> {
+        let Some(snapshot) = self.layout_snapshot() else {
+            return Ok(None);
+        };
+        let mut confirmed_sizes = [None; crate::pane_layout::MAX_PANES];
+        let mut panes = [None; crate::pane_layout::MAX_PANES];
+        for (index, pane) in snapshot.panes.into_iter().enumerate() {
+            let Some(pane) = pane else {
+                continue;
+            };
+            let content =
+                crate::pane_layout::content_rect(pane.rect).ok_or(ServerError::InvalidSnapshot)?;
+            let confirmed = self
+                .pane_state(pane.target)
+                .map_or((content.rows, content.columns), |state| state.confirmed);
+            confirmed_sizes[index] = Some(confirmed);
+            panes[index] = Some(crate::ui_protocol::UiPane {
+                target: pane.target,
+                rect: pane.rect,
+                pending_confirmed: (confirmed != (content.rows, content.columns))
+                    .then_some(confirmed),
+            });
+        }
+        Ok(Some(PaneOperationsView {
+            layout: crate::ui_protocol::LayoutReply {
+                revision: snapshot.revision,
+                rows: snapshot.rows,
+                columns: snapshot.columns,
+                panes,
+                divider: snapshot.divider,
+                dividers: snapshot.dividers,
+            },
+            zoomed_target: self.zoomed_target,
+            confirmed_sizes,
+        }))
+    }
+
+    /// Validate the typed request against its exact schema-13 payload, then
+    /// admit and execute one serialized absolute pane mutation.
+    pub fn handle_pane_operation<RE, Resize>(
+        &mut self,
+        connection: &Connection,
+        request: PaneOperationRequest,
+        payload: &[u8],
+        now_secs: u64,
+        mut resize: Resize,
+    ) -> Result<Vec<u8>, ServerError>
+    where
+        Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
+    {
+        let decoded = pane_operations_protocol::decode_request(payload)
+            .map_err(|_| ServerError::InvalidSnapshot)?;
+        if decoded != request {
+            return Err(ServerError::InvalidSnapshot);
+        }
+        let (key, mutation) = match request {
+            PaneOperationRequest::ViewQuery => return Err(ServerError::Unauthorized),
+            PaneOperationRequest::Swap(value) => (value.key, PaneMutation::Swap(value)),
+            PaneOperationRequest::DividerSet(value) => (value.key, PaneMutation::Divider(value)),
+            PaneOperationRequest::ZoomSet(value) => (value.key, PaneMutation::Zoom(value)),
+        };
+        self.global.require_live_connection(connection, now_secs)?;
+        if connection.selected_capabilities
+            & (CAPABILITY_INPUT | crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS)
+            != (CAPABILITY_INPUT | crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS)
+            || key.lease != connection.lease
+            || key.generation != self.global.generation
+        {
+            return rejected_reply(key, RejectionCode::Unauthorized);
+        }
+        if let Some(reply) = known_reply(&self.global, key, payload, now_secs)? {
+            return Ok(reply);
+        }
+        if self.active_async_split.is_some() || self.async_emergency_effect.is_some() {
+            return rejected_reply(key, RejectionCode::Capacity);
+        }
+        match self.global.ledger.admit(key, payload, now_secs) {
+            Ok(Admission::Execute) => {}
+            Ok(Admission::InProgress) => return status_reply(key, OperationStatus::InProgress),
+            Ok(Admission::Completed(outcome)) => {
+                return status_reply(key, OperationStatus::Completed(outcome));
+            }
+            Err(error) if is_capacity_error(&error) => {
+                return rejected_reply(key, RejectionCode::Capacity);
+            }
+            Err(error) => return Err(ServerError::Protocol(error)),
+        }
+
+        let operation = self.execute_pane_mutation(mutation, &mut resize);
+        let (outcome, response) = match operation {
+            Ok(outcome) => (
+                outcome,
+                status_reply(key, OperationStatus::Completed(outcome))?,
+            ),
+            Err(code) => {
+                self.global.ledger.complete(key, Outcome::Failed)?;
+                return rejected_reply(key, code);
+            }
+        };
+        self.global.ledger.complete(key, outcome)?;
+        Ok(response)
+    }
+
+    fn execute_pane_mutation<RE, Resize>(
+        &mut self,
+        mutation: PaneMutation,
+        resize: &mut Resize,
+    ) -> Result<Outcome, RejectionCode>
+    where
+        Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
+    {
+        let snapshot = self
+            .layout_snapshot()
+            .ok_or(RejectionCode::UnknownContext)?;
+        let mutation_revision = mutation.revision();
+        if mutation_revision != snapshot.revision {
+            return Err(RejectionCode::StaleOwner);
+        }
+        let workspace = snapshot.panes[0]
+            .ok_or(RejectionCode::UnknownContext)?
+            .target
+            .workspace;
+        if snapshot.panes.iter().flatten().any(|pane| {
+            pane.target.generation != self.global.generation || pane.target.workspace != workspace
+        }) {
+            return Err(RejectionCode::Unauthorized);
+        }
+        let targets = mutation.targets();
+        if targets.iter().flatten().any(|target| {
+            target.generation != self.global.generation
+                || target.workspace != workspace
+                || !snapshot
+                    .panes
+                    .iter()
+                    .flatten()
+                    .any(|pane| pane.target == *target)
+                || self.launches.effects(*target).is_err()
+        }) {
+            return Err(RejectionCode::StaleTarget);
+        }
+        if !matches!(mutation, PaneMutation::Zoom(_)) && self.zoomed_target.is_some() {
+            return Err(RejectionCode::InvalidRequest);
+        }
+
+        match mutation {
+            PaneMutation::Swap(request) => {
+                let layout = self.layout.as_mut().ok_or(RejectionCode::UnknownContext)?;
+                let after = layout
+                    .swap(
+                        request.source,
+                        request.destination,
+                        request.expected_layout_revision,
+                    )
+                    .map_err(layout_rejection)?;
+                self.record_workspace_layout();
+                let mut failed = false;
+                for pane in after.panes.iter().flatten().copied() {
+                    let old_rect = snapshot
+                        .panes
+                        .iter()
+                        .flatten()
+                        .find(|old| old.target == pane.target)
+                        .map(|old| old.rect);
+                    if old_rect != Some(pane.rect) {
+                        failed |= !self.apply_pane_size(pane.target, pane.rect, resize);
+                    }
+                }
+                Ok(if failed {
+                    Outcome::Partial
+                } else {
+                    Outcome::Applied
+                })
+            }
+            PaneMutation::Divider(request) => {
+                let layout = self.layout.as_mut().ok_or(RejectionCode::UnknownContext)?;
+                let after = layout
+                    .set_divider(
+                        request.target,
+                        request.expected_layout_revision,
+                        request.divider_index,
+                        request.first_cells,
+                    )
+                    .map_err(layout_rejection)?;
+                if after.revision != snapshot.revision {
+                    self.record_workspace_layout();
+                }
+                let mut failed = false;
+                for pane in after.panes.iter().flatten().copied() {
+                    let old_rect = snapshot
+                        .panes
+                        .iter()
+                        .flatten()
+                        .find(|old| old.target == pane.target)
+                        .map(|old| old.rect);
+                    if old_rect != Some(pane.rect)
+                        || (after.revision == snapshot.revision
+                            && self.is_resize_pending(pane.target))
+                    {
+                        failed |= !self.apply_pane_size(pane.target, pane.rect, resize);
+                    }
+                }
+                Ok(if failed {
+                    Outcome::Partial
+                } else {
+                    Outcome::Applied
+                })
+            }
+            PaneMutation::Zoom(request) => self.apply_zoom(request, resize),
+        }
+    }
+
+    fn apply_zoom<RE, Resize>(
+        &mut self,
+        request: PaneZoomSet,
+        resize: &mut Resize,
+    ) -> Result<Outcome, RejectionCode>
+    where
+        Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
+    {
+        let snapshot = self
+            .layout_snapshot()
+            .ok_or(RejectionCode::UnknownContext)?;
+        let target_is_current = snapshot
+            .panes
+            .iter()
+            .flatten()
+            .any(|pane| pane.target == request.target);
+        let next_zoom = if request.zoomed {
+            if !target_is_current
+                || self
+                    .zoomed_target
+                    .is_some_and(|current| current != request.target)
+            {
+                return Err(RejectionCode::StaleTarget);
+            }
+            Some(request.target)
+        } else {
+            match self.zoomed_target {
+                Some(current) if current == request.target => None,
+                Some(_) => return Err(RejectionCode::StaleTarget),
+                None if target_is_current => None,
+                None => return Err(RejectionCode::StaleTarget),
+            }
+        };
+        let changed = next_zoom != self.zoomed_target;
+        if changed {
+            self.layout
+                .as_mut()
+                .ok_or(RejectionCode::UnknownContext)?
+                .advance_revision(request.expected_layout_revision)
+                .map_err(layout_rejection)?;
+            self.zoomed_target = next_zoom;
+            self.record_workspace_layout();
+        }
+
+        let effective_root = full_root_rect(snapshot.rows, snapshot.columns);
+        let mut failed = false;
+        if let Some(target) = next_zoom {
+            let rect = crate::pane_layout::content_rect(effective_root)
+                .ok_or(RejectionCode::InvalidRequest)?;
+            let desired = (rect.rows, rect.columns);
+            if changed
+                || self
+                    .pane_state(target)
+                    .is_some_and(|state| state.confirmed != desired)
+            {
+                failed |= !self.apply_effective_size(target, desired, snapshot, resize);
+            }
+        } else {
+            for pane in snapshot.panes.iter().flatten().copied() {
+                let Some(rect) = crate::pane_layout::content_rect(pane.rect) else {
+                    failed = true;
+                    continue;
+                };
+                let desired = (rect.rows, rect.columns);
+                if self.pane_state(pane.target).is_none_or(|state| {
+                    state.confirmed != desired || state.desired == Some(desired)
+                }) {
+                    failed |= !self.apply_effective_size(pane.target, desired, snapshot, resize);
+                }
+            }
+        }
+        Ok(if failed {
+            Outcome::Partial
+        } else {
+            Outcome::Applied
+        })
+    }
+
+    fn apply_effective_size<RE, Resize>(
+        &mut self,
+        target: TargetRef,
+        desired: (u16, u16),
+        _underlying: LayoutSnapshot,
+        resize: &mut Resize,
+    ) -> bool
+    where
+        Resize: FnMut(&mut E, u16, u16) -> Result<(), RE>,
+    {
+        if self
+            .pane_state(target)
+            .is_some_and(|state| state.confirmed == desired)
+        {
+            self.record_pane_size(target, desired, None);
+            return true;
+        }
+        let applied = self
+            .launches
+            .session_mut(target)
+            .is_ok_and(|session| resize(&mut session.effects, desired.0, desired.1).is_ok());
+        let confirmed = if applied {
+            desired
+        } else if let Some(state) = self.pane_state(target) {
+            state.confirmed
+        } else {
+            return false;
+        };
+        self.record_pane_size(target, confirmed, (!applied).then_some(desired));
+        applied
     }
 
     /// Run one bounded read-only observation of the exact target pinned to a
@@ -2901,7 +3298,10 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     }
 
     fn plan_close(&self, request: &CloseRequest) -> Result<(), CloseRejection> {
-        if self.active_async_split.is_some() || self.async_emergency_effect.is_some() {
+        if self.active_async_split.is_some()
+            || self.async_emergency_effect.is_some()
+            || self.zoomed_target.is_some()
+        {
             return Err(CloseRejection::StaleLayout);
         }
         let layout = self.layout.as_ref().ok_or(CloseRejection::NoLayout)?;
@@ -2960,10 +3360,21 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 .flatten()
                 .any(|pane| pane.target == target)
         {
+            if before.pane_count() == 1 && self.zoomed_target == Some(target) {
+                self.layout
+                    .as_mut()
+                    .ok_or(())?
+                    .advance_revision(before.revision)
+                    .map_err(|_| ())?;
+                self.zoomed_target = None;
+            }
             self.record_workspace_layout();
             return Ok(false);
         }
         let collapsed = layout.collapse(target, before.revision).map_err(|_| ())?;
+        if self.zoomed_target == Some(target) {
+            self.zoomed_target = None;
+        }
         self.record_workspace_layout();
         for slot in &mut self.pane_sizes {
             if slot.is_some_and(|state| state.target == target) {
@@ -2974,6 +3385,9 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         // the PTY without another wait window.
         drop(self.launches.retire(target).map_err(|_| ())?);
         let mut resize_pending = false;
+        let zoomed = self.zoomed_target;
+        let root_content =
+            crate::pane_layout::content_rect(full_root_rect(collapsed.rows, collapsed.columns));
         for pane in collapsed.panes.iter().flatten().copied() {
             let old_rect = before
                 .panes
@@ -2988,7 +3402,37 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 .launches
                 .effects(pane.target)
                 .map_or(true, |session| session.effects.child_exited());
-            if !exited && !self.apply_pane_size(pane.target, pane.rect, resize) {
+            if exited {
+                continue;
+            }
+            let applied = if let Some(zoomed) = zoomed {
+                if pane.target == zoomed {
+                    root_content.is_some_and(|rect| {
+                        let desired = (rect.rows, rect.columns);
+                        if self
+                            .pane_state(zoomed)
+                            .is_some_and(|state| state.confirmed == desired)
+                        {
+                            true
+                        } else {
+                            self.apply_effective_size(zoomed, desired, collapsed, resize)
+                        }
+                    })
+                } else {
+                    let confirmed = self.pane_state(pane.target).map_or(
+                        (
+                            pane.rect.rows.saturating_sub(2),
+                            pane.rect.columns.saturating_sub(2),
+                        ),
+                        |state| state.confirmed,
+                    );
+                    self.record_pane_size(pane.target, confirmed, None);
+                    true
+                }
+            } else {
+                self.apply_pane_size(pane.target, pane.rect, resize)
+            };
+            if !applied {
                 resize_pending = true;
             }
         }
@@ -3009,6 +3453,13 @@ impl<E: EffectSink> MultiSessionOwner<E> {
             };
             let snapshot = layout.snapshot();
             if snapshot.pane_count() <= 1 {
+                if let Some(target) = self.zoomed_target {
+                    if matches!(self.launches.state(target), Ok(SessionState::Exited)) {
+                        self.finish_pane_exit(target, &mut |effects: &mut E, rows, columns| {
+                            effects.apply_size(rows, columns)
+                        })?;
+                    }
+                }
                 return Ok(());
             }
             let exited = snapshot.panes.into_iter().flatten().find(|pane| {
@@ -3064,6 +3515,49 @@ fn known_reply(
             status_reply(key, OperationStatus::Completed(outcome)).map(Some)
         }
         Some(Admission::Execute) => Err(ServerError::Internal),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PaneMutation {
+    Swap(PaneSwap),
+    Divider(PaneDividerSet),
+    Zoom(PaneZoomSet),
+}
+
+impl PaneMutation {
+    fn revision(self) -> u64 {
+        match self {
+            Self::Swap(request) => request.expected_layout_revision,
+            Self::Divider(request) => request.expected_layout_revision,
+            Self::Zoom(request) => request.expected_layout_revision,
+        }
+    }
+
+    fn targets(self) -> [Option<TargetRef>; 2] {
+        match self {
+            Self::Swap(request) => [Some(request.source), Some(request.destination)],
+            Self::Divider(request) => [Some(request.target), None],
+            Self::Zoom(request) => [Some(request.target), None],
+        }
+    }
+}
+
+fn layout_rejection(error: LayoutError) -> RejectionCode {
+    match error {
+        LayoutError::StaleTarget | LayoutError::TargetScopeMismatch => RejectionCode::StaleTarget,
+        LayoutError::StaleRevision => RejectionCode::StaleOwner,
+        LayoutError::PaneLimitExceeded | LayoutError::RevisionExhausted => RejectionCode::Capacity,
+        _ => RejectionCode::InvalidRequest,
+    }
+}
+
+fn full_root_rect(rows: u16, columns: u16) -> crate::pane_layout::Rect {
+    crate::pane_layout::Rect {
+        x: 0,
+        y: 0,
+        rows,
+        columns,
     }
 }
 
@@ -3730,6 +4224,51 @@ mod tests {
                 .unwrap()
                 .2,
             crate::pane_metadata_protocol::PathStatus::Exited
+        );
+    }
+
+    #[test]
+    fn row_wrap_capability_is_optional_and_resume_cannot_widen_an_old_grant() {
+        use crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS;
+
+        let mut owner = owner();
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let mut journal = Journal::new(&effects);
+        let target = launch(&mut owner, 1, &mut journal, &effects)
+            .unwrap()
+            .target
+            .unwrap();
+
+        let legacy = owner.connect(target, &hello(), 3).unwrap().0;
+        let mut widened_resume = hello();
+        widened_resume.hello.optional_capabilities |= CAPABILITY_SCREEN_ROW_WRAPS;
+        widened_resume.resume = Some(crate::session_protocol::LeaseRef {
+            generation: GENERATION,
+            lease: legacy.lease(),
+        });
+        let (resumed, resumed_welcome) = owner.connect(target, &widened_resume, 4).unwrap();
+        assert_eq!(resumed.lease(), legacy.lease());
+        assert_eq!(
+            resumed_welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+            0
+        );
+
+        let mut fresh = hello();
+        fresh.hello.optional_capabilities |= CAPABILITY_SCREEN_ROW_WRAPS;
+        let (fresh_connection, fresh_welcome) = owner.connect(target, &fresh, 5).unwrap();
+        assert_ne!(
+            fresh_welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+            0
+        );
+        let mut fresh_resume = fresh;
+        fresh_resume.resume = Some(crate::session_protocol::LeaseRef {
+            generation: GENERATION,
+            lease: fresh_connection.lease(),
+        });
+        let (_, resumed_fresh) = owner.connect(target, &fresh_resume, 6).unwrap();
+        assert_ne!(
+            resumed_fresh.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+            0
         );
     }
 
@@ -7564,6 +8103,7 @@ mod runtime_helper_tests {
         delivered: Vec<Key>,
         resizes: Vec<(u16, u16)>,
         fail_resize: bool,
+        exited: bool,
     }
 
     impl EffectSink for Sink {
@@ -7580,7 +8120,7 @@ mod runtime_helper_tests {
             Ok(())
         }
         fn child_exited(&self) -> bool {
-            false
+            self.exited
         }
         fn screen_revision(&self) -> Option<u64> {
             Some(1)
@@ -7654,6 +8194,86 @@ mod runtime_helper_tests {
             resume: None,
         };
         owner.connect(target, &hello, NOW).unwrap().0
+    }
+
+    fn select_pane_operations_for_test(
+        owner: &mut MultiSessionOwner<Sink>,
+        connection: &mut Connection,
+    ) {
+        let capability = crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS;
+        connection.selected_capabilities |= capability;
+        owner
+            .global
+            .grants
+            .get_mut(&connection.lease())
+            .expect("live connection grant")
+            .capabilities |= capability;
+    }
+
+    fn add_right_pane(
+        owner: &mut MultiSessionOwner<Sink>,
+        source: TargetRef,
+        key: OperationKey,
+    ) -> TargetRef {
+        let snapshot = owner.layout_snapshot().unwrap();
+        let destination = owner.launches.next_target().unwrap();
+        let preview = owner
+            .layout
+            .as_ref()
+            .unwrap()
+            .preview_split(
+                source,
+                snapshot.revision,
+                SplitDirection::Right,
+                destination,
+            )
+            .unwrap();
+        let planned = preview
+            .planned_snapshot()
+            .panes
+            .iter()
+            .flatten()
+            .find(|pane| pane.target == destination)
+            .copied()
+            .unwrap();
+        let content = crate::pane_layout::content_rect(planned.rect).unwrap();
+        let launch = LaunchRequest {
+            key,
+            rows: content.rows,
+            columns: content.columns,
+            requested_executable: b"/bin/sh",
+            requested_working_directory: b"/",
+            client_working_directory: b"/",
+            arguments: &[],
+            environment: &[],
+        };
+        let mut payload = Vec::new();
+        encode_split_request(
+            &SplitRequest {
+                key,
+                target: source,
+                expected_layout_revision: snapshot.revision,
+                direction: SplitDirection::Right,
+                launch: &launch,
+            },
+            &mut payload,
+        )
+        .unwrap();
+        let result = owner
+            .execute_split(
+                &payload,
+                NOW,
+                &mut Journal,
+                |_, target| Ok::<_, ()>(target.session),
+                |_| Ok::<_, ()>(Sink::default()),
+                |sink: &mut Sink, rows, columns| {
+                    sink.resizes.push((rows, columns));
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(result.new_target, Some(destination));
+        destination
     }
 
     fn key(connection: &Connection, sequence: u64) -> OperationKey {
@@ -7889,6 +8509,463 @@ mod runtime_helper_tests {
             decode_response_payload(&again).unwrap().body,
             ResponseBody::Status(OperationStatus::Completed(Outcome::Partial))
         );
+    }
+
+    #[test]
+    fn pane_zoom_commits_underlying_revision_and_exact_duplicate_has_no_effect() {
+        use crate::pane_operations_protocol::{
+            encode_request, encode_view, PaneZoomSet, Request as PaneOperationRequest,
+        };
+
+        let (mut owner, target) = owner_with_first(true);
+        let mut connection = connect(&mut owner, target, 41);
+        select_pane_operations_for_test(&mut owner, &mut connection);
+        let request = PaneOperationRequest::ZoomSet(PaneZoomSet {
+            key: key(&connection, 9),
+            expected_layout_revision: 1,
+            target,
+            zoomed: true,
+        });
+        let payload = encode_request(&request).unwrap();
+        let mut effects = Vec::new();
+        let first = owner
+            .handle_pane_operation(&connection, request, &payload, NOW, |_, rows, columns| {
+                effects.push((rows, columns));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert!(
+            effects.is_empty(),
+            "single-pane zoom already has the effective size"
+        );
+        assert!(matches!(
+            decode_response_payload(&first).unwrap().body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        ));
+        assert_eq!(owner.layout_snapshot().unwrap().revision, 2);
+        assert_eq!(owner.zoomed_target, Some(target));
+
+        let duplicate = owner
+            .handle_pane_operation(
+                &connection,
+                request,
+                &payload,
+                NOW,
+                |_, _, _| -> Result<(), ()> { panic!("exact duplicate must not resize") },
+            )
+            .unwrap();
+        assert_eq!(duplicate, first);
+        let view = owner
+            .pane_operations_view(&connection, NOW)
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.zoomed_target, Some(target));
+        assert_eq!(view.confirmed_sizes[0], Some((22, 79)));
+        assert_eq!(view.layout.revision, 2);
+        assert_eq!(view.layout.panes[0].unwrap().pending_confirmed, None);
+        assert!(encode_view(&view).is_ok());
+    }
+
+    #[test]
+    fn spontaneous_exit_of_zoom_target_clears_projection_for_multiple_and_last_pane() {
+        use crate::pane_operations_protocol::{
+            encode_request, PaneZoomSet, Request as PaneOperationRequest,
+        };
+
+        let (mut owner, source) = owner_with_first(true);
+        let mut connection = connect(&mut owner, source, 47);
+        select_pane_operations_for_test(&mut owner, &mut connection);
+        let zoom_target = add_right_pane(&mut owner, source, key(&connection, 2));
+        let zoom = PaneOperationRequest::ZoomSet(PaneZoomSet {
+            key: key(&connection, 3),
+            expected_layout_revision: 2,
+            target: zoom_target,
+            zoomed: true,
+        });
+        let payload = encode_request(&zoom).unwrap();
+        owner
+            .handle_pane_operation(&connection, zoom, &payload, NOW, |_, _, _| Ok::<_, ()>(()))
+            .unwrap();
+        owner.for_each_effects_mut(|target, sink| {
+            if target == zoom_target {
+                sink.exited = true;
+            }
+        });
+        owner.poll(NOW).unwrap();
+        let after_multiple = owner.layout_snapshot().unwrap();
+        assert_eq!(owner.zoomed_target, None);
+        assert_eq!(after_multiple.pane_count(), 1);
+        assert!(!after_multiple
+            .panes
+            .iter()
+            .flatten()
+            .any(|pane| pane.target == zoom_target));
+
+        let (mut solo, target) = owner_with_first(true);
+        let mut solo_connection = connect(&mut solo, target, 48);
+        select_pane_operations_for_test(&mut solo, &mut solo_connection);
+        let zoom = PaneOperationRequest::ZoomSet(PaneZoomSet {
+            key: key(&solo_connection, 9),
+            expected_layout_revision: 1,
+            target,
+            zoomed: true,
+        });
+        let payload = encode_request(&zoom).unwrap();
+        solo.handle_pane_operation(&solo_connection, zoom, &payload, NOW, |_, _, _| {
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        solo.for_each_effects_mut(|_, sink| sink.exited = true);
+        solo.poll(NOW).unwrap();
+        let after_last = solo.layout_snapshot().unwrap();
+        assert_eq!(solo.zoomed_target, None);
+        assert_eq!(after_last.revision, 3);
+        assert_eq!(
+            after_last.pane_count(),
+            1,
+            "the exited target remains a tombstone"
+        );
+    }
+
+    #[test]
+    fn zoom_resize_failure_keeps_absolute_pending_size_for_new_key_retry() {
+        use crate::pane_operations_protocol::{
+            encode_request, PaneZoomSet, Request as PaneOperationRequest,
+        };
+
+        let (mut owner, source) = owner_with_first(true);
+        let mut connection = connect(&mut owner, source, 42);
+        select_pane_operations_for_test(&mut owner, &mut connection);
+        let target = add_right_pane(&mut owner, source, key(&connection, 2));
+        let current_revision = owner.layout_snapshot().unwrap().revision;
+        let request = |sequence| {
+            PaneOperationRequest::ZoomSet(PaneZoomSet {
+                key: key(&connection, sequence),
+                expected_layout_revision: if sequence == 3 {
+                    current_revision
+                } else {
+                    current_revision + 1
+                },
+                target,
+                zoomed: true,
+            })
+        };
+        let first = request(3);
+        let first_payload = encode_request(&first).unwrap();
+        owner
+            .handle_pane_operation(&connection, first, &first_payload, NOW, |_, _, _| {
+                Err::<(), _>(())
+            })
+            .unwrap();
+        assert_eq!(owner.pane_state(target).unwrap().desired, Some((22, 79)));
+        let retry = request(4);
+        let retry_payload = encode_request(&retry).unwrap();
+        let mut calls = Vec::new();
+        owner
+            .handle_pane_operation(
+                &connection,
+                retry,
+                &retry_payload,
+                NOW,
+                |_, rows, columns| {
+                    calls.push((rows, columns));
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(calls, vec![(22, 79)]);
+        assert_eq!(owner.pane_state(target).unwrap().desired, None);
+        let view = owner
+            .pane_operations_view(&connection, NOW)
+            .unwrap()
+            .unwrap();
+        let target_index = view
+            .layout
+            .panes
+            .iter()
+            .position(|pane| pane.is_some_and(|pane| pane.target == target))
+            .unwrap();
+        assert_eq!(view.confirmed_sizes[target_index], Some((22, 79)));
+        assert_eq!(
+            view.layout.panes[target_index].unwrap().pending_confirmed,
+            Some((22, 79))
+        );
+    }
+
+    #[test]
+    fn root_resize_during_zoom_keeps_projection_and_unzoom_restores_tree() {
+        use crate::pane_operations_protocol::{
+            encode_request, PaneZoomSet, Request as PaneOperationRequest,
+        };
+        use crate::ui_protocol::RootResize;
+
+        let (mut owner, target) = owner_with_first(true);
+        let mut connection = connect(&mut owner, target, 43);
+        select_pane_operations_for_test(&mut owner, &mut connection);
+        let zoom = PaneOperationRequest::ZoomSet(PaneZoomSet {
+            key: key(&connection, 20),
+            expected_layout_revision: 1,
+            target,
+            zoomed: true,
+        });
+        let zoom_payload = encode_request(&zoom).unwrap();
+        owner
+            .handle_pane_operation(&connection, zoom, &zoom_payload, NOW, |_, _, _| {
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+
+        let root_resize = RootResize {
+            key: key(&connection, 21),
+            expected_layout_revision: 2,
+            rows: 30,
+            columns: 100,
+        };
+        let root_payload = crate::ui_protocol::encode_root_resize(&root_resize).unwrap();
+        owner
+            .handle_root_resize(
+                &connection,
+                root_resize,
+                &root_payload,
+                NOW,
+                |_, rows, columns| {
+                    assert_eq!((rows, columns), (28, 98));
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+        let resized = owner.layout_snapshot().unwrap();
+        assert_eq!(
+            (resized.rows, resized.columns, resized.revision),
+            (30, 100, 3)
+        );
+        assert_eq!(owner.zoomed_target, Some(target));
+
+        let unzoom = PaneOperationRequest::ZoomSet(PaneZoomSet {
+            key: key(&connection, 22),
+            expected_layout_revision: 3,
+            target,
+            zoomed: false,
+        });
+        let unzoom_payload = encode_request(&unzoom).unwrap();
+        owner
+            .handle_pane_operation(
+                &connection,
+                unzoom,
+                &unzoom_payload,
+                NOW,
+                |_, _, _| -> Result<(), ()> {
+                    panic!("unzoom should not resize a pane already at the restored size")
+                },
+            )
+            .unwrap();
+        let restored = owner.layout_snapshot().unwrap();
+        assert_eq!(restored.panes, resized.panes);
+        assert_eq!(restored.dividers, resized.dividers);
+        assert_eq!(restored.revision, 4);
+        assert_eq!(owner.zoomed_target, None);
+    }
+
+    #[test]
+    fn stale_pane_operation_is_admitted_failed_without_resize_effects() {
+        use crate::pane_operations_protocol::{
+            encode_request, PaneZoomSet, Request as PaneOperationRequest,
+        };
+
+        let (mut owner, target) = owner_with_first(true);
+        let mut connection = connect(&mut owner, target, 44);
+        select_pane_operations_for_test(&mut owner, &mut connection);
+        let request = PaneOperationRequest::ZoomSet(PaneZoomSet {
+            key: key(&connection, 30),
+            expected_layout_revision: 99,
+            target,
+            zoomed: true,
+        });
+        let payload = encode_request(&request).unwrap();
+        let reply = owner
+            .handle_pane_operation(
+                &connection,
+                request,
+                &payload,
+                NOW,
+                |_, _, _| -> Result<(), ()> { panic!("stale request must not resize") },
+            )
+            .unwrap();
+        assert!(matches!(
+            decode_response_payload(&reply).unwrap().body,
+            ResponseBody::Rejected(RejectionCode::StaleOwner)
+        ));
+        assert_eq!(owner.layout_snapshot().unwrap().revision, 1);
+        assert_eq!(owner.zoomed_target, None);
+    }
+
+    #[test]
+    fn zoom_resizes_only_selected_pane_and_reports_hidden_confirmed_size() {
+        use crate::pane_operations_protocol::{
+            encode_request, encode_view, PaneZoomSet, Request as PaneOperationRequest,
+        };
+
+        let (mut owner, source) = owner_with_first(true);
+        let mut connection = connect(&mut owner, source, 45);
+        select_pane_operations_for_test(&mut owner, &mut connection);
+        let zoomed = add_right_pane(&mut owner, source, key(&connection, 2));
+        let before = owner.layout_snapshot().unwrap();
+        assert_eq!(before.revision, 2);
+        let hidden_before = owner.pane_state(source).unwrap().confirmed;
+        let zoom = PaneOperationRequest::ZoomSet(PaneZoomSet {
+            key: key(&connection, 3),
+            expected_layout_revision: before.revision,
+            target: zoomed,
+            zoomed: true,
+        });
+        let payload = encode_request(&zoom).unwrap();
+        let mut calls = Vec::new();
+        owner
+            .handle_pane_operation(&connection, zoom, &payload, NOW, |_, rows, columns| {
+                calls.push((rows, columns));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(calls, vec![(22, 79)]);
+        let view = owner
+            .pane_operations_view(&connection, NOW)
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.zoomed_target, Some(zoomed));
+        assert_eq!(view.layout.revision, before.revision + 1);
+        for geometry in before.panes.iter().flatten() {
+            assert!(view
+                .layout
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == geometry.target && pane.rect == geometry.rect));
+        }
+        let hidden_index = view
+            .layout
+            .panes
+            .iter()
+            .position(|pane| pane.is_some_and(|pane| pane.target == source))
+            .unwrap();
+        let zoom_index = view
+            .layout
+            .panes
+            .iter()
+            .position(|pane| pane.is_some_and(|pane| pane.target == zoomed))
+            .unwrap();
+        assert_eq!(view.confirmed_sizes[hidden_index], Some(hidden_before));
+        assert_eq!(view.confirmed_sizes[zoom_index], Some((22, 79)));
+        assert!(view.layout.panes[zoom_index]
+            .unwrap()
+            .pending_confirmed
+            .is_some());
+        assert!(encode_view(&view).is_ok());
+    }
+
+    #[test]
+    fn swap_and_absolute_divider_commit_once_and_resize_affected_targets() {
+        use crate::pane_operations_protocol::{
+            encode_request, PaneDividerSet, PaneSwap, Request as PaneOperationRequest,
+        };
+
+        let (mut owner, source) = owner_with_first(true);
+        let mut connection = connect(&mut owner, source, 46);
+        select_pane_operations_for_test(&mut owner, &mut connection);
+        let destination = add_right_pane(&mut owner, source, key(&connection, 2));
+        // Unequal actual sizes make a location swap require PTY resizes.
+        owner
+            .layout
+            .as_mut()
+            .unwrap()
+            .set_divider(source, 2, 0, 39)
+            .unwrap();
+        owner
+            .resize_layout(3, 24, 82, |_, _, _| Ok::<_, ()>(()))
+            .unwrap();
+        let before = owner.layout_snapshot().unwrap();
+        let source_rect = before
+            .panes
+            .iter()
+            .flatten()
+            .find(|pane| pane.target == source)
+            .unwrap()
+            .rect;
+        let destination_rect = before
+            .panes
+            .iter()
+            .flatten()
+            .find(|pane| pane.target == destination)
+            .unwrap()
+            .rect;
+        let swap = PaneOperationRequest::Swap(PaneSwap {
+            key: key(&connection, 3),
+            expected_layout_revision: before.revision,
+            source,
+            destination,
+        });
+        let swap_payload = encode_request(&swap).unwrap();
+        let mut swap_sizes = Vec::new();
+        owner
+            .handle_pane_operation(&connection, swap, &swap_payload, NOW, |_, rows, columns| {
+                swap_sizes.push((rows, columns));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        let swapped = owner.layout_snapshot().unwrap();
+        assert_eq!(swapped.revision, before.revision + 1);
+        assert_eq!(
+            swapped
+                .panes
+                .iter()
+                .flatten()
+                .find(|pane| pane.target == source)
+                .unwrap()
+                .rect,
+            destination_rect
+        );
+        assert_eq!(
+            swapped
+                .panes
+                .iter()
+                .flatten()
+                .find(|pane| pane.target == destination)
+                .unwrap()
+                .rect,
+            source_rect
+        );
+        assert_eq!(swap_sizes.len(), 2);
+
+        let info = owner
+            .layout
+            .as_ref()
+            .unwrap()
+            .divider_info(source, swapped.revision, 0)
+            .unwrap();
+        let divider = PaneOperationRequest::DividerSet(PaneDividerSet {
+            key: key(&connection, 4),
+            expected_layout_revision: swapped.revision,
+            target: source,
+            divider_index: 0,
+            first_cells: info.first_span + 1,
+        });
+        let divider_payload = encode_request(&divider).unwrap();
+        let mut divider_sizes = Vec::new();
+        owner
+            .handle_pane_operation(
+                &connection,
+                divider,
+                &divider_payload,
+                NOW,
+                |_, rows, columns| {
+                    divider_sizes.push((rows, columns));
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+        let adjusted = owner.layout_snapshot().unwrap();
+        assert_eq!(adjusted.revision, swapped.revision + 1);
+        assert_eq!(divider_sizes.len(), 2);
+        assert!(divider_sizes.iter().any(|(_, columns)| *columns != 38));
     }
 
     #[test]

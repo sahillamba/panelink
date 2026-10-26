@@ -49,6 +49,8 @@ const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_STEP: Duration = Duration::from_millis(25);
+const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const REGISTRY_READ_BACKOFF: Duration = Duration::from_millis(8);
 /// macOS `sun_path` capacity, including the terminating NUL.
 const MAX_SOCKET_PATH_BYTES: usize = 103;
 
@@ -64,6 +66,9 @@ pub(crate) enum OpenError {
     ServerStartTimedOut,
     StaleEndpointUnsafe,
     StopFailed,
+    WorkspaceUnavailable,
+    WorkspaceRegistryBusy,
+    WorkspaceRegistryUnavailable,
 }
 
 impl OpenError {
@@ -80,6 +85,9 @@ impl OpenError {
             Self::ServerStartTimedOut => "panelink server did not become ready (see server.log)",
             Self::StaleEndpointUnsafe => "unexpected file at the panelink socket path",
             Self::StopFailed => "could not stop the panelink server",
+            Self::WorkspaceUnavailable => "workspace is no longer registered",
+            Self::WorkspaceRegistryBusy => "workspace registry is busy; try again",
+            Self::WorkspaceRegistryUnavailable => "workspace registry unavailable",
         }
     }
 }
@@ -91,6 +99,538 @@ pub(crate) struct StateRoot {
     pub(crate) server: PathBuf,
     pub(crate) terminfo: PathBuf,
     pub(crate) contexts: PathBuf,
+}
+
+/// Resolve one stable registry route. Numeric IDs are the only path inputs.
+pub(crate) fn workspace_state(project: u64, tab: u64) -> Result<StateRoot, OpenError> {
+    let app = resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME"))?;
+    if project == 1 && tab == 1 {
+        return Ok(app);
+    }
+    let root = app
+        .root
+        .join("projects")
+        .join(project.to_string())
+        .join("workspaces")
+        .join(tab.to_string());
+    let state = StateRoot {
+        root: root.clone(),
+        server: root.join("server"),
+        terminfo: app.terminfo,
+        contexts: root.join("contexts"),
+    };
+    if state.socket_path().as_os_str().len() > MAX_SOCKET_PATH_BYTES {
+        return Err(OpenError::SocketPathTooLong);
+    }
+    Ok(state)
+}
+
+pub(crate) fn prepare_app_root() -> Result<PathBuf, OpenError> {
+    let app = resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME"))?;
+    let root = normalized_validated_root(&app.root)?;
+    ensure_private_dir(&root)?;
+    Ok(root)
+}
+
+/// Validate a configured root without creating anything. `false` means the
+/// root does not exist yet; unsafe components remain an error.
+pub(crate) fn validate_app_root_readonly() -> Result<bool, OpenError> {
+    let app = resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME"))?;
+    ancestors_ok(&app.root, current_uid())?;
+    match fs::symlink_metadata(&app.root) {
+        Ok(metadata) => {
+            private_dir_ok(&metadata, current_uid())?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(OpenError::StateRootUnsafe),
+    }
+}
+
+/// Canonicalize only after checking every configured component and the final
+/// directory. This normalizes macOS /tmp and /var aliases for strict stores,
+/// while refusing a symlink at the user-selected app root itself.
+fn normalized_validated_root(root: &Path) -> Result<PathBuf, OpenError> {
+    ancestors_ok(root, current_uid())?;
+    match fs::symlink_metadata(root) {
+        Ok(metadata) => private_dir_ok(&metadata, current_uid())?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(OpenError::StateRootUnsafe),
+    }
+
+    let mut prefix = root.to_path_buf();
+    let mut suffix = Vec::new();
+    while fs::symlink_metadata(&prefix).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+    {
+        let name = prefix
+            .file_name()
+            .ok_or(OpenError::StateRootUnavailable)?
+            .to_os_string();
+        suffix.push(name);
+        if !prefix.pop() {
+            return Err(OpenError::StateRootUnavailable);
+        }
+    }
+    let mut canonical = fs::canonicalize(&prefix).map_err(|_| OpenError::StateRootUnsafe)?;
+    for component in suffix.into_iter().rev() {
+        canonical.push(component);
+    }
+    Ok(canonical)
+}
+
+pub(crate) fn open_workspace_ids(project: u64, tab: u64) -> i32 {
+    match workspace_state(project, tab) {
+        Ok(state) => {
+            if (project != 1 || tab != 1)
+                && prepare_workspace_namespace(project, tab, &state).is_err()
+            {
+                eprintln!("panelink: workspace directory unavailable");
+                return 1;
+            }
+            open_routed_workspace(state, project, tab)
+        }
+        Err(error) => {
+            eprintln!("panelink: {}", error.message());
+            1
+        }
+    }
+}
+
+fn open_routed_workspace(state: StateRoot, project: u64, tab: u64) -> i32 {
+    let app_root = match prepare_app_root() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("panelink: {}", error.message());
+            return 1;
+        }
+    };
+    let result: Result<(), OpenError> = (|| {
+        prepare_root(&state)?;
+        ensure_terminfo(&state)?;
+        ensure_server_checked(&state, || {
+            workspace_catalog_checked(&app_root, project, tab)
+                .map(|_| ())
+                .map_err(map_registry_route_error)
+        })?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            let (index, route) = match workspace_catalog_checked(&app_root, project, tab) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    eprintln!("panelink: {}", map_registry_route_error(error).message());
+                    return 1;
+                }
+            };
+            crate::ui_client::run_workspace(state.server, state.contexts, app_root, index, route)
+        }
+        Err(error) => {
+            eprintln!("panelink: {}", error.message());
+            1
+        }
+    }
+}
+
+/// Load one immutable catalog and verify the requested route before the host
+/// is entered. The store lock is released before attachment setup begins.
+#[allow(dead_code)] // Kept as the existing non-cancellable crate-local entry point.
+pub(crate) fn workspace_catalog(
+    app_root: &Path,
+    project: u64,
+    tab: u64,
+) -> Result<
+    (
+        panelink::workspace_index::WorkspaceIndex,
+        panelink::workspace_tabs::WorkspaceRouteId,
+    ),
+    (),
+> {
+    workspace_catalog_checked(app_root, project, tab).map_err(|_| ())
+}
+
+fn workspace_catalog_checked(
+    app_root: &Path,
+    project: u64,
+    tab: u64,
+) -> Result<
+    (
+        panelink::workspace_index::WorkspaceIndex,
+        panelink::workspace_tabs::WorkspaceRouteId,
+    ),
+    panelink::workspace_index::store::StoreError,
+> {
+    workspace_catalog_with_loader(
+        app_root,
+        project,
+        tab,
+        || false,
+        || load_workspace_record(app_root),
+    )
+}
+
+pub(crate) fn workspace_catalog_cancellable(
+    app_root: &Path,
+    project: u64,
+    tab: u64,
+    canceled: impl Fn() -> bool,
+) -> Result<
+    (
+        panelink::workspace_index::WorkspaceIndex,
+        panelink::workspace_tabs::WorkspaceRouteId,
+    ),
+    &'static str,
+> {
+    workspace_catalog_with_loader(app_root, project, tab, canceled, || {
+        load_workspace_record(app_root)
+    })
+    .map_err(map_workspace_read_label)
+}
+
+fn workspace_catalog_with_loader(
+    _app_root: &Path,
+    project: u64,
+    tab: u64,
+    canceled: impl Fn() -> bool,
+    mut load_record: impl FnMut() -> Result<
+        Option<panelink::workspace_index::codec::MetadataRecord>,
+        panelink::workspace_index::store::StoreError,
+    >,
+) -> Result<
+    (
+        panelink::workspace_index::WorkspaceIndex,
+        panelink::workspace_tabs::WorkspaceRouteId,
+    ),
+    panelink::workspace_index::store::StoreError,
+> {
+    use panelink::workspace_index::store::StoreError;
+    use panelink::workspace_index::{ProjectId, WorkspaceTabId};
+
+    let record =
+        retry_registry_read(&mut load_record, canceled)?.ok_or(StoreError::Uninitialized)?;
+    let route = panelink::workspace_tabs::WorkspaceRouteId {
+        project: ProjectId::new(project).map_err(|_| StoreError::InvalidTransition)?,
+        tab: WorkspaceTabId::new(tab).map_err(|_| StoreError::InvalidTransition)?,
+    };
+    if record.index().project(route.project).is_err()
+        || record
+            .index()
+            .project(route.project)
+            .is_ok_and(|entry| !entry.tabs().any(|candidate| candidate.id == route.tab))
+    {
+        return Err(StoreError::Uninitialized);
+    }
+    Ok((record.index().clone(), route))
+}
+
+fn load_workspace_record(
+    app_root: &Path,
+) -> Result<
+    Option<panelink::workspace_index::codec::MetadataRecord>,
+    panelink::workspace_index::store::StoreError,
+> {
+    use panelink::workspace_index::store::WorkspaceIndexStore;
+    WorkspaceIndexStore::open(app_root).and_then(|store| store.load())
+}
+
+pub(crate) fn load_workspace_index_snapshot(
+    app_root: &Path,
+) -> Result<
+    Option<panelink::workspace_index::WorkspaceIndex>,
+    panelink::workspace_index::store::StoreError,
+> {
+    let record = retry_registry_read(&mut || load_workspace_record(app_root), || false)?;
+    Ok(record.map(|record| record.index().clone()))
+}
+
+fn retry_registry_read<T>(
+    operation: &mut impl FnMut() -> Result<T, panelink::workspace_index::store::StoreError>,
+    canceled: impl Fn() -> bool,
+) -> Result<T, panelink::workspace_index::store::StoreError> {
+    retry_registry_read_with(
+        operation,
+        Instant::now() + REGISTRY_READ_TIMEOUT,
+        Instant::now,
+        thread::sleep,
+        canceled,
+    )
+}
+
+fn retry_registry_read_with<T>(
+    operation: &mut impl FnMut() -> Result<T, panelink::workspace_index::store::StoreError>,
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut wait: impl FnMut(Duration),
+    canceled: impl Fn() -> bool,
+) -> Result<T, panelink::workspace_index::store::StoreError> {
+    use panelink::workspace_index::store::StoreError;
+
+    loop {
+        if canceled() {
+            return Err(StoreError::Locked);
+        }
+        match operation() {
+            Err(StoreError::Locked) => {
+                let current = now();
+                if current >= deadline {
+                    return Err(StoreError::Locked);
+                }
+                wait(REGISTRY_READ_BACKOFF.min(deadline - current));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn map_registry_route_error(error: panelink::workspace_index::store::StoreError) -> OpenError {
+    use panelink::workspace_index::store::StoreError;
+    match error {
+        StoreError::Locked => OpenError::WorkspaceRegistryBusy,
+        StoreError::Uninitialized => OpenError::WorkspaceUnavailable,
+        _ => OpenError::WorkspaceRegistryUnavailable,
+    }
+}
+
+#[allow(dead_code)] // Kept as the existing non-cancellable crate-local entry point.
+pub(crate) fn resolve_workspace_route(
+    app_root: &Path,
+    route: panelink::workspace_tabs::WorkspaceRouteId,
+) -> Result<(StateRoot, panelink::workspace_index::WorkspaceIndex), &'static str> {
+    resolve_workspace_route_cancellable(app_root, route, || false)
+}
+
+pub(crate) fn resolve_workspace_route_cancellable(
+    app_root: &Path,
+    route: panelink::workspace_tabs::WorkspaceRouteId,
+    canceled: impl Fn() -> bool,
+) -> Result<(StateRoot, panelink::workspace_index::WorkspaceIndex), &'static str> {
+    let project = route.project.get();
+    let tab = route.tab.get();
+    let (index, _) = workspace_catalog_with_loader(app_root, project, tab, canceled, || {
+        load_workspace_record(app_root)
+    })
+    .map_err(map_workspace_read_label)?;
+    let state = workspace_state(project, tab).map_err(|_| "workspace unavailable")?;
+    Ok((state, index))
+}
+
+fn map_workspace_read_label(error: panelink::workspace_index::store::StoreError) -> &'static str {
+    use panelink::workspace_index::store::StoreError;
+    match error {
+        StoreError::Locked => "workspace registry busy",
+        StoreError::Uninitialized => "workspace is no longer registered",
+        _ => "workspace registry unavailable",
+    }
+}
+
+#[allow(dead_code)] // Kept as the existing non-cancellable crate-local entry point.
+pub(crate) fn ensure_workspace_route(
+    state: &StateRoot,
+    route: panelink::workspace_tabs::WorkspaceRouteId,
+    index: &panelink::workspace_index::WorkspaceIndex,
+) -> Result<(), &'static str> {
+    let app_root = resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME"))
+        .map_err(|_| "workspace unavailable")?
+        .root;
+    ensure_workspace_route_cancellable(&app_root, state, route, index, || false)
+}
+
+pub(crate) fn ensure_workspace_route_cancellable(
+    app_root: &Path,
+    state: &StateRoot,
+    route: panelink::workspace_tabs::WorkspaceRouteId,
+    index: &panelink::workspace_index::WorkspaceIndex,
+    canceled: impl Fn() -> bool,
+) -> Result<(), &'static str> {
+    let project = route.project.get();
+    prepare_root(state).map_err(|_| "workspace unavailable")?;
+    ensure_terminfo(state).map_err(|_| "workspace unavailable")?;
+    ensure_server_checked(state, || {
+        workspace_catalog_with_loader(app_root, project, route.tab.get(), canceled, || {
+            load_workspace_record(app_root)
+        })
+        .map(|(catalog, _)| {
+            catalog
+                .project(route.project)
+                .is_ok_and(|entry| entry.tabs().any(|candidate| candidate.id == route.tab))
+                && index
+                    .project(route.project)
+                    .is_ok_and(|entry| entry.tabs().any(|candidate| candidate.id == route.tab))
+        })
+        .map_err(map_registry_route_error)
+        .and_then(|registered| {
+            registered
+                .then_some(())
+                .ok_or(OpenError::WorkspaceUnavailable)
+        })
+    })
+    .map_err(|error| match error {
+        OpenError::WorkspaceRegistryBusy => "workspace registry busy",
+        OpenError::WorkspaceUnavailable => "workspace is no longer registered",
+        _ => "workspace registry unavailable",
+    })?;
+    Ok(())
+}
+
+/// Persist the current selection as a best-effort metadata-only update.
+/// Callers run this on the bounded metadata worker, never the UI loop.
+pub(crate) fn save_workspace_selection(
+    app_root: &Path,
+    route: panelink::workspace_tabs::WorkspaceRouteId,
+) -> Result<(), &'static str> {
+    use panelink::workspace_index::codec::MetadataRecord;
+    use panelink::workspace_index::store::WorkspaceIndexStore;
+
+    let mut store = WorkspaceIndexStore::open(app_root).map_err(|_| "selection not saved")?;
+    let record = store
+        .load()
+        .map_err(|_| "selection not saved")?
+        .ok_or("selection not saved")?;
+    let mut index = record.index().clone();
+    index
+        .select_tab(route.project, route.tab)
+        .map_err(|_| "selection not saved")?;
+    let next_revision = record
+        .revision()
+        .checked_add(1)
+        .ok_or("selection not saved")?;
+    let next = MetadataRecord::new(index, next_revision, record.next_id())
+        .map_err(|_| "selection not saved")?;
+    store
+        .save(record.revision(), &next)
+        .map_err(|_| "selection not saved")?;
+    Ok(())
+}
+
+fn prepare_workspace_namespace(project: u64, tab: u64, state: &StateRoot) -> Result<(), OpenError> {
+    let app = resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME"))?;
+    ancestors_ok(&app.root, current_uid())?;
+    ensure_private_dir(&app.root)?;
+    let projects = app.root.join("projects");
+    ensure_private_dir(&projects)?;
+    let project_dir = projects.join(project.to_string());
+    ensure_private_dir(&project_dir)?;
+    let workspaces = project_dir.join("workspaces");
+    ensure_private_dir(&workspaces)?;
+    let tab_dir = workspaces.join(tab.to_string());
+    ensure_private_dir(&tab_dir)?;
+    ensure_private_dir(&state.root)?;
+    ensure_private_dir(&state.server)?;
+    ensure_private_dir(&state.contexts)?;
+    ensure_private_dir(&state.terminfo)?;
+    Ok(())
+}
+
+pub(crate) fn stop_workspace_ids(project: u64, tab: u64) -> Result<(), &'static str> {
+    let state = workspace_state(project, tab).map_err(|_| "workspace unavailable")?;
+    if !validate_workspace_root(project, tab, &state)? {
+        return Ok(());
+    }
+    let _lifecycle = lifecycle_lock(&state, STOP_TIMEOUT).map_err(|_| "workspace busy")?;
+    let lock_held = server_lock_held_checked(&state.server)?;
+    if !lock_held {
+        if path_entry_exists(&state.root.join(PID_NAME))?
+            || endpoint_state_checked(&state.socket_path())? != EndpointState::Absent
+            || server_ready(&state)
+        {
+            return Err("workspace state uncertain");
+        }
+        return Ok(());
+    }
+    let pid = live_server_pid(&state).ok_or("workspace identity unavailable")?;
+    // SAFETY: `live_server_pid` verifies the exact recorded process identity.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return Err("workspace stop failed");
+    }
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    while server_lock_held_checked(&state.server)? {
+        if Instant::now() >= deadline {
+            return Err("workspace stop failed");
+        }
+        thread::sleep(POLL_STEP);
+    }
+    if endpoint_state_checked(&state.socket_path())? != EndpointState::Absent {
+        return Err("workspace state uncertain");
+    }
+    remove_pid_record(&state.root.join(PID_NAME))?;
+    Ok(())
+}
+
+pub(crate) fn workspace_remove_guard<T>(
+    project: u64,
+    tab: u64,
+    operation: impl FnOnce() -> Result<T, &'static str>,
+) -> Result<T, &'static str> {
+    let state = workspace_state(project, tab).map_err(|_| "workspace unavailable")?;
+    if !validate_workspace_root(project, tab, &state)? {
+        // Removal must serialize with first open even when the namespace is
+        // absent. Otherwise an opener can validate registration and start
+        // between this absence check and the registry mutation below.
+        if project == 1 && tab == 1 {
+            prepare_root(&state)
+        } else {
+            prepare_workspace_namespace(project, tab, &state)
+        }
+        .map_err(|_| "workspace unavailable")?;
+    }
+    let _lifecycle = lifecycle_lock(&state, STOP_TIMEOUT).map_err(|_| "workspace busy")?;
+    if server_lock_held_checked(&state.server)? || server_ready(&state) {
+        return Err("workspace is running");
+    }
+    if path_entry_exists(&state.root.join(PID_NAME))? {
+        // A leftover identity record is ambiguous until the route's normal
+        // stop path has verified and retired it.
+        return Err("workspace identity is uncertain");
+    }
+    if endpoint_state_checked(&state.socket_path())? != EndpointState::Absent {
+        return Err("workspace state uncertain");
+    }
+    operation()
+}
+
+/// Validate an existing workspace namespace without creating directories.
+/// A missing namespace cannot currently own a server. Removal must still
+/// serialize with first open before mutating registration. Existing
+/// components must all be private real dirs.
+fn validate_workspace_root(
+    project: u64,
+    tab: u64,
+    state: &StateRoot,
+) -> Result<bool, &'static str> {
+    let app = resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME"))
+        .map_err(|_| "workspace unavailable")?;
+    ancestors_ok(&app.root, current_uid()).map_err(|_| "workspace state unsafe")?;
+    let mut paths = vec![app.root.clone()];
+    if project != 1 || tab != 1 {
+        paths.extend([
+            app.root.join("projects"),
+            app.root.join("projects").join(project.to_string()),
+            app.root
+                .join("projects")
+                .join(project.to_string())
+                .join("workspaces"),
+            state.root.clone(),
+        ]);
+    }
+    for path in paths {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                private_dir_ok(&metadata, current_uid()).map_err(|_| "workspace state unsafe")?
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err("workspace state unsafe"),
+        }
+    }
+    for path in [&state.server, &state.contexts] {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                private_dir_ok(&metadata, current_uid()).map_err(|_| "workspace state unsafe")?
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err("workspace state unsafe"),
+        }
+    }
+    Ok(true)
 }
 
 impl StateRoot {
@@ -172,9 +712,17 @@ fn ancestors_ok(path: &Path, uid: u32) -> Result<(), OpenError> {
             Err(_) => return Err(OpenError::StateRootUnsafe),
         };
         let file_type = metadata.file_type();
-        // `/tmp` and `/var` are root-owned symlinks into /private on macOS.
+        // Accept only macOS's system-owned aliases, not arbitrary root-owned
+        // symlink ancestors that could redirect the configured app root.
         if file_type.is_symlink() {
-            if metadata.uid() != 0 {
+            let expected = match current.as_path() {
+                path if path == Path::new("/tmp") => Path::new("/private/tmp"),
+                path if path == Path::new("/var") => Path::new("/private/var"),
+                _ => return Err(OpenError::StateRootUnsafe),
+            };
+            if metadata.uid() != 0
+                || fs::canonicalize(&current).map_err(|_| OpenError::StateRootUnsafe)? != expected
+            {
                 return Err(OpenError::StateRootUnsafe);
             }
             continue;
@@ -340,6 +888,35 @@ fn endpoint_state(path: &Path) -> EndpointState {
     }
 }
 
+fn endpoint_state_checked(path: &Path) -> Result<EndpointState, &'static str> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(EndpointState::Absent),
+        Err(_) => Err("workspace state uncertain"),
+        Ok(metadata) if metadata.file_type().is_socket() && metadata.uid() == current_uid() => {
+            Ok(EndpointState::Socket)
+        }
+        Ok(_) => Err("workspace state unsafe"),
+    }
+}
+
+/// Any PID path entry, including a dangling symlink or an unreadable entry,
+/// is ambiguous until explicitly retired by the verified stop path.
+fn path_entry_exists(path: &Path) -> Result<bool, &'static str> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("workspace state uncertain"),
+    }
+}
+
+fn remove_pid_record(path: &Path) -> Result<(), &'static str> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("workspace state uncertain"),
+    }
+}
+
 /// Whether a live server holds the storage lock. A missing lock file means
 /// storage was never initialized, so no server can be running.
 fn server_lock_held(server_dir: &Path) -> bool {
@@ -360,6 +937,38 @@ fn server_lock_held(server_dir: &Path) -> bool {
         false
     } else {
         true
+    }
+}
+
+/// Liveness probe for destructive workspace operations. Unlike the general
+/// startup probe, every unexpected open/flock failure is treated as unknown.
+fn server_lock_held_checked(server_dir: &Path) -> Result<bool, &'static str> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(server_dir.join("server.lock"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err("workspace state uncertain"),
+    };
+    let metadata = file.metadata().map_err(|_| "workspace state uncertain")?;
+    if !metadata.is_file() || metadata.uid() != current_uid() || metadata.mode() & 0o077 != 0 {
+        return Err("workspace state unsafe");
+    }
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
+    // SAFETY: fd is a valid open descriptor owned by `file`.
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        // SAFETY: the successful probe lock is released before `file` closes.
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+        return Ok(false);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EWOULDBLOCK) || error.raw_os_error() == Some(libc::EAGAIN)
+    {
+        Ok(true)
+    } else {
+        Err("workspace state uncertain")
     }
 }
 
@@ -509,7 +1118,15 @@ fn process_start_time(pid: i32) -> Option<u64> {
 /// The whole inspect/cleanup/spawn/wait sequence runs under the lifecycle
 /// lock, so a concurrent opener simply waits and then finds the server.
 fn ensure_server(state: &StateRoot) -> Result<(), OpenError> {
+    ensure_server_checked(state, || Ok(()))
+}
+
+fn ensure_server_checked(
+    state: &StateRoot,
+    still_registered: impl FnOnce() -> Result<(), OpenError>,
+) -> Result<(), OpenError> {
     let _lifecycle = lifecycle_lock(state, START_TIMEOUT + STOP_TIMEOUT)?;
+    still_registered()?;
     let endpoint = endpoint_state(&state.socket_path());
     let lock_held = server_lock_held(&state.server);
     match decide_endpoint(endpoint, lock_held) {
@@ -2732,6 +3349,9 @@ fn format_layout_output(layout: &SavedLayout, previous: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use panelink::workspace_index::store::{StoreError, WorkspaceIndexStore};
+    use std::cell::Cell;
+    use std::sync::mpsc;
 
     fn temp_dir(name: &str) -> PathBuf {
         let base = std::env::temp_dir().canonicalize().unwrap();
@@ -2743,6 +3363,147 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn registry_read_retry_is_locked_only_cancellable_and_deadline_bounded() {
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+        let mut operation = || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(StoreError::Locked)
+            } else {
+                Ok("read")
+            }
+        };
+        let read = retry_registry_read_with(
+            &mut operation,
+            start + REGISTRY_READ_TIMEOUT,
+            || clock.get(),
+            |delay| {
+                waits.push(delay);
+                clock.set(clock.get() + delay);
+            },
+            || false,
+        );
+        assert_eq!(read, Ok("read"));
+        assert_eq!(attempts, 3);
+        assert_eq!(waits.as_slice(), &[REGISTRY_READ_BACKOFF; 2]);
+
+        let attempts = Cell::new(0);
+        let mut corrupt = || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(StoreError::CorruptRecord)
+        };
+        assert_eq!(
+            retry_registry_read_with(
+                &mut corrupt,
+                start + REGISTRY_READ_TIMEOUT,
+                || start,
+                |_| panic!("corrupt records must not retry"),
+                || false,
+            ),
+            Err(StoreError::CorruptRecord)
+        );
+        assert_eq!(attempts.get(), 1);
+
+        let absent_attempts = Cell::new(0);
+        let mut absent = || {
+            absent_attempts.set(absent_attempts.get() + 1);
+            Ok(None::<()>)
+        };
+        assert_eq!(
+            retry_registry_read_with(
+                &mut absent,
+                start + REGISTRY_READ_TIMEOUT,
+                || start,
+                |_| panic!("missing records must not retry"),
+                || false,
+            ),
+            Ok(None)
+        );
+        assert_eq!(absent_attempts.get(), 1);
+
+        let clock = Cell::new(start);
+        let attempts = Cell::new(0);
+        let mut locked = || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(StoreError::Locked)
+        };
+        assert_eq!(
+            retry_registry_read_with(
+                &mut locked,
+                start + Duration::from_millis(20),
+                || clock.get(),
+                |delay| clock.set(clock.get() + delay),
+                || false,
+            ),
+            Err(StoreError::Locked)
+        );
+        assert!(clock.get() <= start + Duration::from_millis(20));
+        assert!(attempts.get() <= 5);
+
+        let mut never_attempt =
+            || -> Result<(), StoreError> { panic!("canceled reads must not reach the store") };
+        assert_eq!(
+            retry_registry_read_with(
+                &mut never_attempt,
+                start + REGISTRY_READ_TIMEOUT,
+                || start,
+                |_| panic!("canceled reads must not wait"),
+                || true,
+            ),
+            Err(StoreError::Locked)
+        );
+    }
+
+    #[test]
+    fn workspace_catalog_retries_real_lock_contention_without_mutating_registry() {
+        let root = temp_dir("catalog-lock");
+        let mut locked_store = WorkspaceIndexStore::open(&root).unwrap();
+        locked_store.initialize_legacy().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let owner = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(locked_store);
+        });
+        ready_rx.recv().unwrap();
+
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let reader_root = root.clone();
+        let reader = thread::spawn(move || {
+            workspace_catalog_with_loader(
+                &reader_root,
+                1,
+                1,
+                || false,
+                || {
+                    let result = load_workspace_record(&reader_root);
+                    if matches!(&result, Err(StoreError::Locked)) {
+                        let _ = locked_tx.send(());
+                    }
+                    result
+                },
+            )
+        });
+        locked_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("catalog reader observes the held registry lock");
+        release_tx.send(()).unwrap();
+
+        let (index, route) = reader.join().unwrap().unwrap();
+        owner.join().unwrap();
+        assert_eq!((route.project.get(), route.tab.get()), (1, 1));
+        assert!(index.project(route.project).is_ok());
+        let check = WorkspaceIndexStore::open(&root).unwrap();
+        assert_eq!(check.load().unwrap().unwrap().revision(), 1);
+        drop(check);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1,21 +1,21 @@
 # Panelink implementation roadmap
 
 ```text
-current-phase: Phase4 DONE as scoped pinned managed identity/explicit recovery contract; continue remaining Phase5 work after preserving product decisions and separate Phase3 human host gate.
-last-updated: 2026-10-25
+current-phase: Phase3/Phase5 resumed; bounded tabs/copy/pane operations automated verified. FullRust1399/0/15ignored, finalclient123/0, outerPTY3/0 and all7support checks. Phase4 scoped completion retained; host/clipboard/reboot/workload gates remain open.
+last-updated: 2026-10-26
 last-verified-p4: Parent serial Rust1231pass/0fail/15ignored,63groups; all seven supporting checks pass decoder39/Python232run231pass1opt-in skip/docs332zero/fmt/Clippy/build/fingerprints. Luna+independent parent full managed native pass incl foreign135/postrefusal138/returnA152 and exact A rev7->8, passiveB1; zero prompts/cleanup true. Active binary unchanged.
 checkpoint: User-authorized verified Phase3 checkpoint: scrollback, pane run, owner discovery and client/server/killed-input-client acceptance on codex/p3-scrollback-integration based on9f3d8a0; see Git history for checkpoint ID. FullPhase3 remains open; no push. Original source checkout preserved.
-last-verified: Final usability tree locked/offline serial Cargo1111pass/0fail/15ignored in164.34s (lib722/binary148/integration241 across55 targets); all seven supporting checks pass, decoder39/Python77/docs281/0. Real outer-PTY normal-history/app-wheel tests pass. Earlier sizing, startup-output and asynchronous writer-fixture failures are preserved in docs/progress/P3-USABILITY-FIXES-RESULT.md.
+last-verified: Full locked/offline serial Rust1399pass/0fail/15ignored across75groups. After strictClippy payload boxing/lint cleanup, finalclient123/0 and outerPTY3/0 pass; actual4PTYprotocol1/0. All7support checks pass decoder39/fingerprints/fmt/strictClippy/build/Python232run1skip/finaldocs. See P5-PANE-OPERATIONS-INTEGRATION-2026-10-26.md. No clipboard or activation.
 prior-evidence-orchestration: Serial1091pass/0fail/15ignored in182.72s plus seven supporting checks before user-reported usability repairs; see P3-ORCHESTRATION-RESULT.md.
 prior-evidence-scrollback: Final serial Cargo1064pass/0fail/15ignored in122.73s (lib712/binary123/integration229 across50 targets); seven non-Cargo checks passed separately, decoder39/Python77/docs253/0. First full serial run1063pass/1fail/15ignored at shutdown HUP marker; isolated and full rerun pass without code changes. See P3-LIVE-SCROLLBACK-RESULT.md.
 prior-evidence-metadata: Final serial Cargo1059pass/0fail/15ignored in152.92s (lib709/binary123/integration227 across50 targets); all7 non-Cargo verifier checks pass separately, decoder39/Python77/docs251/0. Initial parallel verifier7/8 had2 library timing/observation failures; preserved in P3-PANE-METADATA-RESULT.md, not relabeled. No final Cargo timeout.
 prior-evidence-upstream: verifier 8/8; full suite 993 passed/0 failed/15 ignored after origin/main merge (095bf45) and four-pane, agent CLI, L16 relaunch, L17 attach, L18 exit status, before stash integration; not combined-tree verification.
 prior-evidence-stash: live-split slice library 641 passed/4 ignored, focused integration 73 passed/0 failed, verifier 7/8 with binary 115 passed/1 failed at pathname-bind EPERM; not combined-tree verification. See docs/progress/ASYNC-LAUNCH-RESULT.md.
-next-action: Phase4 complete; see P4-INTEGRATED-RESULT.md and Git completion commit. Continue Phase5 remaining hierarchy/interaction and full V-HISTORY acceptance in phase order; retain pending product decisions and separate Phase3 human Apple Terminal gate. No push or activation.
+next-action: Bounded pane operations integrated and automated verified. Continue remaining Phase3 human four-pane host and Phase5 Apple Terminal/real clipboard/physical reboot/layout recovery/representative workload gates, preserving explicit evidence limits. Do not relabel PTY automation as human/reboot acceptance. No push or activation.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
-blocked-on: No remaining scoped Phase4 gate. Phase3 human four-pane Apple Terminal acceptance and Phase5 hierarchy/interaction/reboot/workload acceptance remain separate and open.
+blocked-on: No remaining scoped Phase4 gate. Phase3 human four-pane Apple Terminal proof and Phase5 distinct human host/clipboard/physical reboot/layout recovery/workload gates stay open; bounded M2 pane operations automated pass.
 merged-origin: 2026-10-22 merged origin/main (Wave1 usability, Wave2 client/server close, Herdr study, Subagents SA plan); see docs/progress/WAVE2-RESULT.md, USABILITY-WAVE1-RESULT.md, SUBAGENTS-PLAN.md
 setup: see docs/SETUP.md for a fresh Apple Silicon Mac; Rust 1.99.1. Current source/status supersedes the historical index block in STASH-MERGE-RESULT.md. Worktree graph project: Users-sahillamba-.codex-worktrees-7060-panelink.
 phase-4: DONE — 2026-10-25 — pinned managed UI/foreign refusal/return plus explicit recovery, parent native verified; see docs/progress/P4-INTEGRATED-RESULT.md
@@ -304,7 +304,11 @@ This is a development gate, not a live Panelink adapter or recovery feature.
 
 ## Phase 5 — workspaces, selection, history (in progress; scoped saved history DONE)
 
-- [ ] Resolve hierarchy; implement keyboard layout operations.
+- [x] Scoped opt-in in-client workspace tabs, chooser and safe switching under Project -> workspace tabs -> split panes; parent full1344/0/15ignored and immediate private-PTY switching3/3. See P5-TAB-INTEGRATION-2026-10-25.md. Full host acceptance remains open.
+- [x] Scoped visible-view keyboard copy mode, frozen caret/selection and local input isolation; parent full1356/0/15ignored and clipboard-free actual PTY2/0. See P5-KEYBOARD-COPY-RESULT-2026-10-25.md.
+- [x] Scoped M2 pane-location swaps, interactive ancestor-divider preview/absolute commit and server-global zoom while processes continue; fullRust1399/0/15ignored, finalclient123/0, outerPTY3/0 and real4PTY1/0. See P5-PANE-OPERATIONS-INTEGRATION-2026-10-26.md. Broader host/workload acceptance stays open.
+- [x] Scoped project/workspace model, strict metadata-only codec/store and opt-in isolated workspace CLI routing; actual two-server open/stop and legacy reachability acceptance. See P5-WORKSPACE-ROUTING-RESULT-2026-10-25.md.
+- [x] Scoped frozen drag selection, separately negotiated wrap metadata, selected-cell compositor and attached-only async clipboard lifecycle; fake-sink and private-PTY checks pass. Human host/real clipboard remain open; bounded keyboard copy is now delivered separately. See P5-SELECTION-CLIENT-RESUMED-2026-10-25.md.
 - [ ] Mouse routing, selection copying and context menus on Apple Terminal.
 - [x] Scoped two-pane saved normal scrollback and visible-screen checkpoints, bounded read-only CLI show/search, 30-day ended-session pruning and stopped-workspace clear; see P5-SAVED-HISTORY.md. Does not imply workspace or provider recovery.
 - [x] Deterministic software-injected pre/post-rename sync faults, retry acknowledgments and first-end-time retention, including real-PTY capture retries; see P5-RECOVERY-FAULTS.md.

@@ -1,0 +1,794 @@
+//! Pure, bounded navigation and top-strip layout for workspace routes.
+//!
+//! This view reads names and order from [`WorkspaceIndex`] without changing
+//! its selection. It owns no IO, storage, target references, or processes.
+
+use std::fmt;
+
+use unicode_width::UnicodeWidthChar;
+
+use crate::pane_layout::{Rect, MIN_PANE_COLUMNS, MIN_PANE_ROWS};
+use crate::terminal::compose::HeaderCell;
+use crate::workspace_index::{ProjectId, WorkspaceIndex, WorkspaceTabId};
+
+const MAX_ROWS: u16 = 80;
+const MAX_COLUMNS: u16 = 240;
+const MAX_LABEL_CELLS: usize = 24;
+const MAX_GLYPH_BYTES: usize = 32;
+
+/// Stable client-side identity for a selected project/workspace pair.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceRouteId {
+    /// Project containing the workspace tab.
+    pub project: ProjectId,
+    /// Workspace tab to attach to.
+    pub tab: WorkspaceTabId,
+}
+
+/// A typed action produced by a strip hit region.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TabAction {
+    /// Open the project chooser.
+    ProjectChooser,
+    /// Select this stable project and tab pair.
+    Select(WorkspaceRouteId),
+    /// Navigate to the previous tab in the current project.
+    PreviousTab,
+    /// Navigate to the next tab in the current project.
+    NextTab,
+}
+
+/// Relative navigation requested by the client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TabNavigation {
+    /// Select the next tab in the current project, wrapping at either end.
+    NextTab,
+    /// Select the previous tab in the current project, wrapping at either end.
+    PreviousTab,
+    /// Select the next nonempty project in index order.
+    NextProject,
+    /// Select the previous nonempty project in index order.
+    PreviousProject,
+}
+
+/// Deterministic failures from validating or navigating a route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TabsError {
+    /// The route's project or tab is absent from this index snapshot.
+    InvalidRoute,
+    /// No project with a tab is available for project navigation.
+    NoNavigableProject,
+}
+
+impl fmt::Display for TabsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRoute => f.write_str("workspace route is not present"),
+            Self::NoNavigableProject => f.write_str("no project with a workspace tab is available"),
+        }
+    }
+}
+
+impl std::error::Error for TabsError {}
+
+/// Navigate within an immutable index snapshot, without changing selection.
+pub fn navigate(
+    index: &WorkspaceIndex,
+    current: WorkspaceRouteId,
+    action: TabNavigation,
+) -> Result<WorkspaceRouteId, TabsError> {
+    let project = index
+        .project(current.project)
+        .map_err(|_| TabsError::InvalidRoute)?;
+    let tabs: Vec<_> = project.tabs().collect();
+    let current_index = tabs
+        .iter()
+        .position(|tab| tab.id == current.tab)
+        .ok_or(TabsError::InvalidRoute)?;
+
+    match action {
+        TabNavigation::NextTab | TabNavigation::PreviousTab => {
+            let len = tabs.len();
+            if len == 0 {
+                return Err(TabsError::InvalidRoute);
+            }
+            let next = match action {
+                TabNavigation::NextTab => (current_index + 1) % len,
+                TabNavigation::PreviousTab => (current_index + len - 1) % len,
+                _ => unreachable!("tab navigation arm is exhaustive"),
+            };
+            Ok(WorkspaceRouteId {
+                project: current.project,
+                tab: tabs[next].id,
+            })
+        }
+        TabNavigation::NextProject | TabNavigation::PreviousProject => {
+            let projects: Vec<_> = index
+                .projects()
+                .filter(|project| project.tabs().next().is_some())
+                .collect();
+            if projects.is_empty() {
+                return Err(TabsError::NoNavigableProject);
+            }
+            let project_index = projects
+                .iter()
+                .position(|p| p.id() == current.project)
+                .ok_or(TabsError::InvalidRoute)?;
+            let len = projects.len();
+            let next = match action {
+                TabNavigation::NextProject => (project_index + 1) % len,
+                TabNavigation::PreviousProject => (project_index + len - 1) % len,
+                _ => unreachable!("project navigation arm is exhaustive"),
+            };
+            let next_project = projects[next];
+            let tab = next_project
+                .selected_tab_id()
+                .filter(|selected| next_project.tabs().any(|tab| tab.id == *selected))
+                .or_else(|| next_project.tabs().next().map(|tab| tab.id))
+                .ok_or(TabsError::NoNavigableProject)?;
+            Ok(WorkspaceRouteId {
+                project: next_project.id(),
+                tab,
+            })
+        }
+    }
+}
+
+/// Complete strip and pane-root geometry for one clamped host viewport.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TabsLayout {
+    rows: u16,
+    columns: u16,
+    header_cells: Vec<HeaderCell>,
+    pane_root: Rect,
+    hit_regions: Vec<HitRegion>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HitRegion {
+    start: u16,
+    end: u16,
+    action: TabAction,
+}
+
+impl TabsLayout {
+    /// Header cells for row zero; length never exceeds the clamped width.
+    pub fn header_cells(&self) -> &[HeaderCell] {
+        &self.header_cells
+    }
+
+    /// Pane compositor root below the reserved header row.
+    pub const fn pane_root(&self) -> Rect {
+        self.pane_root
+    }
+
+    /// Clamped visible screen rows.
+    pub const fn rows(&self) -> u16 {
+        self.rows
+    }
+
+    /// Clamped visible screen columns.
+    pub const fn columns(&self) -> u16 {
+        self.columns
+    }
+
+    /// Whether the reduced root can hold one pane at the existing minimum.
+    pub const fn fits_single_pane(&self) -> bool {
+        self.pane_root.rows >= MIN_PANE_ROWS && self.pane_root.columns >= MIN_PANE_COLUMNS
+    }
+
+    /// Map a screen-coordinate cell to its stable strip action.
+    pub fn hit_test(&self, column: u16, row: u16) -> Option<TabAction> {
+        if row != 0 || column >= self.columns {
+            return None;
+        }
+        self.hit_regions
+            .iter()
+            .find(|region| column >= region.start && column < region.end)
+            .map(|region| region.action)
+    }
+}
+
+/// Build a bounded top strip and a pane root from the current index snapshot.
+pub fn layout(
+    index: &WorkspaceIndex,
+    current: WorkspaceRouteId,
+    host_rows: u16,
+    host_columns: u16,
+) -> Result<TabsLayout, TabsError> {
+    let project = index
+        .project(current.project)
+        .map_err(|_| TabsError::InvalidRoute)?;
+    let tabs: Vec<_> = project.tabs().collect();
+    if !tabs.iter().any(|tab| tab.id == current.tab) {
+        return Err(TabsError::InvalidRoute);
+    }
+
+    let rows = host_rows.min(MAX_ROWS);
+    let columns = host_columns.min(MAX_COLUMNS);
+    if rows == 0 || columns == 0 {
+        return Ok(TabsLayout {
+            rows,
+            columns,
+            header_cells: Vec::new(),
+            pane_root: Rect {
+                x: 0,
+                y: 0,
+                rows: 0,
+                columns: 0,
+            },
+            hit_regions: Vec::new(),
+        });
+    }
+
+    let mut cells = vec![HeaderCell::blank(false); usize::from(columns)];
+    let mut hits = Vec::with_capacity(11);
+    let project_name = project.display_name();
+    let project_label = bracketed_label("[ ", project_name, " v ]", MAX_LABEL_CELLS);
+    let project_width = place_label(&mut cells, 0, &project_label, true, MAX_LABEL_CELLS);
+    if project_width > 0 {
+        hits.push(HitRegion {
+            start: 0,
+            end: project_width as u16,
+            action: TabAction::ProjectChooser,
+        });
+    }
+
+    let mut cursor = project_width;
+    if cursor < cells.len() {
+        cursor += 1;
+    }
+    if cursor < cells.len() {
+        let remaining = cells.len() - cursor;
+        let labels: Vec<Vec<Glyph>> = tabs
+            .iter()
+            .map(|tab| bracketed_label("[", tab.display_name, "]", MAX_LABEL_CELLS))
+            .collect();
+        let current_index = tabs
+            .iter()
+            .position(|tab| tab.id == current.tab)
+            .ok_or(TabsError::InvalidRoute)?;
+        let total_width = labels
+            .iter()
+            .map(|label| label_width(label) + 1)
+            .sum::<usize>()
+            - 1;
+
+        if total_width <= remaining {
+            let mut at = cursor;
+            for (index, label) in labels.iter().enumerate() {
+                if index != 0 && at < cells.len() {
+                    at += 1;
+                }
+                let allowance = cells.len().saturating_sub(at);
+                let width = place_label(&mut cells, at, label, index == current_index, allowance);
+                if width > 0 {
+                    hits.push(HitRegion {
+                        start: at as u16,
+                        end: (at + width) as u16,
+                        action: TabAction::Select(WorkspaceRouteId {
+                            project: current.project,
+                            tab: tabs[index].id,
+                        }),
+                    });
+                    at += width;
+                }
+            }
+        } else if remaining < 3 {
+            let width = place_label(&mut cells, cursor, &labels[current_index], true, remaining);
+            if width > 0 {
+                hits.push(HitRegion {
+                    start: cursor as u16,
+                    end: (cursor + width) as u16,
+                    action: TabAction::Select(current),
+                });
+            }
+        } else {
+            let tab_budget = remaining - 2;
+            let (start, end) = selected_window(&labels, current_index, tab_budget);
+            let mut at = cursor;
+            if start > 0 {
+                emit_control(&mut cells, &mut hits, at, '<', TabAction::PreviousTab);
+            }
+            at += 1;
+            let visible_end = at + tab_budget;
+            for index in start..end {
+                if index > start && at < visible_end {
+                    at += 1;
+                }
+                if at >= visible_end {
+                    break;
+                }
+                let allowance = visible_end - at;
+                let width = place_label(
+                    &mut cells,
+                    at,
+                    &labels[index],
+                    index == current_index,
+                    allowance,
+                );
+                if width > 0 {
+                    hits.push(HitRegion {
+                        start: at as u16,
+                        end: (at + width) as u16,
+                        action: TabAction::Select(WorkspaceRouteId {
+                            project: current.project,
+                            tab: tabs[index].id,
+                        }),
+                    });
+                    at += width;
+                }
+            }
+            if end < labels.len() {
+                let right = cells.len() - 1;
+                emit_control(&mut cells, &mut hits, right, '>', TabAction::NextTab);
+            }
+        }
+    }
+
+    Ok(TabsLayout {
+        rows,
+        columns,
+        header_cells: cells,
+        pane_root: Rect {
+            x: 0,
+            y: 1,
+            rows: rows.saturating_sub(1),
+            columns,
+        },
+        hit_regions: hits,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct Glyph {
+    text: String,
+    width: usize,
+}
+
+fn bracketed_label(prefix: &str, label: &str, suffix: &str, cap: usize) -> Vec<Glyph> {
+    let mut result = Vec::new();
+    append_ascii(&mut result, prefix, cap);
+    append_text(&mut result, label, cap);
+    append_ascii(&mut result, suffix, cap);
+    result
+}
+
+fn append_ascii(output: &mut Vec<Glyph>, text: &str, cap: usize) {
+    for character in text.chars() {
+        append_character(output, character, cap);
+    }
+}
+
+fn append_text(output: &mut Vec<Glyph>, text: &str, cap: usize) {
+    for character in text.chars() {
+        append_character(output, character, cap);
+    }
+}
+
+fn append_character(output: &mut Vec<Glyph>, character: char, cap: usize) {
+    // Without grapheme segmentation, preserve a visible boundary instead of
+    // allowing a ZWJ to join two independently measured header cells.
+    let character = if character.is_control() || character == '\u{200d}' {
+        '?'
+    } else {
+        character
+    };
+    match UnicodeWidthChar::width(character) {
+        Some(0) => {
+            if let Some(last) = output.last() {
+                if last.text.len() + character.len_utf8() <= MAX_GLYPH_BYTES {
+                    let old_width = last.width;
+                    let mut cluster = last.text.clone();
+                    cluster.push(character);
+                    let new_width = unicode_width::UnicodeWidthStr::width(cluster.as_str());
+                    let total_width = label_width(output) - old_width + new_width;
+                    if (1..=2).contains(&new_width) && total_width <= cap {
+                        let previous = output.last_mut().expect("last glyph remains present");
+                        previous.text.push(character);
+                        previous.width = new_width;
+                    }
+                }
+            } else {
+                output.push(Glyph {
+                    text: "?".to_owned(),
+                    width: 1,
+                });
+            }
+        }
+        Some(width @ 1..=2) => {
+            if label_width(output) + width <= cap && character.len_utf8() <= MAX_GLYPH_BYTES {
+                output.push(Glyph {
+                    text: character.to_string(),
+                    width,
+                });
+            }
+        }
+        _ => {
+            if label_width(output) < cap {
+                output.push(Glyph {
+                    text: "?".to_owned(),
+                    width: 1,
+                });
+            }
+        }
+    }
+}
+
+fn label_width(label: &[Glyph]) -> usize {
+    label.iter().map(|glyph| glyph.width).sum()
+}
+
+fn place_label(
+    cells: &mut [HeaderCell],
+    start: usize,
+    label: &[Glyph],
+    selected: bool,
+    cell_budget: usize,
+) -> usize {
+    let mut written = 0;
+    for glyph in label {
+        let Some(cell) = HeaderCell::glyph(&glyph.text, selected) else {
+            continue;
+        };
+        // HeaderCell validates the complete UTF-8 cluster using the same
+        // Unicode-width policy as the compositor. Do not trust a stale or
+        // scalar-derived width when deciding whether the cell fits.
+        let width = if cell.is_wide() { 2 } else { 1 };
+        if written + width > cell_budget || start + written + width > cells.len() {
+            break;
+        }
+        cells[start + written] = cell;
+        if width == 2 {
+            cells[start + written + 1] = HeaderCell::continuation(selected);
+        }
+        written += width;
+    }
+    written
+}
+
+fn emit_control(
+    cells: &mut [HeaderCell],
+    hits: &mut Vec<HitRegion>,
+    at: usize,
+    glyph: char,
+    action: TabAction,
+) {
+    if let Some(cell) = HeaderCell::glyph(&glyph.to_string(), false) {
+        cells[at] = cell;
+        hits.push(HitRegion {
+            start: at as u16,
+            end: at as u16 + 1,
+            action,
+        });
+    }
+}
+
+fn selected_window(labels: &[Vec<Glyph>], selected: usize, budget: usize) -> (usize, usize) {
+    let mut start = selected;
+    let mut end = selected + 1;
+    let selected_width = label_width(&labels[selected]).min(budget);
+    let mut used = selected_width;
+    loop {
+        let mut progressed = false;
+        if start > 0 {
+            let cost = 1 + label_width(&labels[start - 1]);
+            if used + cost <= budget {
+                start -= 1;
+                used += cost;
+                progressed = true;
+            }
+        }
+        if end < labels.len() {
+            let cost = 1 + label_width(&labels[end]);
+            if used + cost <= budget {
+                used += cost;
+                end += 1;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    (start, end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace_index::{ProjectId, WorkspaceIndex, WorkspaceTabId};
+    use unicode_width::UnicodeWidthStr;
+
+    fn id(value: u64) -> ProjectId {
+        ProjectId::new(value).expect("nonzero project id")
+    }
+
+    fn tab(value: u64) -> WorkspaceTabId {
+        WorkspaceTabId::new(value).expect("nonzero tab id")
+    }
+
+    fn index() -> WorkspaceIndex {
+        let mut index = WorkspaceIndex::new();
+        index
+            .add_project(id(1), "Editors", tab(1), "Main")
+            .expect("project");
+        index.add_tab(id(1), tab(2), "Review").expect("tab");
+        index
+            .add_project(id(2), "Empty", tab(3), "Build")
+            .expect("project");
+        index.remove_tab(id(2), tab(3)).expect("empty project");
+        index
+            .add_project(id(4), "Tools", tab(4), "Logs")
+            .expect("project");
+        index
+            .add_tab(id(4), tab(5), "Wide 界\u{301}")
+            .expect("wide tab");
+        for value in 6..=11 {
+            index
+                .add_tab(id(4), tab(value), &format!("Tab{value}"))
+                .expect("tab");
+        }
+        index
+    }
+
+    fn route(project: u64, tab_id: u64) -> WorkspaceRouteId {
+        WorkspaceRouteId {
+            project: id(project),
+            tab: tab(tab_id),
+        }
+    }
+
+    #[test]
+    fn navigation_wraps_tabs_and_skips_empty_projects_without_mutating_index() {
+        let index = index();
+        assert_eq!(
+            navigate(&index, route(1, 1), TabNavigation::PreviousTab),
+            Ok(route(1, 2))
+        );
+        assert_eq!(
+            navigate(&index, route(1, 2), TabNavigation::NextTab),
+            Ok(route(1, 1))
+        );
+        assert_eq!(
+            navigate(&index, route(1, 1), TabNavigation::NextProject),
+            Ok(route(4, 4))
+        );
+        assert_eq!(
+            navigate(&index, route(4, 4), TabNavigation::PreviousProject),
+            Ok(route(1, 1))
+        );
+        assert_eq!(index.active_project_id(), Some(id(1)));
+        assert_eq!(index.active_tab_id(), Some(tab(1)));
+    }
+
+    #[test]
+    fn navigation_rejects_unknown_route_deterministically() {
+        let index = index();
+        assert_eq!(
+            navigate(&index, route(1, 99), TabNavigation::NextTab),
+            Err(TabsError::InvalidRoute)
+        );
+        assert_eq!(
+            navigate(&index, route(99, 1), TabNavigation::NextProject),
+            Err(TabsError::InvalidRoute)
+        );
+        let mut empty = WorkspaceIndex::new();
+        empty
+            .add_project(id(5), "Before", tab(5), "One")
+            .expect("project");
+        empty
+            .add_project(id(6), "Temp", tab(6), "One")
+            .expect("project");
+        empty
+            .add_project(id(7), "After", tab(7), "One")
+            .expect("project");
+        empty.select_project(id(7)).expect("select later project");
+        empty
+            .remove_tab(id(6), tab(6))
+            .expect("inactive empty project");
+        assert_eq!(
+            navigate(&empty, route(5, 5), TabNavigation::NextProject),
+            Ok(route(7, 7))
+        );
+    }
+
+    #[test]
+    fn geometry_clamps_and_uses_header_plus_existing_outer_minimum() {
+        let index = index();
+        let exact = layout(&index, route(1, 1), 8, MIN_PANE_COLUMNS).expect("layout");
+        assert_eq!(exact.rows(), 8);
+        assert_eq!(
+            exact.pane_root(),
+            Rect {
+                x: 0,
+                y: 1,
+                rows: MIN_PANE_ROWS,
+                columns: MIN_PANE_COLUMNS
+            }
+        );
+        assert!(exact.fits_single_pane());
+        assert!(!layout(&index, route(1, 1), 7, MIN_PANE_COLUMNS)
+            .expect("layout")
+            .fits_single_pane());
+        assert!(!layout(&index, route(1, 1), 8, MIN_PANE_COLUMNS - 1)
+            .expect("layout")
+            .fits_single_pane());
+        let clamped = layout(&index, route(1, 1), 100, 500).expect("layout");
+        assert_eq!((clamped.rows(), clamped.columns()), (80, 240));
+        assert_eq!(clamped.header_cells().len(), 240);
+    }
+
+    #[test]
+    fn zero_and_one_cell_viewports_have_no_invalid_hits_or_half_glyphs() {
+        let index = index();
+        for (rows, columns) in [(0, 20), (5, 0)] {
+            let rendered = super::layout(&index, route(1, 1), rows, columns).expect("empty layout");
+            assert!(rendered.header_cells().is_empty());
+            assert_eq!(
+                rendered.pane_root(),
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 0,
+                    columns: 0
+                }
+            );
+            assert_eq!(rendered.hit_test(0, 0), None);
+        }
+        let one = super::layout(&index, route(1, 1), 1, 1).expect("one cell");
+        assert_eq!(one.header_cells().len(), 1);
+        assert_eq!(
+            one.pane_root(),
+            Rect {
+                x: 0,
+                y: 1,
+                rows: 0,
+                columns: 1
+            }
+        );
+        assert!(one
+            .header_cells()
+            .iter()
+            .all(|cell| !cell.is_continuation()));
+        assert_eq!(one.hit_test(1, 0), None);
+    }
+
+    #[test]
+    fn hits_are_exact_typed_regions_and_never_cover_pane_rows() {
+        let index = index();
+        let rendered = super::layout(&index, route(1, 1), 30, 100).expect("layout");
+        assert_eq!(rendered.hit_test(0, 0), Some(TabAction::ProjectChooser));
+        let tab_region = rendered
+            .hit_regions
+            .iter()
+            .find(|region| region.action == TabAction::Select(route(1, 1)))
+            .expect("selected tab region");
+        assert_eq!(
+            rendered.hit_test(tab_region.start, 0),
+            Some(TabAction::Select(route(1, 1)))
+        );
+        for region in &rendered.hit_regions {
+            assert_eq!(rendered.hit_test(region.start, 0), Some(region.action));
+        }
+        assert_eq!(rendered.hit_test(0, 1), None);
+        assert_eq!(rendered.hit_test(100, 0), None);
+        assert_eq!(rendered.hit_test(0, 2), None);
+    }
+
+    #[test]
+    fn overflow_keeps_current_route_visible_and_wide_glyphs_whole() {
+        let index = index();
+        let rendered = super::layout(&index, route(4, 5), 20, 36).expect("layout");
+        let selected = rendered
+            .hit_regions
+            .iter()
+            .find(|region| region.action == TabAction::Select(route(4, 5)))
+            .expect("selected tab region");
+        assert_eq!(
+            rendered.hit_test(selected.start, 0),
+            Some(TabAction::Select(route(4, 5)))
+        );
+        for (column, cell) in rendered.header_cells().iter().enumerate() {
+            if cell.is_wide() {
+                assert!(rendered
+                    .header_cells()
+                    .get(column + 1)
+                    .is_some_and(HeaderCell::is_continuation));
+            }
+            if cell.is_continuation() {
+                assert!(column > 0 && rendered.header_cells()[column - 1].is_wide());
+            }
+        }
+        let overflow = super::layout(&index, route(4, 8), 20, 36).expect("overflow");
+        let current = overflow
+            .hit_regions
+            .iter()
+            .find(|region| region.action == TabAction::Select(route(4, 8)))
+            .expect("selected tab remains visible");
+        assert_eq!(
+            overflow.hit_test(current.start, 0),
+            Some(TabAction::Select(route(4, 8)))
+        );
+        assert!(overflow
+            .hit_regions
+            .iter()
+            .any(|region| region.action == TabAction::PreviousTab));
+        assert!(overflow
+            .hit_regions
+            .iter()
+            .any(|region| region.action == TabAction::NextTab));
+        let narrow = super::layout(&index, route(4, 5), 4, 30).expect("clipped");
+        assert_eq!(narrow.header_cells().len(), 30);
+        assert_header_topology(narrow.header_cells());
+    }
+
+    #[test]
+    fn combining_marks_are_grouped_with_the_preceding_glyph() {
+        let glyphs = bracketed_label("[", "e\u{301}", "]", MAX_LABEL_CELLS);
+        let grouped = glyphs
+            .iter()
+            .find(|glyph| glyph.text.starts_with('e'))
+            .expect("base glyph");
+        assert_eq!(grouped.text, "e\u{301}");
+        assert_eq!(UnicodeWidthStr::width(grouped.text.as_str()), grouped.width);
+        assert!(grouped.text.len() <= MAX_GLYPH_BYTES);
+    }
+
+    fn assert_header_topology(cells: &[HeaderCell]) {
+        for (column, cell) in cells.iter().enumerate() {
+            if !cell.text().is_empty() {
+                assert!(HeaderCell::glyph(cell.text(), cell.selected()).is_some());
+            }
+            if cell.is_wide() {
+                assert!(cells
+                    .get(column + 1)
+                    .is_some_and(HeaderCell::is_continuation));
+            }
+            if cell.is_continuation() {
+                assert!(column > 0 && cells[column - 1].is_wide());
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_clusters_keep_compositor_topology_at_every_host_width() {
+        let mut index = WorkspaceIndex::new();
+        index
+            .add_project(id(20), "Heart ❤️ e\u{301}", tab(20), "👩\u{200d}💻")
+            .expect("unicode project");
+        index
+            .add_tab(id(20), tab(21), &format!("x{}界", "\u{301}".repeat(25)))
+            .expect("long combining tab");
+
+        for columns in 0..=MAX_COLUMNS {
+            let rendered =
+                super::layout(&index, route(20, 20), 12, columns).expect("unicode layout");
+            assert_eq!(rendered.header_cells().len(), usize::from(columns));
+            assert_header_topology(rendered.header_cells());
+        }
+
+        let heart = bracketed_label("", "❤️", "", MAX_LABEL_CELLS);
+        let heart = heart.first().expect("heart cluster");
+        assert_eq!(heart.width, UnicodeWidthStr::width(heart.text.as_str()));
+        assert_eq!(heart.width, 2);
+
+        let zwj = bracketed_label("", "👩\u{200d}💻", "", MAX_LABEL_CELLS);
+        assert!(zwj.iter().all(|glyph| !glyph.text.contains('\u{200d}')));
+        assert!(zwj.iter().any(|glyph| glyph.text == "?"));
+
+        let long_marks = bracketed_label(
+            "",
+            &format!("e{}", "\u{301}".repeat(40)),
+            "",
+            MAX_LABEL_CELLS,
+        );
+        assert!(long_marks
+            .iter()
+            .all(|glyph| glyph.text.len() <= MAX_GLYPH_BYTES));
+        assert!(long_marks.iter().all(|glyph| {
+            (1..=2).contains(&UnicodeWidthStr::width(glyph.text.as_str()))
+                && glyph.width == UnicodeWidthStr::width(glyph.text.as_str())
+        }));
+    }
+}

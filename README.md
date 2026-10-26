@@ -36,13 +36,18 @@ reattach to it.
 | ...then leave NAV mode | Esc (or wait 4 seconds); Ctrl-X detaches |
 | Focus a pane | Click it |
 | Scroll a pane | Use the mouse wheel over its content; typing returns normal history to live output |
+| Copy text | Drag across pane content and release; copying requires negotiated row-wrap metadata |
+| Keyboard copy mode | Ctrl-B then `c`; move with arrows or `h`/`j`/`k`/`l`, press Space to set/clear an anchor, then Enter or `y` to copy a non-empty range |
+| Zoom a pane | Ctrl-B then `z`; the selected pane's PTY resizes to fill the current workspace view |
+| Swap pane locations | Ctrl-B then `m`; choose another pane with arrows or `h`/`j`/`k`/`l`, then Enter; Esc cancels |
+| Adjust a divider | Ctrl-B then `e`; Tab chooses an ancestor divider, arrows preview its position, Enter applies it, Esc cancels |
 | Close pane from the menu | Right-click the pane, choose Close pane, then press `y` to confirm |
 | List/close panes from a shell | `panelink panes`; `panelink close 1` (or `2`) |
 | Detach (shells keep running) | Ctrl-X |
-| Reattach | `panelink` |
+| Reattach to the legacy Default/Main workspace | `panelink` |
 | Close the workspace | `exit` in every shell, or `panelink stop` |
 
-Current limits: at most four panes, no tabs. The attach client forwards ordinary
+Current limits: at most four panes per workspace. The attach client forwards ordinary
 Ctrl-letter keys, Alt/Meta characters when delivered by the host, F1–F12,
 Delete/Insert/Page Up/Page Down and Shift-Tab. Ctrl-B remains navigation and
 Ctrl-X detaches; Ctrl-C goes to the focused child. Modified function/navigation
@@ -106,6 +111,80 @@ has finished. The workspace still supports at most four panes.
 Workspace state lives in `~/Library/Application Support/Panelink` (private,
 mode 0700). Set `PANELINK_HOME` to use a different directory. The background
 server's output goes to `server.log` there.
+
+Projects can group separately running workspace tabs through the opt-in CLI:
+
+```sh
+panelink workspace list
+panelink workspace project create Editors Main
+panelink workspace tab create 2 Review
+panelink workspace select 2 4
+panelink workspace open 2 4
+panelink workspace stop 2 4
+panelink workspace remove 2 4
+```
+
+Use the IDs printed by `workspace list`; the example assumes a fresh registry.
+`workspace open` without IDs uses the saved selection. Explicit IDs open that
+exact workspace. Each workspace has its own server, panes, history and client
+contexts; detaching leaves its processes running. Remove requires a stopped
+workspace and removes its registry entry while retaining saved files. Plain
+`panelink` and existing commands such as `stop`, `panes` and `history` keep
+addressing the original Default/Main workspace. Registry initialization adds
+that workspace in place; its entry cannot be removed while legacy commands
+remain supported. Projects are named groups; no project-root discovery
+is included. The opt-in `workspace open` client has a persistent project/tab
+row at the top: click the project control to open its chooser, click a tab to
+request it, or press Ctrl-B then `w` for the chooser,
+`n`/`p` for next/previous tab, and `[`/`]` for previous/next project. The
+chooser reads a bounded registry snapshot; refresh keeps the active snapshot
+visible if its route was removed. This UI does not create, remove, or stop
+projects or tabs. Plain `panelink` and raw attach remain on the legacy
+headerless route. See the [routing result](docs/progress/P5-WORKSPACE-ROUTING-RESULT-2026-10-25.md)
+and [tab integration evidence](docs/progress/P5-TAB-INTEGRATION-2026-10-25.md).
+
+Drag copying freezes the source at mouse press, preserving it while output
+continues. Resizing, switching buffers or history views, and opening a modal
+cancel the drag. Copy runs asynchronously in the attached client and reports
+fixed status messages. A peer without row-wrap metadata disables drag copying.
+Automated checks use fake clipboard sinks; real Apple Terminal/clipboard
+acceptance remains open.
+
+Keyboard copy mode (`Ctrl-B c`) is a bounded prototype for the pane's currently
+visible live or history view. It moves a local caret and copies the anchored
+range from a frozen snapshot, so ordinary live output does not replace the
+view being selected. Enter or `y` with no anchor exits without copying; Esc
+cancels, and Ctrl-X detaches. Other keys, paste, and mouse input stay local
+while the mode is active. Resize, focus, buffer/view, route, modal, or wrap
+identity changes cancel it. The existing attached-client clipboard queue is
+used. `Ctrl-B c` remains a prototype shortcut assumption. Typed-protocol
+Repeat events for Enter/`y` are guarded; classic streams that report repeats
+as indistinguishable Press events cannot provide the same repeat guarantee.
+Automated client, compositor and clipboard-free PTY checks pass. Real
+Apple Terminal/clipboard acceptance remains open. See the [keyboard copy
+result](docs/progress/P5-KEYBOARD-COPY-RESULT-2026-10-25.md).
+
+Pane controls are bounded prototypes. Zoom is server-authoritative per
+workspace and resizes the selected pane's actual PTY; other panes and their
+processes keep running at their existing PTY sizes. Unzoom restores the exact
+underlying split geometry for the current root size. Swapping changes two
+panes' locations in the same workspace without moving or replacing their
+processes. Divider preview is local; the chosen absolute position is sent once
+on Enter. Split/layout changes are refused while zoom is active; unzoom first.
+If a captured pane target or layout revision becomes stale, the local chooser
+cancels. Results are asynchronous and an uncertain operation is reported with
+a fixed status; it is never replayed automatically. These operation ratios and
+zoom state do not establish physical-reboot restoration and do not change the
+saved-observation codec. The bindings are prototype choices, not a final
+shortcut configuration. Typed Enter/Esc repeat and release events are handled
+locally; classic streams that expose repeats as indistinguishable press events
+cannot provide the same repeat guard. See the [pane operations contract](docs/progress/P5-PANE-OPERATIONS-CONTRACT-2026-10-25.md)
+and [specification](docs/SPEC.md#bounded-pane-operations-prototype).
+Automated verification includes the full serial Rust suite (1,399 passed,
+15 ignored), final client123/0 and outer-terminal3/0 checks, plus real four-PTY
+process continuity. Human Apple Terminal, real clipboard, physical reboot and
+representative workload acceptance remain open; see
+[the integration evidence](docs/progress/P5-PANE-OPERATIONS-INTEGRATION-2026-10-26.md).
 
 After an abrupt server kill, a later `panelink` invocation can recover its stale
 socket and start a new workspace generation. This starts fresh processes;

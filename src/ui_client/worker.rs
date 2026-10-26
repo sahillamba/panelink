@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use panelink::close_protocol::CloseResult;
 use panelink::control_protocol::{TargetRef, MAX_INPUT_TEXT_BYTES};
+use panelink::pane_operations_protocol::PANE_OPERATIONS_VIEW_BYTES;
 use panelink::terminal::Key;
 use panelink::ui_protocol::{
     HISTORY_QUERY_BYTES, LAYOUT_REPLY_BYTES, MAX_HISTORY_REPLY_BYTES, MAX_KEYS,
@@ -18,6 +19,7 @@ use panelink::ui_protocol::{
 };
 
 use super::net::{Net, NetUpdate, NetView, ScrollUpdate, DETACH_BUDGET};
+use super::pane_operations::{PaneAction, PaneOperationUpdate};
 use super::state::{ClosePlan, Effects, SplitPlan};
 
 const COMMAND_CAPACITY: usize = 32;
@@ -25,7 +27,10 @@ const RESULT_CAPACITY: usize = 32;
 const OWNED_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 const CONTROL_RESULT_RESERVATION: usize = 512;
 const INPUT_RESULT_RESERVATION: usize = 128;
-const POLL_RESULT_RESERVATION: usize = 2 * MAX_SCREEN_REPLY_BYTES + LAYOUT_REPLY_BYTES + 128;
+const POLL_RESULT_RESERVATION: usize =
+    2 * MAX_SCREEN_REPLY_BYTES + LAYOUT_REPLY_BYTES + PANE_OPERATIONS_VIEW_BYTES + 128;
+const PANE_OPERATION_RESULT_RESERVATION: usize =
+    PANE_OPERATIONS_VIEW_BYTES + CONTROL_RESULT_RESERVATION;
 const SHUTDOWN_POLL: Duration = Duration::from_millis(2);
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -65,6 +70,10 @@ enum Command {
         id: u64,
         plan: ClosePlan,
     },
+    PaneOperation {
+        id: u64,
+        action: PaneAction,
+    },
     Poll(NetView),
     Detach,
 }
@@ -77,6 +86,7 @@ impl Command {
             Self::Scroll { .. } => HISTORY_QUERY_BYTES + MOUSE_WHEEL_INPUT_BYTES,
             Self::Split { .. } => std::mem::size_of::<SplitPlan>(),
             Self::Close { .. } => std::mem::size_of::<ClosePlan>(),
+            Self::PaneOperation { action, .. } => std::mem::size_of_val(action),
             Self::Poll(_) | Self::Detach => 0,
         }
     }
@@ -102,7 +112,12 @@ pub(crate) enum ClientResult {
         target: TargetRef,
         result: Result<CloseResult, &'static str>,
     },
-    Poll(NetUpdate),
+    PaneOperation {
+        id: u64,
+        action: PaneAction,
+        result: Result<Box<PaneOperationUpdate>, &'static str>,
+    },
+    Poll(Box<NetUpdate>),
     Detached,
 }
 
@@ -225,6 +240,19 @@ impl WorkerHandle {
         }
     }
 
+    /// Submit one captured pane operation without waiting for network IO.
+    pub(crate) fn pane_operation(
+        &mut self,
+        id: u64,
+        action: PaneAction,
+    ) -> Result<(), &'static str> {
+        self.submit_with(
+            std::mem::size_of::<PaneAction>(),
+            PANE_OPERATION_RESULT_RESERVATION,
+            || Command::PaneOperation { id, action },
+        )
+    }
+
     pub(crate) fn try_result(&mut self) -> Option<ResultEnvelope> {
         match self.results.try_recv() {
             Ok(result) => {
@@ -246,6 +274,35 @@ impl WorkerHandle {
             budget.bytes = budget.bytes.saturating_sub(result.reservation.bytes);
         }
         result.result
+    }
+
+    /// Best-effort detach admission after host restoration, without waiting
+    /// for either queue capacity or the shared accounting lock.
+    pub(crate) fn try_detach_nonblocking(&mut self) -> bool {
+        let Ok(mut budget) = self.budget.try_lock() else {
+            return false;
+        };
+        let Some(sender) = self.commands.as_ref() else {
+            return false;
+        };
+        const RESULT_BYTES: usize = 32;
+        if budget.count >= COMMAND_CAPACITY || budget.bytes + RESULT_BYTES > OWNED_BYTE_BUDGET {
+            return false;
+        }
+        let envelope = Envelope {
+            command: Command::Detach,
+            reservation: Reservation {
+                bytes: RESULT_BYTES,
+            },
+        };
+        match sender.try_send(envelope) {
+            Ok(()) => {
+                budget.count += 1;
+                budget.bytes += RESULT_BYTES;
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Called only after `HostGuard::restore`. It never waits for a full
@@ -375,6 +432,10 @@ impl Effects for WorkerHandle {
         )?;
         Ok(None)
     }
+
+    fn pane_operation(&mut self, id: u64, action: PaneAction) -> Result<(), &'static str> {
+        WorkerHandle::pane_operation(self, id, action)
+    }
 }
 
 trait Backend: Send + 'static {
@@ -409,11 +470,16 @@ impl Backend for Net {
                 target: plan.target,
                 result: self.close(plan),
             },
-            Command::Poll(view) => ClientResult::Poll(self.poll(
+            Command::PaneOperation { id, action } => ClientResult::PaneOperation {
+                id,
+                action,
+                result: self.pane_operation(action).map(Box::new),
+            },
+            Command::Poll(view) => ClientResult::Poll(Box::new(self.poll(
                 view,
                 Instant::now(),
                 &std::sync::atomic::AtomicBool::new(false),
-            )),
+            ))),
             Command::Detach => {
                 self.detach();
                 ClientResult::Detached

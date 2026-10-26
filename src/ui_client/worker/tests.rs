@@ -10,6 +10,7 @@ use std::time::Duration;
 enum GateCommand {
     Keys(usize),
     Paste(usize),
+    PaneOperation,
     Poll,
 }
 
@@ -41,12 +42,13 @@ impl Backend for SlowBackend {
             Command::Poll(_) => {
                 let _ = self.entered.send(GateCommand::Poll);
                 let _ = self.release.recv();
-                ClientResult::Poll(NetUpdate {
+                ClientResult::Poll(Box::new(NetUpdate {
                     layout: None,
+                    pane_operations: None,
                     screens: Vec::new(),
                     status: None,
                     server_present: true,
-                })
+                }))
             }
             Command::Split {
                 id,
@@ -63,6 +65,15 @@ impl Backend for SlowBackend {
                 target: plan.target,
                 result: Err("close delayed"),
             },
+            Command::PaneOperation { id, action } => {
+                let _ = self.entered.send(GateCommand::PaneOperation);
+                let _ = self.release.recv();
+                ClientResult::PaneOperation {
+                    id,
+                    action,
+                    result: Err("pane operation delayed"),
+                }
+            }
             Command::Detach => ClientResult::Detached,
         }
     }
@@ -98,6 +109,64 @@ fn slow_worker() -> (
         release_tx,
         finished_rx,
     )
+}
+
+fn pane_action() -> PaneAction {
+    PaneAction::ZoomSet {
+        target: target(),
+        expected_layout_revision: 1,
+        zoomed: true,
+    }
+}
+
+#[test]
+fn pane_operations_use_bounded_admission_and_reserve_the_authoritative_view() {
+    let (mut worker, entered, release, _) = slow_worker();
+    let started = Instant::now();
+    worker.pane_operation(44, pane_action()).unwrap();
+    assert!(started.elapsed() < Duration::from_millis(50));
+    assert!(matches!(
+        entered.recv_timeout(Duration::from_secs(1)),
+        Ok(GateCommand::PaneOperation)
+    ));
+    let expected = PANE_OPERATION_RESULT_RESERVATION + std::mem::size_of::<PaneAction>();
+    assert_eq!(worker.budget.lock().unwrap().bytes, expected);
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if let Some(result) = worker.try_result() {
+            assert!(matches!(
+                worker.release_result(result),
+                ClientResult::PaneOperation {
+                    id: 44,
+                    result: Err("pane operation delayed"),
+                    ..
+                }
+            ));
+            return;
+        }
+        thread::yield_now();
+    }
+    panic!("pane operation result was not published");
+}
+
+#[test]
+fn detach_admission_never_waits_for_accounting_lock_or_full_budget() {
+    let (mut worker, _, _, _) = slow_worker();
+    let budget = Arc::clone(&worker.budget);
+    let mut held = budget.lock().unwrap();
+    assert!(!worker.try_detach_nonblocking());
+    held.count = COMMAND_CAPACITY;
+    drop(held);
+    assert!(!worker.try_detach_nonblocking());
+    budget.lock().unwrap().count = 0;
+    assert!(worker.try_detach_nonblocking());
+    let result = worker.results.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(matches!(
+        worker.release_result(result),
+        ClientResult::Detached
+    ));
+    assert_eq!(budget.lock().unwrap().count, 0);
 }
 
 #[test]
@@ -323,12 +392,13 @@ impl Backend for SocketBackend {
                 let mut response = [0];
                 self.0.read_exact(&mut response).unwrap();
                 assert_eq!(&response, b"A");
-                ClientResult::Poll(NetUpdate {
+                ClientResult::Poll(Box::new(NetUpdate {
                     layout: None,
+                    pane_operations: None,
                     screens: Vec::new(),
                     status: None,
                     server_present: true,
-                })
+                }))
             }
             Command::Keys { .. } => {
                 self.0.write_all(b"K").unwrap();
@@ -354,6 +424,11 @@ impl Backend for SocketBackend {
                 id,
                 target: plan.target,
                 result: Err("close delayed"),
+            },
+            Command::PaneOperation { id, action } => ClientResult::PaneOperation {
+                id,
+                action,
+                result: Err("pane operation delayed"),
             },
             Command::Detach => ClientResult::Detached,
         }

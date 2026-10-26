@@ -99,6 +99,30 @@ impl fmt::Debug for PaneGeometry {
     }
 }
 
+/// Axis along which an internal divider separates its child regions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DividerOrientation {
+    /// The divider separates left and right regions.
+    Horizontal,
+    /// The divider separates upper and lower regions.
+    Vertical,
+}
+
+/// Read-only geometry for one divider in snapshot traversal order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DividerInfo {
+    /// Zero-based index matching `LayoutSnapshot::dividers` for this revision.
+    pub index: u8,
+    /// The complete split region, including both children and the divider.
+    pub region: Rect,
+    /// Direction in which the split separates its children.
+    pub orientation: DividerOrientation,
+    /// Current first-child span, excluding the one-cell divider.
+    pub first_span: u16,
+    /// Current available cell count excluding the one-cell divider.
+    pub total_cells: u16,
+}
+
 /// Copyable read-only view of the current root, panes, and divider.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct LayoutSnapshot {
@@ -375,6 +399,168 @@ impl PaneLayout {
         Ok(self.state.snapshot)
     }
 
+    /// Advances the layout revision without changing its underlying tree.
+    ///
+    /// Used for owner state changes, such as zoom, that must be observable as
+    /// a new layout revision even though the saved split partition is stable.
+    pub fn advance_revision(
+        &mut self,
+        expected_revision: u64,
+    ) -> Result<LayoutSnapshot, LayoutError> {
+        if expected_revision != self.state.snapshot.revision {
+            return Err(LayoutError::StaleRevision);
+        }
+        let revision = expected_revision
+            .checked_add(1)
+            .ok_or(LayoutError::RevisionExhausted)?;
+        let candidate = state_from_tree(
+            self.state.nodes,
+            self.state.snapshot.rows,
+            self.state.snapshot.columns,
+            revision,
+        )?;
+        self.state = candidate;
+        Ok(self.state.snapshot)
+    }
+
+    /// Swaps two current pane identities while preserving the split tree.
+    ///
+    /// Both references are exact full targets in this layout. Passing the same
+    /// current target is a valid no-op and does not advance the revision.
+    pub fn swap(
+        &mut self,
+        source: TargetRef,
+        destination: TargetRef,
+        expected_revision: u64,
+    ) -> Result<LayoutSnapshot, LayoutError> {
+        if !self.contains_target(source) || !self.contains_target(destination) {
+            return Err(LayoutError::StaleTarget);
+        }
+        if expected_revision != self.state.snapshot.revision {
+            return Err(LayoutError::StaleRevision);
+        }
+        if source == destination {
+            return Ok(self.state.snapshot);
+        }
+
+        let source_index = self
+            .state
+            .nodes
+            .iter()
+            .position(|node| matches!(node, TreeNode::Leaf(target) if *target == source))
+            .ok_or(LayoutError::InvalidLayoutState)?;
+        let destination_index = self
+            .state
+            .nodes
+            .iter()
+            .position(|node| matches!(node, TreeNode::Leaf(target) if *target == destination))
+            .ok_or(LayoutError::InvalidLayoutState)?;
+        let next_revision = self
+            .state
+            .snapshot
+            .revision
+            .checked_add(1)
+            .ok_or(LayoutError::RevisionExhausted)?;
+        let mut next_nodes = self.state.nodes;
+        next_nodes.swap(source_index, destination_index);
+        let candidate = state_from_tree(
+            next_nodes,
+            self.state.snapshot.rows,
+            self.state.snapshot.columns,
+            next_revision,
+        )?;
+        self.state = candidate;
+        Ok(self.state.snapshot)
+    }
+
+    /// Returns the selected divider only when it is an ancestor of `target`.
+    ///
+    /// `divider_index` follows the current snapshot's preorder traversal and is
+    /// therefore valid only with the exact layout revision supplied here.
+    pub fn divider_info(
+        &self,
+        target: TargetRef,
+        expected_revision: u64,
+        divider_index: u8,
+    ) -> Result<DividerInfo, LayoutError> {
+        if !self.contains_target(target) {
+            return Err(LayoutError::StaleTarget);
+        }
+        if expected_revision != self.state.snapshot.revision {
+            return Err(LayoutError::StaleRevision);
+        }
+        let mut traversal_index = 0;
+        let selected = find_divider(
+            &self.state.nodes,
+            0,
+            root_rect(self.state.snapshot.rows, self.state.snapshot.columns),
+            divider_index,
+            &mut traversal_index,
+        )?
+        .ok_or(LayoutError::InvalidDividerIndex)?;
+        if !subtree_contains_target(&self.state.nodes, selected.0, target)? {
+            return Err(LayoutError::DividerNotAncestor);
+        }
+        Ok(selected.1)
+    }
+
+    /// Sets an ancestor divider to an absolute first-child span in cells.
+    ///
+    /// The span excludes the divider and is measured against the current split
+    /// region. Invalid bounds or any undersized descendant reject atomically.
+    pub fn set_divider(
+        &mut self,
+        target: TargetRef,
+        expected_revision: u64,
+        divider_index: u8,
+        first_cells: u16,
+    ) -> Result<LayoutSnapshot, LayoutError> {
+        let info = self.divider_info(target, expected_revision, divider_index)?;
+        if first_cells == info.first_span {
+            return Ok(self.state.snapshot);
+        }
+        if first_cells == 0 || first_cells >= info.total_cells {
+            return Err(LayoutError::LayoutTooSmall);
+        }
+
+        let mut traversal_index = 0;
+        let (split_index, _) = find_divider(
+            &self.state.nodes,
+            0,
+            root_rect(self.state.snapshot.rows, self.state.snapshot.columns),
+            divider_index,
+            &mut traversal_index,
+        )?
+        .ok_or(LayoutError::InvalidDividerIndex)?;
+        let total_cells = info.total_cells;
+        let mut next_nodes = self.state.nodes;
+        match &mut next_nodes[split_index] {
+            TreeNode::Split {
+                first_cells: stored_first_cells,
+                total_cells: stored_total_cells,
+                ..
+            } => {
+                *stored_first_cells = first_cells;
+                *stored_total_cells = total_cells;
+            }
+            _ => return Err(LayoutError::InvalidLayoutState),
+        }
+        let next_revision = self
+            .state
+            .snapshot
+            .revision
+            .checked_add(1)
+            .ok_or(LayoutError::RevisionExhausted)?;
+        let candidate = state_from_tree(
+            next_nodes,
+            self.state.snapshot.rows,
+            self.state.snapshot.columns,
+            next_revision,
+        )?;
+        self.state = candidate;
+        Ok(self.state.snapshot)
+    }
+
     /// Removes any pane; its sibling subtree absorbs the removed split region.
     ///
     /// The removed target must exactly identify one current pane. The sibling
@@ -615,6 +801,162 @@ fn rect_contains(outer: Rect, inner: Rect) -> bool {
         && u32::from(inner.y) + u32::from(inner.rows) <= u32::from(outer.y) + u32::from(outer.rows)
 }
 
+fn find_divider(
+    nodes: &[TreeNode; MAX_TREE_NODES],
+    node_index: usize,
+    region: Rect,
+    wanted_index: u8,
+    traversal_index: &mut u8,
+) -> Result<Option<(usize, DividerInfo)>, LayoutError> {
+    match *nodes
+        .get(node_index)
+        .ok_or(LayoutError::InvalidLayoutState)?
+    {
+        TreeNode::Empty => Err(LayoutError::InvalidLayoutState),
+        TreeNode::Leaf(_) => Ok(None),
+        TreeNode::Split {
+            first,
+            second,
+            horizontal,
+            first_cells,
+            total_cells,
+        } => {
+            let index = *traversal_index;
+            *traversal_index = traversal_index
+                .checked_add(1)
+                .ok_or(LayoutError::InvalidLayoutState)?;
+            let (first_rect, second_rect, _) =
+                split_rectangles_from_ratio(region, horizontal, first_cells, total_cells)?;
+            if index == wanted_index {
+                let dimension = if horizontal {
+                    region.columns
+                } else {
+                    region.rows
+                };
+                return Ok(Some((
+                    node_index,
+                    DividerInfo {
+                        index,
+                        region,
+                        orientation: if horizontal {
+                            DividerOrientation::Horizontal
+                        } else {
+                            DividerOrientation::Vertical
+                        },
+                        first_span: if horizontal {
+                            first_rect.columns
+                        } else {
+                            first_rect.rows
+                        },
+                        total_cells: dimension
+                            .checked_sub(1)
+                            .ok_or(LayoutError::LayoutTooSmall)?,
+                    },
+                )));
+            }
+            if let Some(found) =
+                find_divider(nodes, first, first_rect, wanted_index, traversal_index)?
+            {
+                return Ok(Some(found));
+            }
+            find_divider(nodes, second, second_rect, wanted_index, traversal_index)
+        }
+    }
+}
+
+fn subtree_contains_target(
+    nodes: &[TreeNode; MAX_TREE_NODES],
+    node_index: usize,
+    target: TargetRef,
+) -> Result<bool, LayoutError> {
+    match *nodes
+        .get(node_index)
+        .ok_or(LayoutError::InvalidLayoutState)?
+    {
+        TreeNode::Empty => Err(LayoutError::InvalidLayoutState),
+        TreeNode::Leaf(found) => Ok(found == target),
+        TreeNode::Split { first, second, .. } => Ok(subtree_contains_target(nodes, first, target)?
+            || subtree_contains_target(nodes, second, target)?),
+    }
+}
+
+fn split_rectangles_from_ratio(
+    region: Rect,
+    horizontal: bool,
+    first_cells: u16,
+    total_cells: u16,
+) -> Result<(Rect, Rect, Rect), LayoutError> {
+    if total_cells == 0 || first_cells == 0 || first_cells >= total_cells {
+        return Err(LayoutError::InvalidLayoutState);
+    }
+    let dimension = if horizontal {
+        region.columns
+    } else {
+        region.rows
+    };
+    let usable = dimension
+        .checked_sub(1)
+        .ok_or(LayoutError::LayoutTooSmall)?;
+    let first_dimension = u32::from(first_cells)
+        .checked_mul(u32::from(usable))
+        .ok_or(LayoutError::LayoutTooLarge)?
+        / u32::from(total_cells);
+    let first_dimension =
+        u16::try_from(first_dimension).map_err(|_| LayoutError::LayoutTooLarge)?;
+    let second_dimension = usable
+        .checked_sub(first_dimension)
+        .ok_or(LayoutError::LayoutTooSmall)?;
+    if horizontal {
+        let divider_x = region
+            .x
+            .checked_add(first_dimension)
+            .ok_or(LayoutError::LayoutTooLarge)?;
+        let second_x = divider_x
+            .checked_add(1)
+            .ok_or(LayoutError::LayoutTooLarge)?;
+        Ok((
+            Rect {
+                columns: first_dimension,
+                ..region
+            },
+            Rect {
+                x: second_x,
+                columns: second_dimension,
+                ..region
+            },
+            Rect {
+                x: divider_x,
+                columns: 1,
+                ..region
+            },
+        ))
+    } else {
+        let divider_y = region
+            .y
+            .checked_add(first_dimension)
+            .ok_or(LayoutError::LayoutTooLarge)?;
+        let second_y = divider_y
+            .checked_add(1)
+            .ok_or(LayoutError::LayoutTooLarge)?;
+        Ok((
+            Rect {
+                rows: first_dimension,
+                ..region
+            },
+            Rect {
+                y: second_y,
+                rows: second_dimension,
+                ..region
+            },
+            Rect {
+                y: divider_y,
+                rows: 1,
+                ..region
+            },
+        ))
+    }
+}
+
 impl fmt::Debug for PaneLayout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PaneLayout")
@@ -671,6 +1013,10 @@ pub enum LayoutError {
     PaneLimitExceeded,
     /// The layout revision cannot be incremented without wrapping.
     RevisionExhausted,
+    /// The spatial divider index does not exist in the current layout.
+    InvalidDividerIndex,
+    /// The selected divider does not contain the exact target below it.
+    DividerNotAncestor,
     /// The preview's complete before-state no longer matches this layout.
     PreviewStale,
     /// An internal fixed-state invariant was not satisfied.
@@ -692,6 +1038,8 @@ impl fmt::Display for LayoutError {
             Self::LayoutTooLarge => "one or more panes would exceed supported bounds",
             Self::PaneLimitExceeded => "the four-pane workspace capacity is full",
             Self::RevisionExhausted => "layout revision cannot be incremented",
+            Self::InvalidDividerIndex => "divider index is outside the current layout",
+            Self::DividerNotAncestor => "divider is not an ancestor of the target",
             Self::PreviewStale => "split preview no longer matches the layout",
             Self::InvalidLayoutState => "layout state is invalid",
         };
@@ -1056,6 +1404,35 @@ mod tests {
         })
     }
 
+    fn four_pane_layout() -> (PaneLayout, [TargetRef; 4]) {
+        let first = existing_target();
+        let second = new_target();
+        let third = TargetRef {
+            pane: 90,
+            session: 91,
+            ..new_target()
+        };
+        let fourth = TargetRef {
+            pane: 92,
+            session: 93,
+            ..new_target()
+        };
+        let mut layout = PaneLayout::new(first, 31, 122).expect("root layout");
+        let split = layout
+            .preview_split(first, 1, SplitDirection::Right, second)
+            .expect("root split");
+        layout.commit_split(split).expect("root commit");
+        let split = layout
+            .preview_split(first, 2, SplitDirection::Down, third)
+            .expect("left nested split");
+        layout.commit_split(split).expect("left nested commit");
+        let split = layout
+            .preview_split(second, 3, SplitDirection::Down, fourth)
+            .expect("right nested split");
+        layout.commit_split(split).expect("right nested commit");
+        (layout, [first, second, third, fourth])
+    }
+
     #[test]
     fn content_rect_insets_each_edge_and_requires_the_supported_content_minimum() {
         let outer = Rect {
@@ -1094,6 +1471,229 @@ mod tests {
                 ..outer
             }),
             None
+        );
+    }
+
+    #[test]
+    fn divider_indices_follow_snapshot_preorder_and_roundtrip_exact_geometry() {
+        let (layout, targets) = four_pane_layout();
+        let snapshot = layout.snapshot();
+        let root = layout
+            .divider_info(targets[3], snapshot.revision, 0)
+            .expect("root divider is ancestor");
+        let left = layout
+            .divider_info(targets[0], snapshot.revision, 1)
+            .expect("left divider is ancestor");
+        let right = layout
+            .divider_info(targets[3], snapshot.revision, 2)
+            .expect("right divider is ancestor");
+        assert_eq!(
+            root.region,
+            Rect {
+                x: 0,
+                y: 0,
+                rows: 31,
+                columns: 122
+            }
+        );
+        assert_eq!(root.index, 0);
+        assert_eq!(
+            left.region,
+            Rect {
+                x: 0,
+                y: 0,
+                rows: 31,
+                columns: 60
+            }
+        );
+        assert_eq!(left.index, 1);
+        assert_eq!(
+            right.region,
+            Rect {
+                x: 61,
+                y: 0,
+                rows: 31,
+                columns: 61
+            }
+        );
+        assert_eq!(right.index, 2);
+        assert_eq!(
+            snapshot.dividers[0],
+            Some(Rect {
+                x: 60,
+                y: 0,
+                rows: 31,
+                columns: 1
+            })
+        );
+        assert_eq!(
+            snapshot.dividers[1],
+            Some(Rect {
+                x: 0,
+                y: 15,
+                rows: 1,
+                columns: 60
+            })
+        );
+        assert_eq!(
+            snapshot.dividers[2],
+            Some(Rect {
+                x: 61,
+                y: 15,
+                rows: 1,
+                columns: 61
+            })
+        );
+
+        let rebuilt = PaneLayout::from_snapshot(snapshot).expect("snapshot rebuild");
+        assert_eq!(rebuilt.snapshot(), snapshot);
+        assert!(rebuilt.state.nodes == layout.state.nodes);
+    }
+
+    #[test]
+    fn swap_preserves_slots_tree_ratios_and_exact_target_identities() {
+        let (mut layout, targets) = four_pane_layout();
+        let before = layout.snapshot();
+        let nodes = layout.state.nodes;
+        let swapped = layout
+            .swap(targets[0], targets[3], before.revision)
+            .expect("swap");
+        assert_eq!(swapped.revision, before.revision + 1);
+        assert_eq!(swapped.dividers, before.dividers);
+        assert!(layout.state.nodes[0] == nodes[0]);
+        assert!(layout.state.nodes[1] == nodes[1]);
+        assert!(layout.state.nodes[2] == nodes[2]);
+        assert!(swapped
+            .panes
+            .iter()
+            .flatten()
+            .any(|pane| pane.target == targets[0] && pane.rect == before.panes[3].unwrap().rect));
+        assert!(swapped
+            .panes
+            .iter()
+            .flatten()
+            .any(|pane| pane.target == targets[3] && pane.rect == before.panes[0].unwrap().rect));
+    }
+
+    #[test]
+    fn divider_adjustment_is_absolute_and_preserves_ratio_on_root_resize() {
+        let target = existing_target();
+        let other = new_target();
+        let mut layout = PaneLayout::new(target, 31, 102).expect("layout");
+        let split = layout
+            .preview_split(target, 1, SplitDirection::Right, other)
+            .expect("split");
+        layout.commit_split(split).expect("commit");
+        let adjusted = layout
+            .set_divider(target, 2, 0, 63)
+            .expect("absolute divider position");
+        assert_eq!(adjusted.panes[0].unwrap().rect.columns, 63);
+        let resized = layout
+            .resize(adjusted.revision, 31, 122)
+            .expect("root resize");
+        assert_eq!(resized.panes[0].unwrap().rect.columns, 75);
+        assert_eq!(resized.panes[1].unwrap().rect.columns, 46);
+        assert_eq!(
+            PaneLayout::from_snapshot(resized).unwrap().snapshot(),
+            resized
+        );
+    }
+
+    #[test]
+    fn divider_requires_exact_revision_ancestor_and_full_target_identity() {
+        let (mut layout, targets) = four_pane_layout();
+        let before = layout.snapshot();
+        assert_eq!(
+            layout.divider_info(targets[0], before.revision, 2),
+            Err(LayoutError::DividerNotAncestor)
+        );
+        assert_eq!(
+            layout.divider_info(targets[0], before.revision, 3),
+            Err(LayoutError::InvalidDividerIndex)
+        );
+        assert_eq!(
+            layout.divider_info(targets[0], before.revision - 1, 0),
+            Err(LayoutError::StaleRevision)
+        );
+        let mut stale = targets[0];
+        stale.occupant_revision += 1;
+        assert_eq!(
+            layout.set_divider(stale, before.revision, 0, 61),
+            Err(LayoutError::StaleTarget)
+        );
+        assert_eq!(
+            layout.swap(targets[0], stale, before.revision),
+            Err(LayoutError::StaleTarget)
+        );
+        assert_eq!(layout.snapshot(), before);
+    }
+
+    #[test]
+    fn divider_rejects_invalid_subtree_geometry_atomically() {
+        let first = existing_target();
+        let second = new_target();
+        let third = TargetRef {
+            pane: 90,
+            session: 91,
+            ..new_target()
+        };
+        let mut layout = PaneLayout::new(first, 31, 122).expect("layout");
+        let split = layout
+            .preview_split(first, 1, SplitDirection::Right, second)
+            .unwrap();
+        layout.commit_split(split).unwrap();
+        let split = layout
+            .preview_split(first, 2, SplitDirection::Right, third)
+            .unwrap();
+        layout.commit_split(split).unwrap();
+        let before = layout.snapshot();
+        // The root's 43-column first region makes its nested 29/59 child
+        // region 20 columns after the existing floor rounding.
+        assert_eq!(
+            layout.set_divider(first, before.revision, 0, 43),
+            Err(LayoutError::LayoutTooSmall)
+        );
+        assert_eq!(layout.snapshot(), before);
+        assert_eq!(
+            layout.set_divider(first, before.revision, 0, 0),
+            Err(LayoutError::LayoutTooSmall)
+        );
+        assert_eq!(layout.snapshot(), before);
+    }
+
+    #[test]
+    fn noops_keep_revision_and_overflow_rejections_are_atomic() {
+        let (mut layout, targets) = four_pane_layout();
+        let before = layout.snapshot();
+        assert_eq!(
+            layout.swap(targets[0], targets[0], before.revision),
+            Ok(before)
+        );
+        let info = layout.divider_info(targets[0], before.revision, 0).unwrap();
+        assert_eq!(
+            layout.set_divider(targets[0], before.revision, 0, info.first_span),
+            Ok(before)
+        );
+
+        layout.state.snapshot.revision = u64::MAX;
+        let overflow_state = layout.snapshot();
+        assert_eq!(
+            layout.swap(targets[0], targets[3], u64::MAX),
+            Err(LayoutError::RevisionExhausted)
+        );
+        assert_eq!(layout.snapshot(), overflow_state);
+        assert_eq!(
+            layout.set_divider(targets[0], u64::MAX, 0, info.first_span + 1),
+            Err(LayoutError::RevisionExhausted)
+        );
+        assert_eq!(layout.snapshot(), overflow_state);
+        assert_eq!(
+            layout.swap(targets[0], targets[0], u64::MAX),
+            Ok(overflow_state)
+        );
+        assert_eq!(
+            layout.set_divider(targets[0], u64::MAX, 0, info.first_span),
+            Ok(overflow_state)
         );
     }
 

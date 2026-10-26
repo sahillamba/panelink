@@ -38,12 +38,22 @@ pub const CAPABILITY_WORKSPACE_EVENTS: u64 = 8;
 /// Only the multi-session server may offer this capability.
 pub const CAPABILITY_PANE_METADATA: u64 = 16;
 
+/// Capability for authoritative visible-row soft-wrap metadata in UI snapshots.
+/// Only the multi-session UI path offers this capability.
+pub const CAPABILITY_SCREEN_ROW_WRAPS: u64 = 32;
+
+/// Capability vocabulary for authoritative pane swap, divider and zoom operations.
+/// Runtime paths must not offer it until those operations are implemented.
+pub const CAPABILITY_PANE_OPERATIONS: u64 = 64;
+
 /// All capability bits currently defined by this schema.
 pub const KNOWN_CAPABILITIES: u64 = CAPABILITY_READ
     | CAPABILITY_INPUT
     | CAPABILITY_EVENTS
     | CAPABILITY_WORKSPACE_EVENTS
-    | CAPABILITY_PANE_METADATA;
+    | CAPABILITY_PANE_METADATA
+    | CAPABILITY_SCREEN_ROW_WRAPS
+    | CAPABILITY_PANE_OPERATIONS;
 
 /// Client capability request for the v1.0 handshake.
 ///

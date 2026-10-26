@@ -59,13 +59,13 @@ Confirmed requirements come from the user's answers recorded in [discovery](PANE
 | R-15 | Provide an easy scriptable API for agents to read and control other managed panes, agents and processes. | Stable targets and machine-readable CLI/local API support discovery, bounded sanitized output reads and explicit input/control operations under a documented access/ownership contract. The full proposed API remains unimplemented; the bounded four-pane CLI/runtime exposes discovery, reads, deliberate input, managed pane run and finite watches/reconciliation. See the [runtime scope reconciliation](progress/P3-RUNTIME-CONTRACT-AUDIT.md). Detailed proposed contracts and acceptance scenarios are in [AGENT-CONTROL.md](AGENT-CONTROL.md). |
 | R-16 | Offer Split Left, Right, Up and Down from a pane's right-click menu. | Each action splits relative to the clicked pane and opens one fresh independent terminal session on the chosen side, preserving the original process/session. Use deterministic geometry, stable identity, minimum-size handling and a matching agent/CLI operation. The [layout design](PANE-LAYOUT.md) and [Phase3A](progress/P3A-RIGHT-CLICK-SPLITS.md) track the delivered scoped implementation; the current four-pane prototype has automated private-PTY acceptance, while distinct human four-pane host acceptance remains open. |
 
-| R-17 | Automatically expose newly started background agents/subagents from OpenCode or compatible OpenCode wrappers in a tab named Subagents, so the user can optionally switch there and observe them (requested 2026-10-21). | Exact provider parent/child identity routes each supported worker to the correct workspace; observation never duplicates its execution. See [Phase SA plan](progress/SUBAGENTS-PLAN.md) for proposed read-only UX, version/wrapper feasibility gates and acceptance. This does not settle the remaining tab/sidebar hierarchy. |
+| R-17 | Automatically expose newly started background agents/subagents from OpenCode or compatible OpenCode wrappers in a tab named Subagents, so the user can optionally switch there and observe them (requested 2026-10-21). | Exact provider parent/child identity routes each supported worker to the correct workspace; observation never duplicates its execution. See [Phase SA plan](progress/SUBAGENTS-PLAN.md) for proposed read-only UX, version/wrapper feasibility gates and acceptance. This provider feature does not select a project sidebar or change the confirmed Project → workspace tabs → split panes hierarchy. |
 
 Numeric latency, memory, history, and build budgets remain to be established on real hardware. The workload statement is an evaluation target, not a measured result.
 
 ## Proposed first-release scope
 
-Project workspaces, split panes, optional tabs/sidebar according to the user's pending layout choice, named sessions/processes, OpenCode and custom-command launchers, status/attention indicators, detach/reattach, retained history/search, context menus, copy mode, and selection copying.
+Projects with workspace tabs and split panes, named sessions/processes, OpenCode and custom-command launchers, status/attention indicators, detach/reattach, retained history/search, context menus, copy mode, and selection copying. A project sidebar remains an unselected presentation option.
 
 Tabnine is optional CLI compatibility pending an installed supported version and account access. Autonomous task assignment, worktree automation, a custom chat interface, remote runtimes, and existing tmux adoption require an explicit scope decision before inclusion.
 
@@ -76,6 +76,89 @@ One executable exposes client, server, and command modes. The server owns PTYs a
 Use one terminal engine per managed PTY, with authoritative state in the server. A pane is a view of a stable managed session, not the identity of its child process. Moving a pane or reconnecting must not relaunch the command.
 
 Represent these concepts explicitly:
+
+Confirmed hierarchy (user decision2026-10-25): **Project → workspace tabs →
+split panes**. Each project can expose workspace tabs, and each workspace owns
+its pane layout. Tabs are the workspace navigation surface; they are not a
+second nested tab layer inside a workspace. Switching a tab must preserve the
+server-owned processes in other workspaces. The bounded opt-in `workspace open`
+client now shows a persistent row-zero project/tab strip and supports in-client
+route switching. Each registered tab routes to an independent existing
+four-pane server/storage/context domain. This is a bounded UI slice; full
+Phase5 acceptance remains open. Projects are named groups in this slice,
+without source-root discovery. Legacy commands with no workspace selector keep
+the original default route; only `workspace open` without IDs follows persisted
+active selection. Removal requires a stopped, unambiguous runtime and retains
+its saved files. Plain `panelink` and raw attach remain legacy/headerless. See
+[the routing contract and result](progress/P5-WORKSPACE-ROUTING-RESULT-2026-10-25.md)
+and [tab integration evidence](progress/P5-TAB-INTEGRATION-2026-10-25.md).
+
+### Bounded opt-in tab UI behavior
+
+The `workspace open` client reserves row zero for a persistent project/tab
+strip. Clicking the project control opens its chooser; clicking a tab requests
+that route. Ctrl-B then `w` opens the chooser;
+`n`/`p` navigate tabs and `[`/`]` navigate projects. The chooser uses an
+immutable catalog snapshot. A refresh does not replace the displayed active
+snapshot if that active route has since been removed. This UI only navigates
+registered entries; it does not create, remove, or stop projects or tabs.
+
+Only one route preparation may be pending. While it runs, the current route is
+shown and child input is frozen. A switch cancels local copy/selection work;
+unsent keys are discarded with the existing notice and are never sent to the
+new route. If preparation fails, the old attachment remains the actual route.
+After a prepared destination is installed, it uses a fresh App and network
+attachment. Ctrl-X restores the host terminal before a nonjoining best-effort
+detach of the old worker. Saving the selected route is asynchronous and starts
+after installation; it may finish after detach, and no rollback or completion
+order guarantee is made. See [tab integration evidence](progress/P5-TAB-INTEGRATION-2026-10-25.md)
+for current validation and open acceptance.
+
+### Bounded pane operations prototype
+
+The current pane controls use prototype bindings: `Ctrl-B z` toggles zoom,
+`Ctrl-B m` opens a pane-location swap chooser, and `Ctrl-B e` opens an
+ancestor-divider chooser. These bindings describe the current prototype; they
+do not settle the final shortcut configuration.
+
+Zoom is server-authoritative and scoped to one workspace. It resizes the
+selected pane's actual PTY to the current root content size while the
+underlying split tree and hidden panes remain in place; hidden processes keep
+running at their current PTY sizes. Unzoom resizes panes as needed and restores
+the exact underlying geometry for the current root size. Swapping exchanges
+two exact pane targets' locations in the same tab and does not migrate, replace,
+or restart their PTYs or processes. Divider mode lets the user cycle through
+ancestor dividers with Tab/Shift-Tab and preview one-cell position changes
+along each divider's axis with arrow keys. Enter sends one absolute-position
+commit; Esc cancels the local preview.
+
+Layout topology changes are refused while zoom is active; unzoom before
+changing the split layout. Swap and divider choosers capture their target and
+layout revision. If that target or revision becomes stale, the local mode
+cancels instead of retargeting the action. Pane operations are asynchronous:
+fixed status messages report results, and an uncertain or unknown result is
+not automatically replayed. No pane input is part of these operations.
+
+Pane-operation ratios and zoom are runtime state. They do not establish
+physical-reboot restoration, and the saved-observation codec is unchanged by
+this prototype. Current bindings and repeat handling are not final user
+configuration claims. Typed Enter/Esc repeat and release events are handled
+locally; classic streams that expose repeats as indistinguishable press events
+cannot provide the same repeat guard.
+
+As of 2026-10-26, the full serial Rust suite passes **1,399 tests, zero failed,
+15 ignored** across 75 result groups. After Clippy cleanup and boxing large
+worker result payloads, final client checks pass123/0 and the actual outer-PTY
+target passes3/0 (tabs, clipboard-free copy, pane controls). Strict all-target
+Clippy and all seven supporting checks pass. The separate real four-PTY
+protocol scenario passes1/0 and verifies original shell PIDs/state, hidden
+output, actual PTY dimensions, deduplication/conflict behavior and unnegotiated
+denial. These automated checks do not establish human Apple Terminal,
+real clipboard, physical reboot or representative workload acceptance.
+M2's broader host/workload gates and Phases3/5 remain open. See
+[the integration evidence](progress/P5-PANE-OPERATIONS-INTEGRATION-2026-10-26.md),
+[the pane contract](progress/P5-PANE-OPERATIONS-CONTRACT-2026-10-25.md), and
+[the current handoff](progress/SESSION.md).
 
 - Workspace: stable ID, name, project directory, tab/layout roots, saved UI preferences.
 - Layout: leaf pane views and split nodes with orientation and relative sizes; optional tab roots.
@@ -456,7 +539,7 @@ See [implementation and verification](progress/P3-LIVE-SCROLLBACK-RESULT.md).
 
 ## Proposed interaction contract
 
-Default prefix: Ctrl+B, configurable. Ctrl+B twice forwards a literal Ctrl+B. Provide discoverable help and menu actions. Binding names and exact split shortcuts will be finalized after the layout choice; essential actions include create/split/focus/resize/zoom, workspace switching, history/search/copy, detach, and explicit stop.
+Default prefix: Ctrl+B, configurable. Ctrl+B twice forwards a literal Ctrl+B. Provide discoverable help and menu actions. The bounded opt-in tab UI uses `w`, `n`/`p`, and `[`/`]` for chooser, tab, and project navigation. The current pane-operation prototype uses `z`, `m`, and `e` after the prefix; these are not final bindings. Other binding names and exact split shortcuts remain subject to the interaction design; essential actions include create/split/focus/resize/zoom, history/search/copy, detach, and explicit stop.
 
 Mouse hit testing distinguishes sidebar, tab strip, pane border, pane content, menu overlay, scrollbar, and resize handles. Overlay actions must not leak input into the underlying process.
 
@@ -473,7 +556,43 @@ later split receives a fresh session identity. The last shell's exit ends the
 workspace. This is a scoped two-pane behavior, not a decision about the
 broader workspace/agent authorization policy.
 
-Selection starts in one pane, stays within its content, supports wrapped lines and Unicode cell widths, and copies after mouse release. Preserve selection across ordinary output where possible; resize or buffer changes must have defined behavior. Recommend a snapshot of selected text at copy time with stable history coordinates, clearing selection on resize or screen-buffer switch in the first release. Keyboard copy mode must work while output continues.
+Selection starts in one pane, stays within its content, supports wrapped lines and Unicode cell widths, and copies after mouse release. The bounded drag implementation freezes sanitized cells and authoritative row-wrap flags at press, retaining that source across ordinary output. Resize, target/layout geometry changes, displayed history/view changes, buffer switches, modal ownership and lost wrap metadata cancel it. Selected cells use the frozen source for highlighting; other cells keep updating. Empty selections do not copy.
+
+### Bounded keyboard copy mode prototype
+
+The attached client also has a bounded keyboard path for the pane's currently
+visible live or history view. `Ctrl-B c` enters when capture succeeds and
+authoritative row-wrap metadata is available; this shortcut remains a
+prototype assumption, not a settled configurable binding. Arrows or `h`/`j`/
+`k`/`l` move the local caret. Space sets or clears the selection anchor. Enter
+or `y` copies a non-empty anchored range once and exits; with no anchor it
+exits without copying. Esc cancels, while Ctrl-X detaches. Other keys, paste,
+and mouse events remain local during the mode.
+
+Copy mode holds its captured cells stable while ordinary live output continues.
+Resize, focus, geometry, buffer or visible-view, route, modal, or wrap-identity
+changes cancel it. Copy uses the existing attached-client asynchronous
+clipboard queue and fixed status messages. This slice adds no arbitrary
+history scrolling/search, server message, persistence, or terminal clipboard
+access. Typed-protocol Repeat events for Enter/`y` are guarded after the copy
+key press; classic streams that encode repeats as indistinguishable Press
+events cannot promise the same one-gesture repeat behavior. Focused client
+(108 passed), compositor (25 passed), and clipboard-free private-PTY (2 passed)
+checks pass after compile/fixture corrections. The keyboard-copy checkpoint,
+before the later pane-operation changes, passed the full serial tree with
+1,356 tests and 15 ignored. Apple Terminal and real clipboard acceptance
+remain open. See the [keyboard copy result](progress/P5-KEYBOARD-COPY-RESULT-2026-10-25.md).
+
+The live-screen/history reply extension negotiates row-wrap metadata separately;
+legacy wire replies and persisted checkpoint/history bytes retain their formats.
+An old peer without wrap metadata disables drag copying rather than guessing
+line boundaries. The attached client submits at most a bounded selection to an
+asynchronous `/usr/bin/pbcopy` worker with fixed redacted results and no shell.
+Detach cancels pending work; terminal restoration precedes blocking worker
+cleanup. The implementation and automated acceptance are tracked in
+[the integration plan](progress/P5-SELECTION-INTEGRATION-PLAN-2026-10-25.md) and
+[client result](progress/P5-SELECTION-CLIENT-RESUMED-2026-10-25.md). Human Apple
+Terminal drag behavior and real clipboard acceptance remain separate gates.
 
 Copy/paste should use macOS clipboard commands from the local attached client without interpolating text into shell code. Clipboard errors are visible and do not exit the session. Forward paste with the active pane's bracketed-paste semantics. Do not blindly forward host input escape sequences to a pane with different terminal modes.
 
@@ -954,7 +1073,7 @@ These are acceptance requirements for future implementation, not completed execu
 
 ## Open decisions beyond the bounded prototype
 
-User choices still pending: exact agent-control access scope/defaults and autonomous scheduling; lifetime/stop behavior; workspace/sidebar/tab hierarchy; remote/tmux scope; firm review criteria, OpenCode approval, allowed dependencies, and history/clipboard policy. Apple Terminal is the first host baseline. The private repository destination is confirmed as [sahillamba/panelink](https://github.com/sahillamba/panelink).
+User choices still pending: exact agent-control access scope/defaults and autonomous scheduling; lifetime/stop behavior; project-sidebar presentation and shortcut configuration beyond the bounded tab UI; remote/tmux scope; firm review criteria, OpenCode approval, allowed dependencies, and history/clipboard policy. Apple Terminal is the first host baseline. The private repository destination is confirmed as [sahillamba/panelink](https://github.com/sahillamba/panelink).
 
 Core dependency pins and the PTY API are selected only for the bounded prototype. Release-level dependency/capability choices, host input, viewport/delta schema, minimum macOS, data format/retention limits, input ownership, mouse pass-through gesture, OpenCode adapter/version matrix, and representative numeric quality budgets remain open.
 

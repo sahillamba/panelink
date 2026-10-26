@@ -944,6 +944,7 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
     let capture = client.capture();
     for mode in [
         &b"\x1b[?1006l"[..],
+        b"\x1b[?1002l",
         b"\x1b[?1000l",
         b"\x1b[?1049l",
         b"\x1b[?2004l",

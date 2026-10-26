@@ -1044,6 +1044,8 @@ fn reason_for(error: LayoutError, direction: SplitDirection, pane: Rect) -> Disa
         | LayoutError::InvalidDimensions
         | LayoutError::TargetScopeMismatch
         | LayoutError::TargetIdentityConflict
+        | LayoutError::InvalidDividerIndex
+        | LayoutError::DividerNotAncestor
         | LayoutError::InvalidLayoutState => DisabledReason::Unavailable,
     }
 }

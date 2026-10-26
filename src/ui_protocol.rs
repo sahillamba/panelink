@@ -88,12 +88,18 @@
 //!
 //! ScreenReply (carried in one `MessageKind::Snapshot` frame): `0 schema |
 //! 2 kind 0x8002 | 4 target (40) | 44 screen revision u64 nonzero | 52
-//! checkpoint length u32 | 56 reserved 8 zero | 64 checkpoint bytes` where the
-//! checkpoint is one complete `screen_checkpoint` record for the same target.
+//! checkpoint length u32 | 56 wrap marker u16 | 58 reserved 6 zero | 64
+//! checkpoint bytes` where the checkpoint is one complete `screen_checkpoint`
+//! record for the same target. Without the separately negotiated row-wrap
+//! capability, the marker is zero and the payload ends after the checkpoint.
+//! With it, marker bit 0 may announce a packed LSB-first row-wrap bitmap after
+//! the checkpoint; all other marker bits remain zero.
 //!
 //! HistoryReply (Snapshot frame) uses the ScreenReply layout with the offset
-//! at 52, mode flags at 54 (bit 0 alternate screen, bit 1 mouse reporting),
-//! checkpoint length at 56 and checkpoint bytes at 64. Alternate-screen
+//! at 52, mode flags at 54 (bit 0 alternate screen, bit 1 mouse reporting,
+//! bit 2 negotiated wrap-bitmap marker), checkpoint length at 56, four
+//! reserved zero bytes at 60, and checkpoint bytes at 64. When marked, the
+//! packed LSB-first row-wrap bitmap follows the checkpoint. Alternate-screen
 //! history is clamped to zero so a hidden shell buffer is never shown as app
 //! content.
 //!
@@ -140,6 +146,8 @@ pub const ATTACH_TARGET_BYTES: usize = 48;
 pub const LAYOUT_REPLY_BYTES: usize = 424;
 /// Fixed ScreenReply header before the checkpoint record.
 pub const SCREEN_REPLY_HEADER_BYTES: usize = 64;
+/// Maximum number of bytes in a packed row-wrap bitmap (80 terminal rows).
+pub const MAX_ROW_WRAP_BITMAP_BYTES: usize = 10;
 /// Exact size of a ResizeReply.
 pub const RESIZE_REPLY_BYTES: usize = 48;
 
@@ -162,10 +170,10 @@ const MAX_SCREEN_REPLY_CHECKPOINT_BYTES: usize =
 
 /// Maximum complete ScreenReply payload (header plus largest checkpoint).
 pub const MAX_SCREEN_REPLY_BYTES: usize =
-    SCREEN_REPLY_HEADER_BYTES + MAX_SCREEN_REPLY_CHECKPOINT_BYTES;
+    SCREEN_REPLY_HEADER_BYTES + MAX_SCREEN_REPLY_CHECKPOINT_BYTES + MAX_ROW_WRAP_BITMAP_BYTES;
 /// Maximum complete HistoryReply payload (header plus checkpoint).
 pub const MAX_HISTORY_REPLY_BYTES: usize =
-    SCREEN_REPLY_HEADER_BYTES + MAX_SCREEN_REPLY_CHECKPOINT_BYTES;
+    SCREEN_REPLY_HEADER_BYTES + MAX_SCREEN_REPLY_CHECKPOINT_BYTES + MAX_ROW_WRAP_BITMAP_BYTES;
 /// Fixed MouseWheelInput request size.
 pub const MOUSE_WHEEL_INPUT_BYTES: usize = 88;
 
@@ -532,6 +540,8 @@ pub struct ScreenReplyView<'a> {
     target: TargetRef,
     screen_revision: u64,
     checkpoint: &'a [u8],
+    rows: u16,
+    wraps: Option<&'a [u8]>,
 }
 
 impl<'a> ScreenReplyView<'a> {
@@ -548,6 +558,20 @@ impl<'a> ScreenReplyView<'a> {
     /// Complete validated `screen_checkpoint` record bytes.
     pub const fn checkpoint(&self) -> &'a [u8] {
         self.checkpoint
+    }
+
+    /// Whether this reply included negotiated authoritative row-wrap metadata.
+    pub const fn wrap_metadata_available(&self) -> bool {
+        self.wraps.is_some()
+    }
+
+    /// Whether the zero-based checkpoint row soft-wraps into the next row.
+    pub fn row_wrapped(&self, row: u16) -> Option<bool> {
+        let wraps = self.wraps?;
+        if row >= self.rows {
+            return None;
+        }
+        Some(wraps[usize::from(row) / 8] & (1 << (row % 8)) != 0)
     }
 }
 
@@ -568,6 +592,8 @@ pub struct HistoryReplyView<'a> {
     alternate_screen: bool,
     mouse_reporting: bool,
     checkpoint: &'a [u8],
+    rows: u16,
+    wraps: Option<&'a [u8]>,
 }
 
 impl<'a> HistoryReplyView<'a> {
@@ -599,6 +625,20 @@ impl<'a> HistoryReplyView<'a> {
     /// Validated screen checkpoint bytes.
     pub const fn checkpoint(&self) -> &'a [u8] {
         self.checkpoint
+    }
+
+    /// Whether this reply included negotiated authoritative row-wrap metadata.
+    pub const fn wrap_metadata_available(&self) -> bool {
+        self.wraps.is_some()
+    }
+
+    /// Whether the zero-based checkpoint row soft-wraps into the next row.
+    pub fn row_wrapped(&self, row: u16) -> Option<bool> {
+        let wraps = self.wraps?;
+        if row >= self.rows {
+            return None;
+        }
+        Some(wraps[usize::from(row) / 8] & (1 << (row % 8)) != 0)
     }
 }
 
@@ -1005,8 +1045,48 @@ pub fn prefix_screen_reply(
     Ok(checkpoint)
 }
 
+/// Prefix a ScreenReply with an optional, separately negotiated row-wrap bitmap.
+/// Passing `None` emits the exact legacy bytes produced by
+/// [`prefix_screen_reply`].
+pub fn prefix_screen_reply_with_wraps(
+    target: TargetRef,
+    screen_revision: u64,
+    mut checkpoint: Vec<u8>,
+    wraps: Option<&[bool]>,
+) -> Result<Vec<u8>, UiCodecError> {
+    let (bitmap, bitmap_len) = encode_wrap_bitmap(target, screen_revision, &checkpoint, wraps)?;
+    if wraps.is_none() {
+        return prefix_screen_reply(target, screen_revision, checkpoint);
+    }
+    let bitmap = bitmap.expect("bitmap is present when wrap flags are supplied");
+    let mut prefix = [0_u8; SCREEN_REPLY_HEADER_BYTES];
+    put_header(&mut prefix, KIND_SCREEN_REPLY);
+    put_target(&mut prefix, 4, target);
+    put_u64(&mut prefix, 44, screen_revision);
+    put_u32(&mut prefix, 52, checkpoint.len() as u32);
+    put_u16(&mut prefix, 56, 1);
+    checkpoint
+        .try_reserve_exact(SCREEN_REPLY_HEADER_BYTES + bitmap_len)
+        .map_err(|_| UiCodecError::PayloadTooLarge)?;
+    checkpoint.splice(0..0, prefix);
+    checkpoint.extend_from_slice(&bitmap[..bitmap_len]);
+    if checkpoint.len() > MAX_SCREEN_REPLY_BYTES {
+        return Err(UiCodecError::PayloadTooLarge);
+    }
+    Ok(checkpoint)
+}
+
 /// Decode a ScreenReply and validate its embedded checkpoint record.
 pub fn decode_screen_reply(bytes: &[u8]) -> Result<ScreenReplyView<'_>, UiCodecError> {
+    decode_screen_reply_with_wraps(bytes, false)
+}
+
+/// Decode a ScreenReply when row-wrap capability negotiation is explicit.
+/// A marked trailer is rejected unless `wraps_negotiated` is true.
+pub fn decode_screen_reply_with_wraps(
+    bytes: &[u8],
+    wraps_negotiated: bool,
+) -> Result<ScreenReplyView<'_>, UiCodecError> {
     if bytes.len() > MAX_SCREEN_REPLY_BYTES {
         return Err(UiCodecError::PayloadTooLarge);
     }
@@ -1014,7 +1094,15 @@ pub fn decode_screen_reply(bytes: &[u8]) -> Result<ScreenReplyView<'_>, UiCodecE
         return Err(UiCodecError::Truncated);
     }
     header(bytes, KIND_SCREEN_REPLY)?;
-    zero(&bytes[56..SCREEN_REPLY_HEADER_BYTES])?;
+    let flags = read_u16(bytes, 56);
+    if flags & !1 != 0 {
+        return Err(UiCodecError::NonzeroReserved);
+    }
+    zero(&bytes[58..SCREEN_REPLY_HEADER_BYTES])?;
+    let has_wraps = flags & 1 != 0;
+    if has_wraps && !wraps_negotiated {
+        return Err(UiCodecError::InvalidStatus);
+    }
     let target = read_target(bytes, 4);
     validate_target(target)?;
     let screen_revision = read_u64(bytes, 44);
@@ -1022,13 +1110,32 @@ pub fn decode_screen_reply(bytes: &[u8]) -> Result<ScreenReplyView<'_>, UiCodecE
         return Err(UiCodecError::ZeroRevision);
     }
     let length = read_u32(bytes, 52) as usize;
-    exact_size(bytes, SCREEN_REPLY_HEADER_BYTES + length)?;
-    let checkpoint = &bytes[SCREEN_REPLY_HEADER_BYTES..];
+    let checkpoint_end = SCREEN_REPLY_HEADER_BYTES
+        .checked_add(length)
+        .ok_or(UiCodecError::PayloadTooLarge)?;
+    if bytes.len() < checkpoint_end {
+        return Err(UiCodecError::Truncated);
+    }
+    let checkpoint = &bytes[SCREEN_REPLY_HEADER_BYTES..checkpoint_end];
     validate_checkpoint(target, screen_revision, checkpoint)?;
+    let rows = crate::screen_checkpoint::decode(checkpoint)
+        .map_err(|_| UiCodecError::InvalidCheckpoint)?
+        .rows();
+    let wraps = if has_wraps {
+        let bitmap_len = wrap_bitmap_len(rows)?;
+        exact_size(bytes, checkpoint_end + bitmap_len)?;
+        validate_wrap_bitmap(&bytes[checkpoint_end..], rows)?;
+        Some(&bytes[checkpoint_end..])
+    } else {
+        exact_size(bytes, checkpoint_end)?;
+        None
+    };
     Ok(ScreenReplyView {
         target,
         screen_revision,
         checkpoint,
+        rows,
+        wraps,
     })
 }
 
@@ -1070,8 +1177,70 @@ pub fn prefix_history_reply(
     Ok(checkpoint)
 }
 
+/// Prefix a HistoryReply with an optional, separately negotiated row-wrap bitmap.
+/// Passing `None` emits the exact legacy bytes produced by
+/// [`prefix_history_reply`].
+pub fn prefix_history_reply_with_wraps(
+    target: TargetRef,
+    screen_revision: u64,
+    offset_rows: u16,
+    alternate_screen: bool,
+    mouse_reporting: bool,
+    mut checkpoint: Vec<u8>,
+    wraps: Option<&[bool]>,
+) -> Result<Vec<u8>, UiCodecError> {
+    if wraps.is_none() {
+        return prefix_history_reply(
+            target,
+            screen_revision,
+            offset_rows,
+            alternate_screen,
+            mouse_reporting,
+            checkpoint,
+        );
+    }
+    validate_target(target)?;
+    if screen_revision == 0 {
+        return Err(UiCodecError::ZeroRevision);
+    }
+    if offset_rows > MAX_HISTORY_OFFSET_ROWS {
+        return Err(UiCodecError::InvalidHistoryOffset);
+    }
+    let (bitmap, bitmap_len) = encode_wrap_bitmap(target, screen_revision, &checkpoint, wraps)?;
+    let bitmap = bitmap.expect("bitmap is present when wrap flags are supplied");
+    let mut prefix = [0_u8; SCREEN_REPLY_HEADER_BYTES];
+    put_header(&mut prefix, KIND_HISTORY_REPLY);
+    put_target(&mut prefix, 4, target);
+    put_u64(&mut prefix, 44, screen_revision);
+    put_u16(&mut prefix, 52, offset_rows);
+    put_u16(
+        &mut prefix,
+        54,
+        u16::from(alternate_screen) | (u16::from(mouse_reporting) << 1) | 4,
+    );
+    put_u32(&mut prefix, 56, checkpoint.len() as u32);
+    checkpoint
+        .try_reserve_exact(SCREEN_REPLY_HEADER_BYTES + bitmap_len)
+        .map_err(|_| UiCodecError::PayloadTooLarge)?;
+    checkpoint.splice(0..0, prefix);
+    checkpoint.extend_from_slice(&bitmap[..bitmap_len]);
+    if checkpoint.len() > MAX_HISTORY_REPLY_BYTES {
+        return Err(UiCodecError::PayloadTooLarge);
+    }
+    Ok(checkpoint)
+}
+
 /// Decode and validate one history checkpoint reply.
 pub fn decode_history_reply(bytes: &[u8]) -> Result<HistoryReplyView<'_>, UiCodecError> {
+    decode_history_reply_with_wraps(bytes, false)
+}
+
+/// Decode a HistoryReply when row-wrap capability negotiation is explicit.
+/// A marked trailer is rejected unless `wraps_negotiated` is true.
+pub fn decode_history_reply_with_wraps(
+    bytes: &[u8],
+    wraps_negotiated: bool,
+) -> Result<HistoryReplyView<'_>, UiCodecError> {
     if bytes.len() > MAX_HISTORY_REPLY_BYTES {
         return Err(UiCodecError::PayloadTooLarge);
     }
@@ -1090,14 +1259,35 @@ pub fn decode_history_reply(bytes: &[u8]) -> Result<HistoryReplyView<'_>, UiCode
         return Err(UiCodecError::InvalidHistoryOffset);
     }
     let flags = read_u16(bytes, 54);
-    if flags & !0b11 != 0 {
+    if flags & !0b111 != 0 {
+        return Err(UiCodecError::InvalidStatus);
+    }
+    let has_wraps = flags & 4 != 0;
+    if has_wraps && !wraps_negotiated {
         return Err(UiCodecError::InvalidStatus);
     }
     let checkpoint_len = read_u32(bytes, 56) as usize;
     zero(&bytes[60..SCREEN_REPLY_HEADER_BYTES])?;
-    exact_size(bytes, SCREEN_REPLY_HEADER_BYTES + checkpoint_len)?;
-    let checkpoint = &bytes[SCREEN_REPLY_HEADER_BYTES..];
+    let checkpoint_end = SCREEN_REPLY_HEADER_BYTES
+        .checked_add(checkpoint_len)
+        .ok_or(UiCodecError::PayloadTooLarge)?;
+    if bytes.len() < checkpoint_end {
+        return Err(UiCodecError::Truncated);
+    }
+    let checkpoint = &bytes[SCREEN_REPLY_HEADER_BYTES..checkpoint_end];
     validate_checkpoint(target, screen_revision, checkpoint)?;
+    let rows = crate::screen_checkpoint::decode(checkpoint)
+        .map_err(|_| UiCodecError::InvalidCheckpoint)?
+        .rows();
+    let wraps = if has_wraps {
+        let bitmap_len = wrap_bitmap_len(rows)?;
+        exact_size(bytes, checkpoint_end + bitmap_len)?;
+        validate_wrap_bitmap(&bytes[checkpoint_end..], rows)?;
+        Some(&bytes[checkpoint_end..])
+    } else {
+        exact_size(bytes, checkpoint_end)?;
+        None
+    };
     Ok(HistoryReplyView {
         target,
         screen_revision,
@@ -1105,6 +1295,8 @@ pub fn decode_history_reply(bytes: &[u8]) -> Result<HistoryReplyView<'_>, UiCode
         alternate_screen: flags & 1 != 0,
         mouse_reporting: flags & 2 != 0,
         checkpoint,
+        rows,
+        wraps,
     })
 }
 
@@ -1195,6 +1387,58 @@ fn validate_checkpoint(
     let metadata = decoded.metadata();
     if metadata.target() != target || metadata.screen_revision() != screen_revision {
         return Err(UiCodecError::InvalidCheckpoint);
+    }
+    Ok(())
+}
+
+fn encode_wrap_bitmap(
+    target: TargetRef,
+    screen_revision: u64,
+    checkpoint: &[u8],
+    wraps: Option<&[bool]>,
+) -> Result<(Option<[u8; MAX_ROW_WRAP_BITMAP_BYTES]>, usize), UiCodecError> {
+    let Some(wraps) = wraps else {
+        return Ok((None, 0));
+    };
+    validate_checkpoint(target, screen_revision, checkpoint)?;
+    let rows = crate::screen_checkpoint::decode(checkpoint)
+        .map_err(|_| UiCodecError::InvalidCheckpoint)?
+        .rows();
+    if wraps.len() != usize::from(rows) {
+        return Err(UiCodecError::InvalidDimensions);
+    }
+    let bitmap_len = wrap_bitmap_len(rows)?;
+    let mut bitmap = [0_u8; MAX_ROW_WRAP_BITMAP_BYTES];
+    for (row, wrapped) in wraps.iter().copied().enumerate() {
+        if wrapped {
+            bitmap[row / 8] |= 1 << (row % 8);
+        }
+    }
+    Ok((Some(bitmap), bitmap_len))
+}
+
+fn wrap_bitmap_len(rows: u16) -> Result<usize, UiCodecError> {
+    if rows == 0 || rows > MAX_PANE_ROWS {
+        return Err(UiCodecError::InvalidDimensions);
+    }
+    Ok(usize::from(rows).div_ceil(8))
+}
+
+fn validate_wrap_bitmap(bitmap: &[u8], rows: u16) -> Result<(), UiCodecError> {
+    let expected = wrap_bitmap_len(rows)?;
+    if bitmap.len() != expected {
+        return Err(if bitmap.len() < expected {
+            UiCodecError::Truncated
+        } else {
+            UiCodecError::TrailingBytes
+        });
+    }
+    let used_last_bits = rows % 8;
+    if used_last_bits != 0 {
+        let allowed = (1_u8 << used_last_bits) - 1;
+        if bitmap[expected - 1] & !allowed != 0 {
+            return Err(UiCodecError::NonzeroReserved);
+        }
     }
     Ok(())
 }
@@ -1675,6 +1919,16 @@ mod tests {
         encode_checkpoint(&snapshot, &metadata).unwrap()
     }
 
+    fn checkpoint_rows(target: TargetRef, revision: u64, rows: u16) -> Vec<u8> {
+        checkpoint_geometry(target, revision, rows, 20)
+    }
+
+    fn checkpoint_geometry(target: TargetRef, revision: u64, rows: u16, columns: u16) -> Vec<u8> {
+        let snapshot = ScreenSnapshot::try_new(TerminalSize::new(rows, columns).unwrap()).unwrap();
+        let metadata = CheckpointMetadata::new(target, 0, 1, revision).unwrap();
+        encode_checkpoint(&snapshot, &metadata).unwrap()
+    }
+
     #[test]
     fn golden_request_bytes() {
         assert_eq!(hex(&encode_layout_query()), "0008000100000000");
@@ -2083,6 +2337,199 @@ mod tests {
             decode_history_reply(&bad_target),
             Err(UiCodecError::InvalidCheckpoint)
         );
+    }
+
+    #[test]
+    fn wrap_bitmap_round_trips_supported_row_counts_and_legacy_bytes() {
+        assert_eq!(wrap_bitmap_len(1), Ok(1));
+        assert_eq!(wrap_bitmap_len(8), Ok(1));
+        assert_eq!(wrap_bitmap_len(9), Ok(2));
+        assert_eq!(wrap_bitmap_len(80), Ok(10));
+
+        for rows in [5, 8, 9, 80] {
+            let record = checkpoint_rows(TARGET, 9, rows);
+            let flags: Vec<_> = (0..rows).map(|row| row % 3 == 1).collect();
+            let legacy_screen = prefix_screen_reply(TARGET, 9, record.clone()).unwrap();
+            let screen_none =
+                prefix_screen_reply_with_wraps(TARGET, 9, record.clone(), None).unwrap();
+            assert_eq!(screen_none, legacy_screen);
+            let screen =
+                prefix_screen_reply_with_wraps(TARGET, 9, record.clone(), Some(&flags)).unwrap();
+            assert!(screen.len() <= MAX_SCREEN_REPLY_BYTES);
+            assert_eq!(
+                screen.len(),
+                legacy_screen.len() + usize::from(rows).div_ceil(8)
+            );
+            assert_eq!(
+                decode_screen_reply(&screen),
+                Err(UiCodecError::InvalidStatus)
+            );
+            let screen_view = decode_screen_reply_with_wraps(&screen, true).unwrap();
+            assert!(screen_view.wrap_metadata_available());
+            assert_eq!(screen_view.checkpoint(), record.as_slice());
+            for row in 0..rows {
+                assert_eq!(screen_view.row_wrapped(row), Some(flags[usize::from(row)]));
+            }
+            assert_eq!(screen_view.row_wrapped(rows), None);
+            assert_eq!(
+                decode_screen_reply(&legacy_screen).unwrap().row_wrapped(0),
+                None
+            );
+
+            let legacy_history =
+                prefix_history_reply(TARGET, 9, 3, true, false, record.clone()).unwrap();
+            let history_none =
+                prefix_history_reply_with_wraps(TARGET, 9, 3, true, false, record.clone(), None)
+                    .unwrap();
+            assert_eq!(history_none, legacy_history);
+            let history = prefix_history_reply_with_wraps(
+                TARGET,
+                9,
+                3,
+                true,
+                false,
+                record.clone(),
+                Some(&flags),
+            )
+            .unwrap();
+            assert!(history.len() <= MAX_HISTORY_REPLY_BYTES);
+            let history_view = decode_history_reply_with_wraps(&history, true).unwrap();
+            assert!(history_view.alternate_screen());
+            assert!(!history_view.mouse_reporting());
+            assert!(history_view.wrap_metadata_available());
+            assert_eq!(history_view.checkpoint(), record.as_slice());
+            for row in 0..rows {
+                assert_eq!(history_view.row_wrapped(row), Some(flags[usize::from(row)]));
+            }
+            assert_eq!(
+                decode_history_reply(&legacy_history)
+                    .unwrap()
+                    .row_wrapped(0),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_replies_reject_noncanonical_or_unnegotiated_trailers() {
+        let record = checkpoint(TARGET, 9);
+        let flags = [true, false, true, false, true];
+        let screen =
+            prefix_screen_reply_with_wraps(TARGET, 9, record.clone(), Some(&flags)).unwrap();
+        assert_eq!(
+            decode_screen_reply_with_wraps(&screen, false),
+            Err(UiCodecError::InvalidStatus)
+        );
+
+        let mut bad_screen = screen.clone();
+        bad_screen[57] |= 2;
+        assert_eq!(
+            decode_screen_reply_with_wraps(&bad_screen, true),
+            Err(UiCodecError::NonzeroReserved)
+        );
+        let mut bad_padding = screen.clone();
+        *bad_padding.last_mut().unwrap() |= 0b1000_0000;
+        assert_eq!(
+            decode_screen_reply_with_wraps(&bad_padding, true),
+            Err(UiCodecError::NonzeroReserved)
+        );
+        let mut truncated = screen.clone();
+        truncated.pop();
+        assert_eq!(
+            decode_screen_reply_with_wraps(&truncated, true),
+            Err(UiCodecError::Truncated)
+        );
+        let mut trailing = screen.clone();
+        trailing.push(0);
+        assert_eq!(
+            decode_screen_reply_with_wraps(&trailing, true),
+            Err(UiCodecError::TrailingBytes)
+        );
+
+        let history =
+            prefix_history_reply_with_wraps(TARGET, 9, 0, false, true, record, Some(&flags))
+                .unwrap();
+        assert_eq!(
+            decode_history_reply(&history),
+            Err(UiCodecError::InvalidStatus)
+        );
+        let mut bad_history_flags = history.clone();
+        bad_history_flags[55] |= 0x80;
+        assert_eq!(
+            decode_history_reply_with_wraps(&bad_history_flags, true),
+            Err(UiCodecError::InvalidStatus)
+        );
+        let mut bad_history_padding = history;
+        *bad_history_padding.last_mut().unwrap() |= 0b1000_0000;
+        assert_eq!(
+            decode_history_reply_with_wraps(&bad_history_padding, true),
+            Err(UiCodecError::NonzeroReserved)
+        );
+    }
+
+    #[test]
+    fn wrap_builders_require_exact_checkpoint_derived_row_count() {
+        let record = checkpoint(TARGET, 9);
+        assert_eq!(
+            prefix_screen_reply_with_wraps(TARGET, 9, record.clone(), Some(&[false; 4])),
+            Err(UiCodecError::InvalidDimensions)
+        );
+        assert_eq!(
+            prefix_history_reply_with_wraps(TARGET, 9, 0, false, false, record, Some(&[false; 6])),
+            Err(UiCodecError::InvalidDimensions)
+        );
+    }
+
+    #[test]
+    fn maximum_wrap_replies_reach_the_extended_bound() {
+        assert_eq!(
+            MAX_SCREEN_REPLY_BYTES,
+            SCREEN_REPLY_HEADER_BYTES
+                + crate::screen_checkpoint::MAX_SCREEN_CHECKPOINT_BYTES
+                + MAX_ROW_WRAP_BITMAP_BYTES
+        );
+        assert_eq!(MAX_HISTORY_REPLY_BYTES, MAX_SCREEN_REPLY_BYTES);
+        let record = checkpoint_geometry(TARGET, 9, MAX_PANE_ROWS, MAX_PANE_COLUMNS);
+        assert_eq!(
+            record.len(),
+            crate::screen_checkpoint::MAX_SCREEN_CHECKPOINT_BYTES
+        );
+        let wraps = [true; MAX_PANE_ROWS as usize];
+        let screen =
+            prefix_screen_reply_with_wraps(TARGET, 9, record.clone(), Some(&wraps)).unwrap();
+        assert_eq!(screen.len(), MAX_SCREEN_REPLY_BYTES);
+        assert_eq!(
+            decode_screen_reply_with_wraps(&screen, true)
+                .unwrap()
+                .row_wrapped(79),
+            Some(true)
+        );
+        let history =
+            prefix_history_reply_with_wraps(TARGET, 9, 0, false, false, record, Some(&wraps))
+                .unwrap();
+        assert_eq!(history.len(), MAX_HISTORY_REPLY_BYTES);
+        assert_eq!(
+            decode_history_reply_with_wraps(&history, true)
+                .unwrap()
+                .row_wrapped(79),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn random_malformed_wrap_payloads_are_rejected_without_panics() {
+        let mut state = 0x8d26_4f13_u32;
+        for length in 0..256 {
+            let mut bytes = Vec::with_capacity(length);
+            for _ in 0..length {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                bytes.push(state as u8);
+            }
+            assert!(decode_screen_reply_with_wraps(&bytes, true).is_err());
+            assert!(decode_history_reply_with_wraps(&bytes, true).is_err());
+        }
     }
 
     #[test]
