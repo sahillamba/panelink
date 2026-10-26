@@ -50,6 +50,7 @@ const SCENARIO_DEADLINE: Duration = Duration::from_secs(50);
 const ROOT_ROWS: u16 = 40;
 const ROOT_COLUMNS: u16 = 120;
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+static NEXT_NONCE: AtomicU64 = AtomicU64::new(10_000);
 
 struct PrivateDir(PathBuf);
 
@@ -113,6 +114,7 @@ fn zsh_arguments(marker: &str) -> Vec<OsString> {
 struct Client {
     stream: AuthenticatedStream,
     welcome: Welcome,
+    target: Option<TargetRef>,
     next_request: u64,
     next_sequence: u64,
 }
@@ -345,9 +347,31 @@ fn handshake_resumed(
     Client {
         stream,
         welcome,
+        target,
         next_request: 0,
         next_sequence: 0,
     }
+}
+
+fn resume_client(driver: &mut MultiServerDriver, started: Instant, client: &mut Client) {
+    let previous = client.welcome;
+    let sequence = client.next_sequence;
+    let nonce = NEXT_NONCE.fetch_add(1, Ordering::Relaxed);
+    let link = connect(driver, client.target, nonce);
+    let mut resumed = drive(driver, started, move || {
+        handshake_resumed(
+            link,
+            true,
+            Some(panelink::session_protocol::LeaseRef {
+                generation: previous.generation,
+                lease: previous.lease,
+            }),
+        )
+    });
+    assert_eq!(resumed.welcome.generation, previous.generation);
+    assert_eq!(resumed.welcome.lease, previous.lease);
+    resumed.next_sequence = sequence;
+    *client = resumed;
 }
 
 fn drive<T: Send>(
@@ -643,6 +667,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
         (client, pid)
     });
 
+    resume_client(&mut driver, started, &mut first_client);
     let (one_back, third) = drive(&mut driver, started, move || {
         let mut client = first_client;
         let layout = client.layout();
@@ -669,6 +694,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
         (client, pid)
     });
 
+    resume_client(&mut driver, started, &mut second_client);
     let (second_client, fourth) = drive(&mut driver, started, move || {
         let layout = second_client.layout();
         let (_, split_four) = split_payload(
@@ -710,6 +736,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
         .enumerate()
     {
         let pid = pids[index];
+        resume_client(&mut driver, started, client);
         drive(&mut driver, started, move || {
             client.claim(target);
             let state = format!("S{index}-{pid}");
@@ -725,6 +752,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
         });
     }
 
+    resume_client(&mut driver, started, &mut first_client);
     let initial = drive(&mut driver, started, move || {
         let view = first_client.pane_view();
         assert_eq!(view.layout.revision, 4);
@@ -763,10 +791,12 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
             client.welcome.selected_capabilities & CAPABILITY_PANE_OPERATIONS,
             CAPABILITY_PANE_OPERATIONS
         );
+        resume_client(&mut driver, started, client);
         let current = drive(&mut driver, started, move || client.pane_view());
         assert_eq!(target_set(&current), initial_target_set);
         assert_eq!(current.layout.revision, expected_revision, "client {index}");
     }
+    resume_client(&mut driver, started, &mut first_client);
     let (unchanged, first_client_back) = drive(&mut driver, started, move || {
         let unchanged = first_client.pane_view();
         (unchanged, first_client)
@@ -790,6 +820,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
             content,
             "owner reports the size measured from the actual PTY"
         );
+        resume_client(&mut driver, started, client);
         drive(&mut driver, started, move || {
             assert_size_command(client, target, &format!("base-{index}"), content);
         });
@@ -810,6 +841,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
     let swap_bytes = encode_request(&swap).unwrap();
     let first_swap_bytes = swap_bytes.clone();
     let swap_expected_revision = view.layout.revision;
+    resume_client(&mut driver, started, &mut first_client);
     let swapped = drive(&mut driver, started, move || {
         assert_eq!(
             status(&first_client.request(&first_swap_bytes), swap_key),
@@ -860,11 +892,13 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
     {
         let size = content_size(&view.layout, target);
         assert_eq!(confirmed_size(&view, target), size);
+        resume_client(&mut driver, started, client);
         drive(&mut driver, started, move || {
             assert_size_command(client, target, &format!("swap-{index}"), size);
         });
     }
     let swapped_revision = view.layout.revision;
+    resume_client(&mut driver, started, &mut first_client);
     let duplicate = drive(&mut driver, started, move || {
         assert_eq!(
             status(&first_client.request(&swap_bytes), swap_key),
@@ -901,6 +935,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
         divider_index: 0,
         first_cells: 31,
     });
+    resume_client(&mut driver, started, &mut first_client);
     let divider_after = drive(&mut driver, started, move || {
         assert_eq!(
             operation_status(&mut first_client, divider_request, divider_key),
@@ -924,6 +959,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
     {
         let size = content_size(&view.layout, target);
         assert_eq!(confirmed_size(&view, target), size);
+        resume_client(&mut driver, started, client);
         drive(&mut driver, started, move || {
             assert_size_command(client, target, &format!("divider-{index}"), size);
         });
@@ -937,6 +973,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
         .enumerate()
     {
         let pid = pids[index];
+        resume_client(&mut driver, started, client);
         drive(&mut driver, started, move || {
             assert_state_marker(client, target, index, pid, "after-swap");
         });
@@ -957,6 +994,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
     let zoom_bytes = encode_request(&zoom_request).unwrap();
     let before_zoom = view;
     let underlying = view.layout;
+    resume_client(&mut driver, started, &mut first_client);
     let zoomed = drive(&mut driver, started, move || {
         assert_eq!(
             status(&first_client.request(&zoom_bytes), zoom_key),
@@ -985,6 +1023,11 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
     }
     // Start the bounded producer only after the authoritative zoom view is
     // received, so its output is proven to arrive while this pane is hidden.
+    resume_client(
+        &mut driver,
+        started,
+        client_at(&mut first_client, &mut clients, hidden_index),
+    );
     let (first_client_back, clients_back) = drive(&mut driver, started, move || {
         let hidden_client = client_at(&mut first_client, &mut clients, hidden_index);
         assert_eq!(
@@ -1008,6 +1051,11 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
         .iter()
         .position(|target| *target == zoom_target)
         .unwrap();
+    resume_client(
+        &mut driver,
+        started,
+        client_at(&mut first_client, &mut clients, zoom_owner_index),
+    );
     let (first_client_back, clients_back) = drive(&mut driver, started, move || {
         assert_size_command(
             client_at(&mut first_client, &mut clients, zoom_owner_index),
@@ -1030,6 +1078,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
         columns: ROOT_COLUMNS + 4,
     })
     .unwrap();
+    resume_client(&mut driver, started, &mut first_client);
     let resized = drive(&mut driver, started, move || {
         let result = decode_resize_reply(&first_client.request(&resize_bytes)).unwrap();
         assert_eq!(result.status, ResizeStatus::Applied);
@@ -1061,6 +1110,11 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
         columns: ROOT_COLUMNS + 4,
     })
     .unwrap();
+    resume_client(
+        &mut driver,
+        started,
+        client_at(&mut first_client, &mut clients, zoom_owner_index),
+    );
     let (first_client_back, clients_back) = drive(&mut driver, started, move || {
         assert_size_command(
             client_at(&mut first_client, &mut clients, zoom_owner_index),
@@ -1080,6 +1134,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
         target: zoom_target,
         zoomed: false,
     });
+    resume_client(&mut driver, started, &mut first_client);
     let unzoomed = drive(&mut driver, started, move || {
         assert_eq!(
             operation_status(&mut first_client, unzoom_request, unzoom_key),
@@ -1111,24 +1166,7 @@ fn four_real_ptys_keep_processes_state_and_output_through_swap_divider_zoom_and_
         // Inactive fixture sockets can exceed the production one-second read
         // deadline while another pane is tested. Resume the same lease and
         // preserve its next sequence; never replay an operation or input.
-        let link = connect(&mut driver, Some(target), 900 + index as u64);
-        let client = drive(&mut driver, started, move || {
-            let previous = client.welcome;
-            let sequence = client.next_sequence;
-            let mut resumed = handshake_resumed(
-                link,
-                true,
-                Some(panelink::session_protocol::LeaseRef {
-                    generation: previous.generation,
-                    lease: previous.lease,
-                }),
-            );
-            assert_eq!(resumed.welcome.generation, previous.generation);
-            assert_eq!(resumed.welcome.lease, previous.lease);
-            resumed.next_sequence = sequence;
-            *client = resumed;
-            client
-        });
+        resume_client(&mut driver, started, client);
         drive(&mut driver, started, move || {
             assert_size_command(client, target, &format!("unzoom-{index}"), content);
             assert_state_marker(client, target, index, pid, "after-unzoom");
