@@ -629,6 +629,16 @@ fn agent_cli_list_read_claim_send_wait_events_close_and_stale_indices() {
         "{changed_wait}"
     );
 
+    let released = Fixture::assert_ok(
+        &fixture.agent(&["pane", "release", "1", "--json"]),
+        "pane release",
+    );
+    assert_eq!(
+        field(&released, "action"),
+        Some("pane_release"),
+        "{released}"
+    );
+
     let exit_waiter = fixture
         .command()
         .args([
@@ -674,16 +684,6 @@ fn agent_cli_list_read_claim_send_wait_events_close_and_stale_indices() {
         );
         eprintln!("L18 exit-status acceptance exercised documented pane-collapse fallback");
     }
-
-    let released = Fixture::assert_ok(
-        &fixture.agent(&["pane", "release", "1", "--json"]),
-        "pane release",
-    );
-    assert_eq!(
-        field(&released, "action"),
-        Some("pane_release"),
-        "{released}"
-    );
 
     let events = fixture
         .command()
