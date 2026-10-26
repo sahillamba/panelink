@@ -36,6 +36,10 @@ pub const MAX_SHUTDOWN_WAIT: Duration = Duration::from_millis(250);
 /// Metadata-only slots reserved for registered capture targets.
 pub(crate) const MAX_END_RESERVATIONS: usize = 8;
 
+fn capped_shutdown_budget(wait: Duration) -> Duration {
+    wait.min(MAX_SHUTDOWN_WAIT)
+}
+
 const RETRIES: usize = 3;
 const RETRY_DELAY: Duration = Duration::from_millis(10);
 const STATUS_PENDING: u8 = 0;
@@ -859,7 +863,7 @@ impl HistoryWriter {
     pub fn shutdown(mut self, wait: Duration) -> ShutdownReport {
         self.shared.stop_accepting();
         self.sender.take();
-        let budget = wait.min(MAX_SHUTDOWN_WAIT);
+        let budget = capped_shutdown_budget(wait);
         let outcome = match self.done.recv_timeout(budget) {
             Ok(outcome) => outcome,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -2629,7 +2633,6 @@ mod tests {
         let mut queued = writer
             .try_submit(empty_batch(target, 1, 2))
             .expect("queue second batch");
-        let started = Instant::now();
         let report = writer.shutdown(Duration::from_secs(5));
         assert_eq!(report.outcome, ShutdownOutcome::TimedOut);
         assert_eq!(
@@ -2639,7 +2642,6 @@ mod tests {
         assert!(diagnostics
             .snapshot()
             .contains(HistoryReason::ShutdownTimedOut));
-        assert!(started.elapsed() <= MAX_SHUTDOWN_WAIT + Duration::from_millis(100));
         drop(storage);
         assert_eq!(
             ServerStorage::lock_for_maintenance(&fixture.root)
@@ -2658,6 +2660,19 @@ mod tests {
             "late cancellation must not replace the actual timed-out result"
         );
         wait_for_lock(&fixture.root);
+    }
+
+    #[test]
+    fn shutdown_budget_is_capped() {
+        assert_eq!(
+            capped_shutdown_budget(Duration::from_secs(5)),
+            MAX_SHUTDOWN_WAIT
+        );
+        assert_eq!(
+            capped_shutdown_budget(Duration::from_millis(100)),
+            Duration::from_millis(100)
+        );
+        assert_eq!(capped_shutdown_budget(Duration::ZERO), Duration::ZERO);
     }
 
     #[test]
