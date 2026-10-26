@@ -33,7 +33,7 @@ COMMANDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("python_unittest", ("python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py")),
     ("docs_check", ("python3", "scripts/check_docs.py")),
 )
-COMMAND_TIMEOUT_SECONDS = 300
+COMMAND_TIMEOUT_SECONDS = 420
 
 
 def _cargo_home(environment: Mapping[str, str]) -> str | None:

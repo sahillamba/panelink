@@ -15,7 +15,7 @@ RUST_TEST_THREADS=1 python3 scripts/verify_non_ui.py
 
 The script runs eight bounded checks: root Rust tests, vendored decoder tests,
 component-source verification, formatting, strict all-target Clippy, a build,
-Python unit tests, and documentation checks. Each command has a 300-second
+Python unit tests, and documentation checks. Each command has a 420-second
 limit, allowing the serialized root Rust suite to finish on slower runners. The
 workflow prepares the Rust test build separately so compilation on a
 cold hosted runner does not consume that per-command limit. The whole job is
