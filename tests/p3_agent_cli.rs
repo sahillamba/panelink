@@ -988,12 +988,12 @@ fn real_cli_workspace_watch_gap_recovers_after_ring_overflow() {
     );
     observer.signal("CONT");
     let status = observer.wait_until(deadline_after(Duration::from_secs(32)));
+    let events = fs::read_to_string(&output_path).expect("read event output after observer exit");
+    let errors = fs::read_to_string(&error_path).expect("read event observer error output");
     assert!(
         status.success(),
-        "event observer exited with {status}: {}",
-        fs::read_to_string(&error_path).expect("read event observer error output")
+        "event observer exited with {status}; stderr: {errors:?}; stdout: {events:?}"
     );
-    let events = fs::read_to_string(&output_path).expect("read complete event output");
     assert_eq!(
         events.matches("\"event\":\"layout_resync\"").count(),
         1,
