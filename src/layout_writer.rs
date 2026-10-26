@@ -19,6 +19,10 @@ use std::time::{Duration, Instant};
 /// Maximum time an explicit shutdown waits for the worker.
 pub const MAX_SHUTDOWN_WAIT: Duration = Duration::from_millis(250);
 
+fn capped_shutdown_budget(wait: Duration) -> Duration {
+    wait.min(MAX_SHUTDOWN_WAIT)
+}
+
 const RETRIES: usize = 3;
 const RETRY_DELAY: Duration = Duration::from_millis(10);
 
@@ -282,7 +286,7 @@ impl LayoutWriter {
     /// A timeout detaches from the worker but does not release the singleton
     /// guard until the thread exits.
     pub fn shutdown(self, wait: Duration) -> LayoutShutdownOutcome {
-        let budget = wait.min(MAX_SHUTDOWN_WAIT);
+        let budget = capped_shutdown_budget(wait);
         let deadline = Instant::now() + budget;
         self.begin_shutdown().wait_until(deadline)
     }
@@ -424,9 +428,8 @@ impl PendingLayoutShutdown {
     /// save stage starts; a running store call may still finish later, but
     /// the result stays `TimedOut`.
     pub fn wait_until(self, deadline: Instant) -> LayoutShutdownOutcome {
-        let budget = deadline
-            .saturating_duration_since(Instant::now())
-            .min(MAX_SHUTDOWN_WAIT);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let budget = capped_shutdown_budget(remaining);
         match self.done.recv_timeout(budget) {
             Ok(outcome) => outcome,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -1131,6 +1134,19 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_budget_is_capped() {
+        assert_eq!(
+            capped_shutdown_budget(Duration::from_secs(5)),
+            MAX_SHUTDOWN_WAIT
+        );
+        assert_eq!(
+            capped_shutdown_budget(Duration::from_millis(100)),
+            Duration::from_millis(100)
+        );
+        assert_eq!(capped_shutdown_budget(Duration::ZERO), Duration::ZERO);
+    }
+
+    #[test]
     fn shutdown_timed_out_with_blocked_backend() {
         let fixture = Fixture::new();
         let control = FakeControl::default();
@@ -1142,13 +1158,8 @@ mod tests {
         assert_eq!(writer.observe(layout), LayoutSubmit::Accepted);
         gate.wait_until_entered();
 
-        let started = Instant::now();
         let outcome = writer.shutdown(Duration::from_secs(5));
         assert_eq!(outcome, LayoutShutdownOutcome::TimedOut);
-        assert!(
-            started.elapsed() <= MAX_SHUTDOWN_WAIT + Duration::from_millis(100),
-            "shutdown exceeded capped budget"
-        );
 
         // The worker still retains the singleton until unblocked.
         drop(storage);

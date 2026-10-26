@@ -1023,9 +1023,11 @@ def fresh_child_modal_rows(markers: dict[str, Any], *, filtered: bool,
                 return False
             query_points = [point for point in filter_query
                             if isinstance(point, list) and len(point) == 2
-                            and all(isinstance(value, int) for value in point)]
-            # The query must occur once in the search field and once in the
-            # sole result. Any other occurrence makes activation ambiguous.
+                            and all(isinstance(value, int) for value in point)
+                            and point[0] > heading_row]
+            # Within the modal, the query must occur once in the search field
+            # and once in the sole result. Header text above the modal is not
+            # picker content; any extra in-modal occurrence remains ambiguous.
             if exact_session_query:
                 if (markers.get("filter_query_is_fixture_session_id") is not True
                         or not isinstance(sessions_category, list)

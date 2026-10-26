@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -106,20 +107,55 @@ class PanelinkProviderBridgeProbeTests(unittest.TestCase):
     def test_managed_attach_pump_drains_while_main_callback_blocks(self) -> None:
         with tempfile.TemporaryDirectory(prefix="panelink-p4-drain-pump-") as temporary:
             root = Path(temporary)
+            child_ready = root / "child-ready"
+            child_release = root / "child-release"
             attach = PanelinkAttachPty(
                 ["/bin/sh", "-c",
-                 'i=0; while [ "$i" -lt 8 ]; do printf x; /bin/sleep 0.03; i=$((i+1)); done'],
-                root, {"PATH": os.defpath, "HOME": str(root), "LANG": "C"}, root,
+                 'printf ready > "$PANELINK_TEST_READY"; '
+                 'while [ ! -f "$PANELINK_TEST_RELEASE" ]; do /bin/sleep 0.01; done; '
+                 'i=0; while [ "$i" -lt 8 ]; do printf x; i=$((i+1)); done'],
+                root, {"PATH": os.defpath, "HOME": str(root), "LANG": "C",
+                       "PANELINK_TEST_READY": str(child_ready),
+                       "PANELINK_TEST_RELEASE": str(child_release)}, root,
             )
+            callback_entered = threading.Event()
+            callback_released = threading.Event()
+            pump_observed_all = threading.Event()
+
+            def observe_pump_during_callback() -> None:
+                if not callback_entered.wait(2.0):
+                    return
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    output, _total_bytes = attach.output_snapshot()
+                    if output.count(b"x") >= 8:
+                        pump_observed_all.set()
+                        callback_released.set()
+                        return
+                    time.sleep(0.005)
+
+            observer = threading.Thread(target=observe_pump_during_callback, daemon=True)
+            observer.start()
             try:
+                ready_deadline = time.monotonic() + 2.0
+                while time.monotonic() < ready_deadline and not child_ready.exists():
+                    time.sleep(0.005)
+                self.assertTrue(child_ready.exists(), "PTY child did not reach its output gate")
                 # Simulate a blocking control-read/API callback on the owner
-                # thread. The independent PTY reader must keep draining.
-                time.sleep(0.45)
+                # thread. The independent PTY reader must drain all output
+                # before the callback is allowed to return.
+                callback_entered.set()
+                child_release.write_text("release\n", encoding="ascii")
+                self.assertTrue(callback_released.wait(2.0), "pump did not drain during callback")
+                self.assertTrue(pump_observed_all.is_set())
                 output, total_bytes = attach.output_snapshot()
                 self.assertGreaterEqual(total_bytes, 8)
                 self.assertGreaterEqual(output.count(b"x"), 8)
                 self.assertLessEqual(len(output), 512 * 1024)
             finally:
+                child_release.touch(exist_ok=True)
+                callback_released.set()
+                observer.join(timeout=2.0)
                 attach.close()
             self.assertFalse(attach._pump_thread.is_alive())
 

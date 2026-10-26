@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn process_fixture_blocked_stdin_times_out_and_is_reaped() {
-        let fixture = Fixture::new("exec /usr/bin/sleep 30");
+        let fixture = Fixture::new("exec /bin/sleep 30");
         let writer = ClipboardWriter::start(fixture.sink(Duration::from_millis(120))).unwrap();
         writer.try_send("x".repeat(MAX_SELECTION_BYTES)).unwrap();
         assert_eq!(
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn shutdown_cancels_active_process_and_discards_queued_write() {
-        let fixture = Fixture::new("exec /usr/bin/sleep 30");
+        let fixture = Fixture::new("exec /bin/sleep 30");
         let mut writer = ClipboardWriter::start(fixture.sink(Duration::from_secs(5))).unwrap();
         writer.try_send("x".repeat(MAX_SELECTION_BYTES)).unwrap();
         let start = Instant::now();
