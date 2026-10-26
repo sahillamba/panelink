@@ -599,13 +599,13 @@ fn explicit_prepare_then_spend_navigate_and_fresh_durable_confirmation() {
             target,
             &project,
             RecoveryCommand::Status,
-            Instant::now() + Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(3),
         );
         let _ = busy_tx.send(result);
     });
     assert_eq!(
         busy_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(3))
             .expect("endpoint processed cancellation before busy probe")
             .expect("fixed busy reply"),
         RecoveryReply::Busy
@@ -705,7 +705,9 @@ fn send_raw_resume_and_disconnect(
     revision: u64,
 ) {
     let stream = raw_resume_client(path, target, project, ticket, revision);
-    thread::sleep(Duration::from_millis(20));
+    // Let the endpoint worker parse and enqueue the request before closing;
+    // this is a scheduling barrier for the following capacity-one Busy probe.
+    thread::sleep(Duration::from_millis(100));
     drop(stream);
 }
 

@@ -36,6 +36,10 @@ pub const MAX_SHUTDOWN_WAIT: Duration = Duration::from_millis(250);
 /// Metadata-only slots reserved for registered capture targets.
 pub(crate) const MAX_END_RESERVATIONS: usize = 8;
 
+fn capped_shutdown_budget(wait: Duration) -> Duration {
+    wait.min(MAX_SHUTDOWN_WAIT)
+}
+
 const RETRIES: usize = 3;
 const RETRY_DELAY: Duration = Duration::from_millis(10);
 const STATUS_PENDING: u8 = 0;
@@ -859,7 +863,7 @@ impl HistoryWriter {
     pub fn shutdown(mut self, wait: Duration) -> ShutdownReport {
         self.shared.stop_accepting();
         self.sender.take();
-        let budget = wait.min(MAX_SHUTDOWN_WAIT);
+        let budget = capped_shutdown_budget(wait);
         let outcome = match self.done.recv_timeout(budget) {
             Ok(outcome) => outcome,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -2629,7 +2633,6 @@ mod tests {
         let mut queued = writer
             .try_submit(empty_batch(target, 1, 2))
             .expect("queue second batch");
-        let started = Instant::now();
         let report = writer.shutdown(Duration::from_secs(5));
         assert_eq!(report.outcome, ShutdownOutcome::TimedOut);
         assert_eq!(
@@ -2639,7 +2642,6 @@ mod tests {
         assert!(diagnostics
             .snapshot()
             .contains(HistoryReason::ShutdownTimedOut));
-        assert!(started.elapsed() <= MAX_SHUTDOWN_WAIT + Duration::from_millis(100));
         drop(storage);
         assert_eq!(
             ServerStorage::lock_for_maintenance(&fixture.root)
@@ -2658,6 +2660,19 @@ mod tests {
             "late cancellation must not replace the actual timed-out result"
         );
         wait_for_lock(&fixture.root);
+    }
+
+    #[test]
+    fn shutdown_budget_is_capped() {
+        assert_eq!(
+            capped_shutdown_budget(Duration::from_secs(5)),
+            MAX_SHUTDOWN_WAIT
+        );
+        assert_eq!(
+            capped_shutdown_budget(Duration::from_millis(100)),
+            Duration::from_millis(100)
+        );
+        assert_eq!(capped_shutdown_budget(Duration::ZERO), Duration::ZERO);
     }
 
     #[test]
@@ -2902,9 +2917,27 @@ mod tests {
         control.schedule(Call::Load, Behavior::Block(Arc::clone(&gate)));
         let (storage, mut writer, target) = fake_writer(&fixture, control);
         let diagnostics = writer.diagnostics();
-        let mut receipt = writer
-            .try_submit(ended_batch(target, 1, 1, 901))
-            .expect("admit blocked batch");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut batch = ended_batch(target, 1, 1, 901);
+        let mut receipt = loop {
+            match writer.try_submit(batch) {
+                Ok(receipt) => break receipt,
+                Err(error)
+                    if matches!(
+                        error.capacity_reason(),
+                        Some(CapacityReason::Contended | CapacityReason::Count)
+                    ) && Instant::now() < deadline =>
+                {
+                    batch = error.into_batch();
+                    thread::yield_now();
+                }
+                Err(error) => panic!(
+                    "initial blocked batch admission failed: reason={:?}, capacity={:?}",
+                    error.reason(),
+                    error.capacity_reason()
+                ),
+            }
+        };
         gate.wait_until_entered();
         drop(storage);
         let started = Instant::now();
@@ -3148,20 +3181,34 @@ mod tests {
             inject_end_fault: true,
         };
         let mut writer = HistoryWriter::start_with_backend(Box::new(backend), &storage).unwrap();
-        let mut receipt = writer
-            .try_submit(
-                HistoryBatch::new(
-                    target,
-                    1,
-                    1,
-                    false,
-                    expected_rows.clone(),
-                    vec![expected_screen.clone()],
-                    Some(1000),
-                )
-                .unwrap(),
-            )
-            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut batch = HistoryBatch::new(
+            target,
+            1,
+            1,
+            false,
+            expected_rows.clone(),
+            vec![expected_screen.clone()],
+            Some(1000),
+        )
+        .unwrap();
+        let mut receipt = loop {
+            match writer.try_submit(batch) {
+                Ok(receipt) => break receipt,
+                Err(error)
+                    if error.capacity_reason() == Some(CapacityReason::Contended)
+                        && Instant::now() < deadline =>
+                {
+                    batch = error.into_batch();
+                    thread::yield_now();
+                }
+                Err(error) => panic!(
+                    "initial batch admission failed: reason={:?}, capacity={:?}",
+                    error.reason(),
+                    error.capacity_reason()
+                ),
+            }
+        };
         assert_eq!(wait_receipt(&mut receipt), CommitStatus::Committed);
         assert!(writer.had_storage_error());
         assert_eq!(

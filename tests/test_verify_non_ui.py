@@ -60,7 +60,7 @@ class VerifyNonUITests(unittest.TestCase):
         self.assertEqual([item[0] for item in calls], [command for _, command in expected_commands])
         self.assertTrue(all(item[1] == self.root for item in calls))
         self.assertTrue(all(item[2]["CARGO_HOME"] == calls[0][2]["CARGO_HOME"] for item in calls))
-        self.assertTrue(all(item[3] == 180 for item in calls))
+        self.assertTrue(all(item[3] == verify_non_ui.COMMAND_TIMEOUT_SECONDS for item in calls))
         self.assertEqual([item["status"] for item in summary["checks"]], ["passed"] * 8)
         self.assertTrue(summary["component_verification_only"])
         self.assertFalse(summary["milestones_complete"])
@@ -123,7 +123,7 @@ class VerifyNonUITests(unittest.TestCase):
         secret = "private-token-sentinel"
 
         def runner(_argv, **_kwargs):
-            raise subprocess.TimeoutExpired([secret], 180, output=secret)
+            raise subprocess.TimeoutExpired([secret], verify_non_ui.COMMAND_TIMEOUT_SECONDS, output=secret)
 
         with tempfile.TemporaryDirectory(prefix="private-token-sentinel-") as cargo_home:
             code, summary = verify_non_ui.run_checks(
@@ -183,18 +183,28 @@ class VerifyNonUITests(unittest.TestCase):
     def test_process_timeout_kills_process_group_and_reaps_child(self):
         process = Mock()
         process.pid = 1234
-        process.wait.side_effect = [subprocess.TimeoutExpired(["fixed"], 180), 0]
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(["fixed"], verify_non_ui.COMMAND_TIMEOUT_SECONDS),
+            0,
+        ]
         popen = Mock(return_value=process)
 
         with patch.object(verify_non_ui.os, "killpg") as killpg:
             status = verify_non_ui.run_process(
-                ("fixed",), cwd=self.root, env={}, timeout=180, popen=popen
+                ("fixed",),
+                cwd=self.root,
+                env={},
+                timeout=verify_non_ui.COMMAND_TIMEOUT_SECONDS,
+                popen=popen,
             )
 
         self.assertEqual(status, "timed_out")
         killpg.assert_called_once_with(1234, verify_non_ui.signal.SIGKILL)
         self.assertEqual(process.wait.call_count, 2)
-        self.assertEqual(process.wait.call_args_list[0].kwargs["timeout"], 180)
+        self.assertEqual(
+            process.wait.call_args_list[0].kwargs["timeout"],
+            verify_non_ui.COMMAND_TIMEOUT_SECONDS,
+        )
         self.assertEqual(process.wait.call_args_list[1].kwargs["timeout"], 2)
         self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
@@ -203,12 +213,16 @@ class VerifyNonUITests(unittest.TestCase):
         process = Mock()
         process.pid = 1234
         process.wait.side_effect = [
-            subprocess.TimeoutExpired(["fixed"], 180),
+            subprocess.TimeoutExpired(["fixed"], verify_non_ui.COMMAND_TIMEOUT_SECONDS),
             subprocess.TimeoutExpired(["fixed"], 2),
         ]
         with patch.object(verify_non_ui.os, "killpg"):
             status = verify_non_ui.run_process(
-                ("fixed",), cwd=self.root, env={}, timeout=180, popen=Mock(return_value=process)
+                ("fixed",),
+                cwd=self.root,
+                env={},
+                timeout=verify_non_ui.COMMAND_TIMEOUT_SECONDS,
+                popen=Mock(return_value=process),
             )
 
         self.assertEqual(status, "timed_out_cleanup_incomplete")

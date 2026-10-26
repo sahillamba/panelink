@@ -900,6 +900,23 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
         "sibling expanded: {after_close}"
     );
 
+    // The server layout query can observe the close before the attach client
+    // has received and rendered the new topology. Wait for the old left
+    // divider row to become pane content before clicking using new geometry.
+    let old_left_divider_row = closing
+        .1
+        .y
+        .checked_sub(1)
+        .expect("lower pane has a divider");
+    client.wait_screen("closed left divider removed from client render", |screen| {
+        screen
+            .lines()
+            .nth(usize::from(old_left_divider_row))
+            .and_then(|line| line.chars().next())
+            .is_some_and(|cell| cell != '-')
+    });
+    thread::sleep(Duration::from_millis(300));
+
     let mut after_close_reads = Vec::new();
     for (index, target) in surviving_targets.iter().enumerate() {
         let original_index = pane_targets

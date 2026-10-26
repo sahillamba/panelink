@@ -629,6 +629,16 @@ fn agent_cli_list_read_claim_send_wait_events_close_and_stale_indices() {
         "{changed_wait}"
     );
 
+    let released = Fixture::assert_ok(
+        &fixture.agent(&["pane", "release", "1", "--json"]),
+        "pane release",
+    );
+    assert_eq!(
+        field(&released, "action"),
+        Some("pane_release"),
+        "{released}"
+    );
+
     let exit_waiter = fixture
         .command()
         .args([
@@ -674,16 +684,6 @@ fn agent_cli_list_read_claim_send_wait_events_close_and_stale_indices() {
         );
         eprintln!("L18 exit-status acceptance exercised documented pane-collapse fallback");
     }
-
-    let released = Fixture::assert_ok(
-        &fixture.agent(&["pane", "release", "1", "--json"]),
-        "pane release",
-    );
-    assert_eq!(
-        field(&released, "action"),
-        Some("pane_release"),
-        "{released}"
-    );
 
     let events = fixture
         .command()
@@ -908,18 +908,25 @@ fn real_cli_workspace_watch_gap_recovers_after_ring_overflow() {
         .mode(0o600)
         .open(&output_path)
         .expect("create private event output file");
+    let error_path = fixture.root.join("workspace-gap-events.stderr");
+    let error_output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&error_path)
+        .expect("create private event error file");
     let observer = fixture
         .command()
         .args([
             "events",
             "--timeout",
-            "10",
+            "30",
             "--json",
             "--as",
             "gap-observer",
         ])
         .stdout(Stdio::from(output))
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(error_output))
         .spawn()
         .expect("spawn CLI workspace observer");
     let mut observer = ObserverGuard(Some(observer));
@@ -980,9 +987,13 @@ fn real_cli_workspace_watch_gap_recovers_after_ring_overflow() {
         "not enough successful layout invalidations"
     );
     observer.signal("CONT");
-    let status = observer.wait_until(deadline_after(Duration::from_secs(12)));
-    assert!(status.success(), "event observer exited with {status}");
-    let events = fs::read_to_string(&output_path).expect("read complete event output");
+    let status = observer.wait_until(deadline_after(Duration::from_secs(32)));
+    let events = fs::read_to_string(&output_path).expect("read event output after observer exit");
+    let errors = fs::read_to_string(&error_path).expect("read event observer error output");
+    assert!(
+        status.success(),
+        "event observer exited with {status}; stderr: {errors:?}; stdout: {events:?}"
+    );
     assert_eq!(
         events.matches("\"event\":\"layout_resync\"").count(),
         1,

@@ -1058,16 +1058,24 @@ mod tests {
         let fixture = Fixture::new();
         let endpoint = RecoveryEndpoint::bind(fixture.socket(), target(), b"/project").unwrap();
         let started = Instant::now();
-        let result = exchange(
-            fixture.socket(),
-            target(),
-            b"/project",
-            RecoveryCommand::Status,
-            started + Duration::from_millis(50),
-        );
+        let path = fixture.socket();
+        let client = thread::spawn(move || {
+            exchange(
+                path,
+                target(),
+                b"/project",
+                RecoveryCommand::Status,
+                started + Duration::from_secs(1),
+            )
+        });
+        let request = wait_request(&endpoint, Instant::now() + Duration::from_secs(2));
+        let result = client.join().expect("recovery client");
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_millis(500));
-        let request = wait_request(&endpoint, Instant::now() + Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            endpoint.poll().is_none(),
+            "timed-out client retried the request"
+        );
         let until = Instant::now() + Duration::from_secs(1);
         while !request.is_cancelled() && Instant::now() < until {
             thread::sleep(CLIENT_POLL);

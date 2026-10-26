@@ -1247,6 +1247,7 @@ fn workspace_open_pane_operations_acceptance_uses_attached_keyboard_and_live_pty
     wait_root_shell_prompt(&client);
     client.type_shell("stty size; printf 'P5SAZ\\n'");
     wait_whole_root_marker(&client, "P5SAZ");
+    wait_root_shell_prompt(&client);
     let zoomed = client.parser();
     assert_eq!(
         pane_size_before_marker(&zoomed, whole_root_cells(), "P5SAZ"),
@@ -1267,7 +1268,9 @@ fn workspace_open_pane_operations_acceptance_uses_attached_keyboard_and_live_pty
     assert!(
         usize::from(cursor_column) >= whole_root_cells().left
             && usize::from(cursor_column) < whole_root_cells().right,
-        "zoomed cursor stays within the root width"
+        "zoomed cursor stays within root content: column={cursor_column}, bounds={}..{}, terminal_columns={COLUMNS}",
+        whole_root_cells().left,
+        whole_root_cells().right
     );
 
     // Unzoom, then open the visible swap chooser. The short comment is a
