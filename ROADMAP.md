@@ -1,5 +1,10 @@
 # Panelink implementation roadmap
 
+CI setup (2026-10-24): standard GitHub-hosted Apple Silicon validation and
+weekly dependency-update proposals are configured locally. Hosted execution
+and required-check activation remain pending publication; see
+[CI.md](docs/CI.md). This does not change the product phase gates below.
+
 ```text
 current-phase: Phase3/Phase5 resumed; bounded tabs/copy/pane operations automated verified. FullRust1399/0/15ignored, finalclient123/0, outerPTY3/0 and all7support checks. Phase4 scoped completion retained; host/clipboard/reboot/workload gates remain open.
 last-updated: 2026-10-26

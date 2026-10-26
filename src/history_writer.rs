@@ -2180,6 +2180,9 @@ mod tests {
         let control = FakeControl::default();
         let (_storage, mut writer, target) = fake_writer(&fixture, control.clone());
         let mut first = writer.try_submit(empty_batch(target, 1, 1)).unwrap();
+        // This tests same-epoch storage work, not concurrent admission. Wait
+        // for the first commit before reusing the bounded queue's only slot.
+        assert_eq!(wait_receipt(&mut first), CommitStatus::Committed);
         let mut second = writer.try_submit(empty_batch(target, 1, 2)).unwrap();
         assert_eq!(wait_receipt(&mut second), CommitStatus::Committed);
         assert_eq!(wait_receipt(&mut first), CommitStatus::Committed);

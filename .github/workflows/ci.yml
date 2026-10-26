@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Public fork PRs execute untrusted code. No write token or repository secrets.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    name: macOS arm64 verification
+    # Standard GitHub-hosted runner; public repositories receive free compute.
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_TEST_THREADS: '1'
+      # Keep generated files out of vendor source/release fingerprints.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+
+      - name: Set up pinned Rust and record environment
+        id: toolchain
+        run: |
+          mkdir -p ci-results
+          test "$(uname -m)" = arm64
+          rustup show active-toolchain
+          rustc -vV | tee ci-results/rustc.txt
+          cargo --version
+          python3 --version
+          sw_vers
+          git rev-parse HEAD > ci-results/commit.txt
+          printf 'version=%s\n' "$(rustc --version | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}-${{ hashFiles('Cargo.lock', 'vendor/**/Cargo.lock') }}
+
+      - name: Cache Rust build outputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/ci
+          key: cargo-build-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'vendor/**') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-build-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'vendor/**') }}-
+
+      - name: Fetch locked dependencies
+        run: |
+          cargo fetch --locked 2>&1 | tee ci-results/fetch-root.log
+          cargo fetch --locked --manifest-path vendor/crossterm-input/Cargo.toml 2>&1 | tee ci-results/fetch-decoder.log
+
+      - name: Prepare cold test builds
+        run: |
+          cargo test --locked --offline --no-run 2>&1 | tee ci-results/compile-root.log
+          cargo test --locked --offline --no-run --manifest-path vendor/crossterm-input/Cargo.toml 2>&1 | tee ci-results/compile-decoder.log
+
+      - name: Run canonical non-UI verification
+        run: |
+          python3 -u scripts/verify_non_ui.py 2>&1 | tee ci-results/verification.log
+
+      - name: Summarize verification
+        if: ${{ !cancelled() }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path('ci-results')
+          root.mkdir(exist_ok=True)
+          log = root / 'verification.log'
+          summary = None
+          if log.exists():
+              for line in reversed(log.read_text(errors='replace').splitlines()):
+                  try:
+                      candidate = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if isinstance(candidate, dict) and 'component_verification_only' in candidate:
+                      summary = candidate
+                      break
+          lines = ['## Component verification', '',
+                   'Host/Apple Terminal, ignored tests, reboot and provider gates are not certified.', '']
+          if summary is None:
+              lines.append('No completed verifier summary. Inspect setup/build/test logs; this is not a pass.')
+          else:
+              (root / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+              lines.extend(['| Check | Status |', '| --- | --- |'])
+              lines.extend(f"| {item['name']} | {item['status']} |" for item in summary['checks'])
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+              stream.write('\n'.join(lines) + '\n')
+          PY
+
+      - name: Upload verification evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-macos-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-results/
+          retention-days: 14
+          if-no-files-found: warn

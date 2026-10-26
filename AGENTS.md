@@ -46,6 +46,10 @@ User requirements and Panelink's dependency/security policy take precedence over
 
 ## Repository state
 
-The private GitHub repository exists; local `main` tracks `origin/main`. Check current status before source-control work and use Git history as the source of truth.
+The GitHub repository is public (confirmed 2026-10-24). Check the current branch
+and tracking state before source-control work and use Git history as the source
+of truth. GitHub Actions uses the pinned toolchain and the existing non-UI
+verification runner; see `docs/CI.md`. Green CI does not close separate
+host/provider acceptance gates.
 
 User authorized phase-completion commits on 2026-10-17: after each phase is fully complete and its required checks pass, the parent agent must commit the phase's code and affected documentation/evidence. A later explicit user request may also authorize a checkpoint commit of accumulated work; label it as a checkpoint and do not mark unfinished phases complete. Worker subagents leave commits to the parent. Pushing requires a separate user request. This supersedes older blanket no-commit instructions in planning/task notes for the parent; workers' exclusive-file and no-commit constraints remain in force.

@@ -1450,7 +1450,54 @@ The dedicated workspace observer does not proactively renew its30-minute
 lease. Phase4 provider identity, Phase5 hierarchy/selection/reboot, human host
 acceptance and active-agent load are not closed by this slice.
 
-## Historical combined-tree merge checkpoint — 2026-10-22
+## CI setup — 2026-10-24
+
+The user selected standard GitHub-hosted runners after confirming the repository
+is public. Live GitHub API reads confirmed `sahillamba/panelink` is public,
+Actions is enabled, `main` points to `bd84625`, and branch protection is not
+enabled. The local checkout started clean with no unmerged index entries;
+older merge/index warnings below are historical.
+
+Added PR/main/manual macOS arm64 CI, exact Rust 1.99.1 pin, locked fetches,
+separate download/build caches, cold test compilation, canonical serial
+verification, failure summaries and 14-day log artifacts. Official Actions
+are SHA-pinned. Weekly Dependabot PRs cover Actions and root Cargo without
+automatic merging. See [CI.md](../CI.md) for operating details and limits.
+
+Initial local verification passed 7/8 checks. Root Rust stopped with
+674 passed/1 failed/4 ignored because
+`history_writer::tests::empty_batch_initializes_history_and_same_epoch_retry_only_syncs_begin`
+submitted its second batch before the bounded one-slot queue was available
+(`SubmitError::Full`, not a timeout). An isolated rerun passed. The fixture
+now waits for the first commit before the second submission; both committed
+receipts, exact storage-call sequence, drained shutdown and empty saved history
+remain asserted. No production logic changed.
+
+Final local verifier: **8/8 checks passed**, root Rust **1,017 passed / 0 failed /
+15 ignored**, decoder **39 passed**, Python **77 passed**, strict Clippy, fmt,
+build, component fingerprints and docs **236 files / 0 findings**. The final
+run used `RUST_TEST_THREADS=1`, `CARGO_TARGET_DIR="$PWD/target/ci"`, and
+`RUSTUP_TOOLCHAIN=stable` (the installed stable is exactly rustc 1.99.1) with
+approved execution outside the restricted sandbox for real socket/PTY access.
+The named 1.99.1 toolchain manifest was verified downloadable from Rust's
+official distribution server; installing that named toolchain on a fresh
+GitHub runner remains part of the first hosted baseline. The final pass does
+not erase the initial queue-admission failure or certify the ignored cases.
+
+Workflow validation with checksum-verified actionlint 1.7.12 passed. Summary
+rendering was exercised for pass, failure and missing-verifier-output cases;
+Dependabot YAML, documentation links and component fingerprints passed.
+The bounded documentation task and independent read-only workflow/test review
+used a GPT-6-Luna subagent via Codex collaboration (no external launcher).
+
+The user authorized committing and pushing this setup on 2026-10-24.
+Publication and first hosted verification follow this checkpoint. Branch
+protection and release publication have not been changed. After publication,
+confirm the first hosted baseline and require **macOS arm64 verification**
+before merging. This CI does not certify ignored host cases, Apple Terminal,
+reboot or provider acceptance.
+
+## Combined-tree merge checkpoint — 2026-10-22 (read this first)
 
 The origin/main work and local stash work are combined in the working tree.
 Parent reviewed the code/document resolutions and added core/socketpair
