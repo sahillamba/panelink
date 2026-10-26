@@ -2917,9 +2917,27 @@ mod tests {
         control.schedule(Call::Load, Behavior::Block(Arc::clone(&gate)));
         let (storage, mut writer, target) = fake_writer(&fixture, control);
         let diagnostics = writer.diagnostics();
-        let mut receipt = writer
-            .try_submit(ended_batch(target, 1, 1, 901))
-            .expect("admit blocked batch");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut batch = ended_batch(target, 1, 1, 901);
+        let mut receipt = loop {
+            match writer.try_submit(batch) {
+                Ok(receipt) => break receipt,
+                Err(error)
+                    if matches!(
+                        error.capacity_reason(),
+                        Some(CapacityReason::Contended | CapacityReason::Count)
+                    ) && Instant::now() < deadline =>
+                {
+                    batch = error.into_batch();
+                    thread::yield_now();
+                }
+                Err(error) => panic!(
+                    "initial blocked batch admission failed: reason={:?}, capacity={:?}",
+                    error.reason(),
+                    error.capacity_reason()
+                ),
+            }
+        };
         gate.wait_until_entered();
         drop(storage);
         let started = Instant::now();
