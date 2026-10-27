@@ -575,11 +575,11 @@ fn detach(client: &mut Client) {
     client.write(b"\x18");
     assert_eq!(client.wait_attach_exit(), 0);
     client.termios_restored();
-    let capture = client.capture();
-    assert!(
-        capture.windows(8).any(|w| w == b"\x1b[?1000l"),
-        "mouse disabled"
-    );
+    // Process exit does not synchronize with the outer-PTY drain thread.
+    // Wait for the actual restore bytes, including after attach has exited.
+    client.wait_until("mouse disabled", |client| {
+        client.capture().windows(8).any(|w| w == b"\x1b[?1000l")
+    });
 }
 
 #[test]

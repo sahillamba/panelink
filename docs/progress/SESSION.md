@@ -1,5 +1,31 @@
 # Implementation session checkpoint — 2026-10-17
 
+## PR 7 CI detach capture repair — 2026-10-27/28
+
+User requested checkout and repair on `fix/wait-resize-full-screen` in
+`/Users/sahillamba/panelink`, based on head `1c14aa8`. Hosted run40541338517
+failed `p3a_default_open` at the `mouse disabled` assertion. The detach helper
+now waits within its existing bound for the independently drained outer-PTY
+capture to contain the restore bytes after attach exits. Exit-code and termios
+checks remain. A temporary 300 ms delay before capturing those bytes reproduced
+the original assertion failure; the corrected helper passed with the same delay.
+The temporary delay was removed. Application behavior is unchanged.
+
+The first local canonical verifier passed seven checks but stopped Rust testing
+at `multi_startup::tests::opt_in_bridge_environment_reaches_only_the_started_child`:
+shell redirection had created an empty file before printf wrote it. That test
+now waits for the expected contents within its existing two-second bound.
+The next run exposed another incomplete-output observation in the
+agent-detection snapshot fixture: the prompt text could be parsed before the
+final cursor move. The fixture now waits for child exit and PTY EOF before
+copying its snapshot. Default-open tests pass7/0/1ignored after the detach fix.
+Final canonical verifier passes8/8: root Rust1481/0/16ignored, decoder39/0,
+Python233run/1skip, fmt, strict all-target Clippy, build, source fingerprints
+and docs398/0. Agent-detection11/0 and bridge-environment1/0 also pass focused
+checks. Full log: `/private/tmp/panelink-pr7-verification-complete.log`.
+Builds use `/private/tmp/panelink-pr7-target` and Python3.11; no live binary
+activation, commit, push, hosted rerun or phase completion.
+
 ## Wait reliability fixes — 2026-10-27 (current)
 
 User asked for waits that detect a long agent task finishing without endless
