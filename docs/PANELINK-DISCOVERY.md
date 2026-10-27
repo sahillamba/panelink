@@ -4,6 +4,18 @@ Status: first user answers and security review objective recorded; focused follo
 
 ## Confirmed requirements
 
+- UI/UX planning priority (2026-10-27): pane layout, menus and mouse interaction;
+  use Herdr as inspiration with independently designed Panelink behavior and
+  presentation. See [the proposed outcome and implementation plan](UI-UX-PLAN.md).
+  Six interview rounds additionally confirm smooth anchored history, continuous
+  scrollbar dragging, focus-preserving scrolling/resizing, contrasted focused
+  chrome, copy feedback, mouse/keyboard tab create/switch/rename/close, managed
+  new shell tabs, button confirmations and last-tab empty state. Four panes are
+  enough; whole-pane drag, zoom expansion and permanent sidebar are excluded.
+  See [the interview record](design/UI-UX-INTERVIEW.md). Consolidated scope awaits
+  final shared-understanding confirmation; these are future requirements, not
+  claims that the redesigned interactions are implemented.
+
 - Name: Panelink.
 - Run inside existing terminal apps. Panelink is a terminal multiplexer/workspace runtime, with Herdr and tmux as behavior references.
 - Rust, targeting Apple Silicon Macs; high performance with manageable development/build time.

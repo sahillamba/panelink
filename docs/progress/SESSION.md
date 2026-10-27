@@ -1,5 +1,22 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Pane UI/UX plan — 2026-10-27
+
+User requested a detailed plan and then invoked grill-with-docs. All six rounds
+are answered; the [interview](../design/UI-UX-INTERVIEW.md) records decisions and
+clarifications. [UI-UX-PLAN.md](../UI-UX-PLAN.md) is consolidated into eight packets:
+baseline, smooth history, focus/geometry, dividers/menus, tab lifecycle, tab UI,
+feedback and integrated verification. Final shared-understanding confirmation
+remains pending; this planning task requests no application implementation.
+Confirmed: four panes, full tabs, managed new shells, stable/continuous history,
+focus-preserving gestures, button confirmations, copy feedback, no sidebar/pane
+drag/zoom expansion. Last-tab empty state and reserved-route compatibility are
+explicit future lifecycle work, not current capability. GLOSSARY.md added.
+Planning baseline HEAD b97e2f7 in t3-320eb3c2. Current source and official Herdr
+docs inspected; bounded Luna read-only design review incorporated. No application
+changes, Cargo tests, live pane actions, installation, commit or push. Documentation
+validation is recorded in the task response. Existing phase gates remain open.
+
 ## CI accept-deadline repair — 2026-10-27 (isolated checkout)
 
 Run40511639904 failed `p3_pane_run` during a pane-list handshake. An unchanged
@@ -17,7 +34,6 @@ root Rust1480/0/16ignored, decoder39/0, Python233run/1skip, supporting checks
 and docs393/0. Final-source transport40/0/2ignored; independent source review
 found no material issue. The final deterministic regression is old-fail/new-pass.
 No commit, push, activation or phase-completion claim.
-
 
 ## v0.1.4 live activation — 2026-10-27 (current)
 

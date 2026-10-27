@@ -1,5 +1,13 @@
 # Panelink: working implementation specification
 
+Planned UI/UX direction (2026-10-27): [the consolidated plan](UI-UX-PLAN.md)
+records six interview rounds selecting smooth anchored history, continuous
+scrollbar updates, focus-preserving gestures, full tab controls, managed new
+shells, button confirmations and a last-tab empty state. Four panes remain;
+no sidebar, pane drag or zoom expansion. Final shared-understanding confirmation
+is pending. This is future design intent; the implemented prototype contracts
+and evidence below remain current until their respective changes are delivered.
+
 Revision: 0.27, 2026-10-27. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
 
 Development identity evidence updated2026-10-24: pinned OpenCode2.0.32 private
