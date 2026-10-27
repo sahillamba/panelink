@@ -11,26 +11,21 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, Read, Write};
-use std::os::fd::AsFd;
+use std::io::{Read, Write};
 use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
-use rustix::process::{ioctl_tiocsctty, setsid};
-use rustix::termios::{tcgetattr, LocalModes, Termios, Winsize};
-use rustix_openpty::openpty;
+use rustix::termios::{tcgetattr, LocalModes};
 
 const STEP: Duration = Duration::from_secs(10);
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 100;
-const MAX_CAPTURE: usize = 16 * 1024 * 1024;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
@@ -95,6 +90,46 @@ impl Fixture {
         (
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    }
+}
+
+#[path = "support/outer_pty.rs"]
+mod outer_pty;
+use outer_pty::{Client, SUPERVISOR};
+
+impl Fixture {
+    fn client(&self, stderr: Option<std::os::fd::OwnedFd>) -> Client {
+        Client::spawn(
+            &self.root,
+            ROWS,
+            COLUMNS,
+            stderr,
+            |status, release, stdin, stdout, stderr| {
+                let mut command = Command::new("/bin/sh");
+                command
+                    .arg("-c")
+                    .arg(SUPERVISOR)
+                    .arg("panelink-attach-host-supervisor")
+                    .arg(status)
+                    .arg(release)
+                    .arg(env!("CARGO_BIN_EXE_panelink"))
+                    .arg("attach")
+                    .arg("--directory")
+                    .arg(&self.runtime)
+                    .arg("--context-dir")
+                    .arg(self.root.join("client-contexts"))
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("HOME", &self.home)
+                    .env("ZDOTDIR", &self.home)
+                    .env("PS1", "P3AC$ ")
+                    .current_dir(&self.home)
+                    .stdin(stdin)
+                    .stdout(stdout)
+                    .stderr(stderr);
+                command
+            },
         )
     }
 }
@@ -234,269 +269,6 @@ fn wait_child(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
     }
 }
 
-/// The attach client on a private outer PTY with a continuous drain thread.
-struct Client {
-    child: Child,
-    status_path: PathBuf,
-    release_path: PathBuf,
-    writer: fs::File,
-    slave: std::os::fd::OwnedFd,
-    initial: Termios,
-    capture: Arc<Mutex<Vec<u8>>>,
-    stop: Arc<AtomicBool>,
-    drain: Option<JoinHandle<()>>,
-}
-
-impl Client {
-    fn spawn(fixture: &Fixture) -> Self {
-        Self::spawn_with(fixture, None)
-    }
-
-    /// `stderr`: optional replacement for the client's stderr (for example
-    /// the write end of a full pipe); defaults to the outer PTY.
-    fn spawn_with(fixture: &Fixture, stderr: Option<std::os::fd::OwnedFd>) -> Self {
-        let winsize = Winsize {
-            ws_row: ROWS,
-            ws_col: COLUMNS,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        let pty = openpty(None, Some(&winsize)).expect("open outer PTY");
-        let master = fs::File::from(pty.controller);
-        let flags = fcntl_getfl(&master).unwrap();
-        fcntl_setfl(&master, flags | OFlags::NONBLOCK).unwrap();
-        let slave = pty.user;
-        let initial = tcgetattr(&slave).expect("save outer termios");
-        let controlling = slave.as_fd().try_clone_to_owned().unwrap();
-        let clone = || Stdio::from(fs::File::from(slave.as_fd().try_clone_to_owned().unwrap()));
-        // A /bin/sh session leader keeps the outer PTY's session alive after
-        // attach exits (macOS revokes the slave when the leader exits), so the
-        // restored termios stays queryable; it writes attach's exit status to
-        // a file and waits for `release`. Same pattern as tests/p2_host.rs.
-        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-        let status_path = fixture.root.join(format!("attach-{serial}.status"));
-        let release_path = fixture.root.join(format!("release-{serial}"));
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg(SUPERVISOR)
-            .arg("panelink-attach-supervisor")
-            .arg(&status_path)
-            .arg(&release_path)
-            .arg(env!("CARGO_BIN_EXE_panelink"))
-            .arg("attach")
-            .arg("--directory")
-            .arg(&fixture.runtime)
-            .arg("--context-dir")
-            .arg(fixture.root.join("client-contexts"))
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", &fixture.home)
-            .env("ZDOTDIR", &fixture.home)
-            .env("PS1", "P3AC$ ")
-            .current_dir(&fixture.home)
-            .stdin(clone())
-            .stdout(clone())
-            .stderr(match stderr {
-                Some(fd) => Stdio::from(fs::File::from(fd)),
-                None => clone(),
-            });
-        // SAFETY: only reviewed rustix wrappers that start a new session and
-        // set the inherited outer PTY as its controlling terminal.
-        unsafe {
-            command.pre_exec(move || {
-                setsid().map_err(io::Error::from)?;
-                ioctl_tiocsctty(&controlling).map_err(io::Error::from)?;
-                Ok(())
-            });
-        }
-        let child = command.spawn().expect("spawn panelink attach");
-        drop(command);
-        let capture = Arc::new(Mutex::new(Vec::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut reader = master.try_clone().unwrap();
-        let drain = {
-            let capture = Arc::clone(&capture);
-            let stop = Arc::clone(&stop);
-            thread::spawn(move || {
-                let mut buffer = [0_u8; 16 * 1024];
-                while !stop.load(Ordering::Relaxed) {
-                    match reader.read(&mut buffer) {
-                        Ok(0) => thread::sleep(Duration::from_millis(2)),
-                        Ok(count) => {
-                            let mut capture = capture.lock().unwrap();
-                            if capture.len() + count <= MAX_CAPTURE {
-                                capture.extend_from_slice(&buffer[..count]);
-                            }
-                        }
-                        Err(_) => thread::sleep(Duration::from_millis(2)),
-                    }
-                }
-            })
-        };
-        Self {
-            child,
-            status_path,
-            release_path,
-            writer: master,
-            slave,
-            initial,
-            capture,
-            stop,
-            drain: Some(drain),
-        }
-    }
-
-    /// Exit code of `panelink attach` once the supervisor published it.
-    fn attach_exit(&mut self) -> Option<i32> {
-        let text = fs::read_to_string(&self.status_path).ok()?;
-        text.strip_suffix('\n')?.parse().ok()
-    }
-
-    fn wait_attach_exit(&mut self) -> i32 {
-        self.wait_attach_exit_within(STEP)
-    }
-
-    fn wait_attach_exit_within(&mut self, limit: Duration) -> i32 {
-        let deadline = Instant::now() + limit;
-        loop {
-            if let Some(code) = self.attach_exit() {
-                return code;
-            }
-            assert!(Instant::now() < deadline, "attach did not exit");
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        let deadline = Instant::now() + STEP;
-        let mut cursor = 0;
-        while cursor < bytes.len() {
-            match self.writer.write(&bytes[cursor..]) {
-                Ok(count) => cursor += count,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "outer PTY input stalled");
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => panic!("write outer PTY: {error}"),
-            }
-        }
-    }
-
-    fn type_slowly(&mut self, text: &[u8]) {
-        for byte in text {
-            self.write(&[*byte]);
-            thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    fn capture(&self) -> Vec<u8> {
-        self.capture.lock().unwrap().clone()
-    }
-
-    fn screen(&self) -> String {
-        let mut parser = vt100::Parser::new(ROWS, COLUMNS, 0);
-        parser.process(&self.capture());
-        parser.screen().contents()
-    }
-
-    /// Match exact root PTY rows, excluding top controls and side scrollbar.
-    /// A scrollbar is chrome, not part of an acknowledged shell output line.
-    fn wait_root_marker(&mut self, marker: &str) {
-        let capture = self.capture.clone();
-        self.wait_screen(marker, |_| {
-            let mut parser = vt100::Parser::new(ROWS, COLUMNS, 0);
-            parser.process(&capture.lock().unwrap());
-            (1..ROWS - 1).any(|row| {
-                let line = (1..COLUMNS - 1)
-                    .map(|column| {
-                        let cell = parser.screen().cell(row, column).unwrap();
-                        if cell.contents().is_empty() {
-                            " "
-                        } else {
-                            cell.contents()
-                        }
-                    })
-                    .collect::<String>();
-                line.trim() == marker
-            })
-        });
-    }
-
-    fn wait_screen(&mut self, what: &str, done: impl Fn(&str) -> bool) -> String {
-        let deadline = Instant::now() + STEP;
-        loop {
-            let screen = self.screen();
-            if done(&screen) {
-                return screen;
-            }
-            if let Some(status) = self.attach_exit() {
-                panic!(
-                    "attach exited ({status}) waiting for {what}: {:?}",
-                    String::from_utf8_lossy(&self.capture())
-                );
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for {what}; screen:\n{screen}"
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    fn wait_raw_mode(&mut self) {
-        let deadline = Instant::now() + STEP;
-        loop {
-            let termios = tcgetattr(&self.slave).unwrap();
-            if !termios.local_modes.contains(LocalModes::ICANON) {
-                return;
-            }
-            if let Some(status) = self.attach_exit() {
-                panic!(
-                    "attach exited before raw mode ({status}): {:?}",
-                    String::from_utf8_lossy(&self.capture())
-                );
-            }
-            assert!(Instant::now() < deadline, "attach never entered raw mode");
-            thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    fn termios_restored(&self) {
-        let actual = tcgetattr(&self.slave).unwrap();
-        assert_eq!(actual.input_modes, self.initial.input_modes);
-        assert_eq!(actual.output_modes, self.initial.output_modes);
-        assert_eq!(actual.control_modes, self.initial.control_modes);
-        assert_eq!(actual.local_modes, self.initial.local_modes);
-    }
-}
-
-impl Drop for Client {
-    fn drop(&mut self) {
-        let _ = fs::write(&self.release_path, b"release\n");
-        if wait_child(&mut self.child, Duration::from_secs(2)).is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(drain) = self.drain.take() {
-            let _ = drain.join();
-        }
-    }
-}
-
-const SUPERVISOR: &str = r#"
-status_path=$1
-release_path=$2
-shift 2
-trap ':' HUP INT TERM
-"$@"
-code=$?
-printf '%s\n' "$code" > "$status_path.tmp" && /bin/mv "$status_path.tmp" "$status_path"
-while [ ! -f "$release_path" ]; do /bin/sleep 0.05; done
-exit 0
-"#;
-
 fn count(haystack: &str, needle: &str) -> usize {
     haystack.matches(needle).count()
 }
@@ -527,7 +299,7 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     let (code, init) = fixture.control("one.ctx", &["init"]);
     assert_eq!(code, 0, "init: {init}");
 
-    let mut client = Client::spawn(&fixture);
+    let mut client = fixture.client(None);
     client.wait_raw_mode();
     client.wait_screen("pane 1 READY", |screen| screen.contains("PANE1-READY"));
     let capture = client.capture();
@@ -633,7 +405,9 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     // Ctrl-X detaches: exit 0, host modes restored, children still alive.
     client.write(b"\x18");
     assert_eq!(client.wait_attach_exit(), 0, "attach exits 0 on Ctrl-X");
-    thread::sleep(Duration::from_millis(100));
+    // The final restore marker also synchronizes capture of the preceding
+    // mouse, paste and cursor restores even if the drain splits the write.
+    client.wait_capture_contains(b"\x1b[?1049l", Duration::from_secs(2));
     let capture = client.capture();
     for mode in [
         &b"\x1b[?1006l"[..],
@@ -679,7 +453,7 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     drop(client);
 
     // Re-attach resumes both durable contexts without claiming either idle pane.
-    let mut again = Client::spawn(&fixture);
+    let mut again = fixture.client(None);
     again.wait_raw_mode();
     again.wait_screen("both panes after re-attach", |screen| {
         screen.contains("ACK41") && screen.contains("ACK42")
@@ -725,18 +499,7 @@ fn signal(child: &Child, signal: i32) {
 /// Time from the first byte of `pattern` appearing after `from` bytes of
 /// capture, polled every 5 ms up to `limit`.
 fn wait_bytes(client: &Client, from: usize, pattern: &[u8], limit: Duration) -> Option<Duration> {
-    let started = Instant::now();
-    while started.elapsed() < limit {
-        let capture = client.capture();
-        if capture[from.min(capture.len())..]
-            .windows(pattern.len())
-            .any(|window| window == pattern)
-        {
-            return Some(started.elapsed());
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    None
+    client.wait_capture_contains_after(from, pattern, limit)
 }
 
 #[test]
@@ -745,7 +508,7 @@ fn ctrl_x_restores_the_terminal_promptly_when_the_server_is_stalled() {
     let Some((mut server, _)) = Server::start(&fixture) else {
         return;
     };
-    let mut client = Client::spawn(&fixture);
+    let mut client = fixture.client(None);
     client.wait_raw_mode();
     client.wait_screen("pane 1 READY", |screen| screen.contains("PANE1-READY"));
     // Freeze the server: every later exchange stalls (no reply, no EOF).
@@ -763,7 +526,7 @@ fn ctrl_x_restores_the_terminal_promptly_when_the_server_is_stalled() {
     // Termios is restored together with the restore bytes.
     let deadline = Instant::now() + Duration::from_millis(500);
     loop {
-        let termios = tcgetattr(&client.slave).unwrap();
+        let termios = tcgetattr(client.slave()).unwrap();
         if termios.local_modes.contains(LocalModes::ICANON) {
             break;
         }
@@ -799,7 +562,7 @@ fn a_full_stderr_pipe_never_blocks_errors_or_exit() {
     fcntl_setfl(&write_end, flags).unwrap();
     drop(filler);
     let started = Instant::now();
-    let mut client = Client::spawn_with(&fixture, Some(write_end));
+    let mut client = fixture.client(Some(write_end));
     assert_eq!(client.wait_attach_exit_within(Duration::from_secs(5)), 1);
     assert!(started.elapsed() < Duration::from_secs(5));
     // The diagnostic went to the terminal, not to stderr.
@@ -824,7 +587,7 @@ fn a_full_stderr_pipe_never_blocks_errors_or_exit() {
     while filler.write(&chunk).is_ok() {}
     fcntl_setfl(&write_end, flags).unwrap();
     drop(filler);
-    let mut client = Client::spawn_with(&fixture, Some(write_end));
+    let mut client = fixture.client(Some(write_end));
     client.wait_raw_mode();
     client.wait_screen("pane 1 READY", |screen| screen.contains("PANE1-READY"));
     client.write(b"\x18");
@@ -842,7 +605,7 @@ fn seventy_sequential_attach_detach_cycles_do_not_exhaust_leases() {
         return;
     };
     for cycle in 0..70 {
-        let mut client = Client::spawn(&fixture);
+        let mut client = fixture.client(None);
         client.wait_raw_mode();
         client.wait_screen("pane 1 READY", |screen| screen.contains("PANE1-READY"));
         client.write(b"\x18");
@@ -909,7 +672,7 @@ fn reattach_after_server_restart_replaces_dead_contexts() {
     let Some((mut server, _)) = Server::start(&fixture) else {
         return;
     };
-    let mut client = Client::spawn(&fixture);
+    let mut client = fixture.client(None);
     client.wait_raw_mode();
     client.wait_screen("pane 1 READY", |screen| screen.contains("PANE1-READY"));
     client.write(b"\x18");
@@ -922,7 +685,7 @@ fn reattach_after_server_restart_replaces_dead_contexts() {
     let Some((mut server, first)) = Server::start_mode(&fixture, false) else {
         return;
     };
-    let mut client = Client::spawn(&fixture);
+    let mut client = fixture.client(None);
     client.wait_raw_mode();
     client.wait_screen("pane 1 READY after restart", |screen| {
         screen.contains("PANE1-READY")
