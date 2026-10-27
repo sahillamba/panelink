@@ -1,5 +1,31 @@
 # Implementation session checkpoint — 2026-10-17
 
+## Wait reliability fixes — 2026-10-27 (current)
+
+User asked for waits that detect a long agent task finishing without endless
+polling. A live marker wait on a tescode/OpenCode pane exposed two client bugs;
+see [P3-AGENT-CLI.md](P3-AGENT-CLI.md#wait-reliability-fixes--2026-10-27).
+`wait` no longer ends on geometry-only layout changes of its pinned target, and
+`wait --text` searches the whole visible screen instead of the top 24 rows.
+Client-only change; the running server needs no restart.
+
+Live: with installed fingerprint d993350e8c254fa7 a visible marker on row 28 and
+footer text both timed out and resize waits returned stale_target. After the
+rebuild (fingerprint 418efd9a5f476fc6, dirty) row-28 and row-37 text matched at
+once against the same running server. `~/.local/bin/panelink` resolves to the
+debug launcher, so `cargo build` replaced the PATH CLI. A live host resize during
+a wait was not repeated; the new integration test covers it.
+
+Checks: new regression test fails on old code for each bug and passes; fmt,
+strict Clippy, build, docs and component checks pass. Full Rust suite with
+--no-fail-fast: 1478 passed, 2 failed (`control_unavailable` handshake during
+pane close/pane run, the known intermittent issue); both binaries passed 3/3
+reruns, as did an intermittent `p3_inflight_client` failure. Python unittest
+has 13 `test_opencode_bridge_plugin` socket-accept errors that reproduce on the
+unmodified baseline with local Python 3.15 (CI pins 3.11). Tescode-launched
+OpenCode stays unrecognized (PTY-proxy wrapper); recognition is a separate
+proposal. No commit or push.
+
 ## v0.1.4 live activation — 2026-10-27 (current)
 
 User explicitly approved restarting and ending current pane processes. Installed

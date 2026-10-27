@@ -1333,9 +1333,9 @@ fn run_wait(args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
         return Err(CliError::usage());
     }
     let workspace = workspace(options.caller)?;
-    let (target, revision, _) = resolve_index(&workspace, index)?;
+    let (target, _, _) = resolve_index(&workspace, index)?;
     let result = wait_loop(
-        &workspace, options, index, target, revision, condition, text, regex, quiet, timeout,
+        &workspace, options, index, target, condition, text, regex, quiet, timeout,
     );
     match result {
         // An exited child's pane collapses, so the exit can surface as a
@@ -1361,13 +1361,35 @@ fn target_present(workspace: &Workspace, target: TargetRef) -> Result<bool, CliE
         .any(|entry| entry.target == target))
 }
 
+/// The target currently displayed at a 1-based spatial index, if any.
+fn target_at_index(panes: &PaneReply, index: usize) -> Option<TargetRef> {
+    panes
+        .panes
+        .iter()
+        .flatten()
+        .nth(index - 1)
+        .map(|entry| entry.target)
+}
+
+/// A wait is pinned to the full target (generation, workspace, pane, session
+/// and occupant) resolved at its start, reported under its original index.
+/// Geometry-only layout changes such as a host resize or divider move keep
+/// that target at the same index and do not end the wait. A replaced occupant,
+/// closed pane or renumbered index does, without selecting a replacement.
+fn ensure_wait_target(panes: &PaneReply, index: usize, target: TargetRef) -> Result<(), CliError> {
+    if target_at_index(panes, index) == Some(target) {
+        Ok(())
+    } else {
+        Err(stale_target())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn wait_loop(
     workspace: &Workspace,
     options: Options<'_>,
     index: usize,
     target: TargetRef,
-    revision: u64,
     condition: &str,
     text: Option<&str>,
     regex: bool,
@@ -1375,11 +1397,13 @@ fn wait_loop(
     timeout: u64,
 ) -> Result<i32, CliError> {
     let mut link = workspace.pane_events_link(target)?;
-    let initial = link.reconcile_target(target).map_err(link_error)?;
+    // Text conditions search the whole visible screen within the protocol's
+    // reconciliation budget; the default 24-row prefix missed lower rows.
+    let initial = link
+        .reconcile_target_full_screen(target)
+        .map_err(link_error)?;
     let _initial_truncated = initial.truncated;
-    if link.panes().map_err(link_error)?.layout_revision != revision {
-        return Err(stale_target());
-    }
+    ensure_wait_target(&link.panes().map_err(link_error)?, index, target)?;
     let deadline = Instant::now() + Duration::from_secs(timeout);
     let mut cursor = initial.cursor;
     let initial_revision = initial.screen_revision;
@@ -1401,17 +1425,7 @@ fn wait_loop(
         if now >= deadline {
             return finish_wait(workspace, options, index, target, condition, false, true);
         }
-        let before = all_panes(workspace)?;
-        let before_revision = before.layout_revision;
-        let before_target = before
-            .panes
-            .iter()
-            .flatten()
-            .nth(index - 1)
-            .map(|entry| entry.target);
-        if before_revision != revision || before_target != Some(target) {
-            return Err(stale_target());
-        }
+        ensure_wait_target(&all_panes(workspace)?, index, target)?;
         let wait_ms = deadline
             .saturating_duration_since(now)
             .as_millis()
@@ -1443,7 +1457,9 @@ fn wait_loop(
                 _ => {}
             }
         }
-        let current = link.reconcile_target(target).map_err(link_error)?;
+        let current = link
+            .reconcile_target_full_screen(target)
+            .map_err(link_error)?;
         if current.info.target != target {
             return Err(stale_target());
         }
@@ -1454,16 +1470,7 @@ fn wait_loop(
             screen_revision = current.screen_revision;
             quiet_since = Instant::now();
         }
-        let after = all_panes(workspace)?;
-        let after_target = after
-            .panes
-            .iter()
-            .flatten()
-            .nth(index - 1)
-            .map(|entry| entry.target);
-        if after.layout_revision != revision || after_target != Some(target) {
-            return Err(stale_target());
-        }
+        ensure_wait_target(&all_panes(workspace)?, index, target)?;
         if condition == "change" && current.screen_revision != initial_revision {
             return finish_wait(workspace, options, index, target, condition, true, false);
         }

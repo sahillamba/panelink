@@ -3195,12 +3195,35 @@ impl WorkspaceLink {
         &mut self,
         target: TargetRef,
     ) -> Result<AgentReconciliation, &'static str> {
+        self.reconcile_target_with_budget(target, SERVER_READ_BYTES, SERVER_READ_LINES)
+    }
+
+    /// Reconcile with the largest protocol budget so text conditions can see
+    /// every visible row, not only the default 24-row/4 KiB prefix. The
+    /// existing protocol limits apply, so older servers accept the request.
+    pub(crate) fn reconcile_target_full_screen(
+        &mut self,
+        target: TargetRef,
+    ) -> Result<AgentReconciliation, &'static str> {
+        self.reconcile_target_with_budget(
+            target,
+            panelink::watch_protocol::MAX_RECONCILIATION_BYTES as u32,
+            panelink::watch_protocol::MAX_RECONCILIATION_LINES,
+        )
+    }
+
+    fn reconcile_target_with_budget(
+        &mut self,
+        target: TargetRef,
+        max_bytes: u32,
+        max_lines: u16,
+    ) -> Result<AgentReconciliation, &'static str> {
         diagnostic_phase("screen_reconciliation");
         self.ensure_target(target)?;
         let request = WatchRequest::Reconcile {
             target,
-            max_bytes: SERVER_READ_BYTES,
-            max_lines: SERVER_READ_LINES,
+            max_bytes,
+            max_lines,
         };
         let payload = encode_watch_request(&request).map_err(|_| "request_invalid")?;
         let id = self.request_id();
