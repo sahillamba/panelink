@@ -1,5 +1,13 @@
 # Panelink implementation roadmap
 
+UI/UX planning (2026-10-27): six interview rounds confirm smooth history scrolling,
+continuous scrollbar updates, reliable dividers, full tab controls, button-only
+confirmations and stronger focus chrome. Four panes; no whole-pane drag, sidebar
+or zoom expansion. [Consolidated outcome and eight packets](docs/UI-UX-PLAN.md)
+await final shared-understanding confirmation; see the [interview](docs/design/UI-UX-INTERVIEW.md).
+After confirmation and an implementation request, begin UX-01 with current
+evidence/phase order. No application behavior or acceptance gate changes here.
+
 Active user-selected work (2026-10-27): Herdr-style scoped pane input
 and recognized-agent list/prompt/wait. See [implementation plan](docs/progress/HERDR-WORKFLOW-IMPLEMENTATION.md). Shared input does not protect an unfinished human draft;
 exact-target, per-operation owner and no-replay checks remain.

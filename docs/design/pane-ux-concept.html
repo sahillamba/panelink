@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Panelink proposed pane experience</title>
+<style>
+body{margin:0;font-family:var(--font-sans,system-ui);color:var(--foreground)}
+.note{color:var(--muted-foreground);font-size:13px;margin:0 0 12px}
+.canvas{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+.route,.status{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;padding:8px 0}
+.route{border-bottom:1px solid var(--border);margin-bottom:12px}
+.grid{display:grid;grid-template-columns:1.3fr 1fr;gap:8px}
+.pane{border:1px solid var(--border);border-radius:4px;min-width:0}
+.focused{border:2px solid var(--primary)}
+.head{font:12px var(--font-mono,monospace);padding:8px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;gap:8px}
+.content{font:12px/1.8 var(--font-mono,monospace);padding:12px;overflow-wrap:anywhere}
+.tag{color:var(--primary);font-weight:600}.muted{color:var(--muted-foreground)}
+.menu{background:var(--popover);border:1px solid var(--border);border-radius:4px;padding:10px;margin:10px;font-size:12px}
+.menu div{padding:4px}.danger{color:var(--destructive)}
+.flow{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;font-size:12px}
+.step{background:var(--secondary);padding:10px;border-radius:var(--radius);flex:1;min-width:100px}
+@media(max-width:450px){.grid{grid-template-columns:1fr}.head{font-size:11px}}
+</style></head><body>
+<p class="note">Proposed experience · conceptual layout, not an application screenshot. Cell geometry and host behavior must be validated in UX-01.</p>
+<div class="canvas">
+<div class="route"><strong>Project</strong><span class="tag">Main ×</span><span>Review ×</span><span>+</span><span>‹ › · All tabs</span><span>Help · Detach</span></div>
+<div class="grid">
+<div class="pane focused"><div class="head"><span>[Menu] ● Pane 1</span><span>[x]</span></div>
+<div class="content"><span class="tag">Focused · Live</span><br>$ work continues here<br>Normal child terminal colors.</div>
+<div class="menu"><div><strong>Pane actions</strong></div><div>Split → Left / Right / Up / Down</div><div>Resize divider…</div><div>Copy mode · Back to live</div><div class="danger">Close pane…</div><div class="muted">Esc / Cancel · click outside dismisses</div></div></div>
+<div><div class="pane"><div class="head"><span>[Menu] Pane 2</span><span>[x]</span></div><div class="content">History · New output<br>[Back to live]<br>Reading position stays fixed.<br>Dragging updates continuously.</div></div>
+<p class="note" style="margin-top:12px">Scrolling this pane keeps typing focus in Pane 1.<br>Divider drag previews locally; release applies once.<br>Copy success shows “Copied”.</p>
+<div class="menu"><div><strong>Close tab?</strong></div><div>Ends this tab’s processes.</div><div><span class="danger">[Close tab]</span> · [Cancel]</div></div></div>
+</div><div class="status"><strong>One visible action model</strong><span>Menu · right-click · Ctrl-B s</span></div></div>
+<div class="flow"><div class="step">1 · Measure scrolling</div><div class="step">2 · Smooth history and gestures</div><div class="step">3 · Complete tab lifecycle and controls</div><div class="step">4 · Verify and hand off</div></div>
+</body></html>
