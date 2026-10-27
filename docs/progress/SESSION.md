@@ -1,5 +1,24 @@
 # Implementation session checkpoint — 2026-10-17
 
+## CI accept-deadline repair — 2026-10-27 (isolated checkout)
+
+Run40511639904 failed `p3_pane_run` during a pane-list handshake. An unchanged
+local repetition reproduced the handshake failure class. A controlled transport
+regression proves that accept-slice expiry could drop an already-dequeued peer;
+a one-slot pending stream now preserves it for the next live slice while retaining
+timeouts, kernel authentication and bounded admission. Attribution of the hosted
+failure to this race remains inferred pending a hosted rerun. See
+[reproduction, repair and verification](CI-ACCEPT-DEADLINE-2026-10-27.md).
+
+Work is isolated at `/private/tmp/panelink-ci-40511639904` on
+`codex/ci-pane-run-handshake`, based on failed head `b97e2f7`. The original root
+checkout and live workspace are unchanged. Canonical verifier passes 8/8:
+root Rust1480/0/16ignored, decoder39/0, Python233run/1skip, supporting checks
+and docs393/0. Final-source transport40/0/2ignored; independent source review
+found no material issue. The final deterministic regression is old-fail/new-pass.
+No commit, push, activation or phase-completion claim.
+
+
 ## v0.1.4 live activation — 2026-10-27 (current)
 
 User explicitly approved restarting and ending current pane processes. Installed

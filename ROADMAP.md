@@ -1,5 +1,14 @@
 # Panelink implementation roadmap
 
+CI repair in isolated checkout (2026-10-27): run40511639904 failed a pane-list
+handshake; the reproduced post-accept deadline race now retains one dequeued
+connection for the next slice without relaxing timeouts or authentication.
+Canonical verifier passes8/8; final transport40/0/2ignored. New hosted
+confirmation remains pending.
+See [evidence and checkout identity](docs/progress/CI-ACCEPT-DEADLINE-2026-10-27.md).
+No product phase gate is changed.
+
+
 Active user-selected work (2026-10-27): Herdr-style scoped pane input
 and recognized-agent list/prompt/wait. See [implementation plan](docs/progress/HERDR-WORKFLOW-IMPLEMENTATION.md). Shared input does not protect an unfinished human draft;
 exact-target, per-operation owner and no-replay checks remain.
