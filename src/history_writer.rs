@@ -740,6 +740,29 @@ impl HistoryWriter {
         writer_guard: HistoryWriterGuard,
         diagnostics: HistoryDiagnostics,
     ) -> io::Result<Self> {
+        Self::spawn_inner(backend, writer_guard, diagnostics, None)
+    }
+
+    #[cfg(test)]
+    fn spawn_with_worker_ready(
+        backend: Box<dyn HistoryBackend>,
+        writer_guard: HistoryWriterGuard,
+        diagnostics: HistoryDiagnostics,
+    ) -> io::Result<Self> {
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let writer = Self::spawn_inner(backend, writer_guard, diagnostics, Some(ready_tx))?;
+        ready_rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| io::Error::other("history writer worker did not start"))?;
+        Ok(writer)
+    }
+
+    fn spawn_inner(
+        backend: Box<dyn HistoryBackend>,
+        writer_guard: HistoryWriterGuard,
+        diagnostics: HistoryDiagnostics,
+        worker_ready: Option<SyncSender<()>>,
+    ) -> io::Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(MAX_QUEUED_BATCHES);
         let (done_sender, done) = mpsc::sync_channel(1);
         let shared = Arc::new(Shared {
@@ -760,7 +783,14 @@ impl HistoryWriter {
         let worker = thread::Builder::new()
             .name("panelink-history-writer".to_owned())
             .spawn(move || {
-                worker_entry(backend, writer_guard, receiver, worker_shared, done_sender);
+                worker_entry(
+                    backend,
+                    writer_guard,
+                    receiver,
+                    worker_shared,
+                    done_sender,
+                    worker_ready,
+                );
             })
             .map_err(|_| io::Error::other("unable to start history writer"))?;
 
@@ -906,9 +936,9 @@ impl HistoryWriter {
         storage: &ServerStorage,
         diagnostics: HistoryDiagnostics,
     ) -> io::Result<Self> {
-        let result = storage
-            .claim_history_writer()
-            .and_then(|writer_guard| Self::spawn(backend, writer_guard, diagnostics.clone()));
+        let result = storage.claim_history_writer().and_then(|writer_guard| {
+            Self::spawn_with_worker_ready(backend, writer_guard, diagnostics.clone())
+        });
         if result.is_err() {
             diagnostics.record(HistoryReason::CaptureSetupFailed);
         }
@@ -1003,10 +1033,17 @@ fn worker_entry(
     receiver: Receiver<Work>,
     shared: Arc<Shared>,
     done: SyncSender<ShutdownOutcome>,
+    worker_ready: Option<SyncSender<()>>,
 ) {
     let mut current = None;
     let result = catch_unwind(AssertUnwindSafe(|| {
-        worker_loop(&mut *backend, &receiver, &shared, &mut current)
+        worker_loop(
+            &mut *backend,
+            &receiver,
+            &shared,
+            &mut current,
+            worker_ready,
+        )
     }));
     let mut outcome = match result {
         Ok(outcome) => outcome,
@@ -1034,8 +1071,12 @@ fn worker_loop(
     receiver: &Receiver<Work>,
     shared: &Shared,
     current: &mut Option<Work>,
+    worker_ready: Option<SyncSender<()>>,
 ) -> ShutdownOutcome {
     let mut any_failed = false;
+    if let Some(ready) = worker_ready {
+        let _ = ready.send(());
+    }
     loop {
         if shared.canceled() {
             any_failed |= cancel_queued(backend, receiver, shared);
