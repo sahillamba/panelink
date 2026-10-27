@@ -25,7 +25,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::MutexGuard;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::Instant;
 
 const SOCKET_BASENAME: &str = "control.sock";
@@ -281,6 +281,9 @@ pub struct PrivateListener {
     listener: UnixListener,
     _cleanup: SocketCleanup,
     socket_path: PathBuf,
+    // At most one kernel-dequeued stream can cross an accept-slice deadline.
+    // It remains unauthenticated until a later, nonexpired call serves it.
+    pending_accept: Mutex<Option<UnixStream>>,
 }
 
 impl PrivateListener {
@@ -328,6 +331,7 @@ impl PrivateListener {
             listener,
             _cleanup: cleanup,
             socket_path,
+            pending_accept: Mutex::new(None),
         })
     }
 
@@ -337,17 +341,34 @@ impl PrivateListener {
     }
 
     /// Accept and kernel-authenticate one connection before returning it.
+    /// A connection dequeued at slice expiry is retained for the next call;
+    /// expiry never admits it or silently disconnects its waiting peer.
     pub fn accept(&self, deadline: Instant) -> io::Result<AuthenticatedStream> {
+        check_deadline(deadline)?;
+        // The owner normally calls serially. Concurrent accepts fail without
+        // waiting or consuming a second connection into this one-slot buffer.
+        let mut pending = match self.pending_accept.try_lock() {
+            Ok(pending) => pending,
+            Err(TryLockError::WouldBlock) => return Err(io::ErrorKind::WouldBlock.into()),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(io::Error::other("listener accept state is poisoned"));
+            }
+        };
         loop {
             check_deadline(deadline)?;
+            if let Some(stream) = pending.take() {
+                return AuthenticatedStream::new(stream);
+            }
             // One nonblocking accept syscall is protected. In particular, the
             // guard is gone before peer authentication and readiness waiting.
             match with_spawn_gate_until(deadline, || {
                 self.listener.accept().map(|(stream, _address)| stream)
             }) {
                 Ok(stream) => {
-                    check_deadline(deadline)?;
-                    return AuthenticatedStream::new(stream);
+                    // Accept already consumed the kernel queue entry. Retain
+                    // it before rechecking time so expiry cannot drop a valid
+                    // connection before its first handshake.
+                    retain_accepted_until_next_slice(&mut pending, stream, deadline)?;
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -357,6 +378,17 @@ impl PrivateListener {
             }
         }
     }
+}
+
+// Keep the post-accept boundary separate so its expiry behavior can be tested
+// with an already-dequeued socket and an expired instant, without timing races.
+fn retain_accepted_until_next_slice(
+    pending: &mut Option<UnixStream>,
+    stream: UnixStream,
+    deadline: Instant,
+) -> io::Result<()> {
+    *pending = Some(stream);
+    check_deadline(deadline)
 }
 
 fn with_spawn_gate<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
@@ -1163,6 +1195,46 @@ mod tests {
             body: EventBody::ChildExited,
         })
         .expect("valid metadata event")
+    }
+
+    #[test]
+    fn accept_deadline_preserves_dequeued_connection_for_next_slice() {
+        let tree = TestTree(private_test_directory());
+        let listener = PrivateListener::bind(&tree.0).expect("private listener");
+        let (accepted, mut peer) = UnixStream::pair().expect("accepted same-user peer");
+        peer.set_nonblocking(true).unwrap();
+        let error = {
+            let mut pending = listener.pending_accept.lock().unwrap();
+            // The kernel has already dequeued the socket. Force the exact
+            // post-accept expiry boundary without sleeping or scheduling bets.
+            retain_accepted_until_next_slice(&mut pending, accepted, Instant::now())
+                .expect_err("expired slice still returns its timeout")
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        let mut byte = [0];
+        assert_eq!(
+            peer.read(&mut byte)
+                .expect_err("accepted peer must stay open")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            listener
+                .accept(Instant::now())
+                .err()
+                .expect("expired next slice")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        let mut stream = listener
+            .accept(deadline_after(Duration::from_secs(1)))
+            .expect("authenticate deferred peer");
+        peer.write_all(&encoded(MessageKind::Hello, 0, b"same-connection"))
+            .unwrap();
+        let frame = stream
+            .read_frame(deadline_after(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(frame.payload(), b"same-connection");
     }
 
     fn private_test_directory() -> PathBuf {
