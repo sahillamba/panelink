@@ -1,6 +1,21 @@
 # Implementation session checkpoint — 2026-10-17
 
 
+## PR 3 CI socket readiness repair — 2026-10-27 (current)
+
+Hosted run40449868873 at ec09eb0 failed the wide-terminal attach regression
+with connection loss; the other seven verifier checks passed. A focused test
+with only the verified fixture server at background priority fails with the
+old socket sleep loop and passes with descriptor readiness waiting. The
+original deadlines, shell identity, controls/prompt and detach assertions stay
+intact. Independent review is clear; focused transport39/0/2ignored passes.
+Final canonical verifier8/8: rootRust1441/0/15ignored, decoder39/0,
+Python233run/1skip, fingerprints/fmt/strictClippy/privatebuild/docs388zero.
+The first combined attempt's unrelated CLI connection failure and lint failure
+remain documented; no claim of a cause for the intermittent CLI failure is made.
+Publishing the repair to PR3 triggers a new hosted run, whose result is pending.
+See [diagnosis and evidence](PR3-CI-SOCKET-READINESS-2026-10-27.md).
+
 ## Consolidation for PR — 2026-10-27 (current)
 
 User authorized combining main's dirty files with the installed 7060 worktree,

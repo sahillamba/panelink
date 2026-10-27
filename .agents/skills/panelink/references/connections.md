@@ -108,3 +108,13 @@ claim, input, launch or close was sent. They reproduce the reported failure
 sequence, rather than establishing the exact configuration of another session.
 Running a nested sandbox helper inside an already restricted agent does not
 grant the outer agent new permissions. Do not present that helper as a bypass.
+
+## Wide-screen connection loss in older builds
+
+The PR 3 repair addresses repeated connection loss while fetching large pane
+screens when macOS coalesces background socket wait timers. It waits for socket
+readiness within the existing deadlines. See the repository's
+[CI reproduction and evidence](../../../../docs/progress/PR3-CI-SOCKET-READINESS-2026-10-27.md)
+for build availability and verification. Check the executable's build; updating
+source alone does not replace an existing binary. A generic connection error
+still requires diagnosis, and uncertain input must never be replayed.

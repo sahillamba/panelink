@@ -52,6 +52,15 @@ phase-sa-feasibility: ATTEMPTED/BLOCKED — OpenCode2.0.32 ACP/server readiness 
 phase-usability-wave1: scoped implementation delivered 2026-10-22; typed keys/help/cleanup and automated evidence. Full acceptance remains open; see USABILITY-WAVE1-RESULT.md.
 ```
 
+## PR 3 hosted CI follow-up — 2026-10-27
+
+Hosted CI at `ec09eb0` failed in the wide-terminal regression with connection
+loss; seven supporting checks passed. The socket readiness repair preserves
+all deadlines and has an old-fail/new-pass background-server reproduction.
+Final combined verifier8/8: rootRust1441/0/15ignored, decoder39/0,
+Python233run/1skip and all supporting checks pass. New hosted result pending. See
+[the CI repair evidence](docs/progress/PR3-CI-SOCKET-READINESS-2026-10-27.md).
+
 ## Consolidation checkpoint — 2026-10-27
 
 The user authorized combining main's dirty work into 7060 and opening a PR.

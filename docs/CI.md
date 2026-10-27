@@ -72,3 +72,11 @@ setting and is not changed by this workflow.
 The initial setup adds validation and dependency-update proposals only. It does
 not publish releases, sign binaries, run provider sessions, or add an automatic
 agent repair loop. Future release automation should reuse [RELEASE.md](RELEASE.md).
+
+## PR 3 wide-terminal failure
+
+The first PR 3 hosted run at `ec09eb0` passed seven checks but failed the
+wide-terminal attach test with connection loss. Local green evidence did not
+establish a hosted pass. The scoped repair replaces timer-based socket waiting
+with descriptor readiness while retaining existing deadlines; see
+[the diagnosis, counterfactual and verification](progress/PR3-CI-SOCKET-READINESS-2026-10-27.md).

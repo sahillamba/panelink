@@ -589,6 +589,15 @@ fn wide_terminal_starts_and_reattaches_without_losing_the_shell() {
     for _ in 0..2 {
         let mut client = Client::spawn_sized(&fixture, None, 64, 269);
         client.wait_raw_mode();
+        // Exercise macOS timer coalescing only in our verified private server.
+        // Keep the test's outer-PTY drain and UI at normal priority so the
+        // regression isolates socket progress rather than terminal-reader lag.
+        let pid = fixture.verified_server_pid().expect("fixture-owned server");
+        assert!(Command::new("/usr/sbin/taskpolicy")
+            .args(["-b", "-p", &pid.to_string()])
+            .status()
+            .expect("background fixture server")
+            .success());
         client.wait_until("wide terminal pane controls and shell prompt", |client| {
             let mut parser = vt100::Parser::new(64, 269, 0);
             parser.process(&client.capture());
