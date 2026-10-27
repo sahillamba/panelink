@@ -113,7 +113,14 @@ impl Fixture {
                 "-i",
             ])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(self.root.join("server.stderr"))
+                    .expect("capture private fixture server diagnostics"),
+            )
             .spawn()
             .expect("start default workspace server");
         let mut stdout = child.stdout.take().unwrap();
@@ -193,6 +200,12 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if thread::panicking() {
+            if let Ok(bytes) = fs::read(self.root.join("server.stderr")) {
+                let tail = &bytes[bytes.len().saturating_sub(8 * 1024)..];
+                eprintln!("fixture server stderr: {}", String::from_utf8_lossy(tail));
+            }
+        }
         if let Some(server) = self.server.as_mut() {
             if server.try_wait().ok().flatten().is_none() {
                 let _ = server.kill();

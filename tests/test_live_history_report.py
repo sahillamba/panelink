@@ -9,8 +9,9 @@ from scripts import validate_live_history_report as validator
 
 def sample_report(version=1):
     cases = []
-    for name, columns, planned in validator.CASES:
-        interrupted = name == "shutdown_240"
+    profile = validator.PADDED_CASES if version == 3 else validator.CASES
+    for name, columns, planned in profile:
+        interrupted = name == profile[-1][0]
         cases.append({
             "name": name, "columns": columns, "rows_per_pane": 24, "panes": 2,
             "planned_rows_per_pane": planned, "elapsed_us": 1000,
@@ -33,7 +34,7 @@ def sample_report(version=1):
                 for pane in range(2)
             ],
         })
-    if version == 2:
+    if version >= 2:
         for case in cases:
             case["history_diagnostics"] = {"reasons": [], "writer_drain_outcome": "drained"}
     return {"schema_version": version, "synthetic": True, "actual_history_store": True,
@@ -123,7 +124,8 @@ class LiveHistoryReportTests(unittest.TestCase):
                      "p5-history-diagnostics-run1.json", "p5-history-diagnostics-run2.json",
                      "p5-final-tail-run1.json", "p5-final-tail-run2.json",
                      "p5-final-tail-control.json",
-                     "p5-drain-metadata-run1.json", "p5-drain-metadata-run2.json"):
+                     "p5-drain-metadata-run1.json", "p5-drain-metadata-run2.json",
+                     "p5-live-history-2026-10-26.json"):
             with self.subTest(name=name):
                 validator.validate_report(validator.load_report(progress / name))
 
@@ -168,6 +170,21 @@ class LiveHistoryReportTests(unittest.TestCase):
         self.assert_invalid(report)
         report = sample_report()
         report["cases"][0]["history_diagnostics"] = {"reasons": [], "writer_drain_outcome": "drained"}
+        self.assert_invalid(report)
+
+    def test_padded_profile_requires_schema_three_and_exact_content_dimensions(self):
+        report = sample_report(3)
+        validator.validate_report(report)
+        report["schema_version"] = 2
+        self.assert_invalid(report)
+        report["schema_version"] = 3
+        report["cases"][1]["columns"] = 240
+        self.assert_invalid(report)
+        report = sample_report(2)
+        report["schema_version"] = 3
+        self.assert_invalid(report)
+        report = sample_report(3)
+        del report["cases"][2]["history_diagnostics"]
         self.assert_invalid(report)
 
     def test_canceled_metadata_outcomes_require_actual_timeout_and_cancellation(self):

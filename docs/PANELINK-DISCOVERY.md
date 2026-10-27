@@ -1,6 +1,6 @@
 # Panelink: product discovery and spec handoff
 
-Status: first user answers and security review objective recorded; focused follow-ups pending. Updated 2026-10-26.
+Status: first user answers and security review objective recorded; focused follow-ups pending. Updated 2026-10-27.
 
 ## Confirmed requirements
 
@@ -16,6 +16,11 @@ Status: first user answers and security review objective recorded; focused follo
 - OpenCode is the required agent. Tabnine is an optional feasibility item. Preserve the agent's own terminal interface with status and notifications.
 - Provide an easy scriptable/agent command API to discover, read and control other managed agents/processes across panes (requested2026-10-17). Exact access scope/defaults and command contracts are proposed in [AGENT-CONTROL.md](AGENT-CONTROL.md); this does not request autonomous scheduling.
 - Keyboard navigation in the style of tmux, with Herdr-like workspace and mouse interactions.
+- Simpler pointer and keyboard operation (2026-10-27): draggable pane dividers,
+  quick close controls, clickable/draggable scrollbars and a visible actions
+  menu. Touch operates through host-translated mouse events; native touch and
+  a fixed sidebar layout are not selected by this request. See the
+  [delivery plan](progress/P5-POINTER-CONTROLS-2026-10-27.md).
 - Right-click context menus and automatic clipboard copy after text selection. The user explicitly requested Split Left, Right, Up and Down options (2026-10-17), and on2026-10-18 prioritized a new phase to open a fresh terminal session on the new side before the next planned work. See [Phase3A](progress/P3A-RIGHT-CLICK-SPLITS.md) and the existing [pane-layout design](PANE-LAYOUT.md); the confirmed hierarchy is Project → workspace tabs → split panes.
 - Reboot recovery restores layouts and offers supported agent conversation resume.
 - Local layouts, settings, and saved terminal history.

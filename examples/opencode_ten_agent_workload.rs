@@ -5,6 +5,7 @@
 mod workload {
     use panelink::control_protocol::TargetRef;
     use panelink::handshake_protocol::{decode_welcome, Hello, CAPABILITY_INPUT, CAPABILITY_READ};
+    use panelink::history_diagnostics::HistoryDiagnostics;
     use panelink::history_store::HistoryStore;
     use panelink::launch::{Environment, LaunchContext};
     use panelink::layout_store::{LayoutSlot, LayoutStore};
@@ -26,7 +27,7 @@ mod workload {
     use panelink::transport::{AuthenticatedStream, OwnedFrame};
     use panelink::ui_protocol::{
         decode_layout_reply, decode_screen_reply, encode_attach_target, encode_key_input,
-        encode_layout_query, encode_screen_query, KeyInput,
+        encode_layout_query, encode_screen_query, planned_split_size, KeyInput,
     };
     use std::ffi::OsString;
     use std::fs::{self, DirBuilder, OpenOptions};
@@ -36,11 +37,13 @@ mod workload {
     use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, Receiver, SyncSender};
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    const WORKSPACES: usize = 5;
+    const WORKSPACES_AB: usize = 5;
+    const WORKSPACES_C: usize = 6;
     const PANES: usize = 2;
     const MEASURE_SECONDS: u64 = 60;
     const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -49,15 +52,23 @@ mod workload {
     const IO_TIMEOUT: Duration = Duration::from_secs(8);
     /// Whole-probe bound: echo (8 s) + erase (8 s) + slack.
     const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
-    const ROOT_ROWS: u16 = 49;
-    const ROOT_COLUMNS: u16 = 100;
+    const ROOT_ROWS: u16 = 53;
+    const ROOT_COLUMNS: u16 = 102;
     const PID_WRAPPER: &str = "printf '%s\\n' \"$$\" > \"$1\"; shift; exec \"$@\"";
     const SHELL_SCRIPT: &str = r#"
 printf '%s\n' "$$" > "$2"
 printf 'PANELINK-SHELL-READY\r\n'
+while [ ! -e "$3" ]; do sleep 0.05; done
 (
   count=0
-  while :; do count=$((count + 1)); printf 'paced-shell-output-%s\r\n' "$count"; sleep 1; done
+  while [ -e "$3" ]; do
+    i=0
+    while [ "$i" -lt 8 ]; do
+      count=$((count + 1)); i=$((i + 1)); printf 'paced-shell-output-%s\r\n' "$count"
+    done
+    printf '%s\n' "$count" > "$4.pending" && mv "$4.pending" "$4"
+    sleep 0.1
+  done
 ) &
 writer=$!
 trap 'kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null; exit 0' HUP INT TERM
@@ -68,13 +79,46 @@ while IFS= read -r line; do
   fi
 done
 "#;
-
+    const BUILD_SHELL_SCRIPT: &str = r#"
+printf '%s\n' "$$" > "$2"
+printf 'PANELINK-SHELL-READY\r\n'
+(
+  while [ ! -e "$6" ]; do sleep 0.05; done
+  count=0
+  while [ -e "$6" ]; do
+    if "$RUSTC" --edition=2021 "$3" -o "$4"; then
+      count=$((count + 1))
+      printf 'BUILD_OK %s\r\n' "$count"
+      printf '%s\n' "$count" > "$1.pending" && mv "$1.pending" "$1"
+    else
+      printf 'BUILD_FAILED\r\n'
+      printf '%s\n' failed > "$7.pending" && mv "$7.pending" "$7"
+      exit 71
+    fi
+    sleep 1
+  done
+) &
+writer=$!
+trap 'kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null; exit 0' HUP INT TERM
+count=0
+while IFS= read -r line; do
+  if [ "$line" = q ]; then
+    count=$((count + 1)); printf '%s\n' "$count" > "$5.pending" && mv "$5.pending" "$5"
+  fi
+done
+"#;
     type Result<T> = std::result::Result<T, &'static str>;
+
+    static CLEANUP_FAILED: AtomicBool = AtomicBool::new(false);
+    static CLEANUP_UNCERTAIN: AtomicBool = AtomicBool::new(false);
+    static CLEANUP_IDENTITY_CHANGED: AtomicBool = AtomicBool::new(false);
+    static FIXTURE_ROOT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
     #[derive(Clone, Copy, Eq, PartialEq)]
     enum Variant {
         A,
         B,
+        C,
     }
 
     impl Variant {
@@ -82,18 +126,44 @@ done
             match value {
                 "A" => Ok(Self::A),
                 "B" => Ok(Self::B),
-                _ => Err("variant must be A or B"),
+                "C" => Ok(Self::C),
+                _ => Err("variant must be A, B, or C"),
             }
         }
         fn name(self) -> &'static str {
-            if self == Self::A {
-                "A"
-            } else {
-                "B"
+            match self {
+                Self::A => "A",
+                Self::B => "B",
+                Self::C => "C",
             }
         }
-        fn opencode(self, pane: usize) -> bool {
-            pane == 0 || self == Self::B
+        fn workspace_count(self) -> usize {
+            if self == Self::C {
+                WORKSPACES_C
+            } else {
+                WORKSPACES_AB
+            }
+        }
+        fn kind(self, workspace: usize, pane: usize) -> PaneKind {
+            match self {
+                Self::A => {
+                    if pane == 0 {
+                        PaneKind::OpenCode
+                    } else {
+                        PaneKind::Shell
+                    }
+                }
+                Self::B => PaneKind::OpenCode,
+                Self::C if workspace < WORKSPACES_AB => PaneKind::OpenCode,
+                Self::C if pane == 0 => PaneKind::Shell,
+                Self::C => PaneKind::BuildShell,
+            }
+        }
+        fn opencode_count(self) -> usize {
+            match self {
+                Self::A => WORKSPACES_AB,
+                Self::B | Self::C => WORKSPACES_AB * PANES,
+            }
         }
     }
 
@@ -131,12 +201,6 @@ done
         }
     }
 
-    impl Drop for PrivateRoot {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     fn private_dir(path: &Path) -> io::Result<()> {
         let mut builder = DirBuilder::new();
         builder.mode(0o700);
@@ -148,15 +212,22 @@ done
     enum PaneKind {
         OpenCode,
         Shell,
+        BuildShell,
     }
 
     impl PaneKind {
         fn label(self) -> &'static str {
-            if self == Self::OpenCode {
-                "opencode"
-            } else {
-                "shell"
+            match self {
+                Self::OpenCode => "opencode",
+                Self::Shell => "shell_log",
+                Self::BuildShell => "shell_build",
             }
+        }
+        fn is_shell(self) -> bool {
+            self != Self::OpenCode
+        }
+        fn is_build(self) -> bool {
+            self == Self::BuildShell
         }
     }
 
@@ -188,10 +259,26 @@ done
                 (wrapper, "tescode workflow custom")
             };
             let version = if label == "tescode workflow custom" {
-                "wrapper; OpenCode version not queried".to_owned()
+                let output = Command::new(&executable)
+                    .args(["version"])
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .output()
+                    .map_err(|_| "tescode version probe failed to start")?;
+                if !output.status.success() {
+                    return Err("tescode version probe failed");
+                }
+                format!(
+                    "tescode {}",
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or("version unavailable")
+                        .trim()
+                )
             } else {
                 let root = PrivateRoot::create()?;
-                let output = Command::new(&executable)
+                let output_result = Command::new(&executable)
                     .arg("--version")
                     .env_clear()
                     .env("HOME", &root.0)
@@ -199,8 +286,16 @@ done
                     .env("OPENCODE_DISABLE_MODELS_FETCH", "1")
                     .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
                     .env("OPENCODE_DISABLE_UPDATE_CHECK", "1")
-                    .output()
-                    .map_err(|_| "OpenCode version probe failed to start")?;
+                    .output();
+                // output() has reaped the version process. This probe root is
+                // distinct from the workload fixture retained on run failure.
+                fs::remove_dir_all(&root.0).map_err(|_| "version probe fixture cleanup failed")?;
+                if let Ok(mut recorded) = FIXTURE_ROOT.lock() {
+                    if recorded.as_deref() == Some(root.0.as_path()) {
+                        *recorded = None;
+                    }
+                }
+                let output = output_result.map_err(|_| "OpenCode version probe failed to start")?;
                 if !output.status.success() {
                     return Err("OpenCode version probe failed");
                 }
@@ -225,13 +320,46 @@ done
                     project.as_os_str().to_owned(),
                 ]
             } else {
-                vec![project.as_os_str().to_owned()]
+                let mut arguments = Vec::new();
+                // This installed/pinned v2 CLI otherwise starts one managed
+                // service at a fixed shared port despite separate HOME/XDG.
+                // Its locally verified --standalone mode owns a private server.
+                if self.version == "opencode v2.0.32" {
+                    arguments.push("--standalone".into());
+                }
+                arguments.push(project.as_os_str().to_owned());
+                arguments
             }
         }
     }
 
     fn executable(path: &Path) -> bool {
         fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+
+    fn resolve_rustc() -> Result<PathBuf> {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let output = Command::new("rustup")
+            .args(["which", "rustc"])
+            .env("PATH", &path)
+            .output();
+        if let Ok(output) = output {
+            if output.status.success() {
+                let candidate = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+                if candidate.is_absolute() && executable(&candidate) {
+                    return fs::canonicalize(candidate)
+                        .map_err(|_| "rustc path canonicalization failed");
+                }
+            }
+        }
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join("rustc");
+            if executable(&candidate) {
+                return fs::canonicalize(candidate)
+                    .map_err(|_| "rustc path canonicalization failed");
+            }
+        }
+        Err("local rustc executable unavailable")
     }
 
     struct Pane {
@@ -241,7 +369,11 @@ done
         context: LaunchContext,
         pid_file: PathBuf,
         ack_file: PathBuf,
+        build_file: PathBuf,
+        build_failure_file: PathBuf,
+        start_file: PathBuf,
         pid: Option<u32>,
+        identity: Option<ProcessIdentity>,
         startup_started: Instant,
         startup_us: Option<u64>,
         marker: Option<&'static str>,
@@ -255,6 +387,7 @@ done
             pane: usize,
             kind: PaneKind,
             launcher: &Launcher,
+            rustc: &Path,
         ) -> Result<Self> {
             let private = root.join(format!("pane-{pane}"));
             let project = private.join("project");
@@ -290,6 +423,9 @@ done
             ]);
             let pid_file = private.join("child.pid");
             let ack_file = private.join("child.ack");
+            let build_file = private.join("build-count");
+            let build_failure_file = private.join("build-failed");
+            let start_file = private.join("start-workload");
             let (executable, arguments) = match kind {
                 PaneKind::OpenCode => {
                     let command = launcher.command(&project);
@@ -311,8 +447,39 @@ done
                         "panelink-shell".into(),
                         ack_file.as_os_str().to_owned(),
                         pid_file.as_os_str().to_owned(),
+                        private.join("start-workload").into_os_string(),
+                        build_file.as_os_str().to_owned(),
                     ],
                 ),
+                PaneKind::BuildShell => {
+                    let src = private.join("build-project/src");
+                    private_dir(&private.join("build-project"))
+                        .map_err(|_| "build fixture setup failed")?;
+                    private_dir(&src).map_err(|_| "build source directory setup failed")?;
+                    let source = src.join("main.rs");
+                    fs::write(
+                        &source,
+                        b"fn main() { let n: u64 = (1..=1000).sum(); println!(\"{n}\"); }\n",
+                    )
+                    .map_err(|_| "build fixture source setup failed")?;
+                    let output = private.join("build-project/fixture-bin");
+                    env.insert("RUSTC".into(), rustc.as_os_str().to_owned());
+                    (
+                        PathBuf::from("/bin/sh"),
+                        vec![
+                            "-c".into(),
+                            BUILD_SHELL_SCRIPT.into(),
+                            "panelink-build".into(),
+                            build_file.as_os_str().to_owned(),
+                            pid_file.as_os_str().to_owned(),
+                            source.into_os_string(),
+                            output.into_os_string(),
+                            ack_file.as_os_str().to_owned(),
+                            private.join("start-workload").into_os_string(),
+                            build_failure_file.as_os_str().to_owned(),
+                        ],
+                    )
+                }
             };
             Ok(Self {
                 kind,
@@ -324,7 +491,11 @@ done
                 },
                 pid_file,
                 ack_file,
+                build_file,
+                build_failure_file,
+                start_file,
                 pid: None,
+                identity: None,
                 startup_started: Instant::now(),
                 startup_us: None,
                 marker: None,
@@ -338,6 +509,8 @@ done
             if self.pid.is_none() {
                 return Err("child PID marker invalid");
             }
+            let pid = self.pid.ok_or("child PID marker invalid")?;
+            self.identity = Some(ProcessIdentity::capture(pid)?);
             Ok(())
         }
     }
@@ -461,9 +634,47 @@ done
         next_input: Instant,
         input_index: usize,
         history_ok: bool,
+        history_capture_failed: bool,
+        history_diagnostics: HistoryDiagnostics,
+        history_targets_json: String,
+        history_diagnostic_json: String,
+        history_inspection_complete: bool,
+        build_cycles: u64,
+        build_failed: bool,
         layout_ok: bool,
         shutdown_ms: Option<u64>,
         groups_stopped: bool,
+    }
+
+    struct CreateCleanup {
+        pid_files: Vec<PathBuf>,
+        identities: Vec<Option<ProcessIdentity>>,
+        started: Vec<bool>,
+        armed: bool,
+    }
+    impl Drop for CreateCleanup {
+        fn drop(&mut self) {
+            if self.armed {
+                for (index, path) in self.pid_files.iter().enumerate() {
+                    if !self.started.get(index).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    match fs::read_to_string(path)
+                        .ok()
+                        .and_then(|text| text.trim().parse::<u32>().ok())
+                    {
+                        Some(pid) => record_cleanup_result(stop_group(
+                            pid,
+                            self.identities.get(index).copied().flatten(),
+                        )),
+                        None => {
+                            CLEANUP_FAILED.store(true, Ordering::SeqCst);
+                            CLEANUP_UNCERTAIN.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     impl Workspace {
@@ -472,6 +683,7 @@ done
             path: PathBuf,
             variant: Variant,
             launcher: &Launcher,
+            rustc: &Path,
         ) -> Result<Self> {
             private_dir(&path).map_err(|_| "workspace directory setup failed")?;
             let server = path.join("server");
@@ -481,23 +693,23 @@ done
             private_dir(&server).map_err(|_| "server directory setup failed")?;
             private_dir(&terminfo).map_err(|_| "terminfo directory setup failed")?;
             compile_terminfo(&terminfo)?;
-            let kinds = [
-                PaneKind::OpenCode,
-                if variant.opencode(1) {
-                    PaneKind::OpenCode
-                } else {
-                    PaneKind::Shell
-                },
-            ];
+            let kinds = [variant.kind(index, 0), variant.kind(index, 1)];
             let mut panes = Vec::new();
             for (pane, kind) in kinds.into_iter().enumerate() {
-                panes.push(Pane::new(&path, &terminfo, pane, kind, launcher)?);
+                panes.push(Pane::new(&path, &terminfo, pane, kind, launcher, rustc)?);
             }
             let mut panes: [Pane; PANES] = panes.try_into().map_err(|_| "pane setup failed")?;
+            let mut cleanup = CreateCleanup {
+                pid_files: panes.iter().map(|pane| pane.pid_file.clone()).collect(),
+                identities: vec![None; PANES],
+                started: vec![false; PANES],
+                armed: true,
+            };
             let storage = ServerStorage::initialize(&server)
                 .map_err(|_| "server storage initialization failed")?;
             let args = panes[0].arguments.clone();
             panes[0].startup_started = Instant::now();
+            cleanup.started[0] = true;
             let started = StartedMultiServer::start(
                 storage,
                 &terminfo,
@@ -529,10 +741,15 @@ done
                 return Err("history capture unavailable");
             }
             wait_pid(&panes[0].pid_file, &mut driver)?;
+            panes[0].record_pid()?;
+            cleanup.identities[0] = panes[0].identity;
             panes[1].startup_started = Instant::now();
-            let target1 = split_pane(&mut driver, target0, &panes[1], &terminfo)?;
+            cleanup.started[1] = true;
+            let target1 = split_pane(&mut driver, target0, &mut panes[1], &terminfo)?;
+            cleanup.identities[1] = panes[1].identity;
             wait_layout(&mut driver, &server, target0, target1)?;
-            let mut workspace = Self {
+            let diagnostics = driver.history_diagnostics();
+            let workspace = Self {
                 index,
                 history,
                 layout,
@@ -547,12 +764,18 @@ done
                 next_input: Instant::now(),
                 input_index: 0,
                 history_ok: false,
+                history_capture_failed: false,
+                history_diagnostics: diagnostics,
+                history_targets_json: String::new(),
+                history_diagnostic_json: String::new(),
+                history_inspection_complete: false,
+                build_cycles: 0,
+                build_failed: false,
                 layout_ok: false,
                 shutdown_ms: None,
                 groups_stopped: false,
             };
-            workspace.panes[0].record_pid()?;
-            workspace.panes[1].record_pid()?;
+            cleanup.armed = false;
             Ok(workspace)
         }
         fn connect(&mut self) -> Result<()> {
@@ -648,24 +871,110 @@ done
             let started = Instant::now();
             let mut clean = true;
             for pane in &self.panes {
-                if let Some(pid) = pane.pid {
-                    let stopped = stop_group(pid)?;
+                if let (Some(pid), identity) = (pane.pid, pane.identity) {
+                    let stopped = stop_group(pid, identity)?;
                     clean &= stopped;
                 }
             }
+            let history_failure_signal = self
+                .driver
+                .as_ref()
+                .map(|driver| driver.history_failure_signal());
             drop(self.driver.take());
             self.shutdown_ms = Some(micros(started.elapsed()) / 1000);
             self.groups_stopped = clean;
             if !clean {
                 return Err("child process group leaked");
             }
-            let history = HistoryStore::open(&self.history).map_err(|_| "history reopen failed")?;
-            self.history_ok = self.targets.iter().all(|target| {
-                history.load_rows(*target).ok().flatten().is_some()
-                    && history
-                        .load_screens(*target)
-                        .is_ok_and(|screens| screens[0].is_some())
-            });
+            let server_dir = self.history.parent().ok_or("history parent missing")?;
+            let targets = self.targets;
+            match lock_history_for_inspection(server_dir) {
+                Ok(lock) => {
+                    if let Ok(history) = HistoryStore::open(&self.history) {
+                        let mut target_rows = Vec::new();
+                        self.history_ok = true;
+                        self.history_inspection_complete = true;
+                        for target in targets {
+                            let rows = history.load_rows(target);
+                            let screens = history.load_screens(target);
+                            let (saved, rows_readable) = match rows {
+                                Ok(saved) => (saved, true),
+                                Err(_) => (None, false),
+                            };
+                            let (screens, screens_readable) = match screens {
+                                Ok(screens) => (screens, true),
+                                Err(_) => ([None, None], false),
+                            };
+                            let rows_present = saved.is_some();
+                            let (
+                                retained_rows,
+                                retained_bytes,
+                                gap,
+                                ended_at,
+                                normal,
+                                alternate,
+                                capture_disabled,
+                            ) = if let Some(saved) = saved {
+                                (
+                                    saved.records.len(),
+                                    saved.records.iter().map(Vec::len).sum::<usize>(),
+                                    saved.gap,
+                                    saved.ended_at_unix_ms,
+                                    screens[0].is_some(),
+                                    screens[1].is_some(),
+                                    saved.capture_disabled,
+                                )
+                            } else {
+                                (
+                                    0,
+                                    0,
+                                    false,
+                                    0,
+                                    screens[0].is_some(),
+                                    screens[1].is_some(),
+                                    false,
+                                )
+                            };
+                            self.history_ok &=
+                                rows_readable && screens_readable && rows_present && normal;
+                            self.history_inspection_complete &= rows_readable && screens_readable;
+                            target_rows.push(format!("{{\"target\":{{\"generation\":{},\"workspace\":{},\"pane\":{},\"session\":{},\"occupant_revision\":{}}},\"rows_readable\":{},\"rows_present\":{},\"screens_readable\":{},\"retained_rows\":{},\"retained_bytes\":{},\"gap\":{},\"ended\":{},\"ended_at_unix_ms\":{},\"normal_screen\":{},\"alternate_screen\":{},\"capture_disabled\":{}}}", target.generation, target.workspace, target.pane, target.session, target.occupant_revision, rows_readable, rows_present, screens_readable, retained_rows, retained_bytes, gap, ended_at != 0, ended_at, normal, alternate, capture_disabled));
+                        }
+                        self.history_targets_json = target_rows.join(",");
+                    } else {
+                        self.history_ok = false;
+                    }
+                    drop(lock);
+                }
+                Err(_) => {
+                    self.history_ok = false;
+                }
+            }
+            // Settlement prevents late writer results from being omitted.
+            self.history_capture_failed = history_failure_signal
+                .as_ref()
+                .is_some_and(|signal| signal.load(Ordering::SeqCst));
+            let diagnostic_snapshot = self.history_diagnostics.snapshot();
+            let reason_names = diagnostic_snapshot
+                .reasons()
+                .map(|reason| json_string(reason.as_str()))
+                .collect::<Vec<_>>()
+                .join(",");
+            self.history_diagnostic_json = format!(
+                "{{\"sticky_failure\":{},\"reasons\":[{}],\"writer_drain_outcome\":{}}}",
+                self.history_capture_failed,
+                reason_names,
+                json_string(diagnostic_snapshot.writer_drain_outcome().as_str())
+            );
+            for pane in &self.panes {
+                if pane.kind.is_build() {
+                    self.build_cycles = fs::read_to_string(&pane.build_file)
+                        .ok()
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    self.build_failed = pane.build_failure_file.exists();
+                }
+            }
             let layout = LayoutStore::open(&self.layout).map_err(|_| "layout reopen failed")?;
             self.layout_ok = layout
                 .load(LayoutSlot::Current)
@@ -706,7 +1015,7 @@ done
             self.clients.clear();
             for pane in &self.panes {
                 if let Some(pid) = pane.pid {
-                    let _ = stop_group(pid);
+                    record_cleanup_result(stop_group(pid, pane.identity));
                 }
             }
             drop(self.driver.take());
@@ -753,7 +1062,7 @@ done
     fn split_pane(
         driver: &mut MultiServerDriver,
         target: TargetRef,
-        pane: &Pane,
+        pane: &mut Pane,
         terminfo: &Path,
     ) -> Result<TargetRef> {
         let (server, socket) = UnixStream::pair().map_err(|_| "split socketpair failed")?;
@@ -771,7 +1080,11 @@ done
                 },
                 pid_file: pane.pid_file.clone(),
                 ack_file: pane.ack_file.clone(),
+                build_file: pane.build_file.clone(),
+                build_failure_file: pane.build_failure_file.clone(),
+                start_file: pane.start_file.clone(),
                 pid: None,
+                identity: None,
                 startup_started: pane.startup_started,
                 startup_us: None,
                 marker: None,
@@ -790,6 +1103,7 @@ done
                     join.join().map_err(|_| "split client panicked")?;
                     let new_target = result?;
                     wait_pid(&pane.pid_file, driver)?;
+                    pane.record_pid()?;
                     return Ok(new_target);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -879,10 +1193,19 @@ done
             .map(|arg| arg.as_bytes())
             .collect::<Vec<_>>();
         let env = environment_entries(&launch.pane.context.environment);
+        let layout_reply = request(&mut stream, &mut request_id, &encode_layout_query())?;
+        if layout_reply.kind() != MessageKind::Response {
+            return Err("split layout query response invalid");
+        }
+        let decoded_layout = decode_layout_reply(layout_reply.payload())
+            .map_err(|_| "split layout query decode failed")?;
+        let (planned_rows, planned_columns) =
+            planned_split_size(&decoded_layout, target0, SplitDirection::Down)
+                .map_err(|_| "split launch size unavailable")?;
         let child = LaunchRequest {
             key,
-            rows: 24,
-            columns: ROOT_COLUMNS,
+            rows: planned_rows,
+            columns: planned_columns,
             requested_executable: launch.pane.executable.as_os_str().as_bytes(),
             requested_working_directory: launch
                 .pane
@@ -1117,7 +1440,7 @@ done
                         }
                         refreshed.owner_revision
                     };
-                    let result = match kind {
+                    let mut result = match kind {
                         PaneKind::OpenCode => opencode_input(
                             &mut stream,
                             &mut request_id,
@@ -1128,7 +1451,7 @@ done
                             &mut sequence,
                             index,
                         ),
-                        PaneKind::Shell => shell_input(
+                        PaneKind::Shell | PaneKind::BuildShell => shell_input(
                             &mut stream,
                             &mut request_id,
                             target,
@@ -1141,6 +1464,9 @@ done
                             previous,
                         ),
                     };
+                    if let Ok(value) = &mut result {
+                        value.kind = kind;
+                    }
                     let failed = result.is_err();
                     if let Err(reason) = &result {
                         eprintln!(
@@ -1176,6 +1502,22 @@ done
             &encode_screen_query(target).map_err(|_| "screen query encoding failed")?,
         )?;
         if reply.kind() != MessageKind::Snapshot {
+            let label = match reply.payload() {
+                b"invalid_screen" => "invalid_screen",
+                b"unknown_context" => "unknown_context",
+                b"lease_expired" => "lease_expired",
+                b"unauthorized" => "unauthorized",
+                b"target_stale" => "target_stale",
+                b"capability_denied" => "capability_denied",
+                b"internal_error" => "internal_error",
+                b"invalid_request" => "invalid_request",
+                _ => "unclassified_fixed_error",
+            };
+            eprintln!(
+                "workload: screen reply kind {:?}, label {label}, fixed response {:?}",
+                reply.kind(),
+                decode_response_payload(reply.payload()).map(|reply| reply.body)
+            );
             return Err("screen query response kind invalid");
         }
         let view =
@@ -1185,6 +1527,9 @@ done
         }
         let screen = screen_checkpoint::decode(view.checkpoint())
             .map_err(|_| "screen checkpoint decode failed")?;
+        if screen.rows() != 24 || screen.columns() != 100 {
+            return Err("screen content geometry does not match workload");
+        }
         let mut text = String::new();
         for row in 0..screen.rows() {
             for col in 0..screen.columns() {
@@ -1392,6 +1737,28 @@ done
         Ok(reply)
     }
 
+    fn counter_value(path: &Path) -> Option<u64> {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+    }
+
+    fn lock_history_for_inspection(
+        path: &Path,
+    ) -> io::Result<panelink::server_storage::MaintenanceLock> {
+        let deadline = Instant::now() + IO_TIMEOUT;
+        loop {
+            match ServerStorage::lock_for_maintenance(path) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                result => return result,
+            }
+        }
+    }
+
     fn ack_value(path: &Path) -> Result<u64> {
         match fs::read_to_string(path) {
             Ok(text) => text
@@ -1414,6 +1781,9 @@ done
         panelink: Usage,
         opencode: Usage,
         shells: Usage,
+        builds: Usage,
+        log_lines: u64,
+        build_cycles: u64,
     }
 
     fn ps_rows() -> Result<Vec<(u32, u32, u64, f64)>> {
@@ -1457,15 +1827,25 @@ done
             .collect()
     }
 
-    fn sample(groups_opencode: &[u32], groups_shell: &[u32], second: u64) -> Result<Sample> {
+    fn sample(
+        groups_opencode: &[u32],
+        groups_shell: &[u32],
+        groups_build: &[u32],
+        second: u64,
+        log_counter: Option<&Path>,
+        build_counter: Option<&Path>,
+    ) -> Result<Sample> {
         let mut panelink = Usage::default();
         let mut opencode = Usage::default();
         let mut shells = Usage::default();
+        let mut builds = Usage::default();
         for (pid, pgid, rss, cpu) in ps_rows()? {
             let usage = if pid == process::id() {
                 Some(&mut panelink)
             } else if groups_opencode.contains(&pgid) {
                 Some(&mut opencode)
+            } else if groups_build.contains(&pgid) {
+                Some(&mut builds)
             } else if groups_shell.contains(&pgid) {
                 Some(&mut shells)
             } else {
@@ -1485,6 +1865,9 @@ done
             panelink,
             opencode,
             shells,
+            builds,
+            log_lines: log_counter.and_then(counter_value).unwrap_or(0),
+            build_cycles: build_counter.and_then(counter_value).unwrap_or(0),
         })
     }
 
@@ -1498,6 +1881,9 @@ done
             .env("PATH", "/usr/bin:/bin")
             .output()
             .map_err(|_| "ps failed")?;
+        if !output.status.success() {
+            return Err("process-group inspection failed");
+        }
         let text = String::from_utf8_lossy(&output.stdout);
         Ok(text.lines().any(|line| {
             let mut fields = line.split_whitespace();
@@ -1509,8 +1895,91 @@ done
         }))
     }
 
-    fn stop_group(group: u32) -> Result<bool> {
+    #[derive(Clone, Copy)]
+    struct ProcessIdentity {
+        pid: u32,
+        birth_micros: u64,
+        uid: u32,
+    }
+
+    impl ProcessIdentity {
+        fn capture(pid: u32) -> Result<Self> {
+            let pid_i32 = i32::try_from(pid).map_err(|_| "child PID is out of range")?;
+            let info = process_info(pid_i32).ok_or("child process identity unavailable")?;
+            if info.pbi_status == libc::SZOMB {
+                return Err("child exited before identity capture");
+            }
+            Ok(Self {
+                pid,
+                birth_micros: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+                uid: info.pbi_uid,
+            })
+        }
+
+        fn matches_current(self) -> Option<bool> {
+            let info = process_info(i32::try_from(self.pid).ok()?)?;
+            Some(
+                info.pbi_uid == self.uid
+                    && info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
+                        == self.birth_micros,
+            )
+        }
+    }
+
+    fn process_info(pid: i32) -> Option<libc::proc_bsdinfo> {
+        // SAFETY: proc_bsdinfo is plain data and zero is a valid buffer state.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>();
+        // SAFETY: the pointer and byte count exactly describe the writable result.
+        let count = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                std::ptr::addr_of_mut!(info).cast(),
+                i32::try_from(size).ok()?,
+            )
+        };
+        (usize::try_from(count).ok() == Some(size)).then_some(info)
+    }
+
+    fn record_cleanup_result(result: Result<bool>) {
+        match result {
+            Ok(true) => {}
+            Ok(false) => CLEANUP_FAILED.store(true, Ordering::SeqCst),
+            Err(_) => {
+                CLEANUP_FAILED.store(true, Ordering::SeqCst);
+                CLEANUP_UNCERTAIN.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn stop_group(group: u32, identity: Option<ProcessIdentity>) -> Result<bool> {
+        if !group_alive(group)? {
+            return Ok(true);
+        }
+        let Some(identity) = identity else {
+            CLEANUP_FAILED.store(true, Ordering::SeqCst);
+            CLEANUP_UNCERTAIN.store(true, Ordering::SeqCst);
+            return Ok(false);
+        };
         for signal in ["TERM", "KILL"] {
+            if !group_alive(group)? {
+                return Ok(true);
+            }
+            match identity.matches_current() {
+                Some(true) => {}
+                Some(false) => {
+                    CLEANUP_FAILED.store(true, Ordering::SeqCst);
+                    CLEANUP_IDENTITY_CHANGED.store(true, Ordering::SeqCst);
+                    return Ok(false);
+                }
+                None => {
+                    CLEANUP_FAILED.store(true, Ordering::SeqCst);
+                    CLEANUP_UNCERTAIN.store(true, Ordering::SeqCst);
+                    return Ok(false);
+                }
+            }
             let signal_arg = format!("-{signal}");
             let group_arg = group.to_string();
             let _ = Command::new("/usr/bin/pkill")
@@ -1526,7 +1995,11 @@ done
                 thread::sleep(Duration::from_millis(20));
             }
         }
-        Ok(!group_alive(group)?)
+        let stopped = !group_alive(group)?;
+        if !stopped {
+            CLEANUP_FAILED.store(true, Ordering::SeqCst);
+        }
+        Ok(stopped)
     }
 
     fn micros(duration: Duration) -> u64 {
@@ -1600,7 +2073,7 @@ done
         let shell = w
             .inputs
             .iter()
-            .filter(|i| i.kind == PaneKind::Shell)
+            .filter(|i| i.kind.is_shell())
             .collect::<Vec<_>>();
         let echoes = opencode
             .iter()
@@ -1609,7 +2082,7 @@ done
         let rts = opencode.iter().map(|i| i.round_trip_us).collect::<Vec<_>>();
         let shell_rts = shell.iter().map(|i| i.round_trip_us).collect::<Vec<_>>();
         let inputs = w.inputs.iter().map(|input| format!("{{\"probe\":{},\"kind\":{},\"echo_us\":{},\"round_trip_us\":{},\"erased_or_acknowledged\":{}}}", input.probe, json_string(input.kind.label()), num(input.echo_us), input.round_trip_us, input.erased)).collect::<Vec<_>>().join(",");
-        format!("{{\"workspace\":{},\"owner_ticks\":{{\"count\":{},\"p50_us\":{},\"p95_us\":{},\"max_us\":{}}},\"panes\":[{}],\"input_samples\":[{}],\"opencode_input\":{{\"count\":{},\"echo_p50_us\":{},\"echo_p95_us\":{},\"echo_max_us\":{},\"round_trip_p50_us\":{},\"round_trip_p95_us\":{},\"round_trip_max_us\":{}}},\"shell_input_ack\":{{\"count\":{},\"p50_us\":{},\"p95_us\":{},\"max_us\":{}}},\"history_ok\":{},\"layout_ok\":{},\"shutdown_ms\":{},\"process_groups_stopped\":{}}}", w.index, ticks.len(), num(pct_u64(ticks, 0.5)), num(pct_u64(ticks, 0.95)), num(ticks.iter().copied().max()), panes.join(","), inputs, opencode.len(), num(pct_u64(&echoes, 0.5)), num(pct_u64(&echoes, 0.95)), num(echoes.iter().copied().max()), num(pct_u64(&rts, 0.5)), num(pct_u64(&rts, 0.95)), num(rts.iter().copied().max()), shell.len(), num(pct_u64(&shell_rts, 0.5)), num(pct_u64(&shell_rts, 0.95)), num(shell_rts.iter().copied().max()), w.history_ok, w.layout_ok, w.shutdown_ms.map_or_else(|| "null".into(), |n| n.to_string()), w.groups_stopped)
+        format!("{{\"workspace\":{},\"owner_ticks\":{{\"count\":{},\"p50_us\":{},\"p95_us\":{},\"max_us\":{}}},\"panes\":[{}],\"input_samples\":[{}],\"opencode_input\":{{\"count\":{},\"echo_p50_us\":{},\"echo_p95_us\":{},\"echo_max_us\":{},\"round_trip_p50_us\":{},\"round_trip_p95_us\":{},\"round_trip_max_us\":{}}},\"shell_input_ack\":{{\"count\":{},\"p50_us\":{},\"p95_us\":{},\"max_us\":{}}},\"history_ok\":{},\"history_capture_failed\":{},\"history_inspection_complete\":{},\"history_targets\":[{}],\"history_diagnostics\":{},\"build_cycles_completed\":{},\"build_child_acknowledgements\":{},\"build_failed\":{},\"layout_ok\":{},\"shutdown_ms\":{},\"process_groups_stopped\":{}}}", w.index, ticks.len(), num(pct_u64(ticks, 0.5)), num(pct_u64(ticks, 0.95)), num(ticks.iter().copied().max()), panes.join(","), inputs, opencode.len(), num(pct_u64(&echoes, 0.5)), num(pct_u64(&echoes, 0.95)), num(echoes.iter().copied().max()), num(pct_u64(&rts, 0.5)), num(pct_u64(&rts, 0.95)), num(rts.iter().copied().max()), shell.len(), num(pct_u64(&shell_rts, 0.5)), num(pct_u64(&shell_rts, 0.95)), num(shell_rts.iter().copied().max()), w.history_ok, w.history_capture_failed, w.history_inspection_complete, w.history_targets_json, w.history_diagnostic_json, w.build_cycles, w.build_cycles, w.build_failed, w.layout_ok, w.shutdown_ms.map_or_else(|| "null".into(), |n| n.to_string()), w.groups_stopped)
     }
 
     fn private_json(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1628,14 +2101,27 @@ done
         let launcher = Launcher::resolve()?;
         eprintln!("workload: using {} ({})", launcher.label, launcher.version);
         let root = PrivateRoot::create()?;
-        let mut workspaces = Vec::with_capacity(WORKSPACES);
-        for index in 0..WORKSPACES {
-            eprintln!("workload: starting workspace {}/{}", index + 1, WORKSPACES);
+        if let Ok(mut fixture_root) = FIXTURE_ROOT.lock() {
+            *fixture_root = Some(root.0.clone());
+        }
+        let rustc = if variant == Variant::C {
+            Some(resolve_rustc()?)
+        } else {
+            None
+        };
+        let mut workspaces = Vec::with_capacity(variant.workspace_count());
+        for index in 0..variant.workspace_count() {
+            eprintln!(
+                "workload: starting workspace {}/{}",
+                index + 1,
+                variant.workspace_count()
+            );
             workspaces.push(Workspace::create(
                 index,
                 root.0.join(format!("workspace-{index}")),
                 variant,
                 &launcher,
+                rustc.as_deref().unwrap_or(Path::new("/usr/bin/rustc")),
             )?);
         }
         for workspace in &mut workspaces {
@@ -1658,11 +2144,7 @@ done
             thread::sleep(Duration::from_millis(2));
         }
         // Require the visible OpenCode brand plus a composer label before input.
-        let expected_agents = if variant == Variant::A {
-            WORKSPACES
-        } else {
-            WORKSPACES * PANES
-        };
+        let expected_agents = variant.opencode_count();
         let screen_deadline = Instant::now() + Duration::from_secs(60);
         let mut shell_ready = 0;
         // Parent fix: at most ONE outstanding screen query per pane. Issuing a
@@ -1735,7 +2217,10 @@ done
                             shell_ready += 1;
                         }
                     }
-                    Ok(Err(_)) => return Err("startup screen query failed"),
+                    Ok(Err(reason)) => {
+                        eprintln!("workload: startup screen query failed for workspace {workspace} pane {pane}: {reason}");
+                        return Err("startup screen query failed");
+                    }
                     Err(mpsc::TryRecvError::Disconnected) => {
                         return Err("startup screen query disconnected")
                     }
@@ -1757,10 +2242,10 @@ done
         if ready_agents != expected_agents {
             return Err("OpenCode marker/composer not detected on every agent");
         }
-        if shell_ready != WORKSPACES * PANES - expected_agents {
+        if shell_ready != variant.workspace_count() * PANES - expected_agents {
             return Err("shell startup marker missing");
         }
-        eprintln!("workload: UI ready ({ready_agents} OpenCode, {shell_ready} shells); beginning measured interval");
+        eprintln!("workload: UI ready ({ready_agents} OpenCode, {shell_ready} shells); workload gate prepared");
         let mut samples = Vec::with_capacity(MEASURE_SECONDS as usize);
         let agent_groups = workspaces
             .iter()
@@ -1774,8 +2259,37 @@ done
             .filter(|p| p.kind == PaneKind::Shell)
             .filter_map(|p| p.pid)
             .collect::<Vec<_>>();
+        let build_groups = workspaces
+            .iter()
+            .flat_map(|w| w.panes.iter())
+            .filter(|p| p.kind.is_build())
+            .filter_map(|p| p.pid)
+            .collect::<Vec<_>>();
+        let log_counter = workspaces
+            .iter()
+            .flat_map(|workspace| workspace.panes.iter())
+            .find(|pane| pane.kind == PaneKind::Shell)
+            .map(|pane| pane.build_file.clone());
+        let build_counter = workspaces
+            .iter()
+            .flat_map(|workspace| workspace.panes.iter())
+            .find(|pane| pane.kind.is_build())
+            .map(|pane| pane.build_file.clone());
         let start = Instant::now();
         let stop = start + Duration::from_secs(MEASURE_SECONDS);
+        for pane in workspaces
+            .iter()
+            .flat_map(|workspace| workspace.panes.iter())
+            .filter(|pane| pane.kind.is_shell())
+        {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&pane.start_file)
+                .map_err(|_| "workload gate could not start shell producers")?;
+        }
+        eprintln!("workload: measurement gate opened for {MEASURE_SECONDS}s");
         for workspace in &mut workspaces {
             // Parent fix: do not postpone the next keepalive by a full interval
             // after the readiness phase; the server drops idle clients ~1 s.
@@ -1792,11 +2306,27 @@ done
                 samples.push(sample(
                     &agent_groups,
                     &shell_groups,
+                    &build_groups,
                     micros(now.duration_since(start)) / 1000,
+                    log_counter.as_deref(),
+                    build_counter.as_deref(),
                 )?);
                 next_sample += SAMPLE_INTERVAL;
             }
             thread::sleep(Duration::from_millis(2));
+        }
+        let measured_log_lines = log_counter.as_deref().and_then(counter_value).unwrap_or(0);
+        let measured_build_cycles = build_counter
+            .as_deref()
+            .and_then(counter_value)
+            .unwrap_or(0);
+        for pane in workspaces
+            .iter()
+            .flat_map(|workspace| workspace.panes.iter())
+            .filter(|pane| pane.kind.is_shell())
+        {
+            fs::remove_file(&pane.start_file)
+                .map_err(|_| "workload output gate could not close")?;
         }
         for workspace in &mut workspaces {
             workspace.shutdown()?;
@@ -1806,15 +2336,57 @@ done
         if !groups_stopped {
             return Err("child process group remained after shutdown");
         }
-        if !workspaces.iter().all(|w| w.history_ok && w.layout_ok) {
-            return Err("history/layout flags did not verify");
-        }
         let open_code_count = expected_agents;
-        let shell_count = WORKSPACES * PANES - open_code_count;
-        let result = format!("{{\"schema_version\":1,\"variant\":{},\"run\":{},\"synthetic\":false,\"real_opencode\":true,\"spec_r03_complete\":false,\"classification\":\"10 OpenCode sessions usable with idle agents; active-agent load NOT measured\",\"launcher_used\":{},\"launcher_executable\":{},\"opencode_version\":{},\"credential_policy\":\"fresh isolated 0700 HOME/XDG per pane; no auth copied\",\"prompt_submissions\":0,\"opencode_sessions\":{},\"shell_processes\":{},\"workspace_count\":5,\"pane_count\":10,\"two_pane_limit\":\"variant B uses both panes for OpenCode; additional shells cannot fit in these workspaces\",\"measurement_seconds\":60,\"ready_opencode_tuis\":{},\"resource_summary\":{{\"panelink_process\":{},\"opencode_children\":{},\"shell_children\":{}}},\"process_samples\":[{}],\"process_groups_stopped\":{},\"results\":[{}]}}", json_string(variant.name()), run_number, json_string(launcher.label), json_string(&launcher.executable.to_string_lossy()), json_string(&launcher.version), open_code_count, shell_count, ready_agents, usage_summary(&samples, |s| s.panelink), usage_summary(&samples, |s| s.opencode), usage_summary(&samples, |s| s.shells), samples.iter().map(|s| format!("{{\"second\":{},\"panelink_rss_bytes\":{},\"panelink_cpu_percent\":{:.2},\"panelink_process_count\":{},\"opencode_rss_bytes\":{},\"opencode_cpu_percent\":{:.2},\"opencode_process_count\":{},\"shell_rss_bytes\":{},\"shell_cpu_percent\":{:.2},\"shell_process_count\":{}}}", s.second, s.panelink.rss, s.panelink.cpu, s.panelink.count, s.opencode.rss, s.opencode.cpu, s.opencode.count, s.shells.rss, s.shells.cpu, s.shells.count)).collect::<Vec<_>>().join(","), groups_stopped, workspaces.iter().map(workspace_json).collect::<Vec<_>>().join(","));
+        let shell_count = variant.workspace_count() * PANES - open_code_count;
+        let build_cycles = workspaces
+            .iter()
+            .map(|workspace| workspace.build_cycles)
+            .sum::<u64>();
+        let private_pane_directories_distinct = {
+            let paths = workspaces
+                .iter()
+                .flat_map(|workspace| workspace.panes.iter())
+                .map(|pane| pane.pid_file.clone())
+                .collect::<Vec<_>>();
+            paths.iter().all(|path| path.exists())
+                && paths
+                    .iter()
+                    .map(|path| path.parent().map(Path::to_path_buf))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == paths.len()
+        };
+        let history_ok = workspaces.iter().all(|workspace| workspace.history_ok);
+        let history_sticky_failure = workspaces
+            .iter()
+            .any(|workspace| workspace.history_capture_failed);
+        let layout_ok = workspaces.iter().all(|workspace| workspace.layout_ok);
+        let build_failed = workspaces.iter().any(|workspace| workspace.build_failed);
+        let profile = match variant { Variant::A => "five workspaces: five idle OpenCode plus five paced shell", Variant::B => "five workspaces: ten idle OpenCode", Variant::C => "five workspaces: ten idle OpenCode; sixth workspace: paced log shell plus dependency-free rustc build shell" };
+        let result = format!(
+            "{{\"schema_version\":2,\"variant\":{},\"run\":{},\"synthetic_shell_output\":{},\"real_opencode\":true,\"spec_r03_complete\":false,\"acceptance_budget_status\":\"unset\",\"profile\":{},\"launcher_used\":{},\"launcher_executable\":{},\"opencode_version\":{},\"credential_policy\":\"fresh isolated 0700 HOME/XDG/tmp/project per pane; no auth/config copied\",\"prompt_submissions\":0,\"model_calls_requested\":0,\"opencode_sessions\":{},\"shell_processes\":{},\"workspace_count\":{},\"pane_count\":{},\"measurement_seconds\":60,\"root_rows\":53,\"root_columns\":102,\"ready_opencode_tuis\":{},\"probe_output_overlap_instrumented\":false,\"paced_log_lines_at_measurement_end\":{},\"build_cycles_at_measurement_end\":{},\"build_cycles_completed\":{},\"build_child_acknowledgements\":{},\"private_pane_directories_distinct\":{},\"correctness_checks\":{{\"history_rows_and_normal_screens\":{},\"history_sticky_failure\":{},\"saved_layout_matches_targets\":{},\"build_cycle_observed\":{},\"build_failed\":{},\"private_pane_directories_distinct\":{},\"process_groups_stopped\":{}}},\"resource_summary\":{{\"panelink_process\":{},\"opencode_children\":{},\"shell_output_process_groups\":{},\"shell_build_process_groups\":{}}},\"process_samples\":[{}],\"process_groups_stopped\":{},\"results\":[{}]}}",
+            json_string(variant.name()), run_number, shell_count != 0, json_string(profile), json_string(launcher.label), json_string(&launcher.executable.to_string_lossy()), json_string(&launcher.version), open_code_count, shell_count, workspaces.len(), workspaces.len() * PANES, ready_agents, measured_log_lines, measured_build_cycles, build_cycles, build_cycles, private_pane_directories_distinct, history_ok, history_sticky_failure, layout_ok, variant != Variant::C || measured_build_cycles > 0, build_failed, private_pane_directories_distinct, groups_stopped,
+            usage_summary(&samples, |s| s.panelink), usage_summary(&samples, |s| s.opencode), usage_summary(&samples, |s| s.shells), usage_summary(&samples, |s| s.builds),
+            samples.iter().map(|s| format!("{{\"elapsed_ms\":{},\"panelink_rss_bytes\":{},\"panelink_cpu_percent\":{:.2},\"panelink_process_count\":{},\"opencode_rss_bytes\":{},\"opencode_cpu_percent\":{:.2},\"opencode_process_count\":{},\"shell_output_rss_bytes\":{},\"shell_output_cpu_percent\":{:.2},\"shell_output_process_count\":{},\"shell_build_rss_bytes\":{},\"shell_build_cpu_percent\":{:.2},\"shell_build_process_count\":{},\"paced_log_lines\":{},\"build_cycles_completed\":{}}}", s.second, s.panelink.rss, s.panelink.cpu, s.panelink.count, s.opencode.rss, s.opencode.cpu, s.opencode.count, s.shells.rss, s.shells.cpu, s.shells.count, s.builds.rss, s.builds.cpu, s.builds.count, s.log_lines, s.build_cycles)).collect::<Vec<_>>().join(","), groups_stopped, workspaces.iter().map(workspace_json).collect::<Vec<_>>().join(",")
+        );
         private_json(output, result.as_bytes())?;
         eprintln!("workload: raw result written to {}", output.display());
         println!("{result}");
+        if !groups_stopped {
+            return Err("child process group remained; fixture retained");
+        }
+        fs::remove_dir_all(&root.0).map_err(|_| "fixture cleanup failed")?;
+        if let Ok(mut fixture_root) = FIXTURE_ROOT.lock() {
+            *fixture_root = None;
+        }
+        if !history_ok
+            || history_sticky_failure
+            || !layout_ok
+            || (variant == Variant::C && (measured_build_cycles == 0 || build_failed))
+            || !private_pane_directories_distinct
+        {
+            return Err("correctness check failed; schema-2 report retained");
+        }
         Ok(())
     }
 
@@ -1822,7 +2394,7 @@ done
         let args = std::env::args().skip(1).collect::<Vec<_>>();
         if args.len() != 6 || args[0] != "--variant" || args[2] != "--run" || args[4] != "--output"
         {
-            return Err("usage: --variant A|B --run N --output PATH");
+            return Err("usage: --variant A|B|C --run N --output PATH");
         }
         let variant = Variant::parse(&args[1])?;
         let run_number = args[3]
@@ -1832,11 +2404,33 @@ done
             .ok_or("run number must be positive")?;
         let output = PathBuf::from(&args[5]);
         if let Err(reason) = run(variant, run_number, &output) {
+            let cleanup_failed = CLEANUP_FAILED.load(Ordering::SeqCst);
+            let cleanup_status = if CLEANUP_UNCERTAIN.load(Ordering::SeqCst) {
+                "uncertain_identity_no_signal"
+            } else if CLEANUP_IDENTITY_CHANGED.load(Ordering::SeqCst) {
+                "leader_identity_mismatch_group_skipped"
+            } else if cleanup_failed {
+                "cleanup_failed"
+            } else {
+                "no_cleanup_failure"
+            };
+            let retained_root = FIXTURE_ROOT
+                .lock()
+                .ok()
+                .and_then(|root| {
+                    root.as_ref()
+                        .map(|path| json_string(&path.to_string_lossy()))
+                })
+                .unwrap_or_else(|| "null".into());
             let diagnostic = format!(
-                "{{\"variant\":{},\"run\":{},\"status\":\"blocked\",\"reason\":{}}}",
+                "{{\"variant\":{},\"run\":{},\"status\":\"blocked\",\"reason\":{},\"cleanup_failed\":{},\"cleanup_status\":{},\"fixture_retained\":{},\"retained_root\":{}}}",
                 json_string(variant.name()),
                 run_number,
-                json_string(reason)
+                json_string(reason),
+                cleanup_failed,
+                json_string(cleanup_status),
+                retained_root != "null",
+                retained_root
             );
             if !output.exists() {
                 let _ = private_json(&output, diagnostic.as_bytes());

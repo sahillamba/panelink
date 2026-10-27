@@ -1,0 +1,2248 @@
+{
+  "reviewed": "2026-10-27",
+  "scope": "Documented public command paths, global routing/guide flags and named socket methods; argument combinations are not separate commands. Herdr docs describe availability, not a runtime test. Panelink local 0.1.0 from dirty 7060 checkout at 1060668, not older main. Functional equivalents do not imply protocol/test parity.",
+  "sources": {
+    "cli": "https://herdr.dev/docs/cli-reference/",
+    "socket": "https://herdr.dev/docs/socket-api/",
+    "agents": "https://herdr.dev/docs/agent-automation/",
+    "plugins": "https://herdr.dev/docs/plugins/",
+    "integrations": "https://herdr.dev/docs/integrations/",
+    "remote": "https://herdr.dev/docs/connecting-machines/",
+    "skill": "https://herdr.dev/docs/agent-skill/",
+    "restore": "https://herdr.dev/docs/session-state/",
+    "persistence": "https://herdr.dev/docs/persistence-remote/"
+  },
+  "groups": [
+    {
+      "name": "Launch and discovery",
+      "cli": [
+        "(launch)",
+        "status",
+        "status server",
+        "status client",
+        "api schema",
+        "api snapshot",
+        "completion",
+        "completions",
+        "update",
+        "channel show",
+        "channel set"
+      ],
+      "raw": [],
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "name": "Saved machines",
+      "cli": [
+        "machine list",
+        "machine add",
+        "machine rename",
+        "machine disable",
+        "machine enable",
+        "machine remove",
+        "machine status",
+        "machine reconnect"
+      ],
+      "raw": [],
+      "source": "https://herdr.dev/docs/connecting-machines/"
+    },
+    {
+      "name": "Server",
+      "cli": [
+        "server",
+        "server stop",
+        "server reload-config",
+        "server agent-manifests",
+        "server update-agent-manifests",
+        "server reload-agent-manifests"
+      ],
+      "raw": [
+        "ping",
+        "server.stop",
+        "server.reload_config",
+        "server.agent_manifests",
+        "server.reload_agent_manifests"
+      ],
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "name": "Notifications",
+      "cli": [
+        "notification show"
+      ],
+      "raw": [
+        "notification.show"
+      ],
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "name": "Named sessions",
+      "cli": [
+        "session list",
+        "session attach",
+        "session stop",
+        "session delete"
+      ],
+      "raw": [],
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "name": "Workspaces",
+      "cli": [
+        "workspace list",
+        "workspace create",
+        "workspace get",
+        "workspace focus",
+        "workspace rename",
+        "workspace report-metadata",
+        "workspace close"
+      ],
+      "raw": [
+        "workspace.create",
+        "workspace.list",
+        "workspace.get",
+        "workspace.focus",
+        "workspace.rename",
+        "workspace.move",
+        "workspace.move_block",
+        "workspace.report_metadata",
+        "workspace.close"
+      ],
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "name": "Git worktrees",
+      "cli": [
+        "worktree list",
+        "worktree create",
+        "worktree open",
+        "worktree remove"
+      ],
+      "raw": [
+        "worktree.list",
+        "worktree.create",
+        "worktree.open",
+        "worktree.remove"
+      ],
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "name": "Tabs",
+      "cli": [
+        "tab list",
+        "tab create",
+        "tab get",
+        "tab focus",
+        "tab rename",
+        "tab close"
+      ],
+      "raw": [
+        "tab.create",
+        "tab.list",
+        "tab.get",
+        "tab.focus",
+        "tab.rename",
+        "tab.move",
+        "tab.close"
+      ],
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "name": "Pane discovery",
+      "cli": [
+        "pane list",
+        "pane current",
+        "pane get",
+        "pane layout",
+        "pane process-info",
+        "pane neighbor",
+        "pane edges"
+      ],
+      "raw": [
+        "pane.list",
+        "pane.current",
+        "pane.get",
+        "pane.layout",
+        "pane.process_info",
+        "pane.neighbor",
+        "pane.edges"
+      ],
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "name": "Pane organization",
+      "cli": [
+        "pane focus",
+        "pane resize",
+        "pane zoom",
+        "pane rename",
+        "pane input",
+        "pane split",
+        "pane swap",
+        "pane move",
+        "pane close"
+      ],
+      "raw": [
+        "pane.split",
+        "pane.swap",
+        "pane.move",
+        "pane.zoom",
+        "pane.focus_direction",
+        "pane.resize",
+        "pane.rename",
+        "pane.input.set",
+        "pane.close"
+      ],
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "name": "Terminal input/output",
+      "cli": [
+        "pane read",
+        "pane send-text",
+        "pane send-keys",
+        "pane run",
+        "pane wait-output"
+      ],
+      "raw": [
+        "pane.send_text",
+        "pane.send_keys",
+        "pane.send_input",
+        "pane.read",
+        "pane.wait_for_output"
+      ],
+      "source": "https://herdr.dev/docs/agent-automation/"
+    },
+    {
+      "name": "Agent reports",
+      "cli": [
+        "pane report-agent",
+        "pane report-agent-session",
+        "pane release-agent",
+        "pane report-metadata"
+      ],
+      "raw": [
+        "pane.report_agent",
+        "pane.report_agent_session",
+        "pane.report_metadata",
+        "pane.clear_agent_authority",
+        "pane.release_agent"
+      ],
+      "source": "https://herdr.dev/docs/integrations/"
+    },
+    {
+      "name": "Recognized agents",
+      "cli": [
+        "agent list",
+        "agent get",
+        "agent read",
+        "agent send-keys",
+        "agent prompt",
+        "agent rename",
+        "agent focus",
+        "agent wait",
+        "agent attach",
+        "agent start",
+        "agent explain"
+      ],
+      "raw": [
+        "agent.list",
+        "agent.get",
+        "agent.read",
+        "agent.explain",
+        "agent.send_keys",
+        "agent.prompt",
+        "agent.wait",
+        "agent.rename",
+        "agent.focus",
+        "agent.start",
+        "agent.view.set",
+        "agent.view.clear"
+      ],
+      "source": "https://herdr.dev/docs/agent-automation/"
+    },
+    {
+      "name": "Direct terminal/client control",
+      "cli": [
+        "terminal attach",
+        "terminal session control",
+        "terminal session observe",
+        "terminal title set",
+        "terminal title clear"
+      ],
+      "raw": [
+        "client.window_title.set",
+        "client.window_title.clear"
+      ],
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "name": "Session snapshot and events",
+      "cli": [],
+      "raw": [
+        "session.snapshot",
+        "events.subscribe",
+        "events.wait"
+      ],
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "name": "Portable layouts",
+      "cli": [],
+      "raw": [
+        "layout.export",
+        "layout.apply",
+        "layout.set_split_ratio"
+      ],
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "name": "Integrations",
+      "cli": [
+        "integration install",
+        "integration uninstall",
+        "integration status"
+      ],
+      "raw": [
+        "integration.install",
+        "integration.uninstall"
+      ],
+      "source": "https://herdr.dev/docs/integrations/"
+    },
+    {
+      "name": "Plugins",
+      "cli": [
+        "plugin install",
+        "plugin update",
+        "plugin list",
+        "plugin uninstall",
+        "plugin enable",
+        "plugin disable",
+        "plugin link",
+        "plugin unlink",
+        "plugin config-dir",
+        "plugin action list",
+        "plugin action invoke",
+        "plugin log list",
+        "plugin pane open",
+        "plugin pane focus",
+        "plugin pane close"
+      ],
+      "raw": [
+        "plugin.link",
+        "plugin.list",
+        "plugin.unlink",
+        "plugin.enable",
+        "plugin.disable",
+        "plugin.action.list",
+        "plugin.action.invoke",
+        "plugin.log.list",
+        "plugin.pane.open",
+        "plugin.pane.focus",
+        "plugin.pane.close",
+        "popup.close"
+      ],
+      "source": "https://herdr.dev/docs/plugins/"
+    }
+  ],
+  "rows": [
+    {
+      "surface": "CLI",
+      "group": "Launch and discovery",
+      "herdr": "herdr",
+      "status": "Comparable",
+      "panelink": "panelink",
+      "note": "Open/start or reattach to the legacy workspace.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Launch and discovery",
+      "herdr": "herdr status",
+      "status": "Partial",
+      "panelink": "doctor; pane list; control describe",
+      "note": "Diagnostic/status pieces, without Herdr's matching status/ping command surface.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Launch and discovery",
+      "herdr": "herdr status server",
+      "status": "Partial",
+      "panelink": "doctor; pane list; control describe",
+      "note": "Diagnostic/status pieces, without Herdr's matching status/ping command surface.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Launch and discovery",
+      "herdr": "herdr status client",
+      "status": "Partial",
+      "panelink": "doctor; pane list; control describe",
+      "note": "Diagnostic/status pieces, without Herdr's matching status/ping command surface.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Launch and discovery",
+      "herdr": "herdr api schema",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Launch and discovery",
+      "herdr": "herdr api snapshot",
+      "status": "Partial",
+      "panelink": "pane list; control layout/panes/describe/reconcile",
+      "note": "Separate observations, no unified all-session bootstrap response.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Launch and discovery",
+      "herdr": "herdr completion",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Launch and discovery",
+      "herdr": "herdr completions",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Launch and discovery",
+      "herdr": "herdr update",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Launch and discovery",
+      "herdr": "herdr channel show",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Launch and discovery",
+      "herdr": "herdr channel set",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Saved machines",
+      "herdr": "herdr machine list",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/connecting-machines/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Saved machines",
+      "herdr": "herdr machine add",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/connecting-machines/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Saved machines",
+      "herdr": "herdr machine rename",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/connecting-machines/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Saved machines",
+      "herdr": "herdr machine disable",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/connecting-machines/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Saved machines",
+      "herdr": "herdr machine enable",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/connecting-machines/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Saved machines",
+      "herdr": "herdr machine remove",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/connecting-machines/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Saved machines",
+      "herdr": "herdr machine status",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/connecting-machines/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Saved machines",
+      "herdr": "herdr machine reconnect",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/connecting-machines/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Server",
+      "herdr": "herdr server",
+      "status": "Comparable",
+      "panelink": "serve",
+      "note": "Explicit foreground server.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Server",
+      "herdr": "herdr server stop",
+      "status": "Comparable",
+      "panelink": "stop / workspace stop",
+      "note": "Stops the chosen Panelink workspace server and its children; routing differs.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Server",
+      "herdr": "herdr server reload-config",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Server",
+      "herdr": "herdr server agent-manifests",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Server",
+      "herdr": "herdr server update-agent-manifests",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Server",
+      "herdr": "herdr server reload-agent-manifests",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Server",
+      "herdr": "ping",
+      "status": "Partial",
+      "panelink": "doctor; pane list; control describe",
+      "note": "Diagnostic/status pieces, without Herdr's matching status/ping command surface.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Server",
+      "herdr": "server.stop",
+      "status": "Comparable",
+      "panelink": "stop / workspace stop",
+      "note": "Stops the chosen Panelink workspace server and its children; routing differs.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Server",
+      "herdr": "server.reload_config",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Server",
+      "herdr": "server.agent_manifests",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Server",
+      "herdr": "server.reload_agent_manifests",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Notifications",
+      "herdr": "herdr notification show",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Notifications",
+      "herdr": "notification.show",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Named sessions",
+      "herdr": "herdr session list",
+      "status": "Partial",
+      "panelink": "workspace list",
+      "note": "Project/tab registry plus per-workspace state; hierarchy and response shapes differ.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Named sessions",
+      "herdr": "herdr session attach",
+      "status": "Partial",
+      "panelink": "workspace select/open; attach",
+      "note": "Explicit project/tab route selection and attach; legacy pane CLI remains on Default/Main.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Named sessions",
+      "herdr": "herdr session stop",
+      "status": "Partial",
+      "panelink": "workspace stop/remove; stop",
+      "note": "Separate stop and stopped-route removal; process, grouping and state semantics differ.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Named sessions",
+      "herdr": "herdr session delete",
+      "status": "Partial",
+      "panelink": "workspace remove",
+      "note": "Removes a stopped route while retaining saved data; not a named-session delete equivalent.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Workspaces",
+      "herdr": "herdr workspace list",
+      "status": "Partial",
+      "panelink": "workspace list",
+      "note": "Project/tab registry plus per-workspace state; hierarchy and response shapes differ.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Workspaces",
+      "herdr": "herdr workspace create",
+      "status": "Partial",
+      "panelink": "workspace project create; workspace tab create/open",
+      "note": "Different Project → workspace-tab model; record creation and process startup are separate.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Workspaces",
+      "herdr": "herdr workspace get",
+      "status": "Partial",
+      "panelink": "workspace list",
+      "note": "Project/tab registry plus per-workspace state; hierarchy and response shapes differ.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Workspaces",
+      "herdr": "herdr workspace focus",
+      "status": "Partial",
+      "panelink": "workspace select/open; attach",
+      "note": "Explicit project/tab route selection and attach; legacy pane CLI remains on Default/Main.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Workspaces",
+      "herdr": "herdr workspace rename",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Workspaces",
+      "herdr": "herdr workspace report-metadata",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Workspaces",
+      "herdr": "herdr workspace close",
+      "status": "Partial",
+      "panelink": "workspace stop/remove; stop",
+      "note": "Separate stop and stopped-route removal; process, grouping and state semantics differ.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Workspaces",
+      "herdr": "workspace.create",
+      "status": "Partial",
+      "panelink": "workspace project create; workspace tab create/open",
+      "note": "Different Project → workspace-tab model; record creation and process startup are separate.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Workspaces",
+      "herdr": "workspace.list",
+      "status": "Partial",
+      "panelink": "workspace list",
+      "note": "Project/tab registry plus per-workspace state; hierarchy and response shapes differ.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Workspaces",
+      "herdr": "workspace.get",
+      "status": "Partial",
+      "panelink": "workspace list",
+      "note": "Project/tab registry plus per-workspace state; hierarchy and response shapes differ.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Workspaces",
+      "herdr": "workspace.focus",
+      "status": "Partial",
+      "panelink": "workspace select/open; attach",
+      "note": "Explicit project/tab route selection and attach; legacy pane CLI remains on Default/Main.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Workspaces",
+      "herdr": "workspace.rename",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Workspaces",
+      "herdr": "workspace.move",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Workspaces",
+      "herdr": "workspace.move_block",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Workspaces",
+      "herdr": "workspace.report_metadata",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Workspaces",
+      "herdr": "workspace.close",
+      "status": "Partial",
+      "panelink": "workspace stop/remove; stop",
+      "note": "Separate stop and stopped-route removal; process, grouping and state semantics differ.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Git worktrees",
+      "herdr": "herdr worktree list",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Git worktrees",
+      "herdr": "herdr worktree create",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Git worktrees",
+      "herdr": "herdr worktree open",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Git worktrees",
+      "herdr": "herdr worktree remove",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Git worktrees",
+      "herdr": "worktree.list",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Git worktrees",
+      "herdr": "worktree.create",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Git worktrees",
+      "herdr": "worktree.open",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Git worktrees",
+      "herdr": "worktree.remove",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Tabs",
+      "herdr": "herdr tab list",
+      "status": "Partial",
+      "panelink": "workspace list",
+      "note": "Project/tab registry plus per-workspace state; hierarchy and response shapes differ.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Tabs",
+      "herdr": "herdr tab create",
+      "status": "Partial",
+      "panelink": "workspace tab create; workspace open",
+      "note": "Creates a registry tab route, then opens its server; no matching one-step root-shell API.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Tabs",
+      "herdr": "herdr tab get",
+      "status": "Partial",
+      "panelink": "workspace list",
+      "note": "Project/tab registry plus per-workspace state; hierarchy and response shapes differ.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Tabs",
+      "herdr": "herdr tab focus",
+      "status": "Partial",
+      "panelink": "workspace select/open; attach",
+      "note": "Explicit project/tab route selection and attach; legacy pane CLI remains on Default/Main.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Tabs",
+      "herdr": "herdr tab rename",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Tabs",
+      "herdr": "herdr tab close",
+      "status": "Partial",
+      "panelink": "workspace stop/remove; stop",
+      "note": "Separate stop and stopped-route removal; process, grouping and state semantics differ.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Tabs",
+      "herdr": "tab.create",
+      "status": "Partial",
+      "panelink": "workspace tab create; workspace open",
+      "note": "Creates a registry tab route, then opens its server; no matching one-step root-shell API.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Tabs",
+      "herdr": "tab.list",
+      "status": "Partial",
+      "panelink": "workspace list",
+      "note": "Project/tab registry plus per-workspace state; hierarchy and response shapes differ.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Tabs",
+      "herdr": "tab.get",
+      "status": "Partial",
+      "panelink": "workspace list",
+      "note": "Project/tab registry plus per-workspace state; hierarchy and response shapes differ.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Tabs",
+      "herdr": "tab.focus",
+      "status": "Partial",
+      "panelink": "workspace select/open; attach",
+      "note": "Explicit project/tab route selection and attach; legacy pane CLI remains on Default/Main.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Tabs",
+      "herdr": "tab.rename",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Tabs",
+      "herdr": "tab.move",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Tabs",
+      "herdr": "tab.close",
+      "status": "Partial",
+      "panelink": "workspace stop/remove; stop",
+      "note": "Separate stop and stopped-route removal; process, grouping and state semantics differ.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane discovery",
+      "herdr": "herdr pane list",
+      "status": "Comparable",
+      "panelink": "pane list --json; panes",
+      "note": "Spatial entries, exact target refs, owner info and bounded direct-child metadata.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane discovery",
+      "herdr": "herdr pane current",
+      "status": "Partial",
+      "panelink": "pane list; local UI focus",
+      "note": "No explicit caller-pane/current-pane high-level command or Herdr --current routing.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane discovery",
+      "herdr": "herdr pane get",
+      "status": "Partial",
+      "panelink": "pane list; control describe",
+      "note": "No matching one-pane high-level get command.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane discovery",
+      "herdr": "herdr pane layout",
+      "status": "Partial",
+      "panelink": "control layout/panes; schema-13 ViewQuery",
+      "note": "Live layout query exists; layout show reads saved geometry, not this live query.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane discovery",
+      "herdr": "herdr pane process-info",
+      "status": "Partial",
+      "panelink": "pane list metadata",
+      "note": "Direct managed-child cwd/executable; no equivalent full foreground process tree/argv query.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane discovery",
+      "herdr": "herdr pane neighbor",
+      "status": "UI / wire only",
+      "panelink": "Layout geometry / local navigation",
+      "note": "Can derive spatial relationships; no matching dedicated public helper.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane discovery",
+      "herdr": "herdr pane edges",
+      "status": "UI / wire only",
+      "panelink": "Layout geometry / local navigation",
+      "note": "Can derive spatial relationships; no matching dedicated public helper.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane discovery",
+      "herdr": "pane.list",
+      "status": "Comparable",
+      "panelink": "pane list --json; panes",
+      "note": "Spatial entries, exact target refs, owner info and bounded direct-child metadata.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane discovery",
+      "herdr": "pane.current",
+      "status": "Partial",
+      "panelink": "pane list; local UI focus",
+      "note": "No explicit caller-pane/current-pane high-level command or Herdr --current routing.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane discovery",
+      "herdr": "pane.get",
+      "status": "Partial",
+      "panelink": "pane list; control describe",
+      "note": "No matching one-pane high-level get command.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane discovery",
+      "herdr": "pane.layout",
+      "status": "Partial",
+      "panelink": "control layout/panes; schema-13 ViewQuery",
+      "note": "Live layout query exists; layout show reads saved geometry, not this live query.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane discovery",
+      "herdr": "pane.process_info",
+      "status": "Partial",
+      "panelink": "pane list metadata",
+      "note": "Direct managed-child cwd/executable; no equivalent full foreground process tree/argv query.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane discovery",
+      "herdr": "pane.neighbor",
+      "status": "UI / wire only",
+      "panelink": "Layout geometry / local navigation",
+      "note": "Can derive spatial relationships; no matching dedicated public helper.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane discovery",
+      "herdr": "pane.edges",
+      "status": "UI / wire only",
+      "panelink": "Layout geometry / local navigation",
+      "note": "Can derive spatial relationships; no matching dedicated public helper.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane organization",
+      "herdr": "herdr pane focus",
+      "status": "UI / wire only",
+      "panelink": "Click / Ctrl-B arrows or Tab",
+      "note": "Focus is client-local; no matching agent CLI focus command.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane organization",
+      "herdr": "herdr pane resize",
+      "status": "UI / wire only",
+      "panelink": "Divider UI; schema-13 DividerSet",
+      "note": "Absolute divider position/effective PTY resize, not matching directional ratio CLI.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane organization",
+      "herdr": "herdr pane zoom",
+      "status": "UI / wire only",
+      "panelink": "Ctrl-B z; schema-13 ZoomSet",
+      "note": "Implemented typed protocol/UI path; no pane zoom CLI command.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane organization",
+      "herdr": "herdr pane rename",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane organization",
+      "herdr": "herdr pane input",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane organization",
+      "herdr": "herdr pane split",
+      "status": "Comparable",
+      "panelink": "control split; pane run; UI split",
+      "note": "Splits left/right/up/down with at most four panes. Command shapes differ.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane organization",
+      "herdr": "herdr pane swap",
+      "status": "UI / wire only",
+      "panelink": "Ctrl-B m; schema-13 Swap",
+      "note": "Same-workspace swap with pinned targets; no high-level pane swap CLI.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane organization",
+      "herdr": "herdr pane move",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Pane organization",
+      "herdr": "herdr pane close",
+      "status": "Comparable",
+      "panelink": "pane close N; close N; control close",
+      "note": "Terminates the selected process/pane. Closing last pane ends that workspace.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane organization",
+      "herdr": "pane.split",
+      "status": "Comparable",
+      "panelink": "control split; pane run; UI split",
+      "note": "Splits left/right/up/down with at most four panes. Command shapes differ.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane organization",
+      "herdr": "pane.swap",
+      "status": "UI / wire only",
+      "panelink": "Ctrl-B m; schema-13 Swap",
+      "note": "Same-workspace swap with pinned targets; no high-level pane swap CLI.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane organization",
+      "herdr": "pane.move",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane organization",
+      "herdr": "pane.zoom",
+      "status": "UI / wire only",
+      "panelink": "Ctrl-B z; schema-13 ZoomSet",
+      "note": "Implemented typed protocol/UI path; no pane zoom CLI command.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane organization",
+      "herdr": "pane.focus_direction",
+      "status": "UI / wire only",
+      "panelink": "Click / Ctrl-B arrows or Tab",
+      "note": "Focus is client-local; no matching agent CLI focus command.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane organization",
+      "herdr": "pane.resize",
+      "status": "UI / wire only",
+      "panelink": "Divider UI; schema-13 DividerSet",
+      "note": "Absolute divider position/effective PTY resize, not matching directional ratio CLI.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane organization",
+      "herdr": "pane.rename",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane organization",
+      "herdr": "pane.input.set",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Pane organization",
+      "herdr": "pane.close",
+      "status": "Comparable",
+      "panelink": "pane close N; close N; control close",
+      "note": "Terminates the selected process/pane. Closing last pane ends that workspace.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Terminal input/output",
+      "herdr": "herdr pane read",
+      "status": "Partial",
+      "panelink": "pane read [--scrollback] --lines K --json",
+      "note": "Sanitized screen or retained normal-history rows; no ANSI, unwrapped or detection source parity.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Terminal input/output",
+      "herdr": "herdr pane send-text",
+      "status": "Control gap",
+      "panelink": "pane send N TEXT; control text/paste",
+      "note": "Requires an input lease; current attached UI's permanent claims block agent acquisition.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Terminal input/output",
+      "herdr": "herdr pane send-keys",
+      "status": "Control gap",
+      "panelink": "pane keys N ...; pane interrupt N",
+      "note": "Typed keys/interrupt exist, with a narrower key profile and the same ownership conflict.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Terminal input/output",
+      "herdr": "herdr pane run",
+      "status": "Different semantics",
+      "panelink": "pane send N TEXT --enter; control submit",
+      "note": "Herdr submits into an existing terminal. Panelink pane run creates a new split/process.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Terminal input/output",
+      "herdr": "herdr pane wait-output",
+      "status": "Partial",
+      "panelink": "wait N --text TEXT [--regex] --timeout SECS",
+      "note": "Visible screen and bounded regex subset; no recent/unwrapped matching-source parity.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Terminal input/output",
+      "herdr": "pane.send_text",
+      "status": "Control gap",
+      "panelink": "pane send N TEXT; control text/paste",
+      "note": "Requires an input lease; current attached UI's permanent claims block agent acquisition.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Terminal input/output",
+      "herdr": "pane.send_keys",
+      "status": "Control gap",
+      "panelink": "pane keys N ...; pane interrupt N",
+      "note": "Typed keys/interrupt exist, with a narrower key profile and the same ownership conflict.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Terminal input/output",
+      "herdr": "pane.send_input",
+      "status": "Different semantics",
+      "panelink": "pane send N TEXT --enter; control submit",
+      "note": "Herdr submits into an existing terminal. Panelink pane run creates a new split/process.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Terminal input/output",
+      "herdr": "pane.read",
+      "status": "Partial",
+      "panelink": "pane read [--scrollback] --lines K --json",
+      "note": "Sanitized screen or retained normal-history rows; no ANSI, unwrapped or detection source parity.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Terminal input/output",
+      "herdr": "pane.wait_for_output",
+      "status": "Partial",
+      "panelink": "wait N --text TEXT [--regex] --timeout SECS",
+      "note": "Visible screen and bounded regex subset; no recent/unwrapped matching-source parity.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Agent reports",
+      "herdr": "herdr pane report-agent",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/integrations/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Agent reports",
+      "herdr": "herdr pane report-agent-session",
+      "status": "Partial",
+      "panelink": "provider-binding prepare/resume/show/status",
+      "note": "Explicit pinned-provider identity path, not a general plugin-reported native-session/resume API.",
+      "source": "https://herdr.dev/docs/integrations/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Agent reports",
+      "herdr": "herdr pane release-agent",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/integrations/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Agent reports",
+      "herdr": "herdr pane report-metadata",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/integrations/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Agent reports",
+      "herdr": "pane.report_agent",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Agent reports",
+      "herdr": "pane.report_agent_session",
+      "status": "Partial",
+      "panelink": "provider-binding prepare/resume/show/status",
+      "note": "Explicit pinned-provider identity path, not a general plugin-reported native-session/resume API.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Agent reports",
+      "herdr": "pane.report_metadata",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Agent reports",
+      "herdr": "pane.clear_agent_authority",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Agent reports",
+      "herdr": "pane.release_agent",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Recognized agents",
+      "herdr": "herdr agent list",
+      "status": "Partial",
+      "panelink": "pane list; provider-binding show/status",
+      "note": "No generic recognized-agent catalogue or names; pinned-provider data is narrower.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Recognized agents",
+      "herdr": "herdr agent get",
+      "status": "Partial",
+      "panelink": "pane list; provider-binding show/status",
+      "note": "No generic recognized-agent catalogue or names; pinned-provider data is narrower.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Recognized agents",
+      "herdr": "herdr agent read",
+      "status": "Partial",
+      "panelink": "pane read",
+      "note": "Generic terminal text without Herdr agent identity/name resolution.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Recognized agents",
+      "herdr": "herdr agent send-keys",
+      "status": "Partial",
+      "panelink": "pane keys; pane send --enter",
+      "note": "Only generic terminal interaction, with current ownership gap; no readiness/blocked-state prompt contract.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Recognized agents",
+      "herdr": "herdr agent prompt",
+      "status": "Partial",
+      "panelink": "pane keys; pane send --enter",
+      "note": "Only generic terminal interaction, with current ownership gap; no readiness/blocked-state prompt contract.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Recognized agents",
+      "herdr": "herdr agent rename",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Recognized agents",
+      "herdr": "herdr agent focus",
+      "status": "UI / wire only",
+      "panelink": "Local pane focus",
+      "note": "No recognized-agent name targeting, attention acknowledgement or generic focus CLI.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Recognized agents",
+      "herdr": "herdr agent wait",
+      "status": "Partial",
+      "panelink": "wait --text/--quiet/--change/--exit",
+      "note": "Observable terminal/process conditions, not semantic working/blocked/done lifecycle.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Recognized agents",
+      "herdr": "herdr agent attach",
+      "status": "Partial",
+      "panelink": "attach",
+      "note": "Full-workspace client; no matching recognized-agent direct-terminal attach command.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Recognized agents",
+      "herdr": "herdr agent start",
+      "status": "Different semantics",
+      "panelink": "pane run -- COMMAND ARGS",
+      "note": "Directly launches a process in a new split. Does not activate/name/recognize an agent in an existing idle shell.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Recognized agents",
+      "herdr": "herdr agent explain",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.list",
+      "status": "Partial",
+      "panelink": "pane list; provider-binding show/status",
+      "note": "No generic recognized-agent catalogue or names; pinned-provider data is narrower.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.get",
+      "status": "Partial",
+      "panelink": "pane list; provider-binding show/status",
+      "note": "No generic recognized-agent catalogue or names; pinned-provider data is narrower.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.read",
+      "status": "Partial",
+      "panelink": "pane read",
+      "note": "Generic terminal text without Herdr agent identity/name resolution.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.explain",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.send_keys",
+      "status": "Partial",
+      "panelink": "pane keys; pane send --enter",
+      "note": "Only generic terminal interaction, with current ownership gap; no readiness/blocked-state prompt contract.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.prompt",
+      "status": "Partial",
+      "panelink": "pane keys; pane send --enter",
+      "note": "Only generic terminal interaction, with current ownership gap; no readiness/blocked-state prompt contract.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.wait",
+      "status": "Partial",
+      "panelink": "wait --text/--quiet/--change/--exit",
+      "note": "Observable terminal/process conditions, not semantic working/blocked/done lifecycle.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.rename",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.focus",
+      "status": "UI / wire only",
+      "panelink": "Local pane focus",
+      "note": "No recognized-agent name targeting, attention acknowledgement or generic focus CLI.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.start",
+      "status": "Different semantics",
+      "panelink": "pane run -- COMMAND ARGS",
+      "note": "Directly launches a process in a new split. Does not activate/name/recognize an agent in an existing idle shell.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.view.set",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Recognized agents",
+      "herdr": "agent.view.clear",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Direct terminal/client control",
+      "herdr": "herdr terminal attach",
+      "status": "Partial",
+      "panelink": "attach; pane read/events",
+      "note": "Whole-workspace attach and observation primitives; no dedicated single-terminal observe/control UX.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Direct terminal/client control",
+      "herdr": "herdr terminal session control",
+      "status": "Partial",
+      "panelink": "attach; pane read/events",
+      "note": "Whole-workspace attach and observation primitives; no dedicated single-terminal observe/control UX.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Direct terminal/client control",
+      "herdr": "herdr terminal session observe",
+      "status": "Partial",
+      "panelink": "attach; pane read/events",
+      "note": "Whole-workspace attach and observation primitives; no dedicated single-terminal observe/control UX.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Direct terminal/client control",
+      "herdr": "herdr terminal title set",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Direct terminal/client control",
+      "herdr": "herdr terminal title clear",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Direct terminal/client control",
+      "herdr": "client.window_title.set",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Direct terminal/client control",
+      "herdr": "client.window_title.clear",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Session snapshot and events",
+      "herdr": "session.snapshot",
+      "status": "Partial",
+      "panelink": "pane list; control layout/panes/describe/reconcile",
+      "note": "Separate observations, no unified all-session bootstrap response.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Session snapshot and events",
+      "herdr": "events.subscribe",
+      "status": "Partial",
+      "panelink": "events --timeout; wait; control watch/reconcile",
+      "note": "Metadata and layout notifications/reconciliation; finite watch transport, no matching JSON subscription API.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Session snapshot and events",
+      "herdr": "events.wait",
+      "status": "Partial",
+      "panelink": "events --timeout; wait; control watch/reconcile",
+      "note": "Metadata and layout notifications/reconciliation; finite watch transport, no matching JSON subscription API.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Portable layouts",
+      "herdr": "layout.export",
+      "status": "Partial",
+      "panelink": "layout show; recovery view/relaunch",
+      "note": "Saved current/previous topology and fresh default-shell relaunch; no portable tree export or arbitrary declarative apply.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Portable layouts",
+      "herdr": "layout.apply",
+      "status": "Partial",
+      "panelink": "layout show; recovery view/relaunch",
+      "note": "Saved current/previous topology and fresh default-shell relaunch; no portable tree export or arbitrary declarative apply.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Portable layouts",
+      "herdr": "layout.set_split_ratio",
+      "status": "UI / wire only",
+      "panelink": "Divider UI; schema-13 DividerSet",
+      "note": "Absolute divider position/effective PTY resize, not matching directional ratio CLI.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Integrations",
+      "herdr": "herdr integration install",
+      "status": "Partial",
+      "panelink": "serve --opencode-bridge; provider-binding ...",
+      "note": "Experimental OpenCode path; no general integration installer/status family.",
+      "source": "https://herdr.dev/docs/integrations/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Integrations",
+      "herdr": "herdr integration uninstall",
+      "status": "Partial",
+      "panelink": "serve --opencode-bridge; provider-binding ...",
+      "note": "Experimental OpenCode path; no general integration installer/status family.",
+      "source": "https://herdr.dev/docs/integrations/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Integrations",
+      "herdr": "herdr integration status",
+      "status": "Partial",
+      "panelink": "serve --opencode-bridge; provider-binding ...",
+      "note": "Experimental OpenCode path; no general integration installer/status family.",
+      "source": "https://herdr.dev/docs/integrations/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Integrations",
+      "herdr": "integration.install",
+      "status": "Partial",
+      "panelink": "serve --opencode-bridge; provider-binding ...",
+      "note": "Experimental OpenCode path; no general integration installer/status family.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Integrations",
+      "herdr": "integration.uninstall",
+      "status": "Partial",
+      "panelink": "serve --opencode-bridge; provider-binding ...",
+      "note": "Experimental OpenCode path; no general integration installer/status family.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin install",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin update",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin list",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin uninstall",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin enable",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin disable",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin link",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin unlink",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin config-dir",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin action list",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin action invoke",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin log list",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin pane open",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin pane focus",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "CLI",
+      "group": "Plugins",
+      "herdr": "herdr plugin pane close",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/plugins/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "plugin.link",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "plugin.list",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "plugin.unlink",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "plugin.enable",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "plugin.disable",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "plugin.action.list",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "plugin.action.invoke",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "plugin.log.list",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "plugin.pane.open",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "plugin.pane.focus",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "plugin.pane.close",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Socket",
+      "group": "Plugins",
+      "herdr": "popup.close",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No corresponding public command/method found in the reviewed Panelink dispatch.",
+      "source": "https://herdr.dev/docs/socket-api/"
+    },
+    {
+      "surface": "Global selector/flag",
+      "group": "Global selectors and bundled guidance",
+      "herdr": "--remote",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No Panelink remote attach command.",
+      "source": "https://herdr.dev/docs/connecting-machines/"
+    },
+    {
+      "surface": "Global selector/flag",
+      "group": "Global selectors and bundled guidance",
+      "herdr": "--machine",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No saved-machine API forwarding.",
+      "source": "https://herdr.dev/docs/connecting-machines/"
+    },
+    {
+      "surface": "Global selector/flag",
+      "group": "Global selectors and bundled guidance",
+      "herdr": "--session",
+      "status": "Partial",
+      "panelink": "--directory / workspace route",
+      "note": "Explicit directory or project/tab routes; no matching named-session selector.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "Global selector/flag",
+      "group": "Global selectors and bundled guidance",
+      "herdr": "--remote-keybindings",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No remote client/server keybinding selector.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "Global selector/flag",
+      "group": "Global selectors and bundled guidance",
+      "herdr": "--handoff",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No live binary/server upgrade handoff; unrelated to input-owner handoff.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "Global selector/flag",
+      "group": "Global selectors and bundled guidance",
+      "herdr": "--default-config",
+      "status": "No equivalent exposed",
+      "panelink": "—",
+      "note": "No default-config printing command.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Global selector/flag",
+      "group": "Global selectors and bundled guidance",
+      "herdr": "--skill",
+      "status": "Partial",
+      "panelink": ".agents/skills/panelink",
+      "note": "Repository/local skill exists; no release-bundled print-skill flag.",
+      "source": "https://herdr.dev/docs/agent-skill/"
+    },
+    {
+      "surface": "Global selector/flag",
+      "group": "Global selectors and bundled guidance",
+      "herdr": "--version",
+      "status": "Comparable",
+      "panelink": "--version",
+      "note": "panelink --version.",
+      "source": "https://herdr.dev/docs/cli-reference/"
+    },
+    {
+      "surface": "Terminal stream",
+      "group": "Direct terminal/client control",
+      "herdr": "terminal.input",
+      "status": "Control gap",
+      "panelink": "Typed text/keys/paste/submit",
+      "note": "No raw-byte JSON terminal-controller input; existing typed input has the ownership gap.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "Terminal stream",
+      "group": "Direct terminal/client control",
+      "herdr": "terminal.resize",
+      "status": "UI / wire only",
+      "panelink": "RootResize / UI resize",
+      "note": "Typed root/PTY resize, without Herdr's streaming JSON controller.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "Terminal stream",
+      "group": "Direct terminal/client control",
+      "herdr": "terminal.scroll",
+      "status": "UI / wire only",
+      "panelink": "UI history viewport / scroll protocols",
+      "note": "No matching external single-terminal JSON control stream.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "Terminal stream",
+      "group": "Direct terminal/client control",
+      "herdr": "terminal.mouse",
+      "status": "UI / wire only",
+      "panelink": "Typed app wheel input",
+      "note": "Wheel support differs; no general mouse JSON controller parity.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    },
+    {
+      "surface": "Terminal stream",
+      "group": "Direct terminal/client control",
+      "herdr": "terminal.release",
+      "status": "Partial",
+      "panelink": "detach / context release",
+      "note": "Separate writer ownership and workspace detach mechanisms.",
+      "source": "https://herdr.dev/docs/persistence-remote/"
+    }
+  ],
+  "removed": [
+    "pane.graphics.info",
+    "pane.graphics.set",
+    "pane.graphics.clear",
+    "pane.graphics.stream"
+  ],
+  "panelinkExtras": [
+    "claim/release/handoff with exact ownership revisions",
+    "operation status/resync/receipts and nonreplayable input",
+    "bounded saved history list/show/search/clear/cleanup",
+    "current/previous saved layout and offline recovery viewer",
+    "direct argv launch in a new split"
+  ],
+  "counts": {
+    "cli": 106,
+    "socket": 86,
+    "flags": 8,
+    "stream": 5
+  },
+  "panelinkEvidence": [
+    [
+      "Current CLI/help",
+      "/Users/sahillamba/.codex/worktrees/7060/panelink/src/main.rs:675"
+    ],
+    [
+      "Agent CLI and owner errors",
+      "/Users/sahillamba/.codex/worktrees/7060/panelink/src/agent_cli.rs:125"
+    ],
+    [
+      "Workspace route dispatch",
+      "/Users/sahillamba/.codex/worktrees/7060/panelink/src/workspace_cli.rs:17"
+    ],
+    [
+      "Advanced control parser",
+      "/Users/sahillamba/.codex/worktrees/7060/panelink/src/p3_cli.rs:289"
+    ],
+    [
+      "Typed pane operations",
+      "/Users/sahillamba/.codex/worktrees/7060/panelink/src/pane_operations_protocol.rs:176"
+    ],
+    [
+      "Runtime pane-operation dispatch",
+      "/Users/sahillamba/.codex/worktrees/7060/panelink/src/multi_runtime.rs:1789"
+    ],
+    [
+      "Provider bindings",
+      "/Users/sahillamba/.codex/worktrees/7060/panelink/src/provider_cli.rs:13"
+    ],
+    [
+      "Detailed CLI contract",
+      "/Users/sahillamba/.codex/worktrees/7060/panelink/docs/progress/P3-AGENT-CLI.md:11"
+    ]
+  ]
+}

@@ -598,8 +598,21 @@ impl Client {
     }
 
     fn wait_marker(&self, marker: &str) -> String {
-        self.wait_screen(marker, |_, screen| {
-            screen.lines().any(|line| line.trim() == marker)
+        self.wait_screen(marker, |parser, _| {
+            // Match exact child-content rows; right padding now contains UI
+            // chrome. Row one is live content for raw attach and harmless
+            // blank pane padding below the header for workspace open.
+            pane_marker_position(
+                parser,
+                PaneCells {
+                    top: 1,
+                    bottom: ROWS.saturating_sub(1) as usize,
+                    left: 1,
+                    right: COLUMNS.saturating_sub(1) as usize,
+                },
+                marker,
+            )
+            .is_some()
         })
     }
 
@@ -680,10 +693,13 @@ fn inverse_cells_below_header(parser: &vt100::Parser) -> usize {
 
 fn rendered_divider_column(parser: &vt100::Parser) -> Option<usize> {
     (1..COLUMNS.saturating_sub(1) as usize).find(|&column| {
-        (1..ROWS as usize)
-            .filter(|&row| pane_cell_text(parser, row, column) == "|")
-            .count()
-            >= usize::from(ROWS.saturating_sub(1)) / 2
+        // A divider crosses the top pane border. Scrollbar tracks occupy
+        // content-height padding only and must not be mistaken for a divider.
+        pane_cell_text(parser, 1, column) == "|"
+            && (1..ROWS as usize)
+                .filter(|&row| pane_cell_text(parser, row, column) == "|")
+                .count()
+                >= usize::from(ROWS.saturating_sub(1)) / 2
     })
 }
 
@@ -1422,6 +1438,181 @@ fn workspace_open_pane_operations_acceptance_uses_attached_keyboard_and_live_pty
     // its child shells remain live for Fixture-owned cleanup.
     client.write(&[0x18]);
     assert_eq!(client.wait_exit(STEP), 0, "Ctrl-X detach should succeed");
+    client.assert_restored();
+    assert!(server_lock_held(
+        &fixture.route_root(project, tab).join("server")
+    ));
+}
+
+/// SGR coordinates are one-based; test assertions use parsed zero-based cells.
+fn pointer_event(client: &mut Client, code: u8, column: usize, row: usize, release: bool) {
+    let suffix = if release { 'm' } else { 'M' };
+    client.write(format!("\x1b[<{code};{};{}{suffix}", column + 1, row + 1).as_bytes());
+}
+
+fn click_cell(client: &mut Client, column: usize, row: usize) {
+    pointer_event(client, 0, column, row, false);
+    pointer_event(client, 0, column, row, true);
+}
+
+fn visible_label_position(parser: &vt100::Parser, label: &str) -> Option<(usize, usize)> {
+    (0..ROWS as usize).find_map(|row| {
+        let line = (0..COLUMNS as usize)
+            .map(|column| {
+                let text = pane_cell_text(parser, row, column);
+                if text.is_empty() {
+                    " ".to_owned()
+                } else {
+                    text
+                }
+            })
+            .collect::<String>();
+        line.find(label)
+            .map(|index| (row, line[..index].chars().count()))
+    })
+}
+
+fn click_visible_label(client: &mut Client, label: &str) {
+    client.wait_screen(label, |parser, _| {
+        visible_label_position(parser, label).is_some()
+    });
+    let (row, column) = visible_label_position(&client.parser(), label).expect("visible UI label");
+    click_cell(client, column + 1, row);
+}
+
+#[test]
+fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
+    let mut fixture = Fixture::new();
+    fixture.create_project("Pointer", "Main");
+    let project = fixture.project_id("Pointer");
+    let tab = fixture.tab_id("Pointer", "Main");
+    fixture.own_route(project, tab);
+    let mut client = Client::spawn_workspace_open(&fixture, project, tab);
+    client.wait_raw_mode();
+    client.wait_header("Pointer", "Main");
+    client.type_shell("PS1='P5T$ '; printf 'PTR_READY\\n'");
+    wait_whole_root_marker(&client, "PTR_READY");
+    wait_root_shell_prompt(&client);
+
+    // These controls occupy the border below the workspace header. Both are
+    // addressed through rendered labels rather than arbitrary content clicks.
+    click_visible_label(&mut client, "[Menu]");
+    client.wait_screen("discoverable pane actions", |_, screen| {
+        screen.contains("Split") && screen.contains("Zoom") && screen.contains("More")
+    });
+    click_visible_label(&mut client, "[More");
+    client.wait_screen("remaining pane actions", |_, screen| {
+        screen.contains("Close") && screen.contains("Detach")
+    });
+    click_visible_label(&mut client, "[Cancel]");
+    wait_root_shell_prompt(&client);
+    click_visible_label(&mut client, "[x]");
+    client.wait_screen("close confirmation", |_, screen| screen.contains("Cancel"));
+    click_visible_label(&mut client, "Cancel");
+    wait_root_shell_prompt(&client);
+    client.type_shell("printf 'PTR_CANCEL_OK\\n'");
+    wait_whole_root_marker(&client, "PTR_CANCEL_OK");
+
+    client.begin_navigation();
+    client.write(b"r");
+    wait_pane_shell_prompt(&client, false);
+    client.type_shell("PS1='P5T$ '; printf 'PTR_PID_%d\\n' $$; printf 'PTR_RIGHT\\n'");
+    client.wait_screen("right pane readiness", |parser, _| {
+        split_pane_cells(parser)
+            .is_some_and(|(_, right)| pane_marker_position(parser, right, "PTR_RIGHT").is_some())
+    });
+    let before = client.parser();
+    let (_, right) = split_pane_cells(&before).unwrap();
+    let right_pid = pane_shell_pid(&before, right, "PTR_PID_");
+    let divider = rendered_divider_column(&before).unwrap();
+    let desired = divider + 3;
+    pointer_event(&mut client, 0, divider, 8, false);
+    pointer_event(&mut client, 32, desired, 8, false);
+    client.wait_screen("pointer divider preview", |parser, _| {
+        rendered_divider_column(parser) == Some(desired)
+    });
+    pointer_event(&mut client, 0, desired, 8, true);
+    client.wait_screen("pointer divider commit", |parser, _| {
+        rendered_divider_column(parser) == Some(desired)
+            && !parser.screen().hide_cursor()
+            && split_pane_cells(parser)
+                .is_some_and(|(_, right)| shell_prompt_is_visible(parser, right))
+    });
+    client.type_shell("printf 'PTR_AFTER_PID_%d\\n' $$; stty size; printf 'PTR_SIZE\\n'");
+    client.wait_screen("resized shell response", |parser, _| {
+        split_pane_cells(parser)
+            .is_some_and(|(_, right)| pane_marker_position(parser, right, "PTR_SIZE").is_some())
+    });
+    let after = client.parser();
+    let (_, right) = split_pane_cells(&after).unwrap();
+    assert_eq!(pane_shell_pid(&after, right, "PTR_AFTER_PID_"), right_pid);
+    assert_pane_size(&after, right, "PTR_SIZE");
+
+    client
+        .type_shell("for i in {1..80}; do printf 'PTR_ROW_%03d\\n' $i; done; printf 'PTR_TAIL\\n'");
+    client.wait_screen("scrollable right pane tail", |parser, _| {
+        split_pane_cells(parser).is_some_and(|(_, right)| {
+            pane_marker_position(parser, right, "PTR_TAIL").is_some()
+                && shell_prompt_is_visible(parser, right)
+        })
+    });
+    // Wheel once to obtain the real retained extent, then drag the rendered
+    // thumb. Its coordinates come from VT100 cells in the pane's margin.
+    pointer_event(&mut client, 64, COLUMNS as usize - 5, 8, false);
+    client.wait_screen("normal history thumb", |parser, _| {
+        parser.screen().hide_cursor()
+            && (2..ROWS as usize - 1)
+                .any(|row| pane_cell_text(parser, row, COLUMNS as usize - 1) == "#")
+    });
+    let thumb_row = (2..ROWS as usize - 1)
+        .find(|&row| pane_cell_text(&client.parser(), row, COLUMNS as usize - 1) == "#")
+        .expect("visible right history thumb");
+    pointer_event(&mut client, 0, COLUMNS as usize - 1, thumb_row, false);
+    pointer_event(&mut client, 32, COLUMNS as usize - 1, 2, false);
+    pointer_event(&mut client, 0, COLUMNS as usize - 1, 2, true);
+    client.wait_screen("oldest history through scrollbar drag", |parser, _| {
+        pane_cell_text(parser, 2, COLUMNS as usize - 1) == "#"
+            && split_pane_cells(parser)
+                .is_some_and(|(_, right)| pane_marker_position(parser, right, "PTR_TAIL").is_none())
+    });
+    pointer_event(&mut client, 0, COLUMNS as usize - 1, 2, false);
+    pointer_event(
+        &mut client,
+        32,
+        COLUMNS as usize - 1,
+        ROWS as usize - 2,
+        false,
+    );
+    pointer_event(
+        &mut client,
+        0,
+        COLUMNS as usize - 1,
+        ROWS as usize - 2,
+        true,
+    );
+    client.wait_screen("scrollbar drag returns to live tail", |parser, _| {
+        split_pane_cells(parser).is_some_and(|(_, right)| {
+            pane_marker_position(parser, right, "PTR_TAIL").is_some()
+                && shell_prompt_is_visible(parser, right)
+        })
+    });
+
+    // Click the right pane's own close control; a later click confirms. The
+    // left pane survives and expands, proving the click did not close focus's
+    // replacement or become shell input.
+    click_cell(&mut client, COLUMNS as usize - 3, 1);
+    client.wait_screen("right close confirmation", |_, screen| {
+        screen.contains("Cancel")
+    });
+    click_visible_label(&mut client, "[Close]");
+    client.wait_screen("surviving expanded pane", |parser, _| {
+        rendered_divider_column(parser).is_none() && !parser.screen().hide_cursor()
+    });
+    wait_root_shell_prompt(&client);
+    client.type_shell("printf 'PTR_SURVIVOR\\n'");
+    wait_whole_root_marker(&client, "PTR_SURVIVOR");
+    client.write(&[0x18]);
+    assert_eq!(client.wait_exit(STEP), 0);
     client.assert_restored();
     assert!(server_lock_held(
         &fixture.route_root(project, tab).join("server")

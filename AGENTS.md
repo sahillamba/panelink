@@ -25,6 +25,23 @@ automated-test/no-manual-handoff requirements:
 run permitted checks and record blocked acceptance honestly rather than
 counting skipped tests as passes.
 
+## Panelink usage skill and maintenance
+
+The agent usage skill lives at
+[.agents/skills/panelink/SKILL.md](.agents/skills/panelink/SKILL.md), with
+[CLI workflows](.agents/skills/panelink/references/cli.md). Read it when
+operating Panelink panes or explaining its capabilities. It covers runtime
+usage; the roadmap and implementation constraints here still govern development.
+
+Keep this skill current as part of every feature or behavior change affecting
+agents or users: update supported commands, examples, routing, limits, ownership,
+retry/recovery behavior and feature availability in the same task. Remove
+obsolete advice, distinguish implementation from proposed behavior and pending
+acceptance, and check the affected source/help and evidence before advertising
+support. Preserve the executable/worktree distinction. Validate the skill and
+its Markdown links before reporting the task complete. Local installations
+should link to this repository copy so updates do not diverge.
+
 ## Rust guidance
 
 The user requested the community `ms-rust` skill from https://gitlab.com/lx-industries/ms-rust-skill. Installation is pending under this session's network/filesystem restrictions. Do not claim it is installed or that a local skill revision has been pinned.

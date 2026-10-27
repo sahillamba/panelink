@@ -64,11 +64,19 @@ macOS arm64 runner. It does not complete product milestones or establish Apple
 Terminal behavior, ignored host-specific tests, reboot recovery, or provider
 acceptance. Those remain separate gates in the roadmap and their evidence.
 
-The first hosted baseline is pending until the workflow runs successfully on
-GitHub. After that baseline, configure branch protection to require the exact
+The hosted baseline passed on PR #2 head `1060668` on 2026-10-26, as reported
+by the PR watcher. Configure branch protection to require the exact
 check name **macOS arm64 verification**. Branch protection is a repository
 setting and is not changed by this workflow.
 
 The initial setup adds validation and dependency-update proposals only. It does
 not publish releases, sign binaries, run provider sessions, or add an automatic
 agent repair loop. Future release automation should reuse [RELEASE.md](RELEASE.md).
+
+## PR 3 wide-terminal failure
+
+The first PR 3 hosted run at `ec09eb0` passed seven checks but failed the
+wide-terminal attach test with connection loss. Local green evidence did not
+establish a hosted pass. The scoped repair replaces timer-based socket waiting
+with descriptor readiness while retaining existing deadlines; see
+[the diagnosis, counterfactual and verification](progress/PR3-CI-SOCKET-READINESS-2026-10-27.md).

@@ -1,6 +1,6 @@
 # Panelink: working implementation specification
 
-Revision: 0.25, 2026-10-24. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
+Revision: 0.26, 2026-10-27. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
 
 Development identity evidence updated2026-10-24: pinned OpenCode2.0.32 private
 fixtures now also prove an API-created/UI-selected new root, a static nonempty
@@ -13,7 +13,9 @@ acceptance remain separate; no current-at-crash guarantee is established.
 
 ## Current usability contract, 2026-10-24
 
-Each pane reserves one blank cell on all four sides of its outer rectangle.
+Each pane reserves a one-cell margin on all four sides of its outer rectangle.
+The top margin carries pane Menu and close controls; normal-history scrollbars
+use the right margin. The shared compositor geometry defines their hitboxes.
 Its PTY and snapshots use the inset content size, with a minimum of 5 rows by
 20 columns (7 by 22 outer cells). Root limits remain 80 by 240 outer cells.
 Pointer coordinates sent to a child are relative to that content rectangle.
@@ -25,6 +27,20 @@ wheel input only when mouse reporting is enabled, through the same ownership,
 deduplication and nonreplayable admission rules as keyboard input. Without
 mouse reporting, alternate-screen scrolling stays at live output and reports
 that limitation. Querying scroll mode never claims input ownership.
+
+Scrolling presentation update (2026-10-27): pending history reads preserve the
+last valid pane snapshot instead of replacing it with a loading placeholder.
+Normal-buffer wheel bursts accumulate a bounded row delta while one request
+is in flight; the next request uses the completed effective offset. View/target
+invalidation discards this pending movement. Alternate-screen child input is
+not accumulated or replayed. A vertical scrollbar occupies existing right
+padding, excludes selection/copy content, and stays beneath menus. It shows the
+last observed history extent (refreshed by a bounded, read-only oldest-viewport
+query once per screen revision during scrolling). At live output before that
+extent is known, it shows a full thumb. The pointer-controls update adds track
+paging and local thumb previews that seek on release, using the read-only
+history path. No wire,
+retention, capture-loss, clipboard, or reboot guarantee changes.
 
 Agents may explicitly select a durable private caller-context root with
 `PANELINK_AGENT_CONTEXT_DIR`. It must be an absolute, UID-owned 0700 directory
@@ -61,7 +77,21 @@ Confirmed requirements come from the user's answers recorded in [discovery](PANE
 
 | R-17 | Automatically expose newly started background agents/subagents from OpenCode or compatible OpenCode wrappers in a tab named Subagents, so the user can optionally switch there and observe them (requested 2026-10-21). | Exact provider parent/child identity routes each supported worker to the correct workspace; observation never duplicates its execution. See [Phase SA plan](progress/SUBAGENTS-PLAN.md) for proposed read-only UX, version/wrapper feasibility gates and acceptance. This provider feature does not select a project sidebar or change the confirmed Project → workspace tabs → split panes hierarchy. |
 
+Pointer and keyboard usability requirement (user, 2026-10-27): pane divider
+resize must have a direct drag gesture, every pane must expose a close control,
+normal-history scrollbars must support clicks and thumb dragging, and a visible
+menu must make actions discoverable alongside keyboard equivalents. Touch
+compatibility depends on the host translating gestures into terminal mouse
+events. Native multitouch and a fixed project sidebar are not selected. The
+[bounded delivery contract](progress/P5-POINTER-CONTROLS-2026-10-27.md) records
+implementation progress and separate host acceptance.
+
 Numeric latency, memory, history, and build budgets remain to be established on real hardware. The workload statement is an evaluation target, not a measured result.
+
+Workload evaluation choice (user, 2026-10-26): ten idle OpenCode sessions
+concurrent with ordinary shell output and offline fixture build output, with
+no prompts or model calls. This selects the representative measurement
+profile; it does not set numeric latency, capture-loss or resource budgets.
 
 ## Proposed first-release scope
 
@@ -536,6 +566,33 @@ no cross-reset continuity claim. No extra retained queue, wire schema,
 capability, dependency or disk-read fallback is added. Existing same-UID,
 full-target, lease and read-capability checks remain authoritative.
 See [implementation and verification](progress/P3-LIVE-SCROLLBACK-RESULT.md).
+
+## Bounded pointer controls prototype — 2026-10-27
+
+The attached client renders Menu and close controls in each pane's top margin.
+Menu and Ctrl-B s open the same captured-target actions, with viewport-bounded
+pages and Back/More/Cancel controls. Right-click retains the split context menu.
+Close requires a separate explicit Close click or keyboard y. The last-pane
+warning stays visible, and stale layout changes cancel the confirmation.
+
+Divider dragging previews locally and submits one absolute schema-13 request
+on release. The menu also exposes divider selection, minus/plus adjustment and
+Apply/Cancel controls; Ctrl-B e preserves keyboard operation. Minimum subtree
+sizes constrain motion. Escape, focus loss, host resize, stale layout/route and
+buffer changes cancel captured gestures; uncertain mutations are not replayed.
+
+Normal-history tracks page and thumb drags preview a position before read-only
+seeking on release. Ctrl-B PageUp/PageDown/Home/End supplies keyboard access.
+A separate read-only worker command cannot turn a queued seek into application
+wheel input if the server changes buffer modes. Alternate-screen application
+wheel handling remains separate. Controls share renderer geometry and retain
+modal priority; no extra PTY content cells are consumed. Help and local menus
+have pointer exit controls, and keyboard copy can return to the pane Menu.
+
+These are terminal-cell pointer controls; touch depends on the host reporting
+mouse gestures. Automated private-PTY evidence does not establish native touch
+hardware, human Apple Terminal or real clipboard acceptance. See
+[plan and results](progress/P5-POINTER-CONTROLS-2026-10-27.md).
 
 ## Proposed interaction contract
 

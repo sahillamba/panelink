@@ -849,6 +849,10 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
     let menu_rect = pane_rects[0];
     client.click(menu_rect);
     client.write(b"\x02s");
+    client.wait_screen("pane actions menu", |screen| {
+        screen.contains("Split pane...")
+    });
+    client.write(b"\r");
     client.wait_screen("pane limit menu reason", |screen| {
         screen.contains("Pane limit reached (4)")
     });

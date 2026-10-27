@@ -21,17 +21,16 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const SOCKET_BASENAME: &str = "control.sock";
 const DIRECTORY_MODE: u16 = 0o700;
 const SOCKET_MODE: u16 = 0o600;
-const POLL_INTERVAL: Duration = Duration::from_millis(1);
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
@@ -342,7 +341,7 @@ impl PrivateListener {
         loop {
             check_deadline(deadline)?;
             // One nonblocking accept syscall is protected. In particular, the
-            // guard is gone before peer authentication and WouldBlock sleep.
+            // guard is gone before peer authentication and readiness waiting.
             match with_spawn_gate_until(deadline, || {
                 self.listener.accept().map(|(stream, _address)| stream)
             }) {
@@ -352,7 +351,7 @@ impl PrivateListener {
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    wait_for_readiness(deadline)?;
+                    wait_for_readiness(self.listener.as_fd(), libc::POLLIN, deadline)?;
                 }
                 Err(error) => return Err(error),
             }
@@ -393,7 +392,9 @@ pub(crate) fn connect_unix_with_deadline(path: &Path, deadline: Instant) -> io::
             sockopt::socket_error(&fd)??;
             match net::getpeername(&fd) {
                 Ok(Some(_)) => break,
-                Ok(None) | Err(Errno::NOTCONN) => wait_for_readiness(deadline)?,
+                Ok(None) | Err(Errno::NOTCONN) => {
+                    wait_for_readiness(fd.as_fd(), libc::POLLOUT, deadline)?;
+                }
                 Err(error) => return Err(error.into()),
             }
         },
@@ -686,7 +687,7 @@ fn read_exact_until(
             Ok(read) => offset += read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                wait_for_readiness(deadline)?;
+                wait_for_readiness(stream.as_fd(), libc::POLLIN, deadline)?;
             }
             Err(error) => return Err(error),
         }
@@ -717,7 +718,7 @@ impl Write for DeadlineWriter<'_> {
                 Ok(written) => offset += written,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    wait_for_readiness(self.deadline)?;
+                    wait_for_readiness(self.stream.as_fd(), libc::POLLOUT, self.deadline)?;
                 }
                 Err(error) => return Err(error),
             }
@@ -738,13 +739,48 @@ fn check_deadline(deadline: Instant) -> io::Result<()> {
     }
 }
 
-fn wait_for_readiness(deadline: Instant) -> io::Result<()> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(timeout_error());
+/// Wait on the socket rather than a timer. Short sleeps may be coalesced by
+/// macOS for background processes, multiplying latency at each partial frame.
+/// Readiness, interruptions and early timer wakeups all retain the same
+/// absolute deadline; HUP/ERR return to the actual I/O call for EOF/error handling.
+fn wait_for_readiness(
+    socket: BorrowedFd<'_>,
+    events: libc::c_short,
+    deadline: Instant,
+) -> io::Result<()> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(timeout_error());
+        }
+        // poll uses integer milliseconds. Round up so a sub-millisecond tail
+        // cannot turn into a busy loop, then recheck the absolute deadline.
+        let millis =
+            remaining.as_millis() + u128::from(!remaining.subsec_nanos().is_multiple_of(1_000_000));
+        let timeout = millis.min(libc::c_int::MAX as u128) as libc::c_int;
+        let mut descriptor = libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        // SAFETY: the borrowed descriptor stays open for this call, and poll
+        // receives one initialized stack entry with its exact count. It neither
+        // transfers descriptor ownership nor reads application payload bytes.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout) };
+        check_deadline(deadline)?;
+        if ready > 0 {
+            if descriptor.revents & libc::POLLNVAL != 0 {
+                return Err(invalid_input("socket descriptor is invalid"));
+            }
+            return Ok(());
+        }
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
     }
-    thread::sleep(remaining.min(POLL_INTERVAL));
-    check_deadline(deadline)
 }
 
 fn wire_error(error: WireError) -> io::Error {
@@ -788,7 +824,8 @@ mod tests {
     use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixStream;
     use std::sync::mpsc;
-    use std::time::SystemTime;
+    use std::thread;
+    use std::time::{Duration, SystemTime};
 
     static TRANSPORT_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -875,9 +912,9 @@ mod tests {
         let released = crate::spawn_gate::test_acquire_until(deadline)
             .expect("WouldBlock returns after the guard is dropped");
         drop(released);
-        wait_for_readiness(deadline).expect("readiness wait runs outside the gate");
-
         let (accepted, mut peer) = UnixStream::pair().expect("same-user socket pair");
+        wait_for_readiness(accepted.as_fd(), libc::POLLOUT, deadline)
+            .expect("readiness wait runs outside the gate");
         let accepted =
             with_gate_acquisition(deadline, crate::spawn_gate::test_acquire_until, || {
                 assert_test_gate_is_held();
@@ -1526,6 +1563,55 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         assert!(!authenticated.is_poisoned());
+    }
+
+    #[test]
+    fn readiness_keeps_expired_deadlines_even_when_data_is_available() {
+        let (receiver, mut sender) = UnixStream::pair().expect("socket pair");
+        sender.write_all(b"ready").unwrap();
+        let error = wait_for_readiness(receiver.as_fd(), libc::POLLIN, Instant::now())
+            .expect_err("readiness cannot extend an expired deadline");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        let mut bytes = [0; 5];
+        (&receiver).read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"ready", "readiness does not consume payload bytes");
+    }
+
+    #[test]
+    fn full_size_snapshot_crosses_small_socket_buffers_without_timer_polling() {
+        let (sender, receiver) = UnixStream::pair().expect("socket pair");
+        let send_buffer: libc::c_int = 1_024;
+        // SAFETY: the live socket and initialized integer match SO_SNDBUF's
+        // input contract; the kernel copies the value during this call.
+        let result = unsafe {
+            libc::setsockopt(
+                sender.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                std::ptr::from_ref(&send_buffer).cast(),
+                std::mem::size_of_val(&send_buffer) as libc::socklen_t,
+            )
+        };
+        assert_eq!(result, 0, "force repeated socket backpressure");
+        let mut sender = AuthenticatedStream::new(sender).unwrap();
+        let mut receiver = AuthenticatedStream::new(receiver).unwrap();
+        sender.enable_snapshot_writes().unwrap();
+        receiver.enable_snapshot_reads().unwrap();
+        let payload = vec![0x5a; crate::screen_checkpoint::MAX_SCREEN_CHECKPOINT_BYTES];
+        thread::scope(|scope| {
+            let sent = scope.spawn(|| {
+                let frame = Frame::new(MessageKind::Snapshot, 17, &payload).unwrap();
+                sender.write_frame(&frame, deadline_after(Duration::from_secs(2)))
+            });
+            let received = receiver
+                .read_frame(deadline_after(Duration::from_secs(2)))
+                .unwrap();
+            sent.join().unwrap().unwrap();
+            assert_eq!(received.request_id(), 17);
+            assert_eq!(received.payload(), payload);
+            assert!(!receiver.is_poisoned());
+        });
+        assert!(!sender.is_poisoned());
     }
 
     #[test]

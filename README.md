@@ -27,7 +27,8 @@ reattach to it.
 
 | Action | How |
 | --- | --- |
-| Split a pane | Right-click it, then pick Left/Right/Up/Down (or press `l`/`r`/`u`/`d`) |
+| Pane actions | Click `[Menu]` in a pane border, or press Ctrl-B then `s` |
+| Split a pane | Choose Split from its Menu, or right-click it and pick Left/Right/Up/Down |
 | Navigation mode | Press **Control**-B (the Control key, not Command). A `NAV` bar appears at the bottom |
 | Shortcut help | Ctrl-B, then `?`; Esc or `?` closes help |
 | ...then split | `r` right, `l` left, `u` up, `d` down (also `%` and `"`), or `s` for the menu |
@@ -35,26 +36,42 @@ reattach to it.
 | ...then close focused pane | `x`, then `y` to confirm; the last pane ends the workspace |
 | ...then leave NAV mode | Esc (or wait 4 seconds); Ctrl-X detaches |
 | Focus a pane | Click it |
-| Scroll a pane | Use the mouse wheel over its content; typing returns normal history to live output |
+| Scroll a pane | Wheel over it, click the right-margin track to page, or drag its thumb and release to seek normal history; typing returns to live output |
+| Scroll with keys | Ctrl-B then PageUp/PageDown to page, Home for oldest retained output, End for live output |
 | Copy text | Drag across pane content and release; copying requires negotiated row-wrap metadata |
 | Keyboard copy mode | Ctrl-B then `c`; move with arrows or `h`/`j`/`k`/`l`, press Space to set/clear an anchor, then Enter or `y` to copy a non-empty range |
 | Zoom a pane | Ctrl-B then `z`; the selected pane's PTY resizes to fill the current workspace view |
 | Swap pane locations | Ctrl-B then `m`; choose another pane with arrows or `h`/`j`/`k`/`l`, then Enter; Esc cancels |
-| Adjust a divider | Ctrl-B then `e`; Tab chooses an ancestor divider, arrows preview its position, Enter applies it, Esc cancels |
-| Close pane from the menu | Right-click the pane, choose Close pane, then press `y` to confirm |
+| Resize panes | Drag the divider and release; or Menu → Resize divider → `[-]`/`[+]` → Apply. Ctrl-B then `e` supports keyboard adjustment |
+| Close a pane | Click its `[x]`, then `[Close]` or `y` to confirm; `[Cancel]` dismisses |
 | List/close panes from a shell | `panelink panes`; `panelink close 1` (or `2`) |
 | Detach (shells keep running) | Ctrl-X |
 | Reattach to the legacy Default/Main workspace | `panelink` |
 | Close the workspace | `exit` in every shell, or `panelink stop` |
 
-Current limits: at most four panes per workspace. The attach client forwards ordinary
+Normal-history scrolling keeps the last screen visible while the next view is
+fetched. The scrollbar uses the pane's existing right padding; its range is
+refreshed when you scroll. Track clicks page through history, and dragging the
+thumb previews a position before seeking on release. An initial click on an
+unknown range reads its extent. Alternate-screen apps such as OpenCode
+keep their own scrolling behavior and do not show a Panelink history scrollbar.
+
+The visible pane Menu exposes split, zoom, swap, divider adjustment, copy,
+saved layout, shortcut help, close and detach. Mouse controls use terminal cell
+coordinates; touch gestures work when the host terminal translates them into
+mouse press, drag and release events. Native touch hardware acceptance remains
+open. See the [pointer controls plan and evidence](docs/progress/P5-POINTER-CONTROLS-2026-10-27.md).
+
+Current limits: at most four panes per workspace. The rendered workspace is
+bounded to 80 rows by 240 columns; larger terminal windows keep that bounded
+workspace in the upper-left area. The attach client forwards ordinary
 Ctrl-letter keys, Alt/Meta characters when delivered by the host, F1–F12,
 Delete/Insert/Page Up/Page Down and Shift-Tab. Ctrl-B remains navigation and
 Ctrl-X detaches; Ctrl-C goes to the focused child. Modified function/navigation
 keys and application pointer clicks remain unsupported. Wheel events reach
 alternate-screen applications that enable mouse reporting; without that mode,
 Panelink reports the limitation. Normal screens scroll through retained live
-history. Panes have a one-cell blank margin on each side. Help consumes
+history. Pane controls and scrollbars use existing one-cell margins. Help consumes
 typing, paste and mouse actions while open. An experimental pinned OpenCode
 adapter is available only through a dedicated `serve --opencode-bridge` launch,
 with explicit prepare/resume commands; see the [provider guide](docs/progress/P4-MANUAL-RECOVERY.md).
@@ -170,7 +187,8 @@ processes keep running at their existing PTY sizes. Unzoom restores the exact
 underlying split geometry for the current root size. Swapping changes two
 panes' locations in the same workspace without moving or replacing their
 processes. Divider preview is local; the chosen absolute position is sent once
-on Enter. Split/layout changes are refused while zoom is active; unzoom first.
+on Enter, Apply, or release of a divider drag. Split/layout changes are refused
+while zoom is active; unzoom first.
 If a captured pane target or layout revision becomes stale, the local chooser
 cancels. Results are asynchronous and an uncertain operation is reported with
 a fixed status; it is never replayed automatically. These operation ratios and
@@ -242,6 +260,9 @@ verification evidence. Selected components retain their
 - [Product questions and spec handoff plan](docs/PANELINK-DISCOVERY.md)
 - [Working implementation specification](docs/SPEC.md)
 - [First prototype preparation and requested Rust skill](docs/PREBUILD.md)
+- [Panelink usage skill for agents](.agents/skills/panelink/SKILL.md): when to
+  use Panelink, supported CLI workflows, targeting, ownership and recovery limits.
+  Maintained alongside feature changes under [AGENTS.md](AGENTS.md).
 
 ## Alpha release, install and security review
 
@@ -423,7 +444,8 @@ In Terminal B, using the same three paths:
 - A split launches one new `/bin/zsh`. It uses the attach client's own
   working directory and environment, minus `PANELINK_*`. The new pane gets
   focus.
-- The menu's Close pane action and Ctrl-B then `x` require `y` confirmation.
+- The pane's `[x]`, menu Close action and Ctrl-B then `x` require a separate
+  `[Close]` click or `y` confirmation.
   Closing sends HUP to that pane's process group, then KILL after a bounded
   wait if needed. If its sibling remains, the sibling fills the workspace;
   the last shell exiting ends the workspace. `panelink panes` lists the

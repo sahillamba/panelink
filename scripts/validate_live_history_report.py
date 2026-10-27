@@ -9,6 +9,7 @@ from typing import Any
 
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 CASES = (("paced_80", 80, 768), ("burst_240", 240, 20_000), ("shutdown_240", 240, 100_000))
+PADDED_CASES = (("paced_80", 80, 768), ("burst_238", 238, 20_000), ("shutdown_238", 238, 100_000))
 HISTORY_REASONS = frozenset({
     "admission_contended", "admission_count_full", "admission_bytes_full",
     "final_payload_dropped_contended", "final_payload_dropped_count",
@@ -44,16 +45,17 @@ def boolean(value: Any, where: str) -> None:
 
 def validate_report(report: Any, *, require_release: bool = True) -> None:
     fields(report, {"schema_version", "synthetic", "actual_history_store", "queue_occupancy_instrumented", "build_profile", "cases"}, "report")
-    require(type(report["schema_version"]) is int and report["schema_version"] in (1, 2), "report: unsupported schema")
+    require(type(report["schema_version"]) is int and report["schema_version"] in (1, 2, 3), "report: unsupported schema")
     require(report["synthetic"] is True and report["actual_history_store"] is True, "report: wrong workload/store")
     require(report["queue_occupancy_instrumented"] is False, "report: unsupported queue instrumentation claim")
     require(report["build_profile"] in ("debug", "release"), "report: invalid build profile")
     require(not require_release or report["build_profile"] == "release", "report: release measurements required")
     cases = report["cases"]
+    profile = PADDED_CASES if report["schema_version"] == 3 else CASES
     require(type(cases) is list and len(cases) == len(CASES), "report: expected three fixed cases")
-    for case, (name, columns, planned) in zip(cases, CASES):
+    for case, (name, columns, planned) in zip(cases, profile):
         case_fields = {"name", "columns", "rows_per_pane", "panes", "planned_rows_per_pane", "elapsed_us", "owner_tick_us", "probes", "driver_drop_us", "post_drop_lock_wait_us", "history_failure", "shutdown_during_output", "targets"}
-        if report["schema_version"] == 2:
+        if report["schema_version"] >= 2:
             case_fields.add("history_diagnostics")
         fields(case, case_fields, "case")
         require(case["name"] == name, "case: unexpected case order/name")
@@ -66,7 +68,7 @@ def validate_report(report: Any, *, require_release: bool = True) -> None:
             integer(case[key], key, maximum=elapsed)
         for key in ("history_failure", "shutdown_during_output"):
             boolean(case[key], key)
-        if report["schema_version"] == 2:
+        if report["schema_version"] >= 2:
             validate_diagnostics(case["history_diagnostics"], case["history_failure"])
         ticks = case["owner_tick_us"]
         require(type(ticks) is list and 1 <= len(ticks) <= 100_000, "case: invalid owner sample count")
@@ -111,7 +113,7 @@ def validate_report(report: Any, *, require_release: bool = True) -> None:
                 require(target["completed_rows"] is None, "target: interrupted producer count must remain unknown")
             require(case["history_failure"] or target["ended"], "target: missing end without a capture failure")
         require(panes == {0, 1}, "case: duplicate target pane")
-        if name != "shutdown_240":
+        if name != profile[-1][0]:
             require(not case["shutdown_during_output"] and all(t["producer_completed"] for t in targets), "case: normal-exit workload did not finish generation")
         elif case["shutdown_during_output"]:
             require(any(not t["producer_completed"] for t in targets), "case: shutdown overlap contradicts completed producers")

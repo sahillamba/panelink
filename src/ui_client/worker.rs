@@ -61,6 +61,11 @@ enum Command {
         row: u16,
         up: bool,
     },
+    SeekHistory {
+        target: TargetRef,
+        epoch: u64,
+        offset_rows: u16,
+    },
     Split {
         id: u64,
         focus_generation: u64,
@@ -84,6 +89,7 @@ impl Command {
             Self::Keys { keys, .. } => keys.capacity() * std::mem::size_of::<Key>(),
             Self::Paste { text, .. } => text.capacity(),
             Self::Scroll { .. } => HISTORY_QUERY_BYTES + MOUSE_WHEEL_INPUT_BYTES,
+            Self::SeekHistory { .. } => HISTORY_QUERY_BYTES,
             Self::Split { .. } => std::mem::size_of::<SplitPlan>(),
             Self::Close { .. } => std::mem::size_of::<ClosePlan>(),
             Self::PaneOperation { action, .. } => std::mem::size_of_val(action),
@@ -399,6 +405,26 @@ impl Effects for WorkerHandle {
         Ok(())
     }
 
+    fn seek_history(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        offset_rows: u16,
+    ) -> Result<(), &'static str> {
+        if self.scroll_pending {
+            return Err("client busy: history request pending");
+        }
+        self.submit_with(HISTORY_QUERY_BYTES, MAX_HISTORY_REPLY_BYTES, || {
+            Command::SeekHistory {
+                target,
+                epoch,
+                offset_rows,
+            }
+        })?;
+        self.scroll_pending = true;
+        Ok(())
+    }
+
     fn split(
         &mut self,
         plan: SplitPlan,
@@ -455,6 +481,11 @@ impl Backend for Net {
                 row,
                 up,
             } => ClientResult::Scroll(self.scroll(target, epoch, offset_rows, column, row, up)),
+            Command::SeekHistory {
+                target,
+                epoch,
+                offset_rows,
+            } => ClientResult::Scroll(self.seek_history(target, epoch, offset_rows)),
             Command::Split {
                 id,
                 focus_generation,

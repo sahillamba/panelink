@@ -1,22 +1,28 @@
 # Panelink implementation roadmap
 
-CI setup (2026-10-24): standard GitHub-hosted Apple Silicon validation and
-weekly dependency-update proposals are configured locally. Hosted execution
-and required-check activation remain pending publication; see
+CI baseline (2026-10-26): standard GitHub-hosted Apple Silicon validation
+passed on PR #2 head `1060668`; weekly dependency-update proposals are
+configured. Required-check activation remains a repository setting; see
 [CI.md](docs/CI.md). This does not change the product phase gates below.
 
 ```text
 current-phase: Phase3/Phase5 resumed; bounded tabs/copy/pane operations automated verified. FullRust1399/0/15ignored, finalclient123/0, outerPTY3/0 and all7support checks. Phase4 scoped completion retained; host/clipboard/reboot/workload gates remain open.
-last-updated: 2026-10-26
+last-updated: 2026-10-27
+wide-attach-repair: 2026-10-27 host64x269panic fixed by bounding legacy render viewport; client147/0 and default-openPTY7/0/1ignored, Clippy/fmt/build pass. Existing server untouched; native host retry remains pending. See SESSION.md.
+pointer-controls: 2026-10-27 user-selected7060; pane Menu/x, pointer close confirmation, divider drag/menu adjustment, scrollbar click/drag and NAV history implemented. Parentclient146/0, compositor36/0 and workspaceouterPTY4/0; final broad verification recorded in P5-POINTER-CONTROLS-2026-10-27.md. Touch requires host mouse translation; native host/touch/clipboard gates stay open.
+scrolling-ux: 2026-10-27 user feedback repair: keep valid content during history fetch, coalesce bounded normal wheel motion, right-padding position indicators; optional extent read best effort. Library880/0/4ignored, binary221/0, history6/0, outerPTY3/0; finalcompose32/0 and strictClippy/fmt pass. See P5-SCROLLING-UX-2026-10-27.md. Host acceptance remains separate.
+workload-profile: User selected ten idle OpenCode sessions plus shell/build output, no model calls (2026-10-26). Combined variantC measured twice60sec:10TUIs+2shells,72acknowledgedprobes/run,55measuredbuilds/run, no stickyhistoryfailure, allgroupsstopped. RSS sampledmax60.11/345.19MiB remains variable. Numeric loss/lag/error/latency budgets unset. See P5-COMBINED-WORKLOAD-2026-10-26.md.
+last-verified-acceptance: Resume from1060668 on codex/p5-acceptance-continuation. Canonical verifier8/8 (root result totals1402pass/0fail/15ignored; decoder39; Python233run1skip). Final crash-fixture cleanup then separately1/0 and independent review clear. Schema3 live-history benchmark restored for padding,48/48overlap probes; paced failurefalse, burst/shutdown final-payload byte-pressure failuretrue. See P3-P5-RESUME-2026-10-26.md.
 last-verified-p4: Parent serial Rust1231pass/0fail/15ignored,63groups; all seven supporting checks pass decoder39/Python232run231pass1opt-in skip/docs332zero/fmt/Clippy/build/fingerprints. Luna+independent parent full managed native pass incl foreign135/postrefusal138/returnA152 and exact A rev7->8, passiveB1; zero prompts/cleanup true. Active binary unchanged.
 checkpoint: User-authorized verified Phase3 checkpoint: scrollback, pane run, owner discovery and client/server/killed-input-client acceptance on codex/p3-scrollback-integration based on9f3d8a0; see Git history for checkpoint ID. FullPhase3 remains open; no push. Original source checkout preserved.
-last-verified: Full locked/offline serial Rust1399pass/0fail/15ignored across75groups. After strictClippy payload boxing/lint cleanup, finalclient123/0 and outerPTY3/0 pass; actual4PTYprotocol1/0. All7support checks pass decoder39/fingerprints/fmt/strictClippy/build/Python232run1skip/finaldocs. See P5-PANE-OPERATIONS-INTEGRATION-2026-10-26.md. No clipboard or activation.
+last-verified: Pointer-controls final locked/offline serial no-fail-fast Rust1437pass/0fail/15ignored across77resultgroups; finalclient146/0, compositor36/0, workspaceouterPTY4/0. StrictClippy/fmt/debugbuild/fingerprints/docs383zero pass. See P5-POINTER-CONTROLS-2026-10-27.md; host/touch/clipboard/reboot gates remain open.
+prior-evidence-pane-operations: Full locked/offline serial Rust1399pass/0fail/15ignored across75groups. After strictClippy payload boxing/lint cleanup, finalclient123/0 and outerPTY3/0 pass; actual4PTYprotocol1/0. All7support checks pass decoder39/fingerprints/fmt/strictClippy/build/Python232run1skip/finaldocs. See P5-PANE-OPERATIONS-INTEGRATION-2026-10-26.md. No clipboard or activation.
 prior-evidence-orchestration: Serial1091pass/0fail/15ignored in182.72s plus seven supporting checks before user-reported usability repairs; see P3-ORCHESTRATION-RESULT.md.
 prior-evidence-scrollback: Final serial Cargo1064pass/0fail/15ignored in122.73s (lib712/binary123/integration229 across50 targets); seven non-Cargo checks passed separately, decoder39/Python77/docs253/0. First full serial run1063pass/1fail/15ignored at shutdown HUP marker; isolated and full rerun pass without code changes. See P3-LIVE-SCROLLBACK-RESULT.md.
 prior-evidence-metadata: Final serial Cargo1059pass/0fail/15ignored in152.92s (lib709/binary123/integration227 across50 targets); all7 non-Cargo verifier checks pass separately, decoder39/Python77/docs251/0. Initial parallel verifier7/8 had2 library timing/observation failures; preserved in P3-PANE-METADATA-RESULT.md, not relabeled. No final Cargo timeout.
 prior-evidence-upstream: verifier 8/8; full suite 993 passed/0 failed/15 ignored after origin/main merge (095bf45) and four-pane, agent CLI, L16 relaunch, L17 attach, L18 exit status, before stash integration; not combined-tree verification.
 prior-evidence-stash: live-split slice library 641 passed/4 ignored, focused integration 73 passed/0 failed, verifier 7/8 with binary 115 passed/1 failed at pathname-bind EPERM; not combined-tree verification. See docs/progress/ASYNC-LAUNCH-RESULT.md.
-next-action: Bounded pane operations integrated and automated verified. Continue remaining Phase3 human four-pane host and Phase5 Apple Terminal/real clipboard/physical reboot/layout recovery/representative workload gates, preserving explicit evidence limits. Do not relabel PTY automation as human/reboot acceptance. No push or activation.
+next-action: Investigate combined-workload RSS variability and set workload loss/lag/error/latency/resource criteria using the two recorded idle10+shell/build observations. Complete Phase3 human four-pane host and Phase5 Apple Terminal/real clipboard/physical reboot/layout recovery gates. Native Terminal control explicitly denied this session. Wide burst benchmark still records final-payload loss. Do not relabel process/PTY automation or measurements as human/reboot or performance-budget acceptance. No push or activation.
 history-checkpoint-store: live visible-screen capture integrated 2026-10-20, not full history — see docs/progress/P5-LIVE-CAPTURE.md
 history-engine-cursor: local vt100 0.16.2-panelink.2 exposes bounded borrowed normal-history rows, gap and RIS epoch; now consumed by the saved-row writer — see docs/progress/P5-SCROLLBACK-CURSOR.md
 history-saved-rows: scoped P5 saved-history slice DONE at f82d968; retry/read acceptance, bounded orphan-temp discard and synthetic throughput delivered in current working tree; 1,024 rows/8 MiB, 30-day ended retention, stopped-workspace clear/cleanup. Full V-HISTORY reboot/layout and representative workload remain open — see docs/progress/P5-SAVED-HISTORY.md
@@ -45,6 +51,33 @@ phase-p5-recovery: prototype view, chooser, in-workspace menu, explicit relaunch
 phase-sa-feasibility: ATTEMPTED/BLOCKED — OpenCode2.0.32 ACP/server readiness blocked by local socket permissions; OpenCode1.19.0 probe did not prove selected-session switching. See SUBAGENTS-FEASIBILITY.md and P4-OPENCODE-TUI-IDENTITY.md.
 phase-usability-wave1: scoped implementation delivered 2026-10-22; typed keys/help/cleanup and automated evidence. Full acceptance remains open; see USABILITY-WAVE1-RESULT.md.
 ```
+
+## PR 3 hosted CI follow-up — 2026-10-27
+
+Hosted CI at `ec09eb0` failed in the wide-terminal regression with connection
+loss; seven supporting checks passed. The socket readiness repair preserves
+all deadlines and has an old-fail/new-pass background-server reproduction.
+Final combined verifier8/8: rootRust1441/0/15ignored, decoder39/0,
+Python233run/1skip and all supporting checks pass. New hosted result pending. See
+[the CI repair evidence](docs/progress/PR3-CI-SOCKET-READINESS-2026-10-27.md).
+
+## Consolidation checkpoint — 2026-10-27
+
+The user authorized combining main's dirty work into 7060 and opening a PR.
+Main's live-scrollback source already exists here; its unique skill, research
+and handoff docs have been imported. Combined-tree verifier passed8/8,
+root Rust1439/0/15ignored, decoder39/0, Python233run/1skip and supporting
+checks; imported skill validation passes. This is a checkpoint for PR.
+See [the consolidation record](docs/progress/WORKTREE-CONSOLIDATION-2026-10-27.md).
+Phase 3/5 acceptance gates remain open.
+
+## Pointer controls work — 2026-10-27
+
+User selected this installed 7060 checkout for simpler pointer and keyboard
+operation. [Plan and current evidence](docs/progress/P5-POINTER-CONTROLS-2026-10-27.md)
+tracks draggable dividers, pane Menu/close controls, clickable confirmation,
+scrollbar seeking and input isolation. Existing dirty scrolling/workload work
+is preserved. Phase 3/5 host, clipboard and reboot gates stay open.
 
 ## Control commands
 
@@ -318,11 +351,13 @@ This is a development gate, not a live Panelink adapter or recovery feature.
 - [x] Scoped two-pane saved normal scrollback and visible-screen checkpoints, bounded read-only CLI show/search, 30-day ended-session pruning and stopped-workspace clear; see P5-SAVED-HISTORY.md. Does not imply workspace or provider recovery.
 - [x] Deterministic software-injected pre/post-rename sync faults, retry acknowledgments and first-end-time retention, including real-PTY capture retries; see P5-RECOVERY-FAULTS.md.
 - [x] Fresh-process read-only CLI acceptance for retained rows, latest normal/alternate checkpoints and unavailable overwritten content; see P5-RESTART-ACCEPTANCE.md. This does not prove a machine reboot or saved layout restoration.
+- [x] Scoped real pathname server SIGKILL after independently decoded committed one-pane layout/history; fresh read-only inspection and explicit new-generation relaunch without input replay. Parent focused1/0, full verifier8/8 and final cleanup1/0; see [crash recovery evidence](docs/progress/P5-CRASH-RECOVERY-2026-10-26.md). Physical reboot remains open.
 - [x] Bounded orphan-temporary discard, stopped-workspace `history cleanup` CLI and startup-before-capture helper; see P5-TEMP-CLEANUP.md. Full pathname startup acceptance remains blocked.
 - [x] Single-machine synthetic release throughput baseline, two recorded runs, fixed 24-operation cases and quota validation; see P5-HISTORY-THROUGHPUT.md. This is not a ten-agent or UI latency acceptance pass.
 - [x] Bounded history writer component and lock retention; see [P5-HISTORY-WRITER.md](docs/progress/P5-HISTORY-WRITER.md). Scoped live adoption is also delivered; see P5-LIVE-WRITER-RESULT.md.
 - [x] Scoped bounded live history scheduling off the owner thread, retaining durable acknowledgment/gap/close contracts; blocked-writer input/control/split and quota/cap tests pass. See P5-LIVE-WRITER-RESULT.md.
 - [x] Bounded actual-store live two-pane workload observations: two final release runs, raw timing/probe/history reports and validator; see P5-LIVE-HISTORY-BENCH.md. Burst failure flags and preliminary missing ends remain recorded, without a performance-budget pass.
+- [x] User-selected ten-idle-OpenCode plus paced shell/real offline fixture-build profile measured twice; each60seconds/72acknowledgedprobes/55builds, no sticky capture failure, confirmed group cleanup. See [combined workload](docs/progress/P5-COMBINED-WORKLOAD-2026-10-26.md). RSS variance and numeric acceptance budgets remain open.
 - [x] Fixed history failure/drain diagnostics and two schema2 observations; see P5-HISTORY-DIAGNOSTICS.md.
 - [x] Preserve a newest bounded final suffix with all candidate screens under byte pressure; see P5-FINAL-TAIL.md. Prefix loss remains explicit; no quota/budget increase.
 - [x] Scoped explicit-timeout finalization of accepted known-end metadata; canceled payloads/receipts remain canceled. See P5-DRAIN-METADATA.md. Unknown/unsubmitted end intent and payload loss remain separate.
