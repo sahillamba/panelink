@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "status": "investigation_only_proposed_criteria_not_approved",
+  "checkout": {
+    "branch": "codex/p5-acceptance-continuation",
+    "head": "106066813299302ab4425b73ac95068d7eb09c41",
+    "dirty_preexisting_work_preserved": true
+  },
+  "source_reports": [
+    "docs/progress/p5-combined-workload-C-run6.json",
+    "docs/progress/p5-combined-workload-C-run7.json",
+    "docs/progress/p5-live-history-2026-10-26.json"
+  ],
+  "rss_mib": {
+    "combined_harness_run6": {"initial": 13.84, "p50": 53.84, "p95": 59.37, "sampled_max": 60.11},
+    "combined_harness_run7": {"initial": 13.22, "p50": 240.02, "p95": 340.4, "sampled_max": 345.19},
+    "run7_increase_20s_to_30s": {"from": 49.0, "to": 338.22},
+    "run7_minus_run6_sampled_max": 285.08,
+    "opencode_aggregate_run6": {"p50": 1658.61, "sampled_max": 1757.3},
+    "opencode_aggregate_run7": {"p50": 1600.03, "sampled_max": 1764.28},
+    "shell_build_group_max_run6": 88.66,
+    "shell_build_group_max_run7": 98.17
+  },
+  "combined_workload": {
+    "runs": 2,
+    "duration_seconds_each": 60,
+    "opencode_tuis": 10,
+    "shell_build_panes": 2,
+    "builds_completed_during_each_run": 55,
+    "opencode_echo_p95_ms": [133.469, 119.883],
+    "opencode_echo_erase_p95_ms": [237.911, 228.607],
+    "shell_ack_p95_ms": [18.775, 19.502],
+    "paced_output_lines_at_end": [4344, 4304],
+    "history_writer_drain": ["drained", "drained"],
+    "sticky_history_failure": [false, false],
+    "paced_history": {
+      "retained_rows_each_target": 1024,
+      "retained_bytes": 4997120,
+      "gap": true,
+      "classification": "bounded retention overwrite; not capture loss by itself"
+    }
+  },
+  "synthetic_history_cases": {
+    "paced_80": {"history_failure": false, "writer_drain": "drained", "retained_rows": [754, 746], "gap": [false, false]},
+    "burst_238": {
+      "history_failure": true,
+      "writer_drain": "drained",
+      "diagnostic_reasons": ["admission_bytes_full", "final_payload_dropped_bytes"],
+      "producer_rows_each": 20000,
+      "retained_rows_each": 728,
+      "gap": [true, true],
+      "classification": "capture payload loss under adversarial burst; drained means accepted work completed"
+    },
+    "shutdown_238": {
+      "history_failure": true,
+      "writer_drain": "drained",
+      "diagnostic_reasons": ["admission_bytes_full", "final_payload_dropped_bytes"],
+      "producer_completed": false,
+      "retained_rows_each": 728,
+      "gap": [true, true]
+    }
+  },
+  "proposed_acceptance_limits": {
+    "approval": "not_user_approved",
+    "ordinary_workload_repetitions": 3,
+    "warmup_minutes": 2,
+    "measured_minutes_each": 5,
+    "latency_ms": {
+      "opencode_echo_p95": 200,
+      "opencode_echo_p99": 350,
+      "opencode_echo_erase_p95": 300,
+      "opencode_echo_erase_p99": 500,
+      "shell_ack_p95": 50,
+      "shell_ack_p99": 100
+    },
+    "owner_tick_us": {"p95": 500, "p99": 2000},
+    "history_capture_lag_ms": {"p95": 1000, "p99": 2000},
+    "ordinary_capture_loss": {
+      "dropped_or_uncommitted_rows": 0,
+      "forbidden_diagnostics": ["final_payload_dropped_bytes", "storage_error", "capture_invalid"],
+      "transient_admission_bytes_full": "count and require bounded successful recovery without missing durable rows",
+      "retention_gap_from_1024_row_limit_allowed_if_explicit": true
+    },
+    "per_target_retention": {"rows_max": 1024, "bytes_max": 8388608, "newest_complete_suffix": true, "gap_must_be_explicit": true},
+    "combined_harness_rss_mib": {"sample_rate_hz_min": 10, "high_water_max": 512, "unexplained_warm_to_final_60s_growth_max": 64},
+    "deployed_server_rss_mib": {"proposed_ceiling": 128, "status": "validate_on_isolated_server_baseline_before_acceptance"},
+    "overload": {"keep_existing_queue_caps": true, "all_losses_reported_with_count_bytes_reason": true, "silent_loss_allowed": false}
+  },
+  "hypotheses": [
+    {"id": "h1", "claim": "Harness terminal processing or snapshots allocate a large temporary working set", "confidence": "plausible_unproven", "falsifier": "repeat with per-thread allocation attribution and compare six-driver harness against one deployed server"},
+    {"id": "h2", "claim": "Row/screen construction overlaps source Vec buffers and boxed accepted payload", "confidence": "source_path_confirmed_as_possible_overlap_not_rss_cause", "falsifier": "instrument per-batch current/peak payload and allocations; show RSS jump without large batches"},
+    {"id": "h3", "claim": "Allocator or OS retains pages after transient frees", "confidence": "plausible_unproven", "falsifier": "compare allocator live/retained statistics, quiescence, and fresh-process controls"},
+    {"id": "h4", "claim": "Build workload or process-tree sampling affects attribution", "confidence": "possible_unresolved", "falsifier": "sub-second child ancestry/RSS sampling and no-build control"},
+    {"id": "h5", "claim": "History queue pressure drives combined workload RSS", "confidence": "unproven; combined runs show no history failure and omit queue occupancy", "falsifier": "instrument admitted/in-flight bytes and correlate with allocator/process samples"}
+  ],
+  "verification": {
+    "raw_reports_modified": false,
+    "workload_rerun": false,
+    "production_changes": false,
+    "git_diff_check": "passed",
+    "json_parse_and_shape_check": "passed"
+  },
+  "next_experiment": "Add isolated diagnostic counters/attribution without changing queue caps; run three serial five-minute repetitions after warm-up for combined, no-build, single-server, and fresh-process controls; preserve raw samples and loss assertions."
+}

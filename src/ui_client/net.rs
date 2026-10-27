@@ -53,6 +53,7 @@ pub(crate) struct Net {
     pane_operations: Option<PaneOperationsView>,
     pane_operations_pending: bool,
     screen_revisions: [(Option<TargetRef>, u64); panelink::pane_layout::MAX_PANES],
+    history_extents: [(Option<TargetRef>, u64, u16); panelink::pane_layout::MAX_PANES],
 }
 
 /// Host-owned view inputs needed by one network poll.
@@ -82,6 +83,7 @@ pub(crate) enum ScrollResult {
     History {
         revision: u64,
         offset_rows: u16,
+        total_rows: u16,
         checkpoint: Vec<u8>,
         row_wraps: Option<Vec<bool>>,
     },
@@ -135,6 +137,7 @@ impl Net {
             pane_operations: None,
             pane_operations_pending: false,
             screen_revisions: [(None, 0); panelink::pane_layout::MAX_PANES],
+            history_extents: [(None, 0, 0); panelink::pane_layout::MAX_PANES],
         };
         let (layout, pane_operations) = match net.resume_any_context(now)? {
             Some(state) => state,
@@ -236,6 +239,32 @@ impl Net {
         row: u16,
         up: bool,
     ) -> ScrollUpdate {
+        self.scroll_inner(target, epoch, offset_rows, Some((column, row, up)))
+    }
+
+    /// Read retained history without ever claiming input or forwarding a wheel
+    /// event, even if the server observes a newly entered alternate screen.
+    pub(crate) fn seek_history(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        offset_rows: u16,
+    ) -> ScrollUpdate {
+        self.scroll_inner(target, epoch, offset_rows, None)
+    }
+
+    fn scroll_inner(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        offset_rows: u16,
+        wheel: Option<(u16, u16, bool)>,
+    ) -> ScrollUpdate {
+        let extent = self
+            .history_extents
+            .iter()
+            .find(|entry| entry.0 == Some(target))
+            .copied();
         let result = (|| {
             let pane = self.pane_mut(target).ok_or("pane not connected")?;
             let query =
@@ -251,7 +280,9 @@ impl Net {
                 return Err("history reply invalid");
             }
             validate_history_checkpoint(&view)?;
-            if view.alternate_screen() && view.mouse_reporting() {
+            if let Some((column, row, up)) =
+                wheel.filter(|_| view.alternate_screen() && view.mouse_reporting())
+            {
                 if pane.owner_revision.is_none() {
                     let _ = pane.claim(Instant::now());
                 }
@@ -273,7 +304,7 @@ impl Net {
                             return Err("history reply invalid");
                         }
                         validate_history_checkpoint(&retry)?;
-                        history_result(retry)
+                        history_result(pane, retry, extent)
                     }
                     MouseInputResult::NotOwner => {
                         Err("input is owned by another client; wheel not sent")
@@ -281,8 +312,29 @@ impl Net {
                     MouseInputResult::Failed(label) => Err(label),
                 };
             }
-            history_result(view)
+            history_result(pane, view, extent)
         })();
+        if let Ok(ScrollResult::History {
+            revision,
+            offset_rows,
+            total_rows,
+            ..
+        }) = &result
+        {
+            let index = self
+                .history_extents
+                .iter()
+                .position(|entry| entry.0 == Some(target))
+                .or_else(|| {
+                    self.history_extents.iter().position(|entry| {
+                        !self.panes.iter().any(|pane| Some(pane.target) == entry.0)
+                    })
+                })
+                .unwrap_or(0);
+            if total_rows > offset_rows {
+                self.history_extents[index] = (Some(target), *revision, *total_rows);
+            }
+        }
         ScrollUpdate {
             target,
             epoch,
@@ -801,7 +853,11 @@ fn validate_history_checkpoint(view: &HistoryReplyView<'_>) -> Result<(), &'stat
         .map_err(|_| "history checkpoint invalid")
 }
 
-fn history_result(view: HistoryReplyView<'_>) -> Result<ScrollResult, &'static str> {
+fn history_result(
+    pane: &mut PaneConn,
+    view: HistoryReplyView<'_>,
+    cached_extent: Option<(Option<TargetRef>, u64, u16)>,
+) -> Result<ScrollResult, &'static str> {
     if view.alternate_screen() {
         return Ok(ScrollResult::AlternateScreenNoMouse);
     }
@@ -810,9 +866,46 @@ fn history_result(view: HistoryReplyView<'_>) -> Result<ScrollResult, &'static s
     let row_wraps = row_wrap_flags(checkpoint.rows(), view.wrap_metadata_available(), |row| {
         view.row_wrapped(row)
     });
+    // Existing read-only queries clamp to the available history. Probe the
+    // oldest viewport once per live revision to size the scrollbar without a
+    // wire change. This query never forwards mouse input or claims ownership.
+    let total_rows = if let Some((_, _, total)) =
+        cached_extent.filter(|(_, revision, _)| *revision == view.screen_revision())
+    {
+        total.max(view.offset_rows())
+    } else {
+        // Chrome must not turn an already valid viewport into a failed scroll.
+        // A conservative extent is not cached, so a later gesture can retry the
+        // read-only probe. Never combine extents from different screen revisions.
+        let probed = (|| {
+            let query = encode_history_query(
+                view.target(),
+                panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS,
+            )
+            .map_err(|_| "history request invalid")?;
+            let bytes = match pane.request(&query)? {
+                Reply::Snapshot(bytes) => bytes,
+                Reply::Error(label) => return Err(label),
+                Reply::Response(_) => return Err("history reply invalid"),
+            };
+            let oldest = decode_history_reply_with_wraps(&bytes, pane.screen_row_wraps)
+                .map_err(|_| "history reply invalid")?;
+            validate_history_checkpoint(&oldest)?;
+            if oldest.target() != view.target()
+                || oldest.screen_revision() != view.screen_revision()
+                || oldest.alternate_screen()
+                || oldest.offset_rows() < view.offset_rows()
+            {
+                return Err("history extent changed");
+            }
+            Ok(oldest.offset_rows())
+        })();
+        probed.unwrap_or(view.offset_rows())
+    };
     Ok(ScrollResult::History {
         revision: view.screen_revision(),
         offset_rows: view.offset_rows(),
+        total_rows,
         checkpoint: view.checkpoint().to_vec(),
         row_wraps,
     })
@@ -1246,6 +1339,7 @@ mod tests {
             pane_operations: None,
             pane_operations_pending: false,
             screen_revisions: [(None, 0); panelink::pane_layout::MAX_PANES],
+            history_extents: [(None, 0, 0); panelink::pane_layout::MAX_PANES],
         };
         std::thread::scope(|scope| {
             let server = scope.spawn(move || {
@@ -1280,6 +1374,185 @@ mod tests {
                 assert_eq!(net.panes[0].target, survivor);
             }
             server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn scrollbar_extent_probe_is_read_only_cached_and_invalidated_by_revision() {
+        use panelink::handshake_protocol::{Welcome, CAPABILITY_READ};
+        use panelink::protocol_wire::{Frame, MessageKind};
+        use panelink::screen_checkpoint::{encode, CheckpointMetadata};
+        use panelink::terminal::{ScreenSnapshot, TerminalSize};
+        use panelink::transport::AuthenticatedStream;
+        use panelink::ui_protocol::{
+            decode_ui_request, prefix_history_reply, UiRequest, MAX_HISTORY_OFFSET_ROWS,
+        };
+        use std::os::unix::{fs::DirBuilderExt, net::UnixStream};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        struct Root(PathBuf);
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = Root(PathBuf::from(format!(
+            "/private/tmp/panelink-scroll-{}-{serial}",
+            std::process::id()
+        )));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root.0)
+            .unwrap();
+        let target = target(7, 3, 1);
+        let now = Instant::now();
+        let (client, server) = UnixStream::pair().unwrap();
+        let mut client = AuthenticatedStream::new(client).unwrap();
+        client.enable_snapshot_reads().unwrap();
+        let pane = PaneConn::attach(
+            &root.0,
+            &root.0,
+            target,
+            Some(Bootstrap {
+                stream: client,
+                welcome: Welcome {
+                    nonce: 1,
+                    generation: 7,
+                    lease: 10,
+                    selected_capabilities: CAPABILITY_READ,
+                    ttl_seconds: 1800,
+                },
+                used: 0,
+                started: now,
+            }),
+            now,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let mut net = Net {
+            directory: root.0.clone(),
+            context_dir: root.0.clone(),
+            panes: vec![pane],
+            next_layout: now,
+            resize_sent: None,
+            endpoint_identity: None,
+            layout: Some(view_with_target(target).layout),
+            pane_operations: None,
+            pane_operations_pending: false,
+            screen_revisions: [(None, 0); panelink::pane_layout::MAX_PANES],
+            history_extents: [(None, 0, 0); panelink::pane_layout::MAX_PANES],
+        };
+        std::thread::scope(|scope| {
+            let peer = scope.spawn(move || {
+                let mut peer = AuthenticatedStream::new(server).unwrap();
+                peer.enable_snapshot_writes().unwrap();
+                // The second wheel reuses the extent. A new revision refreshes
+                // it; a later alternate-screen reply must not probe or inject.
+                for (requested, revision, available, alternate) in [
+                    (3, 1, 100, false),
+                    (MAX_HISTORY_OFFSET_ROWS, 1, 100, false),
+                    (6, 1, 100, false),
+                    (9, 2, 110, false),
+                    (MAX_HISTORY_OFFSET_ROWS, 2, 110, false),
+                    (12, 4, 100, false),
+                    (MAX_HISTORY_OFFSET_ROWS, 5, 120, false),
+                    (15, 4, 100, false),
+                    (MAX_HISTORY_OFFSET_ROWS, 4, u16::MAX, false),
+                    (18, 4, 100, false),
+                    (MAX_HISTORY_OFFSET_ROWS, 4, u16::MAX - 1, false),
+                    (21, 4, 100, false),
+                    (MAX_HISTORY_OFFSET_ROWS, 4, 100, false),
+                    (24, 6, 0, true),
+                    // A scrollbar request may race an app enabling both
+                    // alternate screen and mouse reporting. It stays READ-only.
+                    (27, 7, 0, true),
+                ] {
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    let frame = peer.read_frame(deadline).unwrap();
+                    assert_eq!(frame.kind(), MessageKind::Request);
+                    let UiRequest::HistoryQuery(query) =
+                        decode_ui_request(frame.payload()).unwrap()
+                    else {
+                        panic!("extent inspection sent a mutation or input");
+                    };
+                    assert_eq!(query.target, target);
+                    assert_eq!(query.offset_rows, requested);
+                    if available >= u16::MAX - 1 {
+                        let kind = if available == u16::MAX {
+                            MessageKind::Error
+                        } else {
+                            MessageKind::Snapshot
+                        };
+                        peer.write_frame(
+                            &Frame::new(kind, frame.request_id(), b"invalid").unwrap(),
+                            deadline,
+                        )
+                        .unwrap();
+                        continue;
+                    }
+                    let snapshot =
+                        ScreenSnapshot::try_new(TerminalSize::new(22, 78).unwrap()).unwrap();
+                    let mut record = encode(
+                        &snapshot,
+                        &CheckpointMetadata::new(target, 0, 1, revision).unwrap(),
+                    )
+                    .unwrap();
+                    if alternate {
+                        record[80] = 1;
+                    }
+                    let bytes = prefix_history_reply(
+                        target,
+                        revision,
+                        requested.min(available),
+                        alternate,
+                        alternate && revision == 7,
+                        record,
+                    )
+                    .unwrap();
+                    peer.write_frame(
+                        &Frame::new(MessageKind::Snapshot, frame.request_id(), &bytes).unwrap(),
+                        deadline,
+                    )
+                    .unwrap();
+                }
+            });
+            for (epoch, offset, total) in [
+                (1, 3, 100),
+                (2, 6, 100),
+                (3, 9, 110),
+                (4, 12, 12),
+                (5, 15, 15),
+                (6, 18, 18),
+                (7, 21, 100),
+            ] {
+                let update = net.scroll(target, epoch, offset, 0, 0, true);
+                let ScrollResult::History {
+                    offset_rows,
+                    total_rows,
+                    ..
+                } = update.result
+                else {
+                    panic!("history unavailable");
+                };
+                assert_eq!((offset_rows, total_rows), (offset, total));
+                assert_eq!(net.panes[0].owner_revision, None);
+            }
+            let update = net.scroll(target, 8, 24, 0, 0, true);
+            assert!(matches!(
+                update.result,
+                ScrollResult::AlternateScreenNoMouse
+            ));
+            assert_eq!(net.panes[0].owner_revision, None);
+            let update = net.seek_history(target, 9, 27);
+            assert!(matches!(
+                update.result,
+                ScrollResult::AlternateScreenNoMouse
+            ));
+            assert_eq!(net.panes[0].owner_revision, None);
+            peer.join().unwrap();
         });
     }
 

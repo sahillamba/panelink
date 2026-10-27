@@ -54,6 +54,9 @@ mod benchmark {
     const MAX_RETAINED_ROWS: usize = 1_024;
     const MAX_SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
     const PROBES_PER_PANE: usize = 8;
+    // Two 24-row PTYs, each with a one-cell border on every edge, plus
+    // the shared divider. Reported case columns remain PTY content columns.
+    const ROOT_ROWS: u16 = 53;
 
     type BenchResult<T> = Result<T, BenchError>;
 
@@ -96,16 +99,16 @@ mod benchmark {
             shutdown: false,
         },
         CaseSpec {
-            name: "burst_240",
-            columns: 240,
+            name: "burst_238",
+            columns: 238,
             planned_rows: 20_000,
             batch_rows: 64,
             delay_ms: 0,
             shutdown: false,
         },
         CaseSpec {
-            name: "shutdown_240",
-            columns: 240,
+            name: "shutdown_238",
+            columns: 238,
             planned_rows: 100_000,
             batch_rows: 32,
             delay_ms: 1,
@@ -627,12 +630,11 @@ mod benchmark {
         client.next_sequence = split_sequence + 1;
         let final_layout = query_layout(&mut client)?;
         verify_layout(&final_layout, spec.columns)?;
-        if !final_layout
-            .panes
-            .iter()
-            .flatten()
-            .any(|pane| pane.target == split_target && pane.rect.rows == 24)
-        {
+        if !final_layout.panes.iter().flatten().any(|pane| {
+            pane.target == split_target
+                && panelink::pane_layout::content_rect(pane.rect)
+                    .is_some_and(|content| content.rows == 24 && content.columns == spec.columns)
+        }) {
             return Err(BenchError("split target was absent from the live layout"));
         }
         query_screen(&mut client, root_target, 0, 24, spec.columns)?;
@@ -659,12 +661,11 @@ mod benchmark {
         claim(&mut client, info.owner_revision, target, 1)?;
         let layout = query_layout(&mut client)?;
         verify_layout(&layout, columns)?;
-        if !layout
-            .panes
-            .iter()
-            .flatten()
-            .any(|pane| pane.target == target && pane.rect.rows == 24)
-        {
+        if !layout.panes.iter().flatten().any(|pane| {
+            pane.target == target
+                && panelink::pane_layout::content_rect(pane.rect)
+                    .is_some_and(|content| content.rows == 24 && content.columns == columns)
+        }) {
             return Err(BenchError("split target dimensions are invalid"));
         }
         query_screen(&mut client, target, 1, 24, columns)?;
@@ -944,14 +945,15 @@ mod benchmark {
     }
 
     fn verify_layout(layout: &panelink::ui_protocol::LayoutReply, columns: u16) -> BenchResult<()> {
-        if layout.rows != 49 || layout.columns != columns {
+        if layout.rows != ROOT_ROWS || layout.columns != columns + 2 {
             return Err(BenchError("root layout dimensions are invalid"));
         }
         let panes: Vec<_> = layout.panes.iter().flatten().collect();
         if panes.len() != 2
-            || panes
-                .iter()
-                .any(|pane| pane.rect.rows != 24 || pane.rect.columns != columns)
+            || panes.iter().any(|pane| {
+                panelink::pane_layout::content_rect(pane.rect)
+                    .is_none_or(|content| content.rows != 24 || content.columns != columns)
+            })
         {
             return Err(BenchError("two-pane layout dimensions are invalid"));
         }
@@ -963,11 +965,13 @@ mod benchmark {
         columns: u16,
         target: TargetRef,
     ) -> BenchResult<()> {
-        if layout.rows != 49
-            || layout.columns != columns
+        if layout.rows != ROOT_ROWS
+            || layout.columns != columns + 2
             || layout.panes.iter().flatten().count() != 1
             || !layout.panes.iter().flatten().any(|pane| {
-                pane.target == target && pane.rect.rows == 49 && pane.rect.columns == columns
+                pane.target == target
+                    && pane.rect.rows == ROOT_ROWS
+                    && pane.rect.columns == columns + 2
             })
         {
             return Err(BenchError("initial root layout dimensions are invalid"));
@@ -1182,8 +1186,8 @@ mod benchmark {
                         executable: exe.as_os_str(),
                         arguments: &root_arguments,
                         context: &context,
-                        rows: 49,
-                        columns: spec.columns,
+                        rows: ROOT_ROWS,
+                        columns: spec.columns + 2,
                     },
                     true,
                 ),
@@ -1674,7 +1678,7 @@ mod benchmark {
         let mut output = String::new();
         write!(
             output,
-            "{{\"schema_version\":2,\"synthetic\":true,\"actual_history_store\":true,\"queue_occupancy_instrumented\":false,\"build_profile\":\"{}\",\"cases\":[",
+            "{{\"schema_version\":3,\"synthetic\":true,\"actual_history_store\":true,\"queue_occupancy_instrumented\":false,\"build_profile\":\"{}\",\"cases\":[",
             if cfg!(debug_assertions) { "debug" } else { "release" }
         )
         .map_err(|_| BenchError("benchmark report formatting failed"))?;

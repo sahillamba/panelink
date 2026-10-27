@@ -785,6 +785,7 @@ fn event_loop(
                 ClientResult::Detached => {}
             }
         }
+        app.flush_scroll(now, worker);
         if let Some(clipboard) = clipboard {
             while let Some(status) = clipboard.poll_result() {
                 app.report_worker_status(status.label(), now);

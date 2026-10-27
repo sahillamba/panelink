@@ -11,6 +11,7 @@ enum GateCommand {
     Keys(usize),
     Paste(usize),
     PaneOperation,
+    Seek(u16),
     Poll,
 }
 
@@ -39,6 +40,18 @@ impl Backend for SlowBackend {
                 epoch,
                 result: ScrollResult::Failed("test scroll"),
             }),
+            Command::SeekHistory {
+                target,
+                epoch,
+                offset_rows,
+            } => {
+                let _ = self.entered.send(GateCommand::Seek(offset_rows));
+                ClientResult::Scroll(ScrollUpdate {
+                    target,
+                    epoch,
+                    result: ScrollResult::AlternateScreenNoMouse,
+                })
+            }
             Command::Poll(_) => {
                 let _ = self.entered.send(GateCommand::Poll);
                 let _ = self.release.recv();
@@ -405,11 +418,13 @@ impl Backend for SocketBackend {
                 ClientResult::Keys(Ok(()))
             }
             Command::Paste { .. } => ClientResult::Paste(Ok(())),
-            Command::Scroll { target, epoch, .. } => ClientResult::Scroll(ScrollUpdate {
-                target,
-                epoch,
-                result: ScrollResult::Failed("test scroll"),
-            }),
+            Command::Scroll { target, epoch, .. } | Command::SeekHistory { target, epoch, .. } => {
+                ClientResult::Scroll(ScrollUpdate {
+                    target,
+                    epoch,
+                    result: ScrollResult::Failed("test scroll"),
+                })
+            }
             Command::Split {
                 id,
                 focus_generation,
@@ -454,4 +469,45 @@ fn socketpair_stall_keeps_host_submission_responsive_until_peer_replies() {
     let mut key_byte = [0];
     peer.read_exact(&mut key_byte).unwrap();
     assert_eq!(&key_byte, b"K");
+}
+
+#[test]
+fn history_seek_is_bounded_separate_from_wheel_and_releases_pending_state() {
+    let (mut worker, entered, release, _) = slow_worker();
+    worker.poll(NetView::default());
+    assert!(matches!(
+        entered.recv_timeout(Duration::from_secs(1)),
+        Ok(GateCommand::Poll)
+    ));
+    worker.seek_history(target(), 47, 17).unwrap();
+    assert!(worker.scroll_pending);
+    assert!(worker.seek_history(target(), 48, 18).is_err());
+    assert!(worker.scroll(target(), 49, 20, 0, 0, true).is_err());
+    assert_eq!(worker.budget.lock().unwrap().count, 2);
+    release.send(()).unwrap();
+    assert!(matches!(
+        entered.recv_timeout(Duration::from_secs(1)),
+        Ok(GateCommand::Seek(17))
+    ));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut saw_seek = false;
+    while Instant::now() < deadline {
+        if let Some(envelope) = worker.try_result() {
+            if let ClientResult::Scroll(update) = worker.release_result(envelope) {
+                assert_eq!(update.target, target());
+                assert_eq!(update.epoch, 47);
+                assert!(matches!(
+                    update.result,
+                    ScrollResult::AlternateScreenNoMouse
+                ));
+                saw_seek = true;
+                break;
+            }
+        }
+        thread::yield_now();
+    }
+    assert!(saw_seek);
+    assert!(!worker.scroll_pending);
+    assert_eq!(worker.budget.lock().unwrap().count, 0);
+    assert_eq!(worker.budget.lock().unwrap().bytes, 0);
 }

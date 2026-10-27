@@ -1,0 +1,4 @@
+interface:
+  display_name: "Panelink"
+  short_description: "Operate Panelink workspaces and panes safely"
+  default_prompt: "Use $panelink to inspect the intended workspace and choose the supported commands for my task."

@@ -1,5 +1,204 @@
 # Implementation session checkpoint — 2026-10-17
 
+
+## Consolidation for PR — 2026-10-27 (current)
+
+User authorized combining main's dirty files with the installed 7060 worktree,
+then checkpointing, pushing and opening a PR against main. Main's source changes
+were already integrated; unique skill/research/handoff docs are now imported.
+The newer 7060 implementation and its open phase gates are preserved. Canonical
+combined-tree verification passed8/8: root Rust1439/0/15ignored, decoder39/0,
+Python233run/1skip, plus fingerprints/fmt/strictClippy/build/docs387zero.
+Imported skill validation, its four Markdown links, agent YAML and report
+checks pass. See [the consolidation record](WORKTREE-CONSOLIDATION-2026-10-27.md).
+This is a user-authorized checkpoint for PR, not full-phase completion.
+The original main checkout and installed binaries remain unchanged.
+
+## Agent usage skill — 2026-10-27
+
+User requested comparison with all Herdr APIs/commands. Added the
+[documented-surface comparison](HERDR-API-COMPARISON-2026-10-27.md) and
+[per-entry JSON mapping](HERDR-API-COMPARISON-2026-10-27.json), using current
+official Herdr docs and the installed 7060 Panelink checkout. Inventory covers
+106 CLI paths (including one alias),86socket methods,5terminal-stream input
+commands and8cross-cutting flags/selectors; arguments are not separate commands.
+Parent checked help/source and a bounded read-only Luna inventory. No Herdr
+installation, runtime test or application change is part of this comparison.
+
+User requested solution options for visible-pane control. Added
+[the proposed ownership ADR](AGENT-INPUT-CONTROL-OPTIONS.md), comparing per-pane
+explicit handoff, workspace automation mode and activity-based handoff.
+Recommendation: workspace automation mode, built on a bounded per-pane first
+increment. No selection, implementation or new runtime check is claimed.
+
+Control follow-up: user reported working reads but `input_failed` on claims.
+Parent traced the installed 7060 client's `Net::poll` claiming every pane and
+renewing owners every10seconds for a30-second TTL. The server rejects another
+owner with Unauthorized; `owner_error` hides that as generic `input_failed`.
+One live claim on the right pane reproduced the error and left its owner
+unchanged. No text was sent. Skill troubleshooting now distinguishes this
+confirmed UI/automation ownership gap from sandbox access. Application handoff
+behavior and specific error reporting remain unfixed; this task changes docs
+only and preserves other worktrees' dirty application work.
+
+Follow-up: user reported Codex failing with `context_directory_unavailable`,
+then `control_unavailable` after setting an explicit temporary context. Parent
+reproduced both errors using the installed Codex `:workspace` sandbox profile.
+Keeping the writable context and allowing the exact legacy control socket
+made read-only pane discovery succeed (three panes). Normal local discovery
+and a bounded right-pane read also succeeded. Added skill connection guidance
+covering both permissions, stable contexts, Codex approvals and spatial pane
+selection. No pane input or ownership mutation was sent, and no global Codex
+configuration was changed. This is connection/discovery evidence, not provider
+recovery or full host acceptance. Skill validation passed; six affected Markdown
+files passed link/hygiene checks and `git diff --check` passed.
+
+User requested a maintained skill teaching agents when and how to use Panelink.
+Added [.agents/skills/panelink/SKILL.md](../../.agents/skills/panelink/SKILL.md)
+and CLI workflows, linked from README and required maintenance in AGENTS.md.
+The local `~/.codex/skills/panelink` installation links to this repository copy.
+PATH currently resolves to the separate 7060 checkout; examples use this main
+checkout's source baseline and require executable/state-root discovery before
+acting. Source/help review and Markdown checks cover the documentation; this
+task does not supply new application/runtime acceptance evidence. Existing
+live-scrollback work and its pending verification remain as recorded below.
+
+## Wide-terminal attach crash repair — 2026-10-27
+
+User reported immediate `internal error (terminal restored)` at host size
+64x269. Reproduced on an isolated private PTY at widths above240. The legacy
+attach renderer used physical host dimensions while its fixed header caches
+hold240columns; staging an absent header panicked at compose.rs:674. Both
+legacy and tabbed attachment now use the existing bounded screen viewport.
+No server restart, live pane input or live workspace mutation was performed.
+
+Regression at64x269 and100x300 fails against the old path with the exact
+269-versus240slice panic and passes with the repair, covering initial,
+unchanged and resize renders. Client147/0; default-open outer-PTY7/0/1ignored,
+including64x269startup/detach/reattach with exact target preservation; strict
+all-target Clippy, debug build, fmt and diff checks pass. The first new PTY
+test failed because its read-only control context lacked initialization; the
+fixture was corrected and the complete target rerun. FullRust was not rerun
+for this follow-up. Installed launcher still resolves to7060's rebuilt debug
+binary. Native Apple Terminal acceptance awaits the user's retry.
+
+## Pointer and keyboard controls — 2026-10-27 (current)
+
+User selected the installed 7060 worktree for simpler panel controls. Parent
+orchestrated Luna renderer and input owners with exclusive files; the input
+owner reached its usage limit before verification, and parent completed the
+saved edits directly. Independent source reviews covered chrome/backend and
+input; parent fixed the reported buffer-switch cancellation defect. No worker
+owns files now. Existing scrolling/workload/release changes were preserved.
+
+Delivered: per-pane Menu/x in margins, captured-target actions with short-host
+paging, explicit mouse Close/Cancel, divider drag preview and one-shot commit,
+menu minus/plus/Apply/Cancel, scrollbar track paging and thumb seek on release,
+NAV PageUp/PageDown/Home/End, clickable Help exit and pointer return from copy
+mode. Pointer history uses a distinct read-only backend command even if server
+modes change. Existing exact-target/revision, modal isolation, minimum-size,
+ownership and uncertainty guards remain. No wire or dependency change.
+
+Final locked/offline serial no-fail-fast Rust: 1,437 passed, 0 failed, 15 ignored
+across77resultgroups. Parent client146/0, compositor36/0 and workspace outer-PTY4/0
+pass; final strict Clippy/fmt/debug build/fingerprints/docs383zero pass. Fixture
+corrections and prior failures are tracked in
+[the evidence](P5-POINTER-CONTROLS-2026-10-27.md).
+The runtime usage skill remains installed from its canonical main repository
+copy; its new interactive reference explicitly names this newer build.
+
+The development launcher still resolves to 7060's debug binary. Existing
+attached processes/workspaces were not restarted or activated. Reattaching the
+rebuilt client loads the UI while server-owned shells continue. Native Apple
+Terminal, real clipboard and touch-hardware acceptance remain separate; no
+broader phase completion, release artifact update, commit or push is claimed.
+
+## Scrolling usability repair — 2026-10-27 (current)
+
+User reported flashing loading views while scrolling and requested scrollbars.
+Parent repairs preserve cached content during history reads, coalesce bounded
+normal-history wheel motion, and draw incremental indicators in right padding.
+Alternate-screen input remains unqueued; optional extent sizing is best effort.
+Independent review's valid-viewport rejection finding is corrected and follow-up
+review clear. Library880/0/4ignored, binary221/0, history6/0 and outerPTY3/0 pass.
+Final compositor32/0 passes after equivalent lint cleanup; strict all-target
+Clippy and formatting pass. Two fresh release builds match; refreshed arm64
+`release/panelink-release` hash c0af2dd88dce4c4dc3e14d16ed46a85dbba715aab3218f0dda81eedf1c893576
+is independently verified and help smoke passed. Installed/running workspaces
+were left alone. No agents or commands remain active.
+See [scrolling evidence](P5-SCROLLING-UX-2026-10-27.md). Previous acceptance and
+workload changes remain dirty/preserved; no full-phase completion or push.
+
+## Combined workload measured — 2026-10-26 (current)
+
+User selected ten idle OpenCode sessions plus shell/build output, with no
+model calls. VariantC now completed two serial60-second release observations
+with all10 real TUIs ready, two shell panes and72acknowledgedprobes per run.
+Both completed55fixturebuilds during the interval, passed workload correctness
+flags, reported no sticky history failure and confirmed owned group cleanup.
+The paced shell retained1024rows with an explicit retention gap. Valid empty
+normal histories for alternate-screen TUIs are preserved honestly.
+
+PATH OpenCodev2.0.32 needs its verified `--standalone` private-server mode;
+default background-service port collisions caused the first four startup
+failures. Preliminary run5's positive-row assertion failure remains recorded.
+Parent corrected empty-row validation, measured-end counters/output gates,
+post-settlement sticky diagnostics and review findings around verified group
+identity/cleanup errors. Review's version-probe root leak is also fixed.
+Final targeted/all-target strictClippy, release example build and formatting
+pass; raw report invariants/resource summaries independently checked. Source
+metadata-only shell-kind correction follows the two observations; see limits
+in the evidence rather than inventing another full run.
+
+Panelink harness RSS sampled maxima varied60.11/345.19MiB; cause unresolved.
+OpenCode echo p95 was133.469/119.883ms, shell ack p95 18.775/19.502ms. Numeric
+latency/loss/resource budgets remain unset. Next bounded work is RSS diagnosis
+and budget selection, preserving wide-burst final-payload loss and the separate
+host/clipboard/physical-reboot gates. No active agents or workload commands
+remain. Prior acceptance changes remain dirty/preserved on the continuation
+branch; no push or full-phase completion commit.
+See [combined workload](P5-COMBINED-WORKLOAD-2026-10-26.md) and
+[evaluation plan](P5-WORKLOAD-ACCEPTANCE-PLAN-2026-10-26.md).
+
+## Acceptance continuation — 2026-10-26 (current)
+
+This section supersedes older active-owner and pending-run lists below.
+The clean starting point was `1060668`, with the hosted arm64 check passing.
+Current branch: `codex/p5-acceptance-continuation`, worktree `7060`.
+
+Added `tests/p5_crash_recovery.rs`: actual private pathname `serve`, committed
+one-pane layout and normal/alternate history independently decoded before
+exact owned-server SIGKILL, read-only byte-preserving offline inspection,
+explicit fresh-generation relaunch, historical mapping and input nonreplay.
+Final cleanup captures PID/start identity, confirms exit before removing
+files and preserves the fixture on uncertain cleanup. Independent review's
+cleanup finding was corrected; follow-up review found no material findings.
+
+Restored `live_history_bench` after pane padding made its old geometry invalid.
+Schema3 uses24x80 and24x238 actual PTYs within current outer size limits;
+schema1/2 historical240-column reports remain strict and readable. One release
+report validates; all48 probes overlap output. Paced capture has no failure;
+burst and active shutdown report `final_payload_dropped_bytes` and gaps.
+No performance budget pass is claimed.
+
+Canonical verifier8/8 at `/private/tmp/panelink-phase-acceptance-verifier.log`:
+root result totals1402pass/0fail/15ignored, decoder39, Python233run/1skip,
+fingerprints/fmt/strictClippy/build/docs pass. The root test binaries preceded
+the final cleanup-only amendment; supporting checks used that amendment and
+the final affected crash target separately passes1/0 in3.46s (`-crash-r4.log`).
+Earlier focused orderly/startup cases3/0 and UI proxies5/0 also pass. All Cargo
+outputs use `/private/tmp/panelink-phase-acceptance-target`.
+
+Native Terminal binding was explicitly denied by the computer-use tool; no
+bypass, clipboard operation or physical reboot occurred. Phase3 human host,
+Phase5 native copy/clipboard/physical reboot and representative workload
+criteria/combined harness remain open. Existing no-model-call preference
+remains in force. No active agents or verification commands remain. Changes
+are uncommitted on the continuation branch; no full-phase completion commit,
+push or runtime activation. See [continuation evidence](P3-P5-RESUME-2026-10-26.md),
+[crash recovery](P5-CRASH-RECOVERY-2026-10-26.md) and
+[workload refresh](P5-WORKLOAD-REFRESH-2026-10-26.md).
+
 ## Verified pane-operation integration — 2026-10-26 (current)
 
 This section supersedes all active-owner and pending-run lists below. No

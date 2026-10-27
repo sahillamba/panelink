@@ -133,6 +133,80 @@ pub struct PaneView<'a> {
     pub content: PaneContent<'a>,
 }
 
+/// History position used to draw a pane's right-margin scrollbar.
+///
+/// `total_rows` counts available history rows and excludes the live screen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Scrollbar {
+    pub offset_rows: u16,
+    pub total_rows: u16,
+}
+
+/// Hitboxes for the always-visible controls in a padded pane's top margin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneControls {
+    /// Six-cell `[Menu]` hitbox.
+    pub menu: Rect,
+    /// Three-cell `[x]` hitbox.
+    pub close: Rect,
+}
+
+/// Returns the menu and close hitboxes for a valid padded pane rectangle.
+///
+/// The controls occupy only the top padding row and do not change content
+/// geometry. Unpadded recovery panes should not expose controls.
+pub fn pane_controls(rect: Rect) -> Option<PaneControls> {
+    content_rect(rect)?;
+    Some(PaneControls {
+        menu: Rect {
+            x: rect.x.checked_add(1)?,
+            y: rect.y,
+            rows: 1,
+            columns: 6,
+        },
+        close: Rect {
+            x: rect.x.checked_add(rect.columns.checked_sub(4)?)?,
+            y: rect.y,
+            rows: 1,
+            columns: 3,
+        },
+    })
+}
+
+/// Shared track and thumb geometry for rendering and pointer hit testing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScrollbarGeometry {
+    /// One-cell-wide track in a pane's right padding.
+    pub track: Rect,
+    /// Current thumb within `track`.
+    pub thumb: Rect,
+}
+
+/// Returns validated scrollbar geometry for a padded pane rectangle.
+pub fn scrollbar_geometry(rect: Rect, scrollbar: Scrollbar) -> Option<ScrollbarGeometry> {
+    content_rect(rect)?;
+    if scrollbar.offset_rows > scrollbar.total_rows {
+        return None;
+    }
+    let track = Rect {
+        x: rect.x.checked_add(rect.columns.checked_sub(1)?)?,
+        y: rect.y.checked_add(1)?,
+        rows: rect.rows.checked_sub(2)?,
+        columns: 1,
+    };
+    let thumb_rows = scrollbar_thumb(track.rows, scrollbar);
+    let thumb_top = scrollbar_thumb_top(track.rows, thumb_rows, scrollbar);
+    Some(ScrollbarGeometry {
+        track,
+        thumb: Rect {
+            x: track.x,
+            y: track.y.checked_add(thumb_top)?,
+            rows: thumb_rows,
+            columns: 1,
+        },
+    })
+}
+
 /// Frozen selected cells to paint over one live pane snapshot.
 ///
 /// The source is borrowed and never modified. The compositor copies selected
@@ -228,6 +302,7 @@ enum SlotKind {
 struct SlotMeta {
     rect: Option<Rect>,
     kind: SlotKind,
+    scrollbar: Option<Scrollbar>,
     placeholder: [u8; MAX_COLUMNS],
     placeholder_len: u16,
 }
@@ -236,6 +311,7 @@ impl SlotMeta {
     const EMPTY: Self = Self {
         rect: None,
         kind: SlotKind::Empty,
+        scrollbar: None,
         placeholder: [0; MAX_COLUMNS],
         placeholder_len: 0,
     };
@@ -394,7 +470,14 @@ impl Compositor {
         header: Option<&[HeaderCell]>,
         output: &mut W,
     ) -> io::Result<()> {
-        self.render_inner(frame, selection, None, header, output)
+        self.render_inner(
+            frame,
+            selection,
+            None,
+            header,
+            [None; crate::pane_layout::MAX_PANES],
+            output,
+        )
     }
 
     /// Validate and render a frame with an optional frozen-cell selection.
@@ -409,7 +492,14 @@ impl Compositor {
         selection: Option<SelectionOverlay<'_>>,
         output: &mut W,
     ) -> io::Result<()> {
-        self.render_inner(frame, selection, None, None, output)
+        self.render_inner(
+            frame,
+            selection,
+            None,
+            None,
+            [None; crate::pane_layout::MAX_PANES],
+            output,
+        )
     }
 
     /// Render frozen selection and a local copy caret, optionally below a
@@ -422,7 +512,29 @@ impl Compositor {
         header: Option<&[HeaderCell]>,
         output: &mut W,
     ) -> io::Result<()> {
-        self.render_inner(frame, selection, Some(caret), header, output)
+        self.render_inner(
+            frame,
+            selection,
+            Some(caret),
+            header,
+            [None; crate::pane_layout::MAX_PANES],
+            output,
+        )
+    }
+
+    /// Render overlays, a persistent header, and per-pane vertical scrollbars.
+    /// Scrollbars occupy only the right cell of padded snapshot panes; they
+    /// never change snapshot or selection geometry.
+    pub fn render_with_chrome<W: Write>(
+        &mut self,
+        frame: &ComposeFrame<'_>,
+        selection: Option<SelectionOverlay<'_>>,
+        caret: Option<CopyCaretOverlay<'_>>,
+        header: Option<&[HeaderCell]>,
+        scrollbars: [Option<Scrollbar>; crate::pane_layout::MAX_PANES],
+        output: &mut W,
+    ) -> io::Result<()> {
+        self.render_inner(frame, selection, caret, header, scrollbars, output)
     }
 
     fn render_inner<W: Write>(
@@ -431,6 +543,7 @@ impl Compositor {
         selection: Option<SelectionOverlay<'_>>,
         caret: Option<CopyCaretOverlay<'_>>,
         header: Option<&[HeaderCell]>,
+        scrollbars: [Option<Scrollbar>; crate::pane_layout::MAX_PANES],
         output: &mut W,
     ) -> io::Result<()> {
         self.pending_ready = false;
@@ -438,6 +551,7 @@ impl Compositor {
         if let Some(header) = header {
             validate_header(header, frame.host_columns)?;
         }
+        validate_scrollbars(frame, self.padded, scrollbars)?;
         let selection = if frame.overlay.is_some() {
             None
         } else {
@@ -451,7 +565,7 @@ impl Compositor {
             validate_copy_caret(frame, caret)?;
         }
         let selection = selection.filter(|selection| selection.anchor != selection.end);
-        self.stage(frame, selection, caret, header);
+        self.stage(frame, selection, caret, header, scrollbars);
         match self.write_frame(output) {
             Ok(()) => {
                 self.pending_ready = true;
@@ -470,6 +584,7 @@ impl Compositor {
         selection: Option<SelectionOverlay<'_>>,
         caret: Option<CopyCaretOverlay<'_>>,
         header: Option<&[HeaderCell]>,
+        scrollbars: [Option<Scrollbar>; crate::pane_layout::MAX_PANES],
     ) {
         let mut meta = FrameMeta::EMPTY;
         meta.host_rows = frame.host_rows;
@@ -489,6 +604,7 @@ impl Compositor {
             };
             let slot_meta = &mut meta.slots[slot];
             slot_meta.rect = Some(pane.rect);
+            slot_meta.scrollbar = scrollbars[slot];
             match pane.content {
                 PaneContent::Snapshot(snapshot) => {
                     slot_meta.kind = SlotKind::Snapshot;
@@ -661,9 +777,19 @@ impl Compositor {
         };
         let work: [PaneWork; crate::pane_layout::MAX_PANES] =
             std::array::from_fn(|slot| self.pane_work(slot, overlay_moved));
+        let controls_repaint: [bool; crate::pane_layout::MAX_PANES] =
+            std::array::from_fn(|slot| work[slot] == PaneWork::Full);
+        let scrollbar_changed: [bool; crate::pane_layout::MAX_PANES] =
+            std::array::from_fn(|slot| {
+                pending.slots[slot].scrollbar != displayed.slots[slot].scrollbar
+            });
 
         let header_changed = !self.header_unchanged();
-        if !overlay_changed && !header_changed && work.iter().all(|work| *work == PaneWork::None) {
+        if !overlay_changed
+            && !header_changed
+            && work.iter().all(|work| *work == PaneWork::None)
+            && !scrollbar_changed.iter().any(|changed| *changed)
+        {
             return write_cursor_update(output, displayed.cursor, pending.cursor);
         }
 
@@ -684,6 +810,26 @@ impl Compositor {
             self.paint_divider(output, Some(old))?;
             self.paint_exposed_exterior(output, old)?;
         }
+        for (slot, changed) in scrollbar_changed.into_iter().enumerate() {
+            if changed || overlay_moved {
+                self.paint_scrollbar(
+                    output,
+                    slot,
+                    changed,
+                    if overlay_moved { damage } else { [None, None] },
+                )?;
+            }
+        }
+        for (slot, repaint_all) in controls_repaint.into_iter().enumerate() {
+            if repaint_all || overlay_moved {
+                self.paint_pane_controls(
+                    output,
+                    slot,
+                    repaint_all,
+                    if overlay_moved { damage } else { [None, None] },
+                )?;
+            }
+        }
         if overlay_changed {
             self.paint_overlay(output)?;
         }
@@ -702,6 +848,12 @@ impl Compositor {
             self.paint_pane(output, slot, None, [None, None])?;
         }
         self.paint_divider(output, None)?;
+        for slot in 0..crate::pane_layout::MAX_PANES {
+            self.paint_scrollbar(output, slot, true, [None, None])?;
+        }
+        for slot in 0..crate::pane_layout::MAX_PANES {
+            self.paint_pane_controls(output, slot, true, [None, None])?;
+        }
         self.paint_overlay(output)?;
         if self.pending_meta.header_present {
             self.paint_header(output, true)?;
@@ -837,6 +989,116 @@ impl Compositor {
             }
         }
         Ok(())
+    }
+
+    /// Paint pane controls in the top padding row, restoring only cells
+    /// damaged by a moved modal overlay during incremental rendering.
+    fn paint_pane_controls<W: Write>(
+        &self,
+        output: &mut W,
+        slot: usize,
+        repaint_all: bool,
+        damage: [Option<Rect>; 2],
+    ) -> io::Result<()> {
+        if !self.padded {
+            return Ok(());
+        }
+        let meta = &self.pending_meta.slots[slot];
+        let Some(rect) = meta.rect.filter(|_| meta.kind != SlotKind::Empty) else {
+            return Ok(());
+        };
+        let Some(controls) = pane_controls(rect) else {
+            return Ok(());
+        };
+        let damaged = |row: u16, column: u16| {
+            damage
+                .iter()
+                .flatten()
+                .any(|rect| rect.contains(column, row))
+        };
+        output.write_all(b"\x1b[0m")?;
+        for (hitbox, label) in [
+            (controls.menu, b"[Menu]".as_slice()),
+            (controls.close, b"[x]".as_slice()),
+        ] {
+            write_ascii_run(
+                output,
+                hitbox.y,
+                hitbox.x,
+                hitbox.columns,
+                |column| {
+                    (!repaint_all && !damaged(hitbox.y, column))
+                        || excluded(self.pending_meta.overlay, hitbox.y, column)
+                },
+                |offset| label[usize::from(offset)],
+            )?;
+        }
+        output.write_all(b"\x1b[0m")
+    }
+
+    /// Paint a scrollbar in the right interior padding cell of one snapshot
+    /// pane. When a menu moves, `damage` limits restoration to rows the menu
+    /// covered; a changed scrollbar repaints its complete track.
+    fn paint_scrollbar<W: Write>(
+        &self,
+        output: &mut W,
+        slot: usize,
+        repaint_all: bool,
+        damage: [Option<Rect>; 2],
+    ) -> io::Result<()> {
+        if !self.padded {
+            return Ok(());
+        }
+        let meta = &self.pending_meta.slots[slot];
+        if meta.scrollbar.is_none() && self.displayed_meta.slots[slot].scrollbar.is_none() {
+            return Ok(());
+        }
+        let Some(rect) = meta.rect.filter(|_| meta.kind == SlotKind::Snapshot) else {
+            return Ok(());
+        };
+        let scrollbar = meta.scrollbar.or(self.displayed_meta.slots[slot].scrollbar);
+        let Some(scrollbar) = scrollbar else {
+            return Ok(());
+        };
+        let Some(geometry) = scrollbar_geometry(rect, scrollbar) else {
+            return Ok(());
+        };
+        output.write_all(b"\x1b[0m")?;
+        for offset in 0..geometry.track.rows {
+            let row = geometry.track.y + offset;
+            let damaged = damage
+                .iter()
+                .flatten()
+                .any(|rect| rect.contains(geometry.track.x, row));
+            if !repaint_all && !damaged {
+                continue;
+            }
+            if excluded(self.pending_meta.overlay, row, geometry.track.x) {
+                continue;
+            }
+            if meta.scrollbar.is_some() {
+                let thumb = geometry.thumb.contains(geometry.track.x, row);
+                output.write_all(if thumb { b"\x1b[0;1m" } else { b"\x1b[0;2m" })?;
+                write_ascii_run(
+                    output,
+                    row,
+                    geometry.track.x,
+                    1,
+                    |_| false,
+                    |_| {
+                        if thumb {
+                            b'#'
+                        } else {
+                            b'|'
+                        }
+                    },
+                )?;
+            } else {
+                output.write_all(b"\x1b[0m")?;
+                write_ascii_run(output, row, geometry.track.x, 1, |_| false, |_| b' ')?;
+            }
+        }
+        output.write_all(b"\x1b[0m")
     }
 
     /// Paint the divider, or with `only`, just its cells inside that rectangle.
@@ -984,6 +1246,52 @@ fn validate_copy_caret(frame: &ComposeFrame<'_>, caret: CopyCaretOverlay<'_>) ->
         return Err(invalid_caret());
     }
     Ok(())
+}
+
+fn validate_scrollbars(
+    frame: &ComposeFrame<'_>,
+    padded: bool,
+    scrollbars: [Option<Scrollbar>; crate::pane_layout::MAX_PANES],
+) -> io::Result<()> {
+    for (slot, scrollbar) in scrollbars.into_iter().enumerate() {
+        let Some(scrollbar) = scrollbar else {
+            continue;
+        };
+        if !padded {
+            return Err(invalid("scrollbar requires padded compositor"));
+        }
+        if scrollbar.offset_rows > scrollbar.total_rows {
+            return Err(invalid("scrollbar offset exceeds total history"));
+        }
+        if !matches!(
+            frame.panes.get(slot).copied().flatten(),
+            Some(PaneView {
+                content: PaneContent::Snapshot(_),
+                ..
+            })
+        ) {
+            return Err(invalid("scrollbar slot is not a snapshot pane"));
+        }
+    }
+    Ok(())
+}
+
+fn scrollbar_thumb(track_rows: u16, scrollbar: Scrollbar) -> u16 {
+    if scrollbar.total_rows == 0 {
+        return track_rows;
+    }
+    let track = u64::from(track_rows);
+    let document = u64::from(scrollbar.total_rows) + track;
+    ((track * track / document).max(1).min(track)) as u16
+}
+
+fn scrollbar_thumb_top(track_rows: u16, thumb_rows: u16, scrollbar: Scrollbar) -> u16 {
+    if scrollbar.total_rows == 0 {
+        return 0;
+    }
+    let travel = u64::from(track_rows - thumb_rows);
+    let remaining = u64::from(scrollbar.total_rows - scrollbar.offset_rows);
+    (travel * remaining / u64::from(scrollbar.total_rows)) as u16
 }
 
 fn paint_copy_caret(target: &mut ScreenSnapshot, point: Point) {
@@ -1426,6 +1734,26 @@ mod tests {
         rendered(&mut Compositor::try_new().unwrap(), frame)
     }
 
+    fn label_at(parser: &Parser, row: u16, column: u16, width: u16) -> String {
+        (0..width)
+            .map(|offset| cell_text(parser, row, column + offset))
+            .collect()
+    }
+
+    fn chrome_rendered_committed(
+        compositor: &mut Compositor,
+        frame: &ComposeFrame<'_>,
+        header: Option<&[HeaderCell]>,
+        scrollbars: [Option<Scrollbar>; crate::pane_layout::MAX_PANES],
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        compositor
+            .render_with_chrome(frame, None, None, header, scrollbars, &mut bytes)
+            .unwrap();
+        assert!(compositor.commit());
+        bytes
+    }
+
     fn selection_rendered_committed(
         compositor: &mut Compositor,
         frame: &ComposeFrame<'_>,
@@ -1592,9 +1920,11 @@ mod tests {
         assert_eq!(cell_text(&parser, 1, 4), "T");
         assert_eq!(cell_text(&parser, 1, 24), "R");
         assert_eq!(cell_text(&parser, 2, 24), "r");
-        for (row, column) in [(0, 0), (0, 1), (1, 0), (11, 21), (1, 21)] {
+        for (row, column) in [(0, 0), (1, 0), (11, 21), (1, 21)] {
             assert_blank(&parser, row, column);
         }
+        assert_eq!(label_at(&parser, 0, 1, 6), "[Menu]");
+        assert_eq!(label_at(&parser, 0, 18, 3), "[x]");
         for row in 0..12 {
             assert_eq!(cell_text(&parser, row, 22), "|");
         }
@@ -1726,6 +2056,528 @@ mod tests {
         frame.focused = Some(1);
         let output = rendered_committed(&mut compositor, &frame);
         assert_eq!(output, b"\x1b[4;28H");
+    }
+
+    #[test]
+    fn scrollbar_thumb_tracks_live_top_and_zero_history_positions() {
+        let pane = snapshot_from("CONTENT", 5, 20);
+        let frame = single_pane(&pane);
+        let mut compositor = Compositor::try_new().unwrap();
+        let top = chrome_rendered_committed(
+            &mut compositor,
+            &frame,
+            None,
+            [
+                Some(Scrollbar {
+                    offset_rows: 4,
+                    total_rows: 4,
+                }),
+                None,
+                None,
+                None,
+            ],
+        );
+        let parser = screen(&top, &frame);
+        for row in 1..=2 {
+            assert_eq!(cell_text(&parser, row, 21), "#");
+            assert!(parser.screen().cell(row, 21).unwrap().bold());
+        }
+        for row in 3..=5 {
+            assert_eq!(cell_text(&parser, row, 21), "|");
+            assert!(parser.screen().cell(row, 21).unwrap().dim());
+        }
+        assert_eq!(cell_text(&parser, 1, 1), "C");
+        assert_eq!(cell_text(&parser, 1, 6), "N");
+        for column in [0, 21] {
+            assert_blank(&parser, 0, column);
+            assert_blank(&parser, 6, column);
+        }
+
+        let live = chrome_rendered_committed(
+            &mut compositor,
+            &frame,
+            None,
+            [
+                Some(Scrollbar {
+                    offset_rows: 0,
+                    total_rows: 4,
+                }),
+                None,
+                None,
+                None,
+            ],
+        );
+        let parser = screen(&live, &frame);
+        for row in 1..=3 {
+            assert_eq!(cell_text(&parser, row, 21), "|");
+        }
+        for row in 4..=5 {
+            assert_eq!(cell_text(&parser, row, 21), "#");
+        }
+
+        let no_history = chrome_rendered_committed(
+            &mut compositor,
+            &frame,
+            None,
+            [
+                Some(Scrollbar {
+                    offset_rows: 0,
+                    total_rows: 0,
+                }),
+                None,
+                None,
+                None,
+            ],
+        );
+        let parser = screen(&no_history, &frame);
+        for row in 1..=5 {
+            assert_eq!(cell_text(&parser, row, 21), "#");
+        }
+    }
+
+    #[test]
+    fn pane_controls_validate_geometry_and_render_only_in_top_padding() {
+        let pane_rect = rect(5, 3, 7, 22);
+        let controls = pane_controls(pane_rect).unwrap();
+        assert_eq!(controls.menu, rect(5, 4, 1, 6));
+        assert_eq!(controls.close, rect(5, 21, 1, 3));
+        assert!(pane_controls(rect(0, 0, 6, 22)).is_none());
+        assert!(pane_controls(rect(0, u16::MAX - 20, 7, 22)).is_none());
+
+        let pane = snapshot_from("CONTENT", 5, 20);
+        let frame = single_pane(&pane);
+        let mut compositor = Compositor::try_new().unwrap();
+        let output = rendered_committed(&mut compositor, &frame);
+        let parser = screen(&output, &frame);
+        assert_eq!(label_at(&parser, 0, 1, 6), "[Menu]");
+        assert_eq!(label_at(&parser, 0, 18, 3), "[x]");
+        assert_eq!(cell_text(&parser, 1, 1), "C");
+        assert_eq!(cell_text(&parser, 1, 7), "T");
+        assert_eq!(pane.rows(), 5);
+        assert_eq!(pane.columns(), 20);
+        assert!(rendered(&mut compositor, &frame).is_empty());
+        assert!(compositor.commit());
+
+        let mut placeholder = frame;
+        placeholder.panes[0] = Some(PaneView {
+            rect: rect(0, 0, 7, 22),
+            content: PaneContent::Placeholder("pending"),
+        });
+        let placeholder_output = fresh_render(&placeholder);
+        let parser = screen(&placeholder_output, &placeholder);
+        assert_eq!(label_at(&parser, 0, 1, 6), "[Menu]");
+        assert_eq!(label_at(&parser, 0, 18, 3), "[x]");
+
+        let mut unpadded = Compositor::try_new_unpadded().unwrap();
+        let mut recovery = frame;
+        recovery.host_rows = 5;
+        recovery.host_columns = 20;
+        recovery.panes[0].as_mut().unwrap().rect = rect(0, 0, 5, 20);
+        let recovery_output = rendered(&mut unpadded, &recovery);
+        let parser = screen(&recovery_output, &recovery);
+        assert_eq!(cell_text(&parser, 0, 0), "C");
+        assert!(!contains(&recovery_output, b"[Menu]"));
+        assert!(!contains(&recovery_output, b"[x]"));
+    }
+
+    #[test]
+    fn pane_controls_respect_modal_overlay_and_restore_after_it_moves() {
+        let pane = snapshot_from("content", 5, 20);
+        let base = single_pane(&pane);
+        let lines = [OverlayLine {
+            text: "MODAL",
+            style: OverlayStyle::Selected,
+        }];
+        let mut covered = base;
+        covered.overlay = Some(OverlayView {
+            rect: rect(0, 2, 1, 5),
+            lines: &lines,
+        });
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut stream = rendered_committed(&mut compositor, &base);
+        stream.extend(rendered_committed(&mut compositor, &covered));
+        let covered_parser = screen(&stream, &base);
+        assert_eq!(label_at(&covered_parser, 0, 2, 5), "MODAL");
+        stream.extend(rendered_committed(&mut compositor, &base));
+        let restored = screen(&stream, &base);
+        assert_eq!(label_at(&restored, 0, 1, 6), "[Menu]");
+        assert_eq!(label_at(&restored, 0, 18, 3), "[x]");
+        assert_eq!(cell_text(&restored, 1, 1), "c");
+    }
+
+    #[test]
+    fn pane_controls_partial_write_failure_invalidates_for_full_repaint() {
+        struct FailAfter(usize);
+        impl Write for FailAfter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                }
+                let written = self.0.min(bytes.len());
+                self.0 -= written;
+                Ok(written)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let pane = snapshot_from("body", 5, 20);
+        let frame = single_pane(&pane);
+        let expected = fresh_render(&frame);
+        let menu_offset = expected
+            .windows(b"[Menu]".len())
+            .position(|window| window == b"[Menu]")
+            .unwrap();
+        let mut compositor = Compositor::try_new().unwrap();
+        let error = compositor
+            .render(&frame, &mut FailAfter(menu_offset + 2))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(!compositor.commit());
+
+        let retry = rendered_committed(&mut compositor, &frame);
+        assert!(contains(&retry, b"\x1b[2J"));
+        let parser = screen(&retry, &frame);
+        assert_eq!(label_at(&parser, 0, 1, 6), "[Menu]");
+        assert_eq!(label_at(&parser, 0, 18, 3), "[x]");
+        assert_eq!(cell_text(&parser, 1, 1), "b");
+    }
+
+    #[test]
+    fn scrollbar_geometry_has_expected_track_and_thumb_positions() {
+        let pane_rect = rect(4, 2, 7, 22);
+        let at_top = scrollbar_geometry(
+            pane_rect,
+            Scrollbar {
+                offset_rows: 4,
+                total_rows: 4,
+            },
+        )
+        .unwrap();
+        assert_eq!(at_top.track, rect(5, 23, 5, 1));
+        assert_eq!(at_top.thumb, rect(5, 23, 2, 1));
+        let at_middle = scrollbar_geometry(
+            pane_rect,
+            Scrollbar {
+                offset_rows: 2,
+                total_rows: 4,
+            },
+        )
+        .unwrap();
+        assert_eq!(at_middle.thumb, rect(6, 23, 2, 1));
+        let at_live = scrollbar_geometry(
+            pane_rect,
+            Scrollbar {
+                offset_rows: 0,
+                total_rows: 4,
+            },
+        )
+        .unwrap();
+        assert_eq!(at_live.thumb, rect(8, 23, 2, 1));
+        assert!(scrollbar_geometry(
+            pane_rect,
+            Scrollbar {
+                offset_rows: 5,
+                total_rows: 4,
+            }
+        )
+        .is_none());
+        assert!(scrollbar_geometry(
+            rect(0, 0, 6, 22),
+            Scrollbar {
+                offset_rows: 0,
+                total_rows: 0,
+            }
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn scrollbar_updates_removals_and_unchanged_frames_only_touch_margin() {
+        let pane = snapshot_from("unchanged", 5, 20);
+        let frame = single_pane(&pane);
+        let bar = [
+            Some(Scrollbar {
+                offset_rows: 2,
+                total_rows: 12,
+            }),
+            None,
+            None,
+            None,
+        ];
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut stream = chrome_rendered_committed(&mut compositor, &frame, None, bar);
+        assert!(chrome_rendered_committed(&mut compositor, &frame, None, bar).is_empty());
+
+        let moved = [
+            Some(Scrollbar {
+                offset_rows: 0,
+                total_rows: 12,
+            }),
+            None,
+            None,
+            None,
+        ];
+        let output = chrome_rendered_committed(&mut compositor, &frame, None, moved);
+        assert!(!contains(&output, b"\x1b[2J"));
+        assert!(!contains(&output, b"unchanged"));
+        assert!(positions(&output).iter().all(|&(_, column)| column == 22));
+        stream.extend(output);
+        let parser = screen(&stream, &frame);
+        assert_eq!(cell_text(&parser, 5, 21), "#");
+        assert_eq!(cell_text(&parser, 1, 1), "u");
+
+        let removed = chrome_rendered_committed(
+            &mut compositor,
+            &frame,
+            None,
+            [None; crate::pane_layout::MAX_PANES],
+        );
+        assert!(!contains(&removed, b"\x1b[2J"));
+        assert!(positions(&removed).iter().all(|&(_, column)| column == 22));
+        stream.extend(removed);
+        let parser = screen(&stream, &frame);
+        for row in 1..=5 {
+            assert_blank(&parser, row, 21);
+        }
+        assert_eq!(cell_text(&parser, 1, 1), "u");
+    }
+
+    #[test]
+    fn scrollbar_is_clipped_by_menu_and_restored_when_menu_leaves() {
+        let pane = snapshot_from("content", 5, 20);
+        let base = single_pane(&pane);
+        let lines = [OverlayLine {
+            text: "MENU",
+            style: OverlayStyle::Selected,
+        }];
+        let mut covered = base;
+        covered.overlay = Some(OverlayView {
+            rect: rect(2, 21, 1, 1),
+            lines: &lines,
+        });
+        let bar = [
+            Some(Scrollbar {
+                offset_rows: 4,
+                total_rows: 4,
+            }),
+            None,
+            None,
+            None,
+        ];
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut stream = chrome_rendered_committed(&mut compositor, &base, None, bar);
+        stream.extend(chrome_rendered_committed(
+            &mut compositor,
+            &covered,
+            None,
+            bar,
+        ));
+        stream.extend(chrome_rendered_committed(&mut compositor, &base, None, bar));
+        let parser = screen(&stream, &base);
+        assert_eq!(cell_text(&parser, 2, 21), "#");
+        assert!(parser.screen().cell(2, 21).unwrap().bold());
+        assert_eq!(cell_text(&parser, 1, 21), "#");
+        assert_eq!(cell_text(&parser, 4, 21), "|");
+    }
+
+    #[test]
+    fn scrollbar_partial_write_retries_and_header_keeps_content_offset() {
+        let pane = snapshot_from("body", 5, 20);
+        let mut frame = single_pane(&pane);
+        frame.host_rows += 1;
+        frame.panes[0].as_mut().unwrap().rect.y = 1;
+        let header = [HeaderCell::blank(false); 22];
+        let bars = [
+            Some(Scrollbar {
+                offset_rows: 0,
+                total_rows: 4,
+            }),
+            None,
+            None,
+            None,
+        ];
+        let mut compositor = Compositor::try_new().unwrap();
+        chrome_rendered_committed(&mut compositor, &frame, Some(&header), bars);
+
+        struct FailAfter(usize);
+        impl Write for FailAfter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                }
+                let written = self.0.min(bytes.len());
+                self.0 -= written;
+                Ok(written)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let shifted = [
+            Some(Scrollbar {
+                offset_rows: 4,
+                total_rows: 4,
+            }),
+            None,
+            None,
+            None,
+        ];
+        assert_eq!(
+            compositor
+                .render_with_chrome(
+                    &frame,
+                    None,
+                    None,
+                    Some(&header),
+                    shifted,
+                    &mut FailAfter(12)
+                )
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert!(!compositor.commit());
+        let retry = chrome_rendered_committed(&mut compositor, &frame, Some(&header), shifted);
+        assert!(contains(&retry, b"\x1b[2J"));
+        let parser = screen(&retry, &frame);
+        assert_eq!(cell_text(&parser, 2, 21), "#");
+        assert_eq!(cell_text(&parser, 3, 21), "#");
+        assert_eq!(cell_text(&parser, 2, 1), "b");
+    }
+
+    #[test]
+    fn scrollbar_rejects_invalid_slot_geometry_before_output() {
+        let snapshot = snapshot_from("x", 5, 20);
+        let frame = single_pane(&snapshot);
+        let bar = Some(Scrollbar {
+            offset_rows: 1,
+            total_rows: 1,
+        });
+        let invalid_frames = [
+            (frame, [None, bar, None, None]),
+            (
+                {
+                    let mut placeholder = frame;
+                    placeholder.panes[0] = Some(PaneView {
+                        rect: rect(0, 0, 7, 22),
+                        content: PaneContent::Placeholder("pending"),
+                    });
+                    placeholder
+                },
+                [bar, None, None, None],
+            ),
+        ];
+        let mut compositor = Compositor::try_new().unwrap();
+        for (invalid_frame, bars) in invalid_frames {
+            let mut output = Vec::new();
+            assert_eq!(
+                compositor
+                    .render_with_chrome(&invalid_frame, None, None, None, bars, &mut output)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert!(output.is_empty());
+        }
+        let mut output = Vec::new();
+        assert_eq!(
+            compositor
+                .render_with_chrome(
+                    &frame,
+                    None,
+                    None,
+                    None,
+                    [
+                        Some(Scrollbar {
+                            offset_rows: 2,
+                            total_rows: 1
+                        }),
+                        None,
+                        None,
+                        None
+                    ],
+                    &mut output,
+                )
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(output.is_empty());
+        let mut unpadded = Compositor::try_new_unpadded().unwrap();
+        let mut unpadded_frame = frame;
+        unpadded_frame.host_rows = 5;
+        unpadded_frame.host_columns = 20;
+        unpadded_frame.panes[0].as_mut().unwrap().rect = rect(0, 0, 5, 20);
+        assert_eq!(
+            unpadded
+                .render_with_chrome(
+                    &unpadded_frame,
+                    None,
+                    None,
+                    None,
+                    [bar, None, None, None],
+                    &mut output,
+                )
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn one_cell_scrollbar_track_keeps_a_visible_thumb() {
+        let bar = Scrollbar {
+            offset_rows: 1,
+            total_rows: 50,
+        };
+        let thumb_rows = scrollbar_thumb(1, bar);
+        let thumb_top = scrollbar_thumb_top(1, thumb_rows, bar);
+        assert_eq!(thumb_rows, 1);
+        assert_eq!(thumb_top, 0);
+
+        let snapshot = snapshot_from("x", 5, 20);
+        let frame = single_pane(&snapshot);
+        let mut compositor = Compositor::try_new().unwrap();
+        let output =
+            chrome_rendered_committed(&mut compositor, &frame, None, [Some(bar), None, None, None]);
+        let parser = screen(&output, &frame);
+        assert_eq!(cell_text(&parser, 4, 21), "#");
+        assert_eq!(cell_text(&parser, 1, 21), "|");
+        assert_blank(&parser, 0, 21);
+        assert_blank(&parser, 6, 21);
+    }
+
+    #[test]
+    fn unpadded_render_preserves_minimum_snapshot_without_margin_writes() {
+        let snapshot = snapshot_from("preserved", 5, 20);
+        let mut frame = single_pane(&snapshot);
+        frame.host_rows = 5;
+        frame.host_columns = 20;
+        frame.panes[0].as_mut().unwrap().rect = rect(0, 0, 5, 20);
+        let mut compositor = Compositor::try_new_unpadded().unwrap();
+        let mut output = Vec::new();
+        compositor.render(&frame, &mut output).unwrap();
+        assert!(compositor.commit());
+        let parser = screen(&output, &frame);
+        assert_eq!(cell_text(&parser, 0, 0), "p");
+        assert_eq!(cell_text(&parser, 0, 8), "d");
+
+        let mut no_bar_output = Vec::new();
+        compositor
+            .render_with_chrome(
+                &frame,
+                None,
+                None,
+                None,
+                [None; crate::pane_layout::MAX_PANES],
+                &mut no_bar_output,
+            )
+            .unwrap();
+        assert!(no_bar_output.is_empty());
+        assert!(compositor.commit());
     }
 
     #[test]

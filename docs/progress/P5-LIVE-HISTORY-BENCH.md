@@ -1,5 +1,11 @@
 # P5 live history sustained-output observations
 
+Current harness update (2026-10-26): pane padding requires a 53-row root and
+schema-3 wide cases at 238 PTY columns within the supported 240-column root.
+The corrected command runs again; see [current source and measurement
+evidence](P5-WORKLOAD-REFRESH-2026-10-26.md). The historical reports and their
+240-column workloads below remain unchanged.
+
 Status: scoped measurement slice delivered and parent-verified on 2026-10-21.
 The implementation owner and parent each completed a release run. Exact stdout
 is preserved in [the owner report](p5-live-history-bench.json) and

@@ -19,8 +19,8 @@ use panelink::split_menu::{
     OverlayStyle as MenuStyle, SplitIntent,
 };
 use panelink::terminal::compose::{
-    ComposeFrame, Compositor, CopyCaretOverlay, OverlayLine, OverlayStyle, OverlayView,
-    PaneContent, PaneView, SelectionOverlay,
+    pane_controls, scrollbar_geometry, ComposeFrame, Compositor, CopyCaretOverlay, OverlayLine,
+    OverlayStyle, OverlayView, PaneContent, PaneView, Scrollbar, SelectionOverlay,
 };
 use panelink::terminal::{Key, ScreenSnapshot, TerminalError, TerminalSize};
 use panelink::terminal_selection::{Point, SelectionError, ViewIdentity};
@@ -52,24 +52,24 @@ const WORKSPACE_NAV_BANNER: &str =
     " NAV  ? help | c copy | z zoom | m swap | e divider | w workspaces | n/p tabs | [/] projects | s menu | v saved | l r u d split | arrows/o focus | x close | ^X detach | Esc ";
 const TOO_SMALL: &str = "Panelink: terminal too small for the pane layout; enlarge it";
 const HELP_LINES: [&str; 8] = [
-    "Panelink help",
+    "Panelink help [Close]",
     "Ctrl-B ?: help | s: menu | c: copy | z: zoom | m: swap | e: divider",
-    "Ctrl-B l/r/u/d: split | arrows/Tab/o: focus",
+    "Ctrl-B l/r/u/d: split | arrows/Tab/o: focus | PgUp/PgDn: history",
     "Ctrl-B x: close pane (confirm y)",
-    "Esc: leave navigation or close help",
-    "Ctrl-X: detach; running shells continue",
-    "Run Panelink again or attach to reconnect",
-    "Press Esc or ? to close help",
+    "Click [Menu] or [x] on a pane; drag its divider to resize",
+    "Click/drag the normal-history scrollbar; right-click opens split menu",
+    "Esc: leave navigation or close help | Ctrl-X: detach",
+    "Press Esc or ? to close help; run Panelink again to reconnect",
 ];
 const WORKSPACE_HELP_LINES: [&str; 8] = [
-    "Panelink help",
+    "Panelink help [Close]",
     "Ctrl-B ?: help | s: menu | c: copy | z: zoom | m: swap | e: divider",
-    "Ctrl-B l/r/u/d: split | arrows/Tab/o: focus",
+    "Ctrl-B l/r/u/d: split | arrows/Tab/o: focus | PgUp/PgDn: history",
     "Ctrl-B n/p: next/previous tab | [/]: previous/next project",
     "Ctrl-B x: close pane (confirm y)",
-    "Esc: leave navigation or close help",
-    "Ctrl-X: detach; running shells continue",
-    "Press Esc or ? to close help",
+    "Click [Menu]/[x]; drag dividers; click/drag normal-history scrollbar",
+    "Esc: leave navigation or close help | Ctrl-X: detach",
+    "Press Esc or ? to close help; run Panelink again to reconnect",
 ];
 
 /// One fully planned split built from a captured menu intent.
@@ -96,6 +96,14 @@ pub(crate) struct ClosePlan {
     pub expected_layout_revision: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ConfirmUiGeometry {
+    overlay: Rect,
+    close: Rect,
+    cancel: Rect,
+    warning: &'static str,
+}
+
 /// Network effects requested by input routing.
 pub(crate) trait Effects {
     /// Deliver typed keys to one pane (schema-8 KeyInput).
@@ -112,6 +120,16 @@ pub(crate) trait Effects {
         row: u16,
         up: bool,
     ) -> Result<(), &'static str>;
+    /// Read-only history seek. Unlike wheel scrolling, this must never route
+    /// a pointer event into the child when alternate-screen state changes.
+    fn seek_history(
+        &mut self,
+        _target: TargetRef,
+        _epoch: u64,
+        _offset_rows: u16,
+    ) -> Result<(), &'static str> {
+        Err("history seeking unavailable")
+    }
     /// Submit one split on the connection pinned to `plan.target`; return the
     /// new pane after it is connected and claimed.
     fn split(
@@ -153,6 +171,61 @@ enum PaneMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ActionsMenu {
+    target: TargetRef,
+    revision: u64,
+    selected: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PointerSeek {
+    target: TargetRef,
+    layout_revision: u64,
+    pane_rect: Rect,
+    track: Rect,
+    thumb_rows: u16,
+    total_rows: u16,
+    start_offset: u16,
+    preview_offset: u16,
+    grab_offset: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PointerDivider {
+    target: TargetRef,
+    revision: u64,
+    divider_index: u8,
+    initial_span: u16,
+    region: Rect,
+    orientation: DividerOrientation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalAction {
+    Split,
+    Zoom,
+    Swap,
+    Divider,
+    Copy,
+    SavedLayout,
+    Help,
+    Close,
+    Detach,
+}
+
+const LOCAL_ACTIONS: [LocalAction; 9] = [
+    LocalAction::Split,
+    LocalAction::Zoom,
+    LocalAction::Swap,
+    LocalAction::Divider,
+    LocalAction::Copy,
+    LocalAction::SavedLayout,
+    LocalAction::Help,
+    LocalAction::Close,
+    LocalAction::Detach,
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FocusMove {
     Left,
     Right,
@@ -178,6 +251,10 @@ struct ScreenSlot {
     history_offset: u16,
     view_epoch: u64,
     history_pending: bool,
+    history_total: u16,
+    /// Bounded accumulated normal-history motion; never queued child input.
+    queued_scroll: Option<(i16, u16, u16)>,
+    queued_seek: Option<u16>,
 }
 
 /// Client presentation state; PTYs and sessions stay server-owned.
@@ -192,6 +269,9 @@ pub(crate) struct App {
     menu_revision: u64,
     /// Explicit y/n prompt before any close request is sent.
     confirm: CloseConfirm,
+    actions_menu: Option<ActionsMenu>,
+    pointer_seek: Option<PointerSeek>,
+    pointer_divider: Option<PointerDivider>,
     /// Persistent local help modal, independent of the NAV timeout.
     help_open: bool,
     /// Navigation mode (entered with Ctrl-B): when it started, if active.
@@ -238,6 +318,9 @@ impl App {
                 history_offset: 0,
                 view_epoch: 0,
                 history_pending: false,
+                history_total: 0,
+                queued_scroll: None,
+                queued_seek: None,
             })
         };
         Ok(Self {
@@ -250,6 +333,9 @@ impl App {
             menu: MenuState::new(),
             menu_revision: 0,
             confirm: CloseConfirm::new(),
+            actions_menu: None,
+            pointer_seek: None,
+            pointer_divider: None,
             help_open: false,
             prefix: None,
             pending: [Key::Enter; MAX_KEYS],
@@ -306,6 +392,7 @@ impl App {
         self.workspace_index = Some(index);
         self.current_route = Some(current);
         self.picker_selection = None;
+        self.actions_menu = None;
         self.route_request = None;
         self.route_switching = false;
         self.route_switch_notice = None;
@@ -375,6 +462,12 @@ impl App {
         // An admitted server operation is not rolled back, but its stale UI
         // completion must not be applied to the destination route.
         self.pane_mode = None;
+        self.pointer_seek = None;
+        self.pointer_divider = None;
+        self.actions_menu = None;
+        self.menu.handle(panelink::split_menu::MenuInput::Cancel);
+        self.confirm = CloseConfirm::new();
+        self.help_open = false;
         self.pending_pane_operation = None;
         self.pane_operations = None;
         self.route_switching = true;
@@ -382,6 +475,12 @@ impl App {
         self.picker_selection = None;
         self.cancel_selection();
         self.pending_copy = None;
+        for slot in &mut self.screens {
+            slot.queued_scroll = None;
+            slot.queued_seek = None;
+            slot.history_pending = false;
+            slot.view_epoch = slot.view_epoch.wrapping_add(1);
+        }
         let abandoned = self.abandon_pending_keys();
         let notice = if abandoned {
             "workspace switch preparing; queued keys discarded"
@@ -408,10 +507,33 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn menu_open(&self) -> bool {
-        self.menu.is_open()
+        self.menu.is_open() || self.actions_menu.is_some()
     }
 
     pub(crate) fn needs_recovery_availability(&self, event: &Event) -> bool {
+        if let Some(menu) = self.actions_menu {
+            return match event {
+                Event::Key(key)
+                    if key.code == KeyCode::Enter && (key.is_press() || key.is_repeat()) =>
+                {
+                    LOCAL_ACTIONS.get(menu.selected) == Some(&LocalAction::SavedLayout)
+                }
+                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                    self.actions_menu_rect().is_some_and(|rect| {
+                        let y = rect
+                            .y
+                            .saturating_add(1 + u16::from(self.workspace_index.is_some()));
+                        let (start, end) = self.actions_page(menu);
+                        start <= 5
+                            && 5 < end
+                            && mouse.row == y.saturating_add((5 - start) as u16)
+                            && mouse.column >= rect.x
+                            && mouse.column < rect.x.saturating_add(rect.columns)
+                    })
+                }
+                _ => false,
+            };
+        }
         if self.copy_mode
             || self.route_switching
             || self.pane_mode.is_some()
@@ -426,7 +548,11 @@ impl App {
             return false;
         }
         match event {
-            Event::Mouse(mouse) => matches!(mouse_button(mouse), Some((true, true))),
+            Event::Mouse(mouse) => {
+                self.pane_control_at(mouse.column, mouse.row)
+                    .is_some_and(|(_, close)| !close)
+                    || matches!(mouse_button(mouse), Some((true, true)))
+            }
             Event::Key(key) if self.prefix.is_some() && (key.is_press() || key.is_repeat()) => {
                 (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
                     && matches!(key.code, KeyCode::Char('s' | 'S' | 'v' | 'V'))
@@ -464,6 +590,51 @@ impl App {
         } else {
             self.screen_viewport()
         }
+    }
+
+    fn confirm_ui_geometry(&self, rows: u16, columns: u16) -> Option<ConfirmUiGeometry> {
+        let intent = self.confirm.intent()?;
+        if rows == 0 || columns == 0 {
+            return None;
+        }
+        let overlay_rows = rows.min(2);
+        let top = rows.saturating_sub(overlay_rows);
+        let button_y = top.saturating_add(overlay_rows.saturating_sub(1));
+        let header_offset = u16::from(self.workspace_index.is_some());
+        Some(ConfirmUiGeometry {
+            overlay: Rect {
+                x: 0,
+                y: top,
+                rows: overlay_rows,
+                columns,
+            },
+            close: Rect {
+                x: 0,
+                y: button_y.saturating_add(header_offset),
+                rows: 1,
+                columns: 7,
+            },
+            cancel: Rect {
+                x: 8,
+                y: button_y.saturating_add(header_offset),
+                rows: 1,
+                columns: 8,
+            },
+            warning: if intent.last_pane && columns < 35 {
+                "Closing ends workspace"
+            } else {
+                match (intent.position, intent.last_pane) {
+                    (1, true) => "Close pane 1? This is the last pane; the workspace ends. (y/n)",
+                    (2, true) => "Close pane 2? This is the last pane; the workspace ends. (y/n)",
+                    (3, true) => "Close pane 3? This is the last pane; the workspace ends. (y/n)",
+                    (4, true) => "Close pane 4? This is the last pane; the workspace ends. (y/n)",
+                    (1, false) => "Close pane 1? (y/n)",
+                    (2, false) => "Close pane 2? (y/n)",
+                    (3, false) => "Close pane 3? (y/n)",
+                    _ => "Close pane 4? (y/n)",
+                }
+            },
+        })
     }
 
     fn screen_viewport(&self) -> (u16, u16) {
@@ -537,7 +708,16 @@ impl App {
     pub(crate) fn set_host(&mut self, rows: u16, columns: u16) {
         if self.host != (rows, columns) {
             self.pane_mode = None;
+            self.actions_menu = None;
+            self.pointer_seek = None;
+            self.pointer_divider = None;
             self.cancel_selection();
+            for slot in &mut self.screens {
+                slot.history_pending = false;
+                slot.queued_scroll = None;
+                slot.queued_seek = None;
+                slot.view_epoch = slot.view_epoch.wrapping_add(1);
+            }
             self.host = (rows, columns);
             let (rows, columns) = self.viewport();
             self.menu.set_viewport(rows, columns);
@@ -646,6 +826,62 @@ impl App {
         if self.layout == Some(reply) {
             return;
         }
+        let captured_target_present = |target: TargetRef| {
+            reply
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == target)
+        };
+        if self.menu.is_open()
+            && (self.menu_revision != reply.revision
+                || self
+                    .menu
+                    .captured_target()
+                    .is_some_and(|target| !captured_target_present(target)))
+        {
+            self.menu.handle(panelink::split_menu::MenuInput::Cancel);
+            self.set_status("menu cancelled: layout changed", Instant::now());
+        }
+        if self.confirm.intent().is_some_and(|intent| {
+            intent.expected_layout_revision != reply.revision
+                || !captured_target_present(intent.target)
+        }) {
+            self.confirm = CloseConfirm::new();
+            self.set_status("close cancelled: layout changed", Instant::now());
+        }
+        if self.actions_menu.is_some_and(|menu| {
+            menu.revision != reply.revision
+                || !reply
+                    .panes
+                    .iter()
+                    .flatten()
+                    .any(|pane| pane.target == menu.target)
+        }) {
+            self.actions_menu = None;
+            self.set_status("pane actions cancelled: layout changed", Instant::now());
+        }
+        if self.pointer_seek.is_some_and(|drag| {
+            drag.layout_revision != reply.revision
+                || !reply
+                    .panes
+                    .iter()
+                    .flatten()
+                    .any(|pane| pane.target == drag.target && pane.rect == drag.pane_rect)
+        }) {
+            self.pointer_seek = None;
+        }
+        if self.pointer_divider.is_some_and(|drag| {
+            drag.revision != reply.revision
+                || !reply
+                    .panes
+                    .iter()
+                    .flatten()
+                    .any(|pane| pane.target == drag.target)
+        }) {
+            self.pointer_divider = None;
+            self.pane_mode = None;
+        }
         if self.layout.is_some_and(|layout| {
             layout.revision != reply.revision
                 || layout.rows != reply.rows
@@ -700,17 +936,25 @@ impl App {
                             .map(|old| old.rect)
                     });
                     if old_rect != Some(pane.rect) {
+                        slot.history_total = 0;
                         slot.history_offset = 0;
                         slot.history_revision = 0;
                         slot.view_epoch = slot.view_epoch.wrapping_add(1);
                         slot.history_pending = false;
+                        slot.queued_scroll = None;
+                        slot.queued_seek = None;
+                        slot.history_pending = false;
                     }
                 } else {
                     slot.target = None;
+                    slot.history_total = 0;
                     slot.revision = 0;
                     slot.history_offset = 0;
                     slot.history_revision = 0;
                     slot.view_epoch = slot.view_epoch.wrapping_add(1);
+                    slot.history_pending = false;
+                    slot.queued_scroll = None;
+                    slot.queued_seek = None;
                     slot.history_pending = false;
                 }
             }
@@ -1011,45 +1255,67 @@ impl App {
             ScrollResult::History {
                 revision,
                 offset_rows,
+                total_rows,
                 checkpoint,
                 row_wraps,
-            } => match panelink::screen_checkpoint::decode(&checkpoint) {
-                Ok(snapshot) if offset_rows > 0 => {
-                    if slot.history.load_checkpoint(&snapshot).is_ok() {
-                        if let Some(wraps) = row_wraps.as_deref() {
-                            if slot.history.apply_row_wraps(wraps).is_err() {
-                                slot.history.clear_row_wraps();
-                                self.set_status("history snapshot invalid", now);
-                                return;
+            } => {
+                slot.history_total = total_rows;
+                match panelink::screen_checkpoint::decode(&checkpoint) {
+                    Ok(snapshot) if offset_rows > 0 => {
+                        if slot.history.load_checkpoint(&snapshot).is_ok() {
+                            if let Some(wraps) = row_wraps.as_deref() {
+                                if slot.history.apply_row_wraps(wraps).is_err() {
+                                    slot.history.clear_row_wraps();
+                                    slot.queued_scroll = None;
+                                    slot.queued_seek = None;
+                                    self.set_status("history snapshot invalid", now);
+                                    return;
+                                }
                             }
+                            slot.history_offset = offset_rows;
+                            slot.history_revision = revision;
+                            self.dirty = true;
+                        } else {
+                            slot.queued_scroll = None;
+                            slot.queued_seek = None;
+                            self.set_status("history snapshot invalid", now);
                         }
-                        slot.history_offset = offset_rows;
+                    }
+                    Ok(_) => {
+                        slot.history.clear_row_wraps();
+                        slot.history_offset = 0;
                         slot.history_revision = revision;
                         self.dirty = true;
-                    } else {
+                    }
+                    Err(_) => {
+                        slot.queued_scroll = None;
+                        slot.queued_seek = None;
                         self.set_status("history snapshot invalid", now);
                     }
                 }
-                Ok(_) => {
-                    slot.history.clear_row_wraps();
-                    slot.history_offset = 0;
-                    slot.history_revision = revision;
-                    self.dirty = true;
-                }
-                Err(_) => self.set_status("history snapshot invalid", now),
-            },
+            }
             ScrollResult::MouseDelivered => {
+                slot.queued_scroll = None;
+                slot.queued_seek = None;
+                slot.history_total = 0;
                 slot.history_offset = 0;
                 slot.history_revision = 0;
                 self.dirty = true;
             }
             ScrollResult::AlternateScreenNoMouse => {
+                slot.queued_scroll = None;
+                slot.queued_seek = None;
+                slot.history_total = 0;
                 slot.history_offset = 0;
                 slot.history_revision = 0;
                 self.dirty = true;
                 self.set_status("alternate-screen app; use its scroll keys", now);
             }
-            ScrollResult::Failed(label) => self.set_status(label, now),
+            ScrollResult::Failed(label) => {
+                slot.queued_scroll = None;
+                slot.queued_seek = None;
+                self.set_status(label, now);
+            }
         }
     }
 
@@ -1062,8 +1328,60 @@ impl App {
             slot.history_offset = 0;
             slot.history_revision = 0;
             slot.history_pending = false;
+            slot.queued_scroll = None;
+            slot.queued_seek = None;
             slot.view_epoch = slot.view_epoch.wrapping_add(1);
             self.dirty = true;
+        }
+    }
+
+    /// Seek the focused normal buffer to an absolute retained-history offset.
+    fn seek_history(&mut self, now: Instant, requested: u16, effects: &mut impl Effects) {
+        let Some(target) = self.focus else {
+            return;
+        };
+        self.seek_history_for_target(target, now, requested, effects);
+    }
+
+    fn seek_history_for_target(
+        &mut self,
+        target: TargetRef,
+        now: Instant,
+        requested: u16,
+        effects: &mut impl Effects,
+    ) {
+        let Some(slot) = self
+            .screens
+            .iter_mut()
+            .find(|slot| slot.target == Some(target))
+        else {
+            return;
+        };
+        if slot.snapshot.alternate_screen() {
+            return;
+        }
+        let maximum = if slot.history_total == 0 {
+            panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS
+        } else {
+            slot.history_total.max(slot.history_offset)
+        };
+        let offset = requested.min(maximum);
+        if slot.history_pending {
+            slot.queued_seek = Some(offset);
+            return;
+        }
+        if offset == slot.history_offset {
+            return;
+        }
+        let epoch = slot.view_epoch.wrapping_add(1);
+        slot.history_pending = true;
+        slot.queued_scroll = None;
+        match effects.seek_history(target, epoch, offset) {
+            Ok(()) => slot.view_epoch = epoch,
+            Err(label) => {
+                slot.history_pending = false;
+                self.set_status(label, now);
+            }
         }
     }
 
@@ -1109,10 +1427,18 @@ impl App {
             slot.history_offset = 0;
             slot.history_revision = 0;
         }
-        // A single large history checkpoint may be in flight. Ignore further
-        // wheel ticks until its result is applied so a dropped/coalesced event
-        // cannot invalidate the request that is already on the wire.
-        if slot.history_pending {
+        // Preserve the in-flight epoch and combine only known normal-buffer
+        // gestures. Alternate-screen wheel delivery is nonreplayable child input.
+        if slot.history_pending || slot.queued_scroll.is_some() {
+            if slot.revision > 0 && !slot.snapshot.alternate_screen() {
+                let delta = if up { 3 } else { -3 };
+                let current = slot.queued_scroll.map_or(0, |queued| queued.0);
+                slot.queued_scroll = Some((
+                    current.saturating_add(delta).clamp(-8192, 8192),
+                    column,
+                    row,
+                ));
+            }
             return;
         }
         let requested = if up {
@@ -1124,13 +1450,82 @@ impl App {
         };
         let epoch = slot.view_epoch.wrapping_add(1);
         slot.history_pending = true;
-        self.dirty = true;
         match effects.scroll(target, epoch, requested, column, row, up) {
             Ok(()) => slot.view_epoch = epoch,
             Err(label) => {
                 slot.history_pending = false;
+                slot.queued_scroll = None;
                 self.set_status(label, now);
             }
+        }
+    }
+
+    /// Admit accumulated normal-buffer wheel motion after the previous worker
+    /// result has been released. Queued gestures are discarded on view changes.
+    pub(crate) fn flush_scroll(&mut self, now: Instant, effects: &mut impl Effects) {
+        if self.route_switching
+            || self.copy_mode
+            || self.screens.iter().any(|slot| slot.history_pending)
+        {
+            return;
+        }
+        if let Some(index) = self
+            .screens
+            .iter()
+            .position(|slot| slot.queued_seek.is_some())
+        {
+            let slot = &mut self.screens[index];
+            let Some(offset) = slot.queued_seek.take() else {
+                return;
+            };
+            let Some(target) = slot.target else { return };
+            if slot.snapshot.alternate_screen() {
+                return;
+            }
+            let offset = offset.min(slot.history_total.max(slot.history_offset));
+            if offset == slot.history_offset {
+                return;
+            }
+            let epoch = slot.view_epoch.wrapping_add(1);
+            match effects.seek_history(target, epoch, offset) {
+                Ok(()) => {
+                    slot.view_epoch = epoch;
+                    slot.history_pending = true;
+                }
+                Err(label) => self.set_status(label, now),
+            }
+            return;
+        }
+        let Some(index) = self
+            .screens
+            .iter()
+            .position(|slot| slot.queued_scroll.is_some())
+        else {
+            return;
+        };
+        let slot = &mut self.screens[index];
+        let Some((delta, column, row)) = slot.queued_scroll.take() else {
+            return;
+        };
+        let Some(target) = slot.target else {
+            return;
+        };
+        if delta == 0 || slot.snapshot.alternate_screen() {
+            return;
+        }
+        let requested = (i32::from(slot.history_offset) + i32::from(delta))
+            .clamp(0, i32::from(panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS))
+            as u16;
+        if requested == slot.history_offset {
+            return;
+        }
+        let epoch = slot.view_epoch.wrapping_add(1);
+        match effects.scroll(target, epoch, requested, column, row, delta > 0) {
+            Ok(()) => {
+                slot.view_epoch = epoch;
+                slot.history_pending = true;
+            }
+            Err(label) => self.set_status(label, now),
         }
     }
 
@@ -1186,14 +1581,23 @@ impl App {
             let buffer_changed =
                 old_buffer.is_some_and(|old| old != slot.snapshot.alternate_screen());
             if buffer_changed {
+                slot.history_total = 0;
                 slot.history_offset = 0;
                 slot.history_pending = false;
+                slot.queued_scroll = None;
+                slot.queued_seek = None;
                 slot.view_epoch = slot.view_epoch.wrapping_add(1);
             }
             buffer_changed
         };
         if buffer_changed {
             self.cancel_selection();
+            if self.pointer_divider.take().is_some() {
+                self.pane_mode = None;
+            }
+            if self.pointer_seek.is_some_and(|drag| drag.target == target) {
+                self.pointer_seek = None;
+            }
         }
         self.dirty = true;
         Ok(())
@@ -1502,11 +1906,34 @@ impl App {
             }
             return Flow::Continue;
         }
+        if self.pointer_seek.is_some() || self.pointer_divider.is_some() {
+            self.handle_pointer_seek_event(event, now, effects);
+            return Flow::Continue;
+        }
         if self.pane_mode.is_some() {
             self.handle_pane_mode_event(event, now, effects);
             return Flow::Continue;
         }
+        if self.actions_menu.is_some() {
+            return self.handle_actions_menu_event(event, now, recovery_availability, effects);
+        }
         if self.help_open {
+            if let Event::Mouse(mouse) = event {
+                let (rows, columns) = self.viewport();
+                let height = rows.min(HELP_LINES.len() as u16);
+                let width = columns.min(72);
+                let left = columns.saturating_sub(width) / 2;
+                let top =
+                    rows.saturating_sub(height) / 2 + u16::from(self.workspace_index.is_some());
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                    && mouse.row == top
+                    && mouse.column >= left
+                    && mouse.column < left.saturating_add(width)
+                {
+                    self.help_open = false;
+                    self.dirty = true;
+                }
+            }
             if let Event::Key(key) = event {
                 match map_key(*key) {
                     KeyAction::Quit => {
@@ -1533,6 +1960,28 @@ impl App {
         if self.confirm.is_open() {
             // The prompt owns every event; none reaches a pane.
             self.dirty = true;
+            if let Event::Mouse(mouse) = event {
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    let Some(intent) = self.confirm.intent() else {
+                        return Flow::Continue;
+                    };
+                    let (rows, columns) = self.viewport();
+                    let geometry = self.confirm_ui_geometry(rows, columns);
+                    if geometry
+                        .is_some_and(|geometry| geometry.close.contains(mouse.column, mouse.row))
+                    {
+                        self.confirm = CloseConfirm::new();
+                        self.close_pane(intent, now, effects);
+                        return Flow::Continue;
+                    } else if geometry
+                        .is_some_and(|geometry| geometry.cancel.contains(mouse.column, mouse.row))
+                    {
+                        self.confirm = CloseConfirm::new();
+                        self.set_status("close cancelled", now);
+                        return Flow::Continue;
+                    }
+                }
+            }
             match self.confirm.handle(confirm_input(event)) {
                 ConfirmResponse::Confirmed(intent) => self.close_pane(intent, now, effects),
                 ConfirmResponse::Cancelled => self.set_status("close cancelled", now),
@@ -1580,6 +2029,20 @@ impl App {
             return Flow::Continue;
         }
         if self.copy_mode {
+            if let Event::Mouse(mouse) = event {
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    if let Some((target, close)) = self.pane_control_at(mouse.column, mouse.row) {
+                        self.cancel_selection();
+                        self.set_focus(Some(target));
+                        if close {
+                            self.confirm_close_focused(now);
+                        } else {
+                            self.open_actions_menu(target, now, effects);
+                        }
+                        return Flow::Continue;
+                    }
+                }
+            }
             return self.handle_copy_mode_event(event, now, effects);
         }
         if self.handle_header_event(event, now) {
@@ -1637,6 +2100,22 @@ impl App {
             }
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some((target, close)) = self.pane_control_at(mouse.column, mouse.row) {
+                        self.flush(now, effects);
+                        self.set_focus(Some(target));
+                        if close {
+                            self.confirm_close_focused(now);
+                        } else {
+                            self.open_actions_menu(target, now, effects);
+                        }
+                        return Flow::Continue;
+                    }
+                    if self.begin_scrollbar_pointer(mouse.column, mouse.row, now, effects) {
+                        return Flow::Continue;
+                    }
+                    if self.begin_divider_pointer(mouse.column, mouse.row, now, effects) {
+                        return Flow::Continue;
+                    }
                     if let Some(target) = self.pane_at(mouse.column, mouse.row) {
                         self.flush(now, effects);
                         self.focus_target(target);
@@ -1732,6 +2211,58 @@ impl App {
             self.begin_copy_mode(now);
             return Flow::Continue;
         }
+        if plain {
+            let seek = match code {
+                KeyCode::PageUp => self.focus.and_then(|target| {
+                    let slot = self
+                        .screens
+                        .iter()
+                        .find(|slot| slot.target == Some(target))?;
+                    let page = self
+                        .display_layout()?
+                        .panes
+                        .iter()
+                        .flatten()
+                        .find(|pane| pane.target == target)
+                        .and_then(|pane| panelink::pane_layout::content_rect(pane.rect))
+                        .map_or(1, |rect| rect.rows.saturating_sub(1).max(1));
+                    Some(slot.history_offset.saturating_add(page))
+                }),
+                KeyCode::PageDown => self.focus.and_then(|target| {
+                    let slot = self
+                        .screens
+                        .iter()
+                        .find(|slot| slot.target == Some(target))?;
+                    let page = self
+                        .display_layout()?
+                        .panes
+                        .iter()
+                        .flatten()
+                        .find(|pane| pane.target == target)
+                        .and_then(|pane| panelink::pane_layout::content_rect(pane.rect))
+                        .map_or(1, |rect| rect.rows.saturating_sub(1).max(1));
+                    Some(slot.history_offset.saturating_sub(page))
+                }),
+                KeyCode::Home => self.focus.and_then(|target| {
+                    self.screens
+                        .iter()
+                        .find(|slot| slot.target == Some(target))
+                        .map(|slot| {
+                            if slot.history_total == 0 {
+                                panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS
+                            } else {
+                                slot.history_total.max(slot.history_offset)
+                            }
+                        })
+                }),
+                KeyCode::End => Some(0),
+                _ => None,
+            };
+            if let Some(offset) = seek {
+                self.seek_history(now, offset, effects);
+                return Flow::Continue;
+            }
+        }
         let direction = match code {
             KeyCode::Char('l' | 'L') if plain => Some(SplitDirection::Left),
             KeyCode::Char('r' | 'R' | '%') if plain => Some(SplitDirection::Right),
@@ -1754,7 +2285,9 @@ impl App {
                 if self.pending_pane_operation.is_some() {
                     self.set_status("pane operation pending", now);
                 } else {
-                    self.open_for_focused(now, recovery_availability);
+                    if let Some(target) = self.focus {
+                        self.open_actions_menu(target, now, effects);
+                    }
                 }
             }
             KeyCode::Char('v' | 'V') if plain => {
@@ -1944,6 +2477,12 @@ impl App {
     }
 
     fn handle_pane_mode_event(&mut self, event: &Event, now: Instant, effects: &mut impl Effects) {
+        if let Event::Mouse(mouse) = event {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                self.handle_pane_mode_pointer(mouse.column, mouse.row, now, effects);
+            }
+            return;
+        }
         if let Event::Key(key) = event {
             if let Some((code, modifiers)) = self.pane_mode_exit_key {
                 match key.kind {
@@ -2097,6 +2636,109 @@ impl App {
         }
         // Paste, mouse, focus, and resize are owned by the mode and never
         // become child input. Resize cancellation is handled by set_host.
+    }
+
+    fn handle_pane_mode_pointer(
+        &mut self,
+        x: u16,
+        y: u16,
+        now: Instant,
+        effects: &mut impl Effects,
+    ) {
+        let Some(mode) = self.pane_mode else { return };
+        let (view_rows, view_columns) = self.viewport();
+        let (choice_count, total_rows) = match mode {
+            PaneMode::Swap { choices, .. } => {
+                let count = choices.iter().flatten().count();
+                (count, 1 + count + 2)
+            }
+            PaneMode::Divider { indices, .. } => {
+                let count = indices.iter().flatten().count();
+                (count, 1 + count + 3)
+            }
+        };
+        let rows = u16::try_from(total_rows).unwrap_or(u16::MAX).min(view_rows);
+        let columns = view_columns.min(76);
+        if rows == 0 || columns == 0 {
+            return;
+        }
+        let left = view_columns.saturating_sub(columns) / 2;
+        let top = view_rows.saturating_sub(rows) / 2;
+        let offset = u16::from(self.workspace_index.is_some());
+        if x < left || x >= left.saturating_add(columns) || y < top.saturating_add(offset) {
+            return;
+        }
+        let row = usize::from(y - top - offset);
+        if row >= total_rows || row == 0 {
+            return;
+        }
+        let adjustment = usize::from(matches!(mode, PaneMode::Divider { .. }));
+        let apply_row = 1 + choice_count + adjustment;
+        let cancel_row = apply_row + 1;
+        if adjustment == 1 && row == 1 + choice_count {
+            let code = if x < left + 3 {
+                Some(KeyCode::Char('h'))
+            } else if (left + 4..left + 7).contains(&x) {
+                Some(KeyCode::Char('l'))
+            } else {
+                None
+            };
+            if let Some(code) = code {
+                let key = Event::Key(crossterm_input::KeyEvent::new(code, KeyModifiers::NONE));
+                self.handle_pane_mode_event(&key, now, effects);
+            }
+            return;
+        }
+        if row == apply_row {
+            let enter = Event::Key(crossterm_input::KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ));
+            self.handle_pane_mode_event(&enter, now, effects);
+            return;
+        }
+        if row == cancel_row {
+            let escape = Event::Key(crossterm_input::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            ));
+            self.handle_pane_mode_event(&escape, now, effects);
+            return;
+        }
+        let selected = row - 1;
+        match mode {
+            PaneMode::Swap {
+                source,
+                revision,
+                choices,
+                ..
+            } if selected < choice_count => {
+                self.pane_mode = Some(PaneMode::Swap {
+                    source,
+                    revision,
+                    choices,
+                    selected,
+                });
+            }
+            PaneMode::Divider {
+                target,
+                revision,
+                indices,
+                ..
+            } if selected < choice_count => {
+                let first_cells = indices[selected]
+                    .map_or(0, |index| self.divider_first_span(target, revision, index));
+                self.pane_mode = Some(PaneMode::Divider {
+                    target,
+                    revision,
+                    indices,
+                    selected,
+                    first_cells,
+                });
+            }
+            _ => return,
+        }
+        self.dirty = true;
     }
 
     fn divider_first_span(&self, target: TargetRef, revision: u64, index: u8) -> u16 {
@@ -2406,7 +3048,7 @@ impl App {
         self.pending_close = Some((request_id, intent.target, intent.last_pane));
         match effects.close(plan, request_id) {
             Ok(Some(result)) => self.complete_close(request_id, intent.target, Ok(result), now),
-            Ok(None) => self.set_status("closing pane…", now),
+            Ok(None) => self.set_status("closing pane...", now),
             Err(label) => {
                 self.pending_close = None;
                 self.set_status(label, now)
@@ -2547,6 +3189,422 @@ impl App {
             .flatten()
             .find(|pane| pane.rect.contains(x, y))
             .map(|pane| pane.target)
+    }
+
+    fn scrollbar_hit_at(&self, x: u16, y: u16) -> Option<(TargetRef, Rect, Rect, u16, u16, u16)> {
+        if !self.fits() {
+            return None;
+        }
+        let header_offset = u16::from(self.workspace_index.is_some());
+        let layout = self.display_layout()?;
+        layout.panes.iter().flatten().find_map(|pane| {
+            let slot = self
+                .screens
+                .iter()
+                .find(|slot| slot.target == Some(pane.target))?;
+            let content = panelink::pane_layout::content_rect(pane.rect)?;
+            let pending = if let Some(view) = self.pane_operations {
+                let index = view.layout.panes.iter().position(|candidate| {
+                    candidate.is_some_and(|candidate| candidate.target == pane.target)
+                })?;
+                view.confirmed_sizes[index]
+                    .is_some_and(|size| size != (content.rows, content.columns))
+            } else {
+                pane.pending_confirmed.is_some()
+            };
+            if pending
+                || slot.snapshot.alternate_screen()
+                || slot.snapshot.rows() != content.rows
+                || slot.snapshot.columns() != content.columns
+            {
+                return None;
+            }
+            let rect = shifted_rect(pane.rect, header_offset);
+            let bar = Scrollbar {
+                offset_rows: slot.history_offset,
+                total_rows: slot.history_total.max(slot.history_offset),
+            };
+            let geometry = scrollbar_geometry(rect, bar)?;
+            geometry.track.contains(x, y).then_some((
+                pane.target,
+                pane.rect,
+                geometry.track,
+                geometry.thumb.rows,
+                slot.history_offset,
+                bar.total_rows,
+            ))
+        })
+    }
+
+    fn begin_scrollbar_pointer(
+        &mut self,
+        x: u16,
+        y: u16,
+        now: Instant,
+        effects: &mut impl Effects,
+    ) -> bool {
+        let Some((target, pane_rect, track, thumb_rows, offset, total)) =
+            self.scrollbar_hit_at(x, y)
+        else {
+            return false;
+        };
+        self.cancel_selection();
+        self.flush(now, effects);
+        self.focus_target(target);
+        self.prefix = None;
+        let layout_revision = self.layout.map_or(0, |layout| layout.revision);
+        if total == 0 {
+            self.set_focus(Some(target));
+            self.seek_history_for_target(
+                target,
+                now,
+                panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS,
+                effects,
+            );
+            return true;
+        }
+        let rect = self.display_layout().and_then(|layout| {
+            layout
+                .panes
+                .iter()
+                .flatten()
+                .find(|pane| pane.target == target)
+                .map(|pane| shifted_rect(pane.rect, u16::from(self.workspace_index.is_some())))
+        });
+        let Some(rect) = rect else { return true };
+        let Some(geometry) = scrollbar_geometry(
+            rect,
+            Scrollbar {
+                offset_rows: offset,
+                total_rows: total,
+            },
+        ) else {
+            return true;
+        };
+        if geometry.thumb.contains(x, y) {
+            self.pointer_seek = Some(PointerSeek {
+                target,
+                layout_revision,
+                pane_rect,
+                track,
+                thumb_rows,
+                total_rows: total,
+                start_offset: offset,
+                preview_offset: offset,
+                grab_offset: y.saturating_sub(geometry.thumb.y),
+            });
+        } else {
+            let page = panelink::pane_layout::content_rect(pane_rect)
+                .map_or(1, |content| content.rows.saturating_sub(1).max(1));
+            let requested = if y < geometry.thumb.y {
+                offset.saturating_add(page).min(total)
+            } else {
+                offset.saturating_sub(page)
+            };
+            self.set_focus(Some(target));
+            self.seek_history_for_target(target, now, requested, effects);
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn handle_pointer_seek_event(
+        &mut self,
+        event: &Event,
+        now: Instant,
+        effects: &mut impl Effects,
+    ) {
+        if let Some(capture) = self.pointer_divider {
+            match event {
+                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Drag(MouseButton::Left) => {
+                    self.update_pointer_divider(mouse.column, mouse.row);
+                }
+                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Up(MouseButton::Left) => {
+                    self.update_pointer_divider(mouse.column, mouse.row);
+                    let mode = self.pane_mode.take();
+                    self.pointer_divider = None;
+                    if let Some(PaneMode::Divider {
+                        first_cells,
+                        revision,
+                        ..
+                    }) = mode
+                    {
+                        if revision == capture.revision
+                            && first_cells != capture.initial_span
+                            && self.divider_value_valid(
+                                capture.target,
+                                capture.revision,
+                                capture.divider_index,
+                                first_cells,
+                            )
+                        {
+                            self.submit_pane_operation(
+                                PaneAction::DividerSet {
+                                    target: capture.target,
+                                    expected_layout_revision: capture.revision,
+                                    divider_index: capture.divider_index,
+                                    first_cells,
+                                },
+                                now,
+                                effects,
+                            );
+                        }
+                    }
+                    self.dirty = true;
+                }
+                Event::Key(key) if key.code == KeyCode::Esc && key.is_press() => {
+                    self.pointer_divider = None;
+                    self.pane_mode = None;
+                    self.dirty = true;
+                }
+                Event::Resize(_, _) | Event::FocusLost => {
+                    self.pointer_divider = None;
+                    self.pane_mode = None;
+                    self.dirty = true;
+                }
+                _ => {}
+            }
+            return;
+        }
+        match event {
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Drag(MouseButton::Left) => {
+                self.update_pointer_seek(mouse.row);
+            }
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Up(MouseButton::Left) => {
+                self.update_pointer_seek(mouse.row);
+                let drag = self.pointer_seek.take();
+                if let Some(drag) = drag {
+                    if drag.preview_offset != drag.start_offset
+                        && self
+                            .layout
+                            .is_some_and(|layout| layout.revision == drag.layout_revision)
+                    {
+                        self.set_focus(Some(drag.target));
+                        self.seek_history_for_target(
+                            drag.target,
+                            now,
+                            drag.preview_offset,
+                            effects,
+                        );
+                    }
+                }
+                self.dirty = true;
+            }
+            Event::Key(key) if key.code == KeyCode::Esc && key.is_press() => {
+                self.pointer_seek = None;
+                self.dirty = true;
+            }
+            Event::Resize(_, _) | Event::FocusLost => {
+                self.pointer_seek = None;
+                self.dirty = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn update_pointer_seek(&mut self, y: u16) {
+        let Some(mut drag) = self.pointer_seek else {
+            return;
+        };
+        let travel = drag.track.rows.saturating_sub(drag.thumb_rows);
+        if travel == 0 {
+            return;
+        }
+        let top = y
+            .saturating_sub(drag.track.y)
+            .saturating_sub(drag.grab_offset)
+            .min(travel);
+        let older_rows = u64::from(top) * u64::from(drag.total_rows) / u64::from(travel);
+        drag.preview_offset = drag.total_rows.saturating_sub(older_rows as u16);
+        self.pointer_seek = Some(drag);
+        self.dirty = true;
+    }
+
+    fn begin_divider_pointer(
+        &mut self,
+        x: u16,
+        screen_y: u16,
+        now: Instant,
+        effects: &mut impl Effects,
+    ) -> bool {
+        let Some((target, revision, divider_index, info)) = self.divider_hit_at(x, screen_y) else {
+            return false;
+        };
+        if !self.operation_ready(now, effects) {
+            return true;
+        }
+        if self
+            .pane_operations
+            .is_some_and(|view| view.zoomed_target.is_some())
+        {
+            self.set_status("unzoom before adjusting dividers", now);
+            return true;
+        }
+        let mut indices = [None; crate::pane_layout::MAX_PANES - 1];
+        indices[0] = Some(divider_index);
+        self.pointer_divider = Some(PointerDivider {
+            target,
+            revision,
+            divider_index,
+            initial_span: info.first_span,
+            region: info.region,
+            orientation: info.orientation,
+        });
+        self.pane_mode = Some(PaneMode::Divider {
+            target,
+            revision,
+            indices,
+            selected: 0,
+            first_cells: info.first_span,
+        });
+        self.cancel_selection();
+        self.prefix = None;
+        self.dirty = true;
+        true
+    }
+
+    fn divider_hit_at(
+        &self,
+        x: u16,
+        screen_y: u16,
+    ) -> Option<(TargetRef, u64, u8, panelink::pane_layout::DividerInfo)> {
+        if !self.fits() {
+            return None;
+        }
+        let layout = self.display_layout()?;
+        let local = self.local.as_ref()?;
+        let revision = self.layout?.revision;
+        let root_y = screen_y.checked_sub(u16::from(self.workspace_index.is_some()))?;
+        for (index, divider) in layout.dividers.iter().enumerate() {
+            let Some(divider) = divider else { continue };
+            if !divider.contains(x, root_y) {
+                continue;
+            }
+            for pane in layout.panes.iter().flatten() {
+                if let Ok(info) = local.divider_info(pane.target, revision, index as u8) {
+                    return Some((pane.target, revision, index as u8, info));
+                }
+            }
+        }
+        None
+    }
+
+    fn update_pointer_divider(&mut self, x: u16, screen_y: u16) {
+        let Some(capture) = self.pointer_divider else {
+            return;
+        };
+        let Some(PaneMode::Divider {
+            target,
+            revision,
+            indices,
+            selected,
+            ..
+        }) = self.pane_mode
+        else {
+            return;
+        };
+        if revision != capture.revision
+            || self
+                .layout
+                .is_none_or(|layout| layout.revision != capture.revision)
+        {
+            self.pointer_divider = None;
+            self.pane_mode = None;
+            return;
+        }
+        let root_y = screen_y.saturating_sub(u16::from(self.workspace_index.is_some()));
+        let requested = match capture.orientation {
+            DividerOrientation::Horizontal => x.saturating_sub(capture.region.x),
+            DividerOrientation::Vertical => root_y.saturating_sub(capture.region.y),
+        };
+        if let Some(candidate) = self.clamp_divider_span(
+            capture.target,
+            capture.revision,
+            capture.divider_index,
+            requested,
+        ) {
+            self.pane_mode = Some(PaneMode::Divider {
+                target,
+                revision,
+                indices,
+                selected,
+                first_cells: candidate,
+            });
+            self.dirty = true;
+        }
+    }
+
+    fn clamp_divider_span(
+        &self,
+        target: TargetRef,
+        revision: u64,
+        index: u8,
+        requested: u16,
+    ) -> Option<u16> {
+        let info = self
+            .local
+            .as_ref()?
+            .divider_info(target, revision, index)
+            .ok()?;
+        let valid = |value| self.divider_value_valid(target, revision, index, value);
+        if valid(requested) {
+            return Some(requested);
+        }
+        // Subtree minimum extents bound a contiguous feasible interval. Search
+        // from the known valid current span instead of rebuilding every span
+        // in the root on each pointer-motion event.
+        if requested < info.first_span {
+            let (mut low, mut high) = (0, info.first_span);
+            while high - low > 1 {
+                let middle = low + (high - low) / 2;
+                if valid(middle) {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
+            }
+            Some(high)
+        } else {
+            let (mut low, mut high) = (info.first_span, info.total_cells);
+            while high - low > 1 {
+                let middle = low + (high - low) / 2;
+                if valid(middle) {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            Some(low)
+        }
+    }
+
+    fn divider_value_valid(&self, target: TargetRef, revision: u64, index: u8, value: u16) -> bool {
+        self.layout
+            .and_then(|layout| local_layout(&layout))
+            .is_some_and(|mut layout| layout.set_divider(target, revision, index, value).is_ok())
+    }
+
+    fn pane_control_at(&self, x: u16, y: u16) -> Option<(TargetRef, bool)> {
+        if !self.fits() {
+            return None;
+        }
+        let header_offset = u16::from(self.workspace_index.is_some());
+        self.display_layout()?
+            .panes
+            .iter()
+            .flatten()
+            .find_map(|pane| {
+                let controls = pane_controls(pane.rect)?;
+                let menu = shifted_rect(controls.menu, header_offset);
+                let close = shifted_rect(controls.close, header_offset);
+                if menu.contains(x, y) {
+                    Some((pane.target, false))
+                } else if close.contains(x, y) {
+                    Some((pane.target, true))
+                } else {
+                    None
+                }
+            })
     }
 
     fn pane_row(&self, screen_row: u16) -> Option<u16> {
@@ -2729,6 +3787,172 @@ impl App {
         }
     }
 
+    fn open_actions_menu(&mut self, target: TargetRef, now: Instant, effects: &mut impl Effects) {
+        let Some(layout) = self.layout else {
+            self.set_status("pane actions unavailable: no layout", now);
+            return;
+        };
+        if !self.fits()
+            || !layout
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == target)
+        {
+            self.set_status("pane actions unavailable: layout changed", now);
+            return;
+        }
+        self.flush(now, effects);
+        self.cancel_selection();
+        self.prefix = None;
+        self.actions_menu = Some(ActionsMenu {
+            target,
+            revision: layout.revision,
+            selected: 0,
+        });
+        self.dirty = true;
+    }
+
+    fn actions_menu_rect(&self) -> Option<Rect> {
+        let (root_rows, root_columns) = self.viewport();
+        let rows = root_rows.min(panelink::split_menu::MAX_OVERLAY_ROWS as u16);
+        let columns = root_columns.min(42);
+        (rows > 0 && columns > 0).then_some(Rect {
+            x: root_columns.saturating_sub(columns) / 2,
+            y: root_rows.saturating_sub(rows) / 2,
+            rows,
+            columns,
+        })
+    }
+
+    /// Leave room for a title, page navigation and Cancel even at minimum
+    /// pane height. Keyboard selection and pointer pages use this same slice.
+    fn actions_page(&self, menu: ActionsMenu) -> (usize, usize) {
+        let capacity = usize::from(self.viewport().0.min(9).saturating_sub(3)).max(1);
+        let last_action = LOCAL_ACTIONS.len() - 1;
+        let start = menu.selected.min(last_action) / capacity * capacity;
+        (start, (start + capacity).min(last_action + 1))
+    }
+
+    fn handle_actions_menu_event(
+        &mut self,
+        event: &Event,
+        now: Instant,
+        recovery_availability: Availability,
+        effects: &mut impl Effects,
+    ) -> Flow {
+        let Some(mut menu) = self.actions_menu else {
+            return Flow::Continue;
+        };
+        match event {
+            Event::Key(key) if key.is_press() || key.is_repeat() => {
+                if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+                    self.actions_menu = None;
+                } else if key.code == KeyCode::Up {
+                    menu.selected =
+                        (menu.selected + LOCAL_ACTIONS.len()) % (LOCAL_ACTIONS.len() + 1);
+                    self.actions_menu = Some(menu);
+                } else if key.code == KeyCode::Down {
+                    menu.selected = (menu.selected + 1) % (LOCAL_ACTIONS.len() + 1);
+                    self.actions_menu = Some(menu);
+                } else if key.code == KeyCode::Enter {
+                    return self.activate_local_action(menu, now, recovery_availability, effects);
+                }
+                self.dirty = true;
+            }
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(rect) = self.actions_menu_rect() {
+                    let offset = u16::from(self.workspace_index.is_some());
+                    if mouse.column >= rect.x
+                        && mouse.column < rect.x.saturating_add(rect.columns)
+                        && mouse.row >= rect.y.saturating_add(1 + offset)
+                        && mouse.row < rect.y.saturating_add(rect.rows + offset)
+                    {
+                        let index = usize::from(mouse.row - rect.y - 1 - offset);
+                        let (start, end) = self.actions_page(menu);
+                        let count = end - start;
+                        if index < count {
+                            menu.selected = start + index;
+                            return self.activate_local_action(
+                                menu,
+                                now,
+                                recovery_availability,
+                                effects,
+                            );
+                        } else if index == count {
+                            let back = start > 0;
+                            let more = end < LOCAL_ACTIONS.len();
+                            if back && (!more || mouse.column < rect.x + 8) {
+                                menu.selected = start.saturating_sub(1);
+                            } else if more {
+                                menu.selected = end;
+                            }
+                            self.actions_menu = Some(menu);
+                            self.dirty = true;
+                        } else if index == count + 1 {
+                            self.actions_menu = None;
+                            self.dirty = true;
+                        }
+                    }
+                }
+                // The menu owns every pointer event, including outside clicks.
+            }
+            _ => {}
+        }
+        Flow::Continue
+    }
+
+    fn activate_local_action(
+        &mut self,
+        menu: ActionsMenu,
+        now: Instant,
+        recovery_availability: Availability,
+        effects: &mut impl Effects,
+    ) -> Flow {
+        let Some(layout) = self.layout else {
+            self.actions_menu = None;
+            return Flow::Continue;
+        };
+        if layout.revision != menu.revision
+            || !layout
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == menu.target)
+        {
+            self.actions_menu = None;
+            self.set_status("pane actions cancelled: layout changed", now);
+            return Flow::Continue;
+        }
+        self.actions_menu = None;
+        let Some(action) = LOCAL_ACTIONS.get(menu.selected).copied() else {
+            self.dirty = true;
+            return Flow::Continue;
+        };
+        self.set_focus(Some(menu.target));
+        match action {
+            LocalAction::Split => self.open_for_focused(now, recovery_availability),
+            LocalAction::Zoom => self.toggle_zoom(now, effects),
+            LocalAction::Swap => self.open_swap_mode(now, effects),
+            LocalAction::Divider => self.open_divider_mode(now, effects),
+            LocalAction::Copy => self.begin_copy_mode(now),
+            LocalAction::SavedLayout => {
+                if recovery_availability == Availability::Enabled {
+                    return Flow::ViewRecovery;
+                }
+                self.set_status("No previous layout saved", now);
+            }
+            LocalAction::Help => self.help_open = true,
+            LocalAction::Close => self.confirm_close_focused(now),
+            LocalAction::Detach => {
+                self.flush(now, effects);
+                return Flow::Quit;
+            }
+        }
+        self.dirty = true;
+        Flow::Continue
+    }
+
     /// Turn a captured intent into one split. The local `PaneLayout` mirror
     /// always starts at revision 1, so the server revision captured together
     /// with the menu (`menu_revision`) replaces the mirror's revision.
@@ -2800,15 +4024,14 @@ impl App {
         let tabs_layout = self.tabs_layout();
         let header_enabled = self.workspace_index.is_some();
         let header_offset = if header_enabled { 1 } else { 0 };
-        let (host_rows, host_columns) = if header_enabled {
-            self.screen_viewport()
-        } else {
-            self.host
-        };
+        // Both legacy attach and workspace tabs use the bounded render area,
+        // even when the physical terminal is larger than the screen caches.
+        let (host_rows, host_columns) = self.screen_viewport();
         if header_enabled && (host_rows == 0 || host_columns == 0) {
             return Ok(());
         }
         let mut panes = [None; crate::pane_layout::MAX_PANES];
+        let mut scrollbars = [None; crate::pane_layout::MAX_PANES];
         let mut divider = None;
         let mut dividers = [None; crate::pane_layout::MAX_PANES - 1];
         let mut focused = None;
@@ -2838,9 +4061,6 @@ impl App {
                 };
                 let content = match (pending, screen, content_rect) {
                     (true, _, _) => PaneContent::Placeholder("resize pending"),
-                    (false, Some(slot), Some(_)) if slot.history_pending => {
-                        PaneContent::Placeholder("loading scrollback...")
-                    }
                     (false, Some(_), Some(rect))
                         if self.copy_mode
                             && self.selection.as_ref().is_some_and(|drag| {
@@ -2877,6 +4097,22 @@ impl App {
                     (false, None, _) => PaneContent::Placeholder("connecting..."),
                     (false, Some(_), None) => PaneContent::Placeholder("pane too small"),
                 };
+                if let (false, Some(slot), PaneContent::Snapshot(_)) = (pending, screen, content) {
+                    if !slot.snapshot.alternate_screen() {
+                        scrollbars[index] = Some(Scrollbar {
+                            offset_rows: self
+                                .pointer_seek
+                                .filter(|drag| drag.target == pane.target)
+                                .map_or(slot.history_offset, |drag| drag.preview_offset),
+                            total_rows: self
+                                .pointer_seek
+                                .filter(|drag| drag.target == pane.target)
+                                .map_or(slot.history_total.max(slot.history_offset), |drag| {
+                                    drag.total_rows
+                                }),
+                        });
+                    }
+                }
                 panes[index] = Some(PaneView {
                     rect: shifted_rect(pane.rect, header_offset),
                     content,
@@ -2893,11 +4129,61 @@ impl App {
 
         let (view_rows, view_columns) = self.viewport();
         let menu_lines = self.menu.overlay_lines();
-        let confirm_line = self.confirm.overlay_line(view_columns);
+        let confirm = self.confirm_ui_geometry(view_rows, view_columns);
         let mut lines = [OverlayLine {
             text: "",
             style: OverlayStyle::Normal,
         }; panelink::split_menu::MAX_OVERLAY_ROWS];
+        let mut action_text: [String; panelink::split_menu::MAX_OVERLAY_ROWS] =
+            std::array::from_fn(|_| String::new());
+        let action_count = if let Some(menu) = self.actions_menu {
+            let pane = self
+                .layout
+                .and_then(|layout| {
+                    layout
+                        .panes
+                        .iter()
+                        .position(|pane| pane.is_some_and(|pane| pane.target == menu.target))
+                })
+                .map_or(1, |index| index + 1);
+            let (start, end) = self.actions_page(menu);
+            action_text[0] = format!("Pane {pane} actions (Esc cancels)");
+            const LABELS: [&str; 9] = [
+                "Split pane...",
+                "Zoom / unzoom",
+                "Swap pane",
+                "Resize divider",
+                "Keyboard copy",
+                "Saved layout",
+                "Shortcut help",
+                "Close pane...",
+                "Detach",
+            ];
+            for (row, index) in (start..end).enumerate() {
+                action_text[row + 1] = format!(
+                    "{} {}",
+                    if menu.selected == index { ">" } else { " " },
+                    LABELS[index]
+                );
+            }
+            let count = end - start;
+            action_text[count + 1] = match (start > 0, end < LABELS.len()) {
+                (true, true) => "[Back]  [More]",
+                (true, false) => "[Back]",
+                (false, true) => "[More]",
+                (false, false) => "",
+            }
+            .into();
+            action_text[count + 2] = if menu.selected == LOCAL_ACTIONS.len() {
+                "> [Cancel]"
+            } else {
+                "  [Cancel]"
+            }
+            .into();
+            count + 3
+        } else {
+            0
+        };
         let mut picker_text: [String; panelink::split_menu::MAX_OVERLAY_ROWS] =
             std::array::from_fn(|_| String::new());
         let picker_count = if self.picker_selection.is_some() {
@@ -2931,7 +4217,7 @@ impl App {
                 ..
             }) => {
                 pane_mode_text[0] =
-                    "Swap pane: arrows/hjkl choose, Enter confirms, Esc cancels".into();
+                    "Swap pane: arrows/hjkl choose; Enter applies, Esc cancels".into();
                 let mut count = 1;
                 for (index, candidate) in choices.iter().flatten().enumerate() {
                     let pane_number =
@@ -2949,6 +4235,14 @@ impl App {
                         );
                         count += 1;
                     }
+                }
+                if count < pane_mode_text.len() {
+                    pane_mode_text[count] = "[Apply]".into();
+                    count += 1;
+                }
+                if count < pane_mode_text.len() {
+                    pane_mode_text[count] = "[Cancel]".into();
+                    count += 1;
                 }
                 let _ = source;
                 count
@@ -2969,7 +4263,7 @@ impl App {
                         DividerOrientation::Horizontal => "left/right",
                         DividerOrientation::Vertical => "up/down",
                     });
-                pane_mode_text[0] = format!("Divider {} ({axis}) first span {first_cells}; Tab changes ancestor, Enter saves, Esc cancels", index + 1);
+                pane_mode_text[0] = format!("Divider {} ({axis}) span {first_cells}; Tab changes ancestor, Enter applies, Esc cancels", index + 1);
                 let mut count = 1;
                 for (candidate, divider_index) in indices
                     .iter()
@@ -2984,6 +4278,18 @@ impl App {
                         );
                         count += 1;
                     }
+                }
+                if count < pane_mode_text.len() {
+                    pane_mode_text[count] = "[-] [+]".into();
+                    count += 1;
+                }
+                if count < pane_mode_text.len() {
+                    pane_mode_text[count] = "[Apply]".into();
+                    count += 1;
+                }
+                if count < pane_mode_text.len() {
+                    pane_mode_text[count] = "[Cancel]".into();
+                    count += 1;
                 }
                 count
             }
@@ -3024,6 +4330,24 @@ impl App {
                 },
                 usize::from(rows),
             ))
+        } else if action_count > 0 {
+            for (index, text) in action_text.iter().enumerate().take(action_count) {
+                lines[index] = OverlayLine {
+                    text,
+                    style: if index == 0 || text.starts_with('>') {
+                        OverlayStyle::Selected
+                    } else {
+                        OverlayStyle::Normal
+                    },
+                };
+            }
+            let rect = self.actions_menu_rect().unwrap_or(Rect {
+                x: 0,
+                y: 0,
+                rows: 0,
+                columns: 0,
+            });
+            Some((rect, action_count.min(usize::from(rect.rows))))
         } else if pane_mode_count > 0 {
             for (index, text) in pane_mode_text.iter().enumerate().take(pane_mode_count) {
                 lines[index] = OverlayLine {
@@ -3056,21 +4380,16 @@ impl App {
                 };
             }
             Some((rect, menu_lines.len()))
-        } else if let (Some(line), true) = (confirm_line.as_ref(), view_rows > 0) {
-            // The y/n prompt takes precedence over every notice.
+        } else if let Some(geometry) = confirm {
             lines[0] = OverlayLine {
-                text: line.text(),
-                style: compose_style(line.style()),
+                text: geometry.warning,
+                style: OverlayStyle::Selected,
             };
-            Some((
-                Rect {
-                    x: 0,
-                    y: view_rows - 1,
-                    rows: 1,
-                    columns: view_columns,
-                },
-                1,
-            ))
+            lines[1] = OverlayLine {
+                text: "[Close] [Cancel]",
+                style: OverlayStyle::Selected,
+            };
+            Some((geometry.overlay, usize::from(geometry.overlay.rows)))
         } else if let (Some((top, rows)), true) = (
             self.picker_screen_geometry(),
             self.picker_selection.is_some(),
@@ -3177,25 +4496,14 @@ impl App {
         } else {
             None
         };
-        if let Some(caret) = caret {
-            return compositor.render_with_copy_mode(
-                &frame,
-                selection,
-                caret,
-                tabs_layout.as_ref().map(|layout| layout.header_cells()),
-                output,
-            );
-        }
-        if let Some(tabs_layout) = tabs_layout.as_ref() {
-            compositor.render_with_header(
-                &frame,
-                selection,
-                Some(tabs_layout.header_cells()),
-                output,
-            )
-        } else {
-            compositor.render_with_selection(&frame, selection, output)
-        }
+        compositor.render_with_chrome(
+            &frame,
+            selection,
+            caret,
+            tabs_layout.as_ref().map(|layout| layout.header_cells()),
+            scrollbars,
+            output,
+        )
     }
 
     fn picker_overlay_text(

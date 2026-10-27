@@ -131,6 +131,7 @@ struct Fake {
     keys: Vec<(TargetRef, Vec<Key>)>,
     pastes: Vec<TargetRef>,
     scrolls: Vec<(TargetRef, u64, u16, u16, u16, bool)>,
+    seeks: Vec<(TargetRef, u64, u16)>,
     splits: Vec<SplitPlan>,
     split_reply: Option<Result<TargetRef, &'static str>>,
     split_async: bool,
@@ -167,6 +168,15 @@ impl Effects for Fake {
     ) -> Result<(), &'static str> {
         self.scrolls
             .push((target, epoch, offset_rows, column, row, up));
+        Ok(())
+    }
+    fn seek_history(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        offset_rows: u16,
+    ) -> Result<(), &'static str> {
+        self.seeks.push((target, epoch, offset_rows));
         Ok(())
     }
     fn split(
@@ -445,14 +455,12 @@ fn recovery_menu_and_navigation_request_viewer_without_forwarding_keys() {
     };
     app.set_layout(one_pane(1));
 
-    feed(&mut app, &mut fake, b"\x02s");
-    assert!(app.menu_open());
-    assert_eq!(
-        app.menu.recovery_availability(),
-        Some(Availability::Enabled)
+    let flows = feed_events(
+        &mut app,
+        &mut fake,
+        b"\x02s\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r",
     );
-    let flows = feed_events(&mut app, &mut fake, b"v");
-    assert_eq!(flows, vec![Flow::ViewRecovery]);
+    assert_eq!(flows.last(), Some(&Flow::ViewRecovery));
     assert!(!app.menu_open());
     app.flush(Instant::now(), &mut fake);
     assert!(fake.keys.is_empty());
@@ -501,23 +509,17 @@ fn split_intent_uses_captured_target_and_server_revision_then_focuses_new_pane()
     assert!(app.menu_open());
     // Layout changes while the menu is open: the captured revision stays 5.
     app.set_layout(one_pane(6));
-    feed(&mut app, &mut fake, b"r");
     assert!(!app.menu_open());
-    assert_eq!(
-        fake.splits,
-        vec![SplitPlan {
-            target: target(1),
-            expected_layout_revision: 5,
-            direction: SplitDirection::Right,
-            rows: 22,
-            columns: 38,
-        }]
+    assert!(
+        fake.splits.is_empty(),
+        "stale menu cancels before any action"
     );
+    assert_eq!(status(&app), Some("menu cancelled: layout changed"));
     assert_eq!(app.focus(), Some(target(1)));
     let mut split_layout = two_panes();
     split_layout.revision = 7;
     app.set_layout(split_layout);
-    assert_eq!(app.focus(), Some(target(2)));
+    assert_eq!(app.focus(), Some(target(1)));
     assert!(fake.keys.is_empty());
 }
 
@@ -528,7 +530,7 @@ fn keyboard_fallback_ctrl_b_s_opens_for_focused_and_esc_closes_without_bytes() {
     app.set_layout(one_pane(1));
     feed(&mut app, &mut fake, b"\x02s");
     assert!(app.menu_open());
-    assert_eq!(app.menu.captured_target(), Some(target(1)));
+    assert_eq!(app.actions_menu.map(|menu| menu.target), Some(target(1)));
     feed(&mut app, &mut fake, b"\x1b");
     assert!(!app.menu_open());
     // Ctrl-B followed by another key is dropped locally.
@@ -536,7 +538,7 @@ fn keyboard_fallback_ctrl_b_s_opens_for_focused_and_esc_closes_without_bytes() {
     assert!(!app.menu_open());
     app.flush(Instant::now(), &mut fake);
     assert!(fake.keys.is_empty());
-    feed(&mut app, &mut fake, b"\x02s\x1b[B\x1b[B\r");
+    feed(&mut app, &mut fake, b"\x02s\r\x1b[B\x1b[B\r");
     assert_eq!(fake.splits.len(), 1);
     assert_eq!(fake.splits[0].direction, SplitDirection::Up);
     assert_eq!(fake.splits[0].rows, 9);
@@ -550,7 +552,7 @@ fn split_failure_shows_status_and_keeps_focus() {
         ..Fake::default()
     };
     app.set_layout(one_pane(1));
-    feed(&mut app, &mut fake, b"\x02sd");
+    feed(&mut app, &mut fake, b"\x02s\rd");
     assert_eq!(app.focus(), Some(target(1)));
     assert_eq!(
         app.status.map(|s| s.0),
@@ -600,6 +602,7 @@ fn wheel_routes_to_outer_pane_with_content_local_coordinates_and_typing_invalida
             target: target(1),
             epoch,
             result: ScrollResult::History {
+                total_rows: 100,
                 revision: 1,
                 offset_rows: 3,
                 checkpoint,
@@ -683,6 +686,7 @@ fn closing_pane_discards_late_history_reply() {
             target: target(1),
             epoch,
             result: ScrollResult::History {
+                total_rows: 100,
                 revision: 1,
                 offset_rows: 3,
                 checkpoint: blank_checkpoint(24, 40, 1),
@@ -731,6 +735,7 @@ fn negotiated_row_wraps_follow_the_exact_live_and_history_checkpoint() {
             target: target(1),
             epoch: 12,
             result: ScrollResult::History {
+                total_rows: 100,
                 revision: 9,
                 offset_rows: 3,
                 checkpoint: history_checkpoint,
@@ -1068,6 +1073,7 @@ fn keyboard_copy_uses_the_visible_history_snapshot() {
             target: target(1),
             epoch: 7,
             result: ScrollResult::History {
+                total_rows: 100,
                 revision: 4,
                 offset_rows: 3,
                 checkpoint: history_checkpoint,
@@ -1275,6 +1281,7 @@ fn alternate_live_screen_and_same_target_resize_invalidate_history_replies() {
             target: target(1),
             epoch: pending_epoch,
             result: ScrollResult::History {
+                total_rows: 100,
                 revision: 1,
                 offset_rows: 3,
                 checkpoint: blank_checkpoint(24, 81, 1),
@@ -1713,6 +1720,37 @@ fn frames_build_for_one_and_two_panes_with_placeholders_and_overlays() {
 }
 
 #[test]
+fn legacy_attach_clamps_large_hosts_before_initial_and_incremental_render() {
+    for (rows, columns) in [(64, 269), (100, 300)] {
+        let mut app = App::new(rows, columns).unwrap();
+        app.set_layout(one_pane(1));
+        assert_eq!(app.desired_root(), Some((rows.min(80), 240)));
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut bytes = Vec::new();
+        app.render(&mut compositor, &mut bytes, Instant::now())
+            .unwrap();
+        assert!(compositor.commit());
+        let mut parser = vt100::Parser::new(rows, columns, 0);
+        parser.process(&bytes);
+        assert!(parser.screen().contents().contains("[Menu]"));
+        bytes.clear();
+        app.render(&mut compositor, &mut bytes, Instant::now())
+            .unwrap();
+        assert!(compositor.commit());
+        assert!(bytes.is_empty());
+        app.set_host(24, 81);
+        app.render(&mut compositor, &mut bytes, Instant::now())
+            .unwrap();
+        assert!(compositor.commit());
+        app.set_host(rows, columns);
+        bytes.clear();
+        app.render(&mut compositor, &mut bytes, Instant::now())
+            .unwrap();
+        assert!(compositor.commit());
+    }
+}
+
+#[test]
 fn too_small_host_keeps_layout_and_shows_notice() {
     let mut app = App::new(24, 81).unwrap();
     app.set_layout(one_pane(1));
@@ -1736,6 +1774,20 @@ fn screen_text(app: &App) -> String {
     let mut parser = vt100::Parser::new(rows.max(1), columns.max(1), 0);
     parser.process(&output);
     parser.screen().contents()
+}
+
+fn parsed_label_position(app: &App, label: &str) -> Option<(u16, u16)> {
+    screen_text(app)
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.find(label).map(|column| {
+                (
+                    u16::try_from(column).unwrap_or(u16::MAX),
+                    u16::try_from(row).unwrap_or(u16::MAX),
+                )
+            })
+        })
 }
 
 #[test]
@@ -2370,19 +2422,13 @@ fn menu_close_item_uses_captured_target_and_server_revision_after_confirmation()
     assert!(!app.menu_open());
     assert!(app.confirm_open());
     assert!(fake.closes.is_empty());
-    // A newer layout revision arrives; the captured one (2) is still used.
+    // A newer layout revision cancels the captured close prompt.
     let mut newer = two_panes();
     newer.revision = 3;
     app.set_layout(newer);
-    assert!(app.confirm_open());
-    feed(&mut app, &mut fake, b"y");
-    assert_eq!(
-        fake.closes,
-        vec![ClosePlan {
-            target: target(2),
-            expected_layout_revision: 2,
-        }]
-    );
+    assert!(!app.confirm_open());
+    assert!(fake.closes.is_empty());
+    assert_eq!(status(&app), Some("close cancelled: layout changed"));
     assert!(fake.keys.is_empty() && fake.pastes.is_empty());
     assert_eq!(app.focus(), Some(target(1)));
 }
@@ -2392,8 +2438,12 @@ fn menu_close_on_single_pane_warns_that_the_workspace_ends() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     app.set_layout(one_pane(4));
-    // End selects the recovery row; Up reaches "Close pane".
-    feed(&mut app, &mut fake, b"\x02s\x1b[F\x1b[A\r");
+    // Close pane is the eighth local action row.
+    feed(
+        &mut app,
+        &mut fake,
+        b"\x02s\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r",
+    );
     assert!(app.confirm_open());
     let text = screen_text(&app);
     assert!(text.contains("This is the last pane"), "{text}");
@@ -2543,7 +2593,7 @@ fn auto_collapse_cancels_a_prompt_for_the_removed_pane() {
     assert!(app.confirm_open());
     app.set_layout(survivor_only());
     assert!(!app.confirm_open());
-    assert_eq!(status(&app), Some("pane already closed"));
+    assert_eq!(status(&app), Some("close cancelled: layout changed"));
     feed(&mut app, &mut fake, b"y");
     assert!(fake.closes.is_empty());
     app.flush(Instant::now(), &mut fake);
@@ -2617,4 +2667,888 @@ fn pending_zoom_and_divider_preview_never_compose_wrong_sized_snapshots() {
     // Zoom committed while the PTY still has its old underlying size.
     let text = render_text(&app);
     assert!(text.contains("resize pending"), "{text}");
+}
+
+fn scroll_event(up: bool) -> Event {
+    Event::Mouse(MouseEvent {
+        kind: if up {
+            MouseEventKind::ScrollUp
+        } else {
+            MouseEventKind::ScrollDown
+        },
+        column: 5,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+fn scroll_fixture() -> (App, Fake) {
+    let mut app = App::new(24, 81).unwrap();
+    app.set_layout(one_pane(1));
+    let bytes = text_checkpoint("live content stays visible", 1);
+    app.load_screen(target(1), 1, &decode(&bytes).unwrap())
+        .unwrap();
+    (app, Fake::default())
+}
+
+fn wheel(app: &mut App, fake: &mut Fake, up: bool) {
+    app.handle_event(
+        &scroll_event(up),
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        fake,
+    );
+}
+
+fn finish_history(app: &mut App, epoch: u64, offset_rows: u16, text: &str) {
+    app.apply_scroll_update(
+        ScrollUpdate {
+            target: target(1),
+            epoch,
+            result: ScrollResult::History {
+                revision: 1,
+                offset_rows,
+                total_rows: 100,
+                checkpoint: text_checkpoint(text, 1),
+                row_wraps: None,
+            },
+        },
+        Instant::now(),
+    );
+}
+
+#[test]
+fn wheel_keeps_live_and_history_content_visible_while_waiting() {
+    let (mut app, mut fake) = scroll_fixture();
+    let mut compositor = Compositor::try_new().unwrap();
+    let mut parser = vt100::Parser::new(24, 81, 0);
+    let mut bytes = Vec::new();
+    app.render(&mut compositor, &mut bytes, Instant::now())
+        .unwrap();
+    parser.process(&bytes);
+    assert!(compositor.commit());
+    wheel(&mut app, &mut fake, true);
+    bytes.clear();
+    app.render(&mut compositor, &mut bytes, Instant::now())
+        .unwrap();
+    assert!(bytes.is_empty(), "pending read changed the visible frame");
+    assert!(parser
+        .screen()
+        .contents()
+        .contains("live content stays visible"));
+    assert!(compositor.commit());
+    finish_history(
+        &mut app,
+        fake.scrolls[0].1,
+        3,
+        "older content stays visible",
+    );
+    bytes.clear();
+    app.render(&mut compositor, &mut bytes, Instant::now())
+        .unwrap();
+    parser.process(&bytes);
+    assert!(compositor.commit());
+    wheel(&mut app, &mut fake, true);
+    bytes.clear();
+    app.render(&mut compositor, &mut bytes, Instant::now())
+        .unwrap();
+    assert!(bytes.is_empty(), "second pending read replaced history");
+    assert!(parser
+        .screen()
+        .contents()
+        .contains("older content stays visible"));
+    assert!(!parser.screen().contents().contains("loading scrollback"));
+}
+
+#[test]
+fn wheel_burst_coalesces_normal_motion_without_changing_inflight_epoch() {
+    let (mut app, mut fake) = scroll_fixture();
+    wheel(&mut app, &mut fake, true);
+    let epoch = fake.scrolls[0].1;
+    wheel(&mut app, &mut fake, true);
+    wheel(&mut app, &mut fake, true);
+    wheel(&mut app, &mut fake, false);
+    assert_eq!(fake.scrolls.len(), 1);
+    assert_eq!(app.screens[0].view_epoch, epoch);
+    app.flush_scroll(Instant::now(), &mut fake);
+    assert_eq!(fake.scrolls.len(), 1);
+    finish_history(&mut app, epoch, 3, "history");
+    app.flush_scroll(Instant::now(), &mut fake);
+    assert_eq!(fake.scrolls.len(), 2);
+    assert_eq!(fake.scrolls[1].2, 6);
+    assert_ne!(fake.scrolls[1].1, epoch);
+    app.flush_scroll(Instant::now(), &mut fake);
+    assert_eq!(fake.scrolls.len(), 2);
+}
+
+#[test]
+fn typing_resize_and_failure_discard_queued_scroll_without_replay() {
+    for action in 0..3 {
+        let (mut app, mut fake) = scroll_fixture();
+        wheel(&mut app, &mut fake, true);
+        wheel(&mut app, &mut fake, true);
+        let epoch = fake.scrolls[0].1;
+        match action {
+            0 => {
+                feed(&mut app, &mut fake, b"x");
+            }
+            1 => {
+                let mut layout = one_pane(2);
+                layout.columns = 80;
+                layout.panes[0].as_mut().unwrap().rect.columns = 80;
+                app.set_layout(layout);
+            }
+            _ => app.apply_scroll_update(
+                ScrollUpdate {
+                    target: target(1),
+                    epoch,
+                    result: ScrollResult::Failed("connection lost"),
+                },
+                Instant::now(),
+            ),
+        }
+        if action != 2 {
+            finish_history(&mut app, epoch, 3, "stale history");
+        }
+        app.flush_scroll(Instant::now(), &mut fake);
+        assert_eq!(fake.scrolls.len(), 1);
+        assert_eq!(app.screens[0].history_offset, 0);
+    }
+}
+
+#[test]
+fn alternate_screen_wheels_are_not_coalesced_or_replayed() {
+    let (mut app, mut fake) = scroll_fixture();
+    let mut bytes = text_checkpoint("alternate app", 1);
+    bytes[80] = 1;
+    app.load_screen(target(1), 2, &decode(&bytes).unwrap())
+        .unwrap();
+    wheel(&mut app, &mut fake, true);
+    wheel(&mut app, &mut fake, true);
+    app.apply_scroll_update(
+        ScrollUpdate {
+            target: target(1),
+            epoch: fake.scrolls[0].1,
+            result: ScrollResult::MouseDelivered,
+        },
+        Instant::now(),
+    );
+    app.flush_scroll(Instant::now(), &mut fake);
+    assert_eq!(fake.scrolls.len(), 1);
+    assert!(app.screens[0].queued_scroll.is_none());
+    assert!(screen_text(&app).contains("alternate app"));
+}
+
+#[test]
+fn scrollbar_is_in_right_padding_and_selection_cannot_copy_it() {
+    let (mut app, mut fake) = scroll_fixture();
+    wheel(&mut app, &mut fake, true);
+    finish_history(&mut app, fake.scrolls[0].1, 50, "history text");
+    let mut compositor = Compositor::try_new().unwrap();
+    let mut bytes = Vec::new();
+    app.render(&mut compositor, &mut bytes, Instant::now())
+        .unwrap();
+    let mut parser = vt100::Parser::new(24, 81, 0);
+    parser.process(&bytes);
+    let bar: String = (1..23)
+        .map(|row| parser.screen().cell(row, 80).unwrap().contents())
+        .collect();
+    assert!(bar.contains('#') && bar.contains('|'), "{bar}");
+    assert!(parser.screen().contents().contains("history text"));
+    assert_eq!(app.screens[0].history.columns(), 79);
+    app.begin_selection(target(1), 80, 10, Instant::now());
+    assert!(app.selection.is_none());
+}
+
+#[test]
+fn scrollbar_track_pages_with_read_only_history_seek() {
+    let (mut app, mut fake) = scroll_fixture();
+    wheel(&mut app, &mut fake, true);
+    finish_history(&mut app, fake.scrolls[0].1, 50, "history text");
+    fake.scrolls.clear();
+    let event = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 80,
+        row: 2,
+        modifiers: KeyModifiers::NONE,
+    });
+    app.handle_event(
+        &event,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    assert_eq!(fake.seeks.len(), 1);
+    assert_eq!(fake.seeks[0].0, target(1));
+    assert_eq!(fake.seeks[0].2, 71);
+    assert!(fake.scrolls.is_empty());
+}
+
+#[test]
+fn scrollbar_drag_previews_locally_and_seeks_once_on_release() {
+    let (mut app, mut fake) = scroll_fixture();
+    wheel(&mut app, &mut fake, true);
+    finish_history(&mut app, fake.scrolls[0].1, 50, "history text");
+    fake.scrolls.clear();
+    let geometry = scrollbar_geometry(
+        rect(0, 0, 24, 81),
+        Scrollbar {
+            offset_rows: 50,
+            total_rows: 100,
+        },
+    )
+    .unwrap();
+    let press = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: geometry.thumb.x,
+        row: geometry.thumb.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    let motion = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: geometry.thumb.x,
+        row: geometry.track.y + geometry.track.rows - 1,
+        modifiers: KeyModifiers::NONE,
+    });
+    let release = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: geometry.thumb.x,
+        row: geometry.track.y + geometry.track.rows - 1,
+        modifiers: KeyModifiers::NONE,
+    });
+    for event in [&press, &motion] {
+        app.handle_event(
+            event,
+            Instant::now(),
+            Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+            &mut fake,
+        );
+    }
+    assert!(fake.seeks.is_empty(), "motion only previews local geometry");
+    assert_eq!(app.pointer_seek.map(|drag| drag.preview_offset), Some(0));
+    app.handle_event(
+        &release,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    assert_eq!(fake.seeks.len(), 1);
+    assert_eq!(fake.seeks[0].2, 0);
+    assert!(fake.scrolls.is_empty());
+}
+
+#[test]
+fn navigation_history_keys_use_read_only_absolute_seek_effects() {
+    let (mut app, mut fake) = scroll_fixture();
+    app.screens[0].history_total = 100;
+    for code in [
+        KeyCode::PageUp,
+        KeyCode::PageDown,
+        KeyCode::Home,
+        KeyCode::End,
+    ] {
+        feed(&mut app, &mut fake, b"\x02");
+        let event = Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        app.handle_event(
+            &event,
+            Instant::now(),
+            Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+            &mut fake,
+        );
+        app.flush_scroll(Instant::now(), &mut fake);
+        if let Some((_, epoch, offset)) = fake.seeks.last().copied() {
+            finish_history(&mut app, epoch, offset, "history");
+        }
+    }
+    assert_eq!(
+        fake.seeks.iter().map(|entry| entry.2).collect::<Vec<_>>(),
+        vec![21, 0, 100, 0]
+    );
+    assert!(
+        fake.scrolls.is_empty(),
+        "history key seeks never use child wheel effects"
+    );
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty());
+}
+
+#[test]
+fn close_confirmation_mouse_buttons_are_explicit_and_consumed() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(4));
+    feed(&mut app, &mut fake, b"\x02x");
+    let opener_release = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 79,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    });
+    app.handle_event(
+        &opener_release,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    assert!(
+        app.confirm_open(),
+        "the opener release cannot activate Close"
+    );
+    let cancel = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 10,
+        row: 23,
+        modifiers: KeyModifiers::NONE,
+    });
+    app.handle_event(
+        &cancel,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    assert!(!app.confirm_open());
+    assert!(fake.closes.is_empty());
+    app.focus_target(target(1));
+    feed(&mut app, &mut fake, b"\x02x");
+    let close = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 23,
+        modifiers: KeyModifiers::NONE,
+    });
+    app.handle_event(
+        &close,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    assert_eq!(fake.closes.len(), 1);
+    assert_eq!(fake.closes[0].target, target(1));
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty());
+}
+
+#[test]
+fn rendered_confirmation_labels_share_click_geometry_across_routes_and_widths() {
+    for width in [22, 40, 81, 100] {
+        for workspace in [false, true] {
+            for last_pane in [false, true] {
+                if !last_pane && width < 81 {
+                    continue;
+                }
+                let mut app = App::new(24, width).unwrap();
+                let mut fake = Fake::default();
+                if workspace {
+                    let (index, route, _) = workspace_catalog();
+                    app.install_workspace_tabs(index, route);
+                }
+                let (rows, columns) = app.viewport();
+                let layout = if last_pane {
+                    let mut layout = one_pane(7);
+                    layout.rows = rows;
+                    layout.columns = columns;
+                    layout.panes[0].as_mut().unwrap().rect = rect(0, 0, rows, columns);
+                    layout
+                } else {
+                    let mut layout = two_panes();
+                    let left = (columns - 1) / 2;
+                    layout.rows = rows;
+                    layout.columns = columns;
+                    layout.panes[0].as_mut().unwrap().rect = rect(0, 0, rows, left);
+                    layout.panes[1].as_mut().unwrap().rect =
+                        rect(left + 1, 0, rows, columns - left - 1);
+                    layout.divider = Some(rect(left, 0, rows, 1));
+                    layout.dividers[0] = layout.divider;
+                    layout
+                };
+                app.set_layout(layout);
+                let offset = u16::from(workspace);
+                let close_x = columns - 3;
+                let opener = Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: close_x,
+                    row: offset,
+                    modifiers: KeyModifiers::NONE,
+                });
+                app.handle_event(
+                    &opener,
+                    Instant::now(),
+                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                    &mut fake,
+                );
+                assert!(app.confirm_open(), "width={width} workspace={workspace}");
+                let release = Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    column: close_x,
+                    row: offset,
+                    modifiers: KeyModifiers::NONE,
+                });
+                app.handle_event(
+                    &release,
+                    Instant::now(),
+                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                    &mut fake,
+                );
+                assert!(app.confirm_open(), "opener release width={width}");
+                let close = parsed_label_position(&app, "[Close]").unwrap();
+                let cancel = parsed_label_position(&app, "[Cancel]").unwrap();
+                assert_eq!(close.1, cancel.1);
+                let cancel_event = Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: cancel.0 + 1,
+                    row: cancel.1,
+                    modifiers: KeyModifiers::NONE,
+                });
+                app.handle_event(
+                    &cancel_event,
+                    Instant::now(),
+                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                    &mut fake,
+                );
+                assert!(!app.confirm_open());
+                assert!(fake.closes.is_empty());
+
+                app.handle_event(
+                    &opener,
+                    Instant::now(),
+                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                    &mut fake,
+                );
+                let close = parsed_label_position(&app, "[Close]").unwrap();
+                let close_event = Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: close.0 + 1,
+                    row: close.1,
+                    modifiers: KeyModifiers::NONE,
+                });
+                app.handle_event(
+                    &close_event,
+                    Instant::now(),
+                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                    &mut fake,
+                );
+                assert_eq!(fake.closes.len(), 1);
+                assert_eq!(
+                    fake.closes[0].target,
+                    if last_pane { target(1) } else { target(2) }
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn pointer_menu_cancel_is_mouse_only_and_never_sends_child_input() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(2));
+    let menu = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    });
+    app.handle_event(
+        &menu,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    assert!(app.actions_menu.is_some());
+    let cancel = parsed_label_position(&app, "Cancel").unwrap();
+    let event = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: cancel.0 + 1,
+        row: cancel.1,
+        modifiers: KeyModifiers::NONE,
+    });
+    app.handle_event(
+        &event,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    assert!(app.actions_menu.is_none());
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+}
+
+fn gesture(app: &mut App, fake: &mut Fake, kind: MouseEventKind, x: u16, y: u16) {
+    app.handle_event(
+        &Event::Mouse(MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }),
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        fake,
+    );
+}
+
+fn reply_from_tree(tree: &PaneLayout) -> LayoutReply {
+    let snapshot = tree.snapshot();
+    LayoutReply {
+        revision: snapshot.revision,
+        rows: snapshot.rows,
+        columns: snapshot.columns,
+        panes: snapshot.panes.map(|pane| {
+            pane.map(|pane| UiPane {
+                target: pane.target,
+                rect: pane.rect,
+                pending_confirmed: None,
+            })
+        }),
+        divider: snapshot.divider,
+        dividers: snapshot.dividers,
+    }
+}
+
+#[test]
+fn pointer_dividers_on_both_axes_and_nested_trees_submit_once_on_release() {
+    for direction in [SplitDirection::Right, SplitDirection::Down] {
+        let mut tree = PaneLayout::new(target(1), 40, 101).unwrap();
+        let preview = tree
+            .preview_split(target(1), 1, direction, target(2))
+            .unwrap();
+        tree.commit_split(preview).unwrap();
+        let preview = tree
+            .preview_split(target(2), 2, SplitDirection::Down, target(3))
+            .unwrap();
+        tree.commit_split(preview).unwrap();
+        let reply = reply_from_tree(&tree);
+        for (index, divider) in reply.dividers.into_iter().enumerate() {
+            let Some(divider) = divider else { continue };
+            let mut app = App::new(40, 101).unwrap();
+            let mut fake = Fake::default();
+            install_operations_view(&mut app, operations_view(reply, None));
+            let x = divider.x;
+            let y = divider.y;
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Down(MouseButton::Left),
+                x,
+                y,
+            );
+            let captured = app.pointer_divider.expect("divider captured");
+            assert_eq!(captured.divider_index as usize, index);
+            let (next_x, next_y) = if divider.columns == 1 {
+                (x + 1, y)
+            } else {
+                (x, y + 1)
+            };
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Drag(MouseButton::Left),
+                next_x,
+                next_y,
+            );
+            assert!(fake.pane_operations.is_empty(), "preview is local");
+            assert_eq!(app.layout(), Some(&reply));
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Up(MouseButton::Left),
+                next_x,
+                next_y,
+            );
+            assert_eq!(
+                fake.pane_operations,
+                vec![PaneAction::DividerSet {
+                    target: captured.target,
+                    expected_layout_revision: reply.revision,
+                    divider_index: index as u8,
+                    first_cells: captured.initial_span + 1,
+                }]
+            );
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Up(MouseButton::Left),
+                next_x,
+                next_y,
+            );
+            assert_eq!(fake.pane_operations.len(), 1);
+            assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.scrolls.is_empty());
+        }
+    }
+}
+
+#[test]
+fn pointer_divider_cancellation_clears_preview_and_cannot_later_commit_it() {
+    for cancellation in [
+        Event::FocusLost,
+        Event::Resize(100, 30),
+        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    ] {
+        let mut app = App::new(24, 81).unwrap();
+        let mut fake = Fake::default();
+        install_operations_view(&mut app, operations_view(two_panes(), None));
+        feed(&mut app, &mut fake, b"\x1b[<0;41;6M\x1b[<32;44;6M");
+        assert!(app.pointer_divider.is_some());
+        app.handle_event(
+            &cancellation,
+            Instant::now(),
+            Availability::Enabled,
+            &mut fake,
+        );
+        assert!(app.pointer_divider.is_none() && app.pane_mode.is_none());
+        feed(&mut app, &mut fake, b"\x1b[<0;44;6m");
+        assert!(fake.pane_operations.is_empty());
+    }
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    install_operations_view(&mut app, operations_view(two_panes(), None));
+    let normal = text_checkpoint_size("normal", 1, 22, 38);
+    app.load_screen(target(1), 1, &decode(&normal).unwrap())
+        .unwrap();
+    feed(&mut app, &mut fake, b"\x1b[<0;41;6M\x1b[<32;44;6M");
+    let mut alternate = normal.clone();
+    alternate[80] = 1;
+    app.load_screen(target(1), 2, &decode(&alternate).unwrap())
+        .unwrap();
+    assert!(app.pointer_divider.is_none() && app.pane_mode.is_none());
+    feed(&mut app, &mut fake, b"\r");
+    assert!(
+        fake.pane_operations.is_empty(),
+        "Enter cannot commit a canceled drag"
+    );
+}
+
+#[test]
+fn pointer_divider_clamps_sparse_motion_and_unchanged_release_does_nothing() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    install_operations_view(&mut app, operations_view(two_panes(), None));
+    feed(&mut app, &mut fake, b"\x1b[<0;41;6M\x1b[<0;41;6m");
+    assert!(fake.pane_operations.is_empty());
+    for requested in [0, 80, u16::MAX] {
+        let span = app.clamp_divider_span(target(1), 2, 0, requested).unwrap();
+        assert!((22..=58).contains(&span));
+        assert!(app.divider_value_valid(target(1), 2, 0, span));
+    }
+    feed(
+        &mut app,
+        &mut fake,
+        b"\x1b[<0;41;6M\x1b[<32;1;6M\x1b[<0;1;6m",
+    );
+    assert!(matches!(
+        fake.pane_operations.as_slice(),
+        [PaneAction::DividerSet {
+            first_cells: 22,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn scrollbar_escape_cancels_preview_without_seeking_or_copying() {
+    let (mut app, mut fake) = scroll_fixture();
+    wheel(&mut app, &mut fake, true);
+    finish_history(&mut app, fake.scrolls[0].1, 50, "history");
+    let geometry = scrollbar_geometry(
+        rect(0, 0, 24, 81),
+        Scrollbar {
+            offset_rows: 50,
+            total_rows: 100,
+        },
+    )
+    .unwrap();
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        geometry.thumb.x,
+        geometry.thumb.y,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Drag(MouseButton::Left),
+        geometry.thumb.x,
+        1,
+    );
+    feed(&mut app, &mut fake, b"\x1b");
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        geometry.thumb.x,
+        1,
+    );
+    assert!(app.pointer_seek.is_none() && fake.seeks.is_empty());
+    assert!(app.take_copy_text().is_none());
+}
+
+#[test]
+fn help_can_be_closed_by_its_rendered_control_without_shell_input() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(1));
+    feed(&mut app, &mut fake, b"\x02?");
+    let (x, y) = parsed_label_position(&app, "[Close]").unwrap();
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        x + 1,
+        y,
+    );
+    assert!(!app.help_open());
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty());
+}
+
+#[test]
+fn every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height() {
+    for rows in [7, 8, 24] {
+        for columns in [22, 81] {
+            for header in [false, true] {
+                let mut app = App::new(rows + u16::from(header), columns).unwrap();
+                let mut fake = Fake::default();
+                if header {
+                    let (index, route, _) = workspace_catalog();
+                    app.install_workspace_tabs(index, route);
+                }
+                let tree = PaneLayout::new(target(1), rows, columns).unwrap();
+                app.set_layout(reply_from_tree(&tree));
+                let (x, y) = parsed_label_position(&app, "[Menu]").unwrap();
+                gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Down(MouseButton::Left),
+                    x + 1,
+                    y,
+                );
+                let mut visited = std::collections::BTreeSet::new();
+                for _ in 0..4 {
+                    let (start, end) = app.actions_page(app.actions_menu.unwrap());
+                    visited.extend(start..end);
+                    assert!(parsed_label_position(&app, "[Cancel]").is_some());
+                    if start <= 5 && 5 < end {
+                        let (x, y) = parsed_label_position(&app, "Saved layout").unwrap();
+                        let event = Event::Mouse(MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Left),
+                            column: x + 1,
+                            row: y,
+                            modifiers: KeyModifiers::NONE,
+                        });
+                        assert!(app.needs_recovery_availability(&event));
+                    }
+                    let Some((x, y)) = parsed_label_position(&app, "[More]") else {
+                        break;
+                    };
+                    gesture(
+                        &mut app,
+                        &mut fake,
+                        MouseEventKind::Down(MouseButton::Left),
+                        x + 1,
+                        y,
+                    );
+                }
+                assert_eq!(
+                    visited.into_iter().collect::<Vec<_>>(),
+                    (0..9).collect::<Vec<_>>()
+                );
+                let (x, y) = parsed_label_position(&app, "[Cancel]").unwrap();
+                gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Down(MouseButton::Left),
+                    x + 1,
+                    y,
+                );
+                assert!(app.actions_menu.is_none());
+                assert!(
+                    fake.keys.is_empty()
+                        && fake.pastes.is_empty()
+                        && fake.closes.is_empty()
+                        && fake.pane_operations.is_empty()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn actions_keyboard_cancel_highlight_matches_its_behavior() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(1));
+    feed(&mut app, &mut fake, b"\x02s");
+    for _ in 0..9 {
+        feed(&mut app, &mut fake, b"\x1b[B");
+    }
+    assert!(render_text(&app).contains("> [Cancel]"));
+    feed(&mut app, &mut fake, b"\r");
+    assert!(app.actions_menu.is_none());
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+}
+
+#[test]
+fn scrollbar_hit_testing_matches_resize_placeholder_rendering() {
+    let (mut app, mut fake) = scroll_fixture();
+    let mut view = operations_view(one_pane(1), None);
+    view.confirmed_sizes[0] = Some((21, 79));
+    view.layout.panes[0].as_mut().unwrap().pending_confirmed = Some((21, 79));
+    install_operations_view(&mut app, view);
+    assert!(render_text(&app).contains("resize pending"));
+    assert!(app.scrollbar_hit_at(80, 10).is_none());
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        80,
+        10,
+    );
+    assert!(fake.seeks.is_empty() && fake.scrolls.is_empty());
+}
+
+#[test]
+fn divider_menu_has_pointer_adjust_apply_and_cancel_controls() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    install_operations_view(&mut app, operations_view(two_panes(), None));
+    feed(&mut app, &mut fake, b"\x02s");
+    for label in ["Resize divider", "[-]", "[+]", "[-]", "[Apply]"] {
+        let (x, y) = parsed_label_position(&app, label).unwrap();
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 1,
+            y,
+        );
+    }
+    assert_eq!(
+        fake.pane_operations,
+        vec![PaneAction::DividerSet {
+            target: target(1),
+            expected_layout_revision: 2,
+            divider_index: 0,
+            first_cells: 39,
+        }]
+    );
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty());
+}
+
+#[test]
+fn pane_menu_remains_pointer_reachable_during_keyboard_copy_mode() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(1));
+    let data = text_checkpoint("copy", 1);
+    app.load_screen_with_wraps(target(1), 1, &decode(&data).unwrap(), Some(&[false; 22]))
+        .unwrap();
+    feed(&mut app, &mut fake, b"\x02c");
+    assert!(app.copy_mode);
+    let (x, y) = parsed_label_position(&app, "[Menu]").unwrap();
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        x + 1,
+        y,
+    );
+    assert!(!app.copy_mode && app.actions_menu.is_some());
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty() && app.take_copy_text().is_none());
 }

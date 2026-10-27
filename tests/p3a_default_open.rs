@@ -260,9 +260,18 @@ impl Client {
     /// `stderr`: optional replacement for the client's stderr (for example
     /// the write end of a full pipe); defaults to the outer PTY.
     fn spawn_with(fixture: &Fixture, stderr: Option<std::os::fd::OwnedFd>) -> Self {
+        Self::spawn_sized(fixture, stderr, ROWS, COLUMNS)
+    }
+
+    fn spawn_sized(
+        fixture: &Fixture,
+        stderr: Option<std::os::fd::OwnedFd>,
+        rows: u16,
+        columns: u16,
+    ) -> Self {
         let winsize = Winsize {
-            ws_row: ROWS,
-            ws_col: COLUMNS,
+            ws_row: rows,
+            ws_col: columns,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
@@ -414,6 +423,29 @@ impl Client {
         }
     }
 
+    /// Match exact root PTY rows, excluding top controls and side scrollbar.
+    /// A scrollbar is chrome, not part of an acknowledged shell output line.
+    fn wait_root_marker(&mut self, marker: &str) {
+        let capture = self.capture.clone();
+        self.wait_screen(marker, |_| {
+            let mut parser = vt100::Parser::new(ROWS, COLUMNS, 0);
+            parser.process(&capture.lock().unwrap());
+            (1..ROWS - 1).any(|row| {
+                let line = (1..COLUMNS - 1)
+                    .map(|column| {
+                        let cell = parser.screen().cell(row, column).unwrap();
+                        if cell.contents().is_empty() {
+                            " "
+                        } else {
+                            cell.contents()
+                        }
+                    })
+                    .collect::<String>();
+                line.trim() == marker
+            })
+        });
+    }
+
     fn wait_screen(&mut self, what: &str, done: impl Fn(&str) -> bool) -> String {
         let deadline = Instant::now() + STEP;
         loop {
@@ -551,6 +583,39 @@ fn detach(client: &mut Client) {
 }
 
 #[test]
+fn wide_terminal_starts_and_reattaches_without_losing_the_shell() {
+    let fixture = Fixture::new();
+    let mut original_target = None;
+    for _ in 0..2 {
+        let mut client = Client::spawn_sized(&fixture, None, 64, 269);
+        client.wait_raw_mode();
+        client.wait_until("wide terminal pane controls and shell prompt", |client| {
+            let mut parser = vt100::Parser::new(64, 269, 0);
+            parser.process(&client.capture());
+            let screen = parser.screen().contents();
+            screen.contains("[Menu]") && (screen.contains('%') || screen.contains('$'))
+        });
+        if original_target.is_none() {
+            let (code, output) = fixture.control("wide-reader", &["init"]);
+            assert_eq!(code, 0, "initialize layout reader: {output}");
+        }
+        let layout = wait_control("bounded wide-terminal layout", || {
+            let (code, text) = fixture.control("wide-reader", &["layout"]);
+            (code == 0 && text.contains("\"columns\":240")).then_some(text)
+        });
+        let target = first_target(&layout).expect("live pane").to_owned();
+        if let Some(original) = &original_target {
+            assert_eq!(&target, original, "reattach preserves the exact live shell");
+        } else {
+            original_target = Some(target);
+        }
+        detach(&mut client);
+        assert!(fixture.server_alive());
+    }
+    assert_eq!(fixture.stop().0, 0);
+}
+
+#[test]
 fn bare_panelink_starts_splits_detaches_reattaches_and_stops() {
     let fixture = Fixture::new();
 
@@ -558,9 +623,7 @@ fn bare_panelink_starts_splits_detaches_reattaches_and_stops() {
     let mut client = open_client(&fixture);
     assert!(fixture.socket().exists(), "server socket created");
     client.type_slowly(b"echo ACK$((40+1))\r");
-    client.wait_screen("ACK41", |screen| {
-        screen.lines().any(|line| line.trim() == "ACK41")
-    });
+    client.wait_root_marker("ACK41");
 
     // Right-click opens the split menu; `r` splits right.
     client.write(b"\x1b[<2;10;5M\x1b[<2;10;5m");

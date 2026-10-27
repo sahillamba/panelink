@@ -400,6 +400,29 @@ impl Client {
         parser.screen().contents()
     }
 
+    /// Match exact root PTY rows, excluding top controls and side scrollbar.
+    /// A scrollbar is chrome, not part of an acknowledged shell output line.
+    fn wait_root_marker(&mut self, marker: &str) {
+        let capture = self.capture.clone();
+        self.wait_screen(marker, |_| {
+            let mut parser = vt100::Parser::new(ROWS, COLUMNS, 0);
+            parser.process(&capture.lock().unwrap());
+            (1..ROWS - 1).any(|row| {
+                let line = (1..COLUMNS - 1)
+                    .map(|column| {
+                        let cell = parser.screen().cell(row, column).unwrap();
+                        if cell.contents().is_empty() {
+                            " "
+                        } else {
+                            cell.contents()
+                        }
+                    })
+                    .collect::<String>();
+                line.trim() == marker
+            })
+        });
+    }
+
     fn wait_screen(&mut self, what: &str, done: impl Fn(&str) -> bool) -> String {
         let deadline = Instant::now() + STEP;
         loop {
@@ -532,9 +555,7 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     });
 
     client.type_slowly(b"echo ACK$((40+1))\r");
-    client.wait_screen("ACK41 output", |screen| {
-        screen.lines().any(|line| line.trim() == "ACK41")
-    });
+    client.wait_root_marker("ACK41");
     assert!(read_pane(&fixture, "one.ctx", &first).contains("ACK41"));
 
     // Right-click inside pane 1 opens the menu; nothing reaches the child.
@@ -588,12 +609,16 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     assert!(!read_pane(&fixture, "one.ctx", &first).contains("ACK42"));
     client.wait_screen("ACK42 rendered", |screen| screen.contains("ACK42"));
 
-    // Keyboard fallback: Ctrl-B s opens the menu for the focused pane (two of
-    // MAX_PANES panes, so splits are still offered); Esc closes it and no byte
-    // (neither 's' nor ESC) reaches the child.
+    // Keyboard fallback: Ctrl-B s opens pane actions; Enter selects Split for
+    // the focused pane (two of MAX_PANES, so splits are still offered). Esc
+    // closes it and none of the menu keys reaches the child.
     thread::sleep(Duration::from_millis(300));
     let before = read_pane(&fixture, "two.ctx", &second);
     client.write(b"\x02s");
+    client.wait_screen("pane actions menu", |screen| {
+        screen.contains("Split pane...")
+    });
+    client.write(b"\r");
     client.wait_screen("keyboard menu", |screen| {
         screen.contains("Split Down") && screen.contains("Esc: close")
     });
@@ -897,9 +922,7 @@ fn reattach_after_server_restart_replaces_dead_contexts() {
         screen.contains("PANE1-READY")
     });
     client.type_slowly(b"echo RE$((40+3))\r");
-    client.wait_screen("typing after restart", |screen| {
-        screen.lines().any(|line| line.trim() == "RE43")
-    });
+    client.wait_root_marker("RE43");
     client.write(b"\x18");
     assert_eq!(client.wait_attach_exit(), 0);
     drop(client);
