@@ -152,3 +152,27 @@ fn discard_shutdown_escalates_a_ready_hup_ignoring_continuous_writer() {
     assert!(session.kill_escalated());
     assert!(session.exit_status().is_some());
 }
+
+#[test]
+fn submit_brackets_text_and_keeps_enter_outside_the_paste() {
+    for bracketed in [false, true] {
+        let expected: &[u8] = if bracketed {
+            b"\x1b[200~hello\x1b[201~\r"
+        } else {
+            b"hello\r"
+        };
+        let fixture = Fixture::new();
+        let mode = if bracketed { "\\033[?2004h" } else { "" };
+        let script = format!("/bin/stty raw -echo || exit 1; printf '{mode}READY\\r\\n'; /bin/dd bs=1 count={} 2>/dev/null | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'", expected.len());
+        let mut session = fixture.spawn(&script);
+        until(&mut session, |session| text(session).contains("READY"));
+        assert_eq!(session.snapshot().bracketed_paste(), bracketed);
+        session.text("hello", true).unwrap();
+        until(&mut session, |session| {
+            session.exit_status().is_some() && session.pty_eof()
+        });
+        let expected_hex: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert!(text(&session).contains(&expected_hex), "{}", text(&session));
+        assert!(session.exit_status().unwrap().success());
+    }
+}

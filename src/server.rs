@@ -780,11 +780,15 @@ impl GlobalAuthority {
             capability_mask & crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS;
         let pane_operations =
             capability_mask & crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS;
+        let agent_observation =
+            capability_mask & crate::handshake_protocol::CAPABILITY_AGENT_OBSERVATION;
         let available = (self.available_capabilities(session)
             | workspace
             | pane_metadata
             | screen_row_wraps
-            | pane_operations)
+            | pane_operations
+            | agent_observation
+            | (capability_mask & crate::handshake_protocol::CAPABILITY_BUILD_IDENTITY))
             & capability_mask;
 
         let (lease, capabilities) = match hello.resume {

@@ -745,7 +745,6 @@ fn event_loop(
             break Ok(130);
         }
         worker.poll(NetView {
-            focus: app.focus(),
             desired_root: if app.route_switching() || app.pane_mutations_blocked() {
                 None
             } else {

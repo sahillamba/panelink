@@ -1,5 +1,11 @@
 # Agent-to-pane control plane proposal
 
+Agent API ergonomics follow-up (2026-10-27): the broad
+[AGENT-API-PROPOSAL.md](AGENT-API-PROPOSAL.md) remains a design proposal, while
+the bounded shared per-batch ownership, pane submit and recognized-agent slice
+below is source-implemented. Bounded private-PTY checks are recorded in [implementation evidence](progress/HERDR-WORKFLOW-IMPLEMENTATION.md); existing-server activation and real provider acceptance remain open. This slice does
+not settle the broader access policy, retained-control UX, or other open choices.
+
 Status: proposed design for confirmed feature R-15, 2026-10-17, with a bounded implementation checkpoint dated 2026-10-18 below. The user confirmed that agents need a simple CLI/API to discover, read, and deliberately control managed pane/process sessions. The broader interface and permission policy remain proposed; cross-workspace scope and access defaults remain open. Autonomous delegation/scheduling is not implied.
 
 ## Current Phase3 continuation — 2026-10-23
@@ -14,9 +20,75 @@ deadline, with no inferred UI/agent/provider role or caller name. It uses the
 existing SessionInfo and authority checks; see
 [accepted owner contract](progress/P3-OWNER-IDENTITY-TASK.md).
 The [runtime reconciliation](progress/P3-RUNTIME-CONTRACT-AUDIT.md) maps the
-implemented scope to evidence; older pending statements below are historical
-unless explicitly retained there. The wider proposed API, hierarchy, human takeover policy, provider identity,
-per-agent isolation and full Phase3 acceptance remain separate/open.
+earlier implemented scope to evidence; older pending statements below are
+historical unless explicitly retained there. The wider proposed API, hierarchy,
+human takeover policy, provider conversation identity, per-agent isolation and
+full Phase3 acceptance remain separate/open.
+
+## Bounded shared input and recognized-agent source implementation — 2026-10-27
+
+The attached UI no longer claims idle panes. Each admitted UI input batch takes
+a short ownership claim and uses separate operation keys for claim, input and
+release. It releases only after known `Applied` input. Failed, partial, or
+uncertain input is never replayed or released. This protects the admitted batch
+only; it does not reserve a pane while a person types an unfinished draft
+between batches. Existing retained `pane claim` ownership remains exclusive
+and blocks other writers until a known release. The UI and scoped submit do not
+steal or clear it.
+
+`pane submit N TEXT [--json] [--as NAME]` submits nonempty printable text, then
+Enter, with the existing 32,768-byte UTF-8 input bound. Its claim, submission,
+and release are three separately keyed operations. After input admission, release is attempted only
+after a known `Applied` result. A stale-layout preflight after a successful claim
+but before any input key is reserved releases the exact original target claim. Partial, failed, or uncertain
+input is not replayed and is not released. A release failure after `Applied`
+reports delivery confirmed and release unconfirmed. This command adds a
+convenience path without changing the retained claim/release behavior.
+
+Recognized-agent CLI commands are `agent list [--json]`, `agent get REF
+[--json]`, `agent read REF [--lines K] [--json]`, `agent prompt REF TEXT
+[--wait] [--until STATE] [--timeout SECS] [--json]`, and `agent wait REF
+[--until STATE] [--timeout SECS] [--json]`. `--until` and `--timeout` on prompt
+are valid only with `--wait`. They use the default workspace.
+`REF` is the returned process-bound `agent_ref` or a pane index where permitted;
+mutating prompt requires the process-bound ref. `read` defaults to 80 lines and
+accepts 1–1024. Wait defaults to `idle` or `blocked` and 30 seconds; timeout is
+1–300 seconds. State choices are `idle`, `working`, `blocked`, and `unknown`.
+Text arguments are joined with spaces, nonempty, contain no control scalars and
+are bounded to 32,768 UTF-8 bytes.
+
+Native recognition binds the PTY foreground-group leader PID to its kernel
+birth identity and executable basename `codex` or `opencode`. Wrappers are
+unknown. State comes from conservative bounded screen markers and can be
+unknown. It is not provider conversation identity, authorization evidence, or
+a per-prompt completion signal. Prompt requires observed `idle`; blocked,
+working, and unknown screens refuse input. A post-prompt wait observes activity
+and a settled state but does not prove which conversation turn completed.
+
+The optional wire feature is capability `128` (`CAPABILITY_AGENT_OBSERVATION`)
+and schema `14`; the protocol uses strict big-endian fixed fields, reserved-byte
+and exact-length checks. Query is 48 bytes: schema `u16`, kind `u16=1`, four
+zero reserved bytes, then five `u64` target fields. Observation is 96 bytes:
+schema, kind `0x8001`, reserved bytes, target, PID/start-seconds/start-
+microseconds as three `u64`s, kind/state as `u8`s, six reserved bytes, screen
+revision and monotonic sample time as `u64`s. Unknown/Codex/OpenCode kinds are
+0/1/2; Unknown/Idle/Working/Blocked/Exited states are 0/1/2/3/4. Guarded
+submit has a 128-byte prefix: schema, kind `2`, reserved bytes, three `u64`
+operation-key fields, target, owner revision, process identity, kind byte,
+reserved bytes, screen revision, `u32` text length, reserved bytes, then text.
+The total payload ceiling is 65,536 bytes; text also obeys the existing 32,768
+UTF-8-byte printable-input bound. Unknown identity cannot claim actionable
+state, and no executable path, argv, or environment is persisted by this codec.
+The server must match the client capability/schema; older servers report
+unsupported, and updating may require restarting the server plus UI
+detach/reattach. Source and documentation changes do not establish runtime
+acceptance. The existing private caller-context and socket permission
+prerequisites still apply.
+
+Older proposal sections below describe broader candidate interfaces and policy.
+Where they conflict with this bounded contract, this dated source-implementation
+section controls the documented slice; it does not convert other proposals or
+pending product decisions into accepted behavior.
 
 ## Historical implementation checkpoint — 2026-10-18
 
@@ -339,3 +411,12 @@ R-16 adds `pane.split --direction left|right|up|down` as the shared TUI/agent du
 The initial `src/control_protocol.rs` slice implemented pure schema1 request payloads for Read/Text/Paste/Submit/Interrupt, with exact borrowed nonzero numeric TargetRef tuples, operation keys and expected input-owner revisions. Its text limits, control-character handling, and read bounds are described in [P3-CONTROL.md](progress/P3-CONTROL.md). This historical checkpoint predates response/session codecs, server dispatch, and the bounded CLI; it is superseded by the current implementation checkpoint at the top of this document. The full R-15 API described above is still not implemented.
 
 The [handshake codec](progress/P3-HANDSHAKE.md) defines Hello/Welcome and capability bits; the runtime now advertises metadata Events when tracking is available. The [macOS peer credential wrapper](progress/P3-PEER-REVIEW.md) checks the connected stream's kernel effective UID before protocol processing. A private-directory pathname listener exists and refuses an existing endpoint; the earlier pathname CLI fixture is operator-confirmed passing outside the sandbox; the expanded live-watch CLI fixture remains an external acceptance check. These prototype facts do not establish release compatibility or per-agent isolation.
+
+## Feedback corrections — 2026-10-27
+
+The implemented feedback follow-up adds child-mode-aware bracketed submit,
+bounded `--bottom` screen selection, conservative styled Codex placeholder
+recognition, failure/ownership diagnostics and independently queried server
+build identity. See the [canonical contract](SPEC.md#agent-feedback-corrections--2026-10-27)
+and [verification record](progress/AGENT-FEEDBACK-FIXES-2026-10-27.md).
+PTY delivery remains separate from application acceptance and task completion.

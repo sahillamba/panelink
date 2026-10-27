@@ -3,6 +3,9 @@
 //! Includes a disposable terminal probe and an experimental one-child local
 //! server. This does not provide a full interactive multiplexer or agent recovery.
 
+pub mod agent_detection;
+pub mod agent_protocol;
+pub mod build_info;
 pub mod close_protocol;
 pub mod control_protocol;
 pub mod event_journal;

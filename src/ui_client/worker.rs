@@ -235,7 +235,7 @@ impl WorkerHandle {
     }
 
     pub(crate) fn poll(&mut self, view: NetView) {
-        if self.poll_pending {
+        if self.poll_pending || self.scroll_pending {
             return;
         }
         if self

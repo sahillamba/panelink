@@ -21,6 +21,7 @@ pub const MAX_RECT_COLUMNS: u16 = 240;
 const MAX_ROWS: usize = MAX_RECT_ROWS as usize;
 const MAX_COLUMNS: usize = MAX_RECT_COLUMNS as usize;
 const MAX_OVERLAY_CELLS: usize = MAX_ROWS * MAX_COLUMNS;
+const VERSION_LABEL: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 /// One sanitized cell in the persistent, fixed top row.
 ///
@@ -991,7 +992,7 @@ impl Compositor {
         Ok(())
     }
 
-    /// Paint pane controls in the top padding row, restoring only cells
+    /// Paint pane controls and the bottom-right version in existing padding, restoring only cells
     /// damaged by a moved modal overlay during incremental rendering.
     fn paint_pane_controls<W: Write>(
         &self,
@@ -1029,6 +1030,28 @@ impl Compositor {
                 |column| {
                     (!repaint_all && !damaged(hitbox.y, column))
                         || excluded(self.pending_meta.overlay, hitbox.y, column)
+                },
+                |offset| label[usize::from(offset)],
+            )?;
+        }
+        // Only the pane touching the viewport's bottom-right corner owns the
+        // badge. Its bottom margin is outside the child PTY and all hitboxes.
+        let label = VERSION_LABEL.as_bytes();
+        if rect.x + rect.columns == self.pending_meta.host_columns
+            && rect.y + rect.rows == self.pending_meta.host_rows
+            && label.len() < usize::from(rect.columns)
+        {
+            let row = rect.y + rect.rows - 1;
+            let column = rect.x + rect.columns - 1 - label.len() as u16;
+            output.write_all(b"\x1b[0;2m")?;
+            write_ascii_run(
+                output,
+                row,
+                column,
+                label.len() as u16,
+                |column| {
+                    (!repaint_all && !damaged(row, column))
+                        || excluded(self.pending_meta.overlay, row, column)
                 },
                 |offset| label[usize::from(offset)],
             )?;
@@ -2206,6 +2229,81 @@ mod tests {
     }
 
     #[test]
+    fn version_badge_uses_bottom_margin_and_survives_modal_damage() {
+        let pane = snapshot_from("CONTENT", 5, 20);
+        let base = single_pane(&pane);
+        let row = base.host_rows - 1;
+        let column = base.host_columns - 1 - VERSION_LABEL.len() as u16;
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut stream = rendered_committed(&mut compositor, &base);
+        let parser = screen(&stream, &base);
+        assert_eq!(
+            label_at(&parser, row, column, VERSION_LABEL.len() as u16),
+            VERSION_LABEL
+        );
+        assert_eq!(label_at(&parser, 1, 1, 7), "CONTENT");
+        assert!(rendered_committed(&mut compositor, &base).is_empty());
+
+        let lines = [OverlayLine {
+            text: "NOTICE",
+            style: OverlayStyle::Selected,
+        }];
+        let mut covered = base;
+        covered.overlay = Some(OverlayView {
+            rect: rect(row, column, 1, VERSION_LABEL.len() as u16),
+            lines: &lines,
+        });
+        stream.extend(rendered_committed(&mut compositor, &covered));
+        assert_eq!(label_at(&screen(&stream, &base), row, column, 6), "NOTICE");
+        stream.extend(rendered_committed(&mut compositor, &base));
+        assert_eq!(
+            label_at(
+                &screen(&stream, &base),
+                row,
+                column,
+                VERSION_LABEL.len() as u16
+            ),
+            VERSION_LABEL
+        );
+
+        let mut placeholder = base;
+        placeholder.panes[0].as_mut().unwrap().content = PaneContent::Placeholder("pending");
+        stream.extend(rendered_committed(&mut compositor, &placeholder));
+        assert_eq!(
+            label_at(
+                &screen(&stream, &base),
+                row,
+                column,
+                VERSION_LABEL.len() as u16
+            ),
+            VERSION_LABEL
+        );
+
+        let other = snapshot_from("RIGHT", 5, 20);
+        let split = side_by_side(&pane, &other);
+        let split_output = fresh_render(&split);
+        let split_screen = screen(&split_output, &split);
+        assert_eq!(
+            label_at(
+                &split_screen,
+                split.host_rows - 1,
+                split.host_columns - 1 - VERSION_LABEL.len() as u16,
+                VERSION_LABEL.len() as u16
+            ),
+            VERSION_LABEL
+        );
+        assert_eq!(
+            label_at(
+                &split_screen,
+                split.host_rows - 1,
+                column,
+                VERSION_LABEL.len() as u16
+            ),
+            ""
+        );
+    }
+
+    #[test]
     fn pane_controls_partial_write_failure_invalidates_for_full_repaint() {
         struct FailAfter(usize);
         impl Write for FailAfter {
@@ -2225,23 +2323,34 @@ mod tests {
         let pane = snapshot_from("body", 5, 20);
         let frame = single_pane(&pane);
         let expected = fresh_render(&frame);
-        let menu_offset = expected
-            .windows(b"[Menu]".len())
-            .position(|window| window == b"[Menu]")
-            .unwrap();
-        let mut compositor = Compositor::try_new().unwrap();
-        let error = compositor
-            .render(&frame, &mut FailAfter(menu_offset + 2))
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
-        assert!(!compositor.commit());
+        for label in [b"[Menu]".as_slice(), VERSION_LABEL.as_bytes()] {
+            let offset = expected
+                .windows(label.len())
+                .position(|window| window == label)
+                .unwrap();
+            let mut compositor = Compositor::try_new().unwrap();
+            let error = compositor
+                .render(&frame, &mut FailAfter(offset + 2))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+            assert!(!compositor.commit());
 
-        let retry = rendered_committed(&mut compositor, &frame);
-        assert!(contains(&retry, b"\x1b[2J"));
-        let parser = screen(&retry, &frame);
-        assert_eq!(label_at(&parser, 0, 1, 6), "[Menu]");
-        assert_eq!(label_at(&parser, 0, 18, 3), "[x]");
-        assert_eq!(cell_text(&parser, 1, 1), "b");
+            let retry = rendered_committed(&mut compositor, &frame);
+            assert!(contains(&retry, b"\x1b[2J"));
+            let parser = screen(&retry, &frame);
+            assert_eq!(label_at(&parser, 0, 1, 6), "[Menu]");
+            assert_eq!(label_at(&parser, 0, 18, 3), "[x]");
+            assert_eq!(cell_text(&parser, 1, 1), "b");
+            assert_eq!(
+                label_at(
+                    &parser,
+                    frame.host_rows - 1,
+                    frame.host_columns - 1 - VERSION_LABEL.len() as u16,
+                    VERSION_LABEL.len() as u16
+                ),
+                VERSION_LABEL
+            );
+        }
     }
 
     #[test]

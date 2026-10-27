@@ -4,16 +4,41 @@ Panelink's control CLI uses a local Unix socket and durable caller contexts.
 A skill describes how to use them; the agent host still controls access.
 Being inside a Panelink pane does not remove Codex's command sandbox.
 
+## Current local Codex setup — 2026-10-27
+
+Codex 0.164.0 was configured with a named `panelink` permission profile extending
+`:workspace`, write access to Panelink's existing `agent-contexts` directory and
+an allow entry for the exact legacy `server/control.sock`. The profile enables
+network handling with `features.network_proxy = true`; no external domains were
+allowed. A sandbox-helper probe confirmed pane discovery and a bounded read,
+while an unrelated external connection remained denied. The original config is
+backed up under `~/.codex/config.toml.before-panelink-20261027-142414`.
+
+This changes defaults for sessions that load the updated configuration. It does
+not rewrite an already running Codex session's permission policy. Reload/select
+the named profile through the host's supported permission UI, or resume with a
+new Codex process that loads it. Keep the same caller/context for outstanding
+operations. The allow entry covers the diagnosed legacy endpoint only; another
+workspace or PANELINK_HOME requires its own explicitly scoped endpoint entry.
+
+Read access is verified for the recorded setup. Current source implements
+shared short per-batch ownership for UI input and `pane submit`; this does not
+protect unfinished human drafts. Legacy retained claims still block other
+writers. Capability 128 / schema 14 is required for recognized-agent commands,
+and runtime acceptance is pending. The socket/context permissions described
+here remain prerequisites and are not granted by the ownership change.
+
 ## Distinguish storage from socket access
 
 | Observation | What it establishes | Next step |
 | --- | --- | --- |
 | `context_directory_unavailable` | The CLI could not create its private caller directory, before querying the server | Check filesystem access and the directory's ownership/permissions |
 | `context_directory_unsafe` or `context_unavailable` | Context path validation/open failed | Preserve the existing context; inspect its path and permissions |
-| `control_unavailable` | Connection or a control query failed; the error groups several causes | Check the selected workspace, server endpoint, and host permission to connect |
+| `control_permission_denied` | The OS denied connection or private endpoint-directory access | Allow the exact endpoint through the host permission profile; verify filesystem permissions |
+| `control_unavailable` | Connection or a control query failed | Inspect fixed `cause`, `stage` and `transport_stage` fields, then check the selected endpoint and host permission |
 | Socket exists | An endpoint pathname exists | This alone proves neither a live server nor permission to connect |
 | Normal terminal succeeds, sandbox fails | The workspace is reachable from one execution environment | Compare the two environments' paths and permissions before changing the server |
-| Reads work, claim returns `input_failed`, and another client owns the pane | An ownership conflict is a possible cause; the generic error also covers other failures | Inspect the returned owner and matching server/client behavior; do not infer a sandbox failure |
+| Reads work, claim returns `input_failed` or `input_not_authorized`, and another client owns the pane | An ownership conflict is a possible cause; the generic error also covers other failures | Inspect the returned owner and matching server/client behavior; do not infer a sandbox failure |
 
 For the default legacy workspace, the endpoint is
 `$PANELINK_HOME/server/control.sock`, or
@@ -35,27 +60,28 @@ switch roots to get past an uncertain mutation; that abandons reconciliation
 state. The 7060 build accepts the explicit root, but other builds may ignore an
 unknown environment variable.
 
-## Attached UI ownership limitation
+## Shared per-batch UI ownership
 
-Confirmed against the running 7060 build on 2026-10-27: the UI's `Net::poll`
-claims input on every pane, including unfocused and idle panes, then renews
-those 30-second owner claims every 10 seconds. The server's `InputOwner::claim`
-rejects a different holder; it does not transfer ownership. The rejection is
-`Unauthorized`, mapped to `unauthorized` by the control client and then hidden
-behind the agent CLI's generic `input_failed` error.
+Current source no longer claims panes while the UI is idle. Each admitted UI
+input batch claims and releases ownership around that batch. The additive
+`pane submit N TEXT [--json] [--as NAME]` command likewise performs a separately
+keyed claim, text-plus-Enter submission and release. It releases only after a
+known `Applied` write. Partial, failed and uncertain writes are never replayed
+or released; if release fails after a confirmed write, report delivery as
+confirmed and release as unconfirmed.
 
-Live discovery showed client owners on all three panes. One claim against the
-right-hand pane (index 3 in that layout) reproduced `input_failed`; discovery
-afterward showed the same holder. No text was sent. Read access works while
-input remains blocked by these leases. This is independent of the sandbox
-connection failure described below. The generic error alone is insufficient
-to diagnose another installation.
+This short lock coordinates an admitted batch only. It does not reserve the
+pane while a person edits a draft between batches. Legacy `pane claim` is still
+retained ownership and blocks every other writer until known release; neither
+the UI nor scoped submit steals it. Do not infer support from an older binary or
+server: the new behavior has no runtime acceptance claim here.
 
-Report the holder and the ownership limitation. Do not repeatedly claim, change
-caller identity, delete contexts or infer that Read permission grants Input.
-Do not detach the user's UI, terminate it, or weaken single-writer guards as a
-workaround. Cooperative UI/automation handoff and a specific ownership error
-are application work still needed for controlling visible panes reliably.
+Recognized-agent requests additionally require matching client/server support
+for capability 128 and schema 14. Old-server attachment may require restarting
+the server and detaching/reattaching the UI. This document records no live
+restart, reattach, claim or pane-input action. The private caller-context
+directory and permission to connect to the selected socket remain separate
+prerequisites.
 
 ## Codex permission handling
 
@@ -118,3 +144,17 @@ readiness within the existing deadlines. See the repository's
 for build availability and verification. Check the executable's build; updating
 source alone does not replace an existing binary. A generic connection error
 still requires diagnosis, and uncertain input must never be replayed.
+
+## Failure receipts
+
+Use the fixed `cause`, logical `stage`, and `transport_stage` fields to separate
+connect, handshake, query, request write, reply read and reconciliation failures.
+A pending operation key must be reconciled in its original context; do not
+change callers or repeat input. Scoped submit receipts preserve delivery even
+when release fails. `application_submission:unverified` is expected until a
+separate application response is observed. Owner metadata attached to a refusal
+is labeled as a before-operation observation, not current lease authority.
+
+Use `build-info --json` and `server-info --json` to distinguish the executable
+from the running server. The latter requires negotiated capability 256; an old
+server remains explicitly unknown. Restarting a server ends its pane processes.

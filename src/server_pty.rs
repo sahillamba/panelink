@@ -972,6 +972,59 @@ impl PtyEffects {
     }
 }
 
+impl PtyEffects {
+    /// Fresh process identity and bounded screen-marker state for this PTY.
+    /// This does not identify a provider conversation or attest its executable.
+    pub fn observe_agent(
+        &self,
+        target: TargetRef,
+        sampled_at_mono_ms: u64,
+    ) -> crate::agent_protocol::Observation {
+        use crate::agent_protocol::{AgentIdentity, AgentKind, AgentState, Observation};
+        let mut observation = Observation {
+            target,
+            identity: AgentIdentity {
+                pid: 0,
+                start_seconds: 0,
+                start_microseconds: 0,
+                kind: AgentKind::Unknown,
+            },
+            state: AgentState::Unknown,
+            screen_revision: self.revision,
+            sampled_at_mono_ms,
+        };
+        let Some(pid) = self.session.foreground_process_id() else {
+            return observation;
+        };
+        let Some((start_seconds, start_microseconds, executable)) =
+            crate::process_metadata::foreground_executable(pid)
+        else {
+            return observation;
+        };
+        // Wrappers and unrecognized foreground leaders stay unknown. Names are
+        // process observations inside the same-user boundary, not credentials.
+        let kind = match std::path::Path::new(&executable)
+            .file_name()
+            .and_then(|name| name.to_str())
+        {
+            Some("codex") => AgentKind::Codex,
+            Some("opencode") => AgentKind::OpenCode,
+            _ => return observation,
+        };
+        if self.session.foreground_process_id() != Some(pid) {
+            return observation;
+        }
+        observation.identity = AgentIdentity {
+            pid: u64::from(pid),
+            start_seconds,
+            start_microseconds,
+            kind,
+        };
+        observation.state = crate::agent_detection::classify_snapshot(kind, self.screen());
+        observation
+    }
+}
+
 impl EffectSink for PtyEffects {
     fn process_identity(&self) -> Option<crate::process_metadata::ProcessIdentity> {
         self.session.process_identity()

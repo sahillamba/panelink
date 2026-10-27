@@ -1781,8 +1781,63 @@ fn dispatch(
                 Err(_) => reply(MultiReply::Error("invalid_workspace_watch_request")),
             },
             Some([0, 13]) => dispatch_pane_operations(owner, connection, payload, now),
+            Some([0, 14]) => dispatch_agent(owner, connection, payload, now),
+            Some([0, 15]) if payload.as_slice() == crate::build_info::QUERY => {
+                match owner.build_identity(connection, now) {
+                    Ok(identity) => reply(MultiReply::Response(
+                        crate::build_info::encode_server_identity(identity),
+                    )),
+                    Err(error) => self::error(&error),
+                }
+            }
             _ => reply(MultiReply::Error("unsupported_request_schema")),
         },
+    }
+}
+
+fn dispatch_agent(
+    owner: &mut MultiSessionOwner<PtyEffects>,
+    connection: &Connection,
+    payload: &[u8],
+    now: u64,
+) -> DispatchResult {
+    use crate::agent_protocol::{AgentKind, AgentState, Request};
+    if connection.selected_capabilities() & crate::handshake_protocol::CAPABILITY_AGENT_OBSERVATION
+        == 0
+    {
+        return reply(MultiReply::Error("agent_observation_unsupported"));
+    }
+    match crate::agent_protocol::decode_request(payload) {
+        Ok(Request::Query(target)) => {
+            match owner.observe_target(connection, target, now, |effects| {
+                effects.observe_agent(target, now.saturating_mul(1000))
+            }) {
+                Ok(observation) => match crate::agent_protocol::encode_observation(&observation) {
+                    Ok(bytes) => reply(MultiReply::Response(bytes)),
+                    Err(_) => reply(MultiReply::Error("agent_observation_invalid")),
+                },
+                Err(error) => self::error(&error),
+            }
+        }
+        Ok(Request::Submit(request)) => {
+            match owner.handle_guarded_agent_submit(connection, &request, payload, now, |effects| {
+                let current = effects.observe_agent(request.target, now.saturating_mul(1000));
+                if request.identity.kind == AgentKind::Unknown
+                    || current.identity != request.identity
+                    || current.screen_revision != request.screen_revision
+                {
+                    return Err(crate::response_protocol::RejectionCode::StaleTarget);
+                }
+                if current.state != AgentState::Idle {
+                    return Err(crate::response_protocol::RejectionCode::Unsupported);
+                }
+                Ok(())
+            }) {
+                Ok(bytes) => reply(MultiReply::Response(bytes)),
+                Err(error) => self::error(&error),
+            }
+        }
+        Err(_) => reply(MultiReply::Error("invalid_agent_request")),
     }
 }
 
@@ -2467,6 +2522,9 @@ enum RequestSchema {
     /// Schema-11 workspace reconciliation or finite watch.
     Workspace(workspace_watch::Request),
     Metadata(TargetRef),
+    AgentQuery(TargetRef),
+    AgentSubmit(OperationKey),
+    BuildIdentity,
 }
 
 fn classify(payload: &[u8]) -> Option<RequestSchema> {
@@ -2517,12 +2575,29 @@ fn classify(payload: &[u8]) -> Option<RequestSchema> {
         [0, 13] => crate::pane_operations_protocol::decode_request(payload)
             .ok()
             .map(RequestSchema::PaneOperations),
+        [0, 15] => (payload == crate::build_info::QUERY).then_some(RequestSchema::BuildIdentity),
+        [0, 14] => match crate::agent_protocol::decode_request(payload).ok()? {
+            crate::agent_protocol::Request::Query(target) => {
+                Some(RequestSchema::AgentQuery(target))
+            }
+            crate::agent_protocol::Request::Submit(request) => {
+                Some(RequestSchema::AgentSubmit(request.key))
+            }
+        },
         _ => None,
     }
 }
 
 fn response_matches(schema: RequestSchema, payload: &[u8]) -> bool {
     match schema {
+        RequestSchema::BuildIdentity => {
+            crate::build_info::decode_server_identity(payload).is_some()
+        }
+        RequestSchema::AgentQuery(target) => crate::agent_protocol::decode_observation(payload)
+            .is_ok_and(|observation| observation.target == target),
+        RequestSchema::AgentSubmit(key) => {
+            decode_response_payload(payload).is_ok_and(|response| response.key == key)
+        }
         RequestSchema::Control => decode_response_payload(payload).is_ok(),
         RequestSchema::UiKeys(key) => {
             decode_response_payload(payload).is_ok_and(|response| response.key == key)

@@ -21,7 +21,8 @@ use panelink::terminal::Key;
 use panelink::ui_protocol::{
     decode_history_reply_with_wraps, decode_layout_reply, decode_resize_reply,
     decode_screen_reply_with_wraps, encode_history_query, encode_layout_query, encode_root_resize,
-    encode_screen_query, HistoryReplyView, LayoutReply, RootResize, MAX_HISTORY_REPLY_BYTES,
+    encode_screen_query, HistoryReplyView, LayoutReply, RootResize, MAX_HISTORY_OFFSET_ROWS,
+    MAX_HISTORY_REPLY_BYTES,
 };
 
 use super::conn::{
@@ -59,7 +60,6 @@ pub(crate) struct Net {
 /// Host-owned view inputs needed by one network poll.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct NetView {
-    pub focus: Option<TargetRef>,
     pub desired_root: Option<(u16, u16)>,
 }
 
@@ -84,6 +84,7 @@ pub(crate) enum ScrollResult {
         revision: u64,
         offset_rows: u16,
         total_rows: u16,
+        extent_known: bool,
         checkpoint: Vec<u8>,
         row_wraps: Option<Vec<bool>>,
     },
@@ -260,6 +261,11 @@ impl Net {
         offset_rows: u16,
         wheel: Option<(u16, u16, bool)>,
     ) -> ScrollUpdate {
+        // Wheel reads are latency-sensitive. An explicit read-only seek can
+        // refresh the extent; requesting the protocol maximum already does
+        // that in the same read, so it needs no second probe.
+        let probe_extent = wheel.is_none() && offset_rows != MAX_HISTORY_OFFSET_ROWS;
+        let discovers_extent = wheel.is_none() && offset_rows == MAX_HISTORY_OFFSET_ROWS;
         let extent = self
             .history_extents
             .iter()
@@ -283,12 +289,16 @@ impl Net {
             if let Some((column, row, up)) =
                 wheel.filter(|_| view.alternate_screen() && view.mouse_reporting())
             {
-                if pane.owner_revision.is_none() {
-                    let _ = pane.claim(Instant::now());
+                if !pane.claim(Instant::now())? {
+                    return Err("input is owned by another client; wheel not sent");
                 }
                 return match pane.send_mouse_wheel(column, row, up)? {
-                    MouseInputResult::Applied => Ok(ScrollResult::MouseDelivered),
+                    MouseInputResult::Applied => {
+                        pane.release_confirmed()?;
+                        Ok(ScrollResult::MouseDelivered)
+                    }
                     MouseInputResult::Unsupported => {
+                        pane.release_confirmed()?;
                         // The server explicitly rejected before admission; a
                         // fresh READ decides whether scrollback is now valid.
                         let retry = encode_history_query(target, offset_rows)
@@ -304,7 +314,7 @@ impl Net {
                             return Err("history reply invalid");
                         }
                         validate_history_checkpoint(&retry)?;
-                        history_result(pane, retry, extent)
+                        history_result(pane, retry, extent, probe_extent, discovers_extent)
                     }
                     MouseInputResult::NotOwner => {
                         Err("input is owned by another client; wheel not sent")
@@ -312,12 +322,12 @@ impl Net {
                     MouseInputResult::Failed(label) => Err(label),
                 };
             }
-            history_result(pane, view, extent)
+            history_result(pane, view, extent, probe_extent, discovers_extent)
         })();
         if let Ok(ScrollResult::History {
             revision,
-            offset_rows,
             total_rows,
+            extent_known,
             ..
         }) = &result
         {
@@ -331,7 +341,7 @@ impl Net {
                     })
                 })
                 .unwrap_or(0);
-            if total_rows > offset_rows {
+            if *extent_known {
                 self.history_extents[index] = (Some(target), *revision, *total_rows);
             }
         }
@@ -516,7 +526,7 @@ impl Net {
         self.next_layout = now + LAYOUT_INTERVAL;
     }
 
-    /// One bounded poll step: layout, resize, reconnect, claims, screens.
+    /// One bounded poll step: layout, resize, reconnect and screens.
     ///
     /// Every exchange is bounded by `OP_DEADLINE`; the stop flag is checked
     /// between panes so a stalled server cannot delay Ctrl-C/SIGTERM handling
@@ -567,25 +577,6 @@ impl Net {
             let pane = &mut self.panes[index];
             if !pane.connected() {
                 continue;
-            }
-            if pane.owner_revision.is_none() && now >= pane.next_claim {
-                match pane.claim(now) {
-                    Ok(true) => {}
-                    Ok(false) if Some(pane.target) == view.focus => {
-                        update.status = Some("pane input is owned by another client")
-                    }
-                    Ok(false) => {}
-                    Err(label) => {
-                        update.status = Some(label);
-                        pane.disconnect(now);
-                        continue;
-                    }
-                }
-            } else if pane.owner_revision.is_some() && now >= pane.next_claim {
-                // Renew before the 30 s owner TTL elapses.
-                if let Err(label) = pane.claim(now) {
-                    update.status = Some(label);
-                }
             }
             if now < pane.next_watch {
                 continue;
@@ -857,6 +848,8 @@ fn history_result(
     pane: &mut PaneConn,
     view: HistoryReplyView<'_>,
     cached_extent: Option<(Option<TargetRef>, u64, u16)>,
+    probe_extent: bool,
+    discovers_extent: bool,
 ) -> Result<ScrollResult, &'static str> {
     if view.alternate_screen() {
         return Ok(ScrollResult::AlternateScreenNoMouse);
@@ -866,23 +859,23 @@ fn history_result(
     let row_wraps = row_wrap_flags(checkpoint.rows(), view.wrap_metadata_available(), |row| {
         view.row_wrapped(row)
     });
-    // Existing read-only queries clamp to the available history. Probe the
-    // oldest viewport once per live revision to size the scrollbar without a
-    // wire change. This query never forwards mouse input or claims ownership.
-    let total_rows = if let Some((_, _, total)) =
+    // Use only a target/revision-matched cached extent on the wheel path. An
+    // ordinary wheel returns its valid requested viewport immediately, with
+    // its own offset as a conservative extent on a cache miss or revision
+    // change. Explicit read-only seeks may refresh the exact scrollbar extent.
+    let (total_rows, extent_known) = if let Some((_, _, total)) =
         cached_extent.filter(|(_, revision, _)| *revision == view.screen_revision())
     {
-        total.max(view.offset_rows())
+        (total.max(view.offset_rows()), true)
+    } else if !probe_extent {
+        (view.offset_rows(), discovers_extent)
     } else {
-        // Chrome must not turn an already valid viewport into a failed scroll.
-        // A conservative extent is not cached, so a later gesture can retry the
-        // read-only probe. Never combine extents from different screen revisions.
+        // This remains read-only and validates target/revision before the
+        // extent can be used. A failed probe leaves the requested viewport
+        // intact with a conservative extent.
         let probed = (|| {
-            let query = encode_history_query(
-                view.target(),
-                panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS,
-            )
-            .map_err(|_| "history request invalid")?;
+            let query = encode_history_query(view.target(), MAX_HISTORY_OFFSET_ROWS)
+                .map_err(|_| "history request invalid")?;
             let bytes = match pane.request(&query)? {
                 Reply::Snapshot(bytes) => bytes,
                 Reply::Error(label) => return Err(label),
@@ -900,12 +893,16 @@ fn history_result(
             }
             Ok(oldest.offset_rows())
         })();
-        probed.unwrap_or(view.offset_rows())
+        match probed {
+            Ok(total) => (total, true),
+            Err(_) => (view.offset_rows(), false),
+        }
     };
     Ok(ScrollResult::History {
         revision: view.screen_revision(),
         offset_rows: view.offset_rows(),
         total_rows,
+        extent_known,
         checkpoint: view.checkpoint().to_vec(),
         row_wraps,
     })
@@ -1000,15 +997,13 @@ impl Net {
         keys: &[Key],
     ) -> Result<(), &'static str> {
         let pane = self.pane_mut(target).ok_or("pane not connected")?;
-        // Not yet owner (for example a freshly split or reconnected pane):
-        // try one immediate claim rather than dropping the keys.
-        if pane.owner_revision.is_none() {
-            let _ = pane.claim(Instant::now());
+        if !pane.claim(Instant::now())? {
+            return Err("input owned by another client; keys not sent");
         }
         match pane.send_keys(keys)? {
             InputResult::Applied => {
                 pane.next_watch = Instant::now();
-                Ok(())
+                pane.release_confirmed()
             }
             InputResult::NotOwner => Err("input owned by another client; keys not sent"),
             InputResult::Failed(label) => Err(label),
@@ -1017,8 +1012,11 @@ impl Net {
 
     pub(crate) fn send_paste(&mut self, target: TargetRef, text: &str) -> Result<(), &'static str> {
         let pane = self.pane_mut(target).ok_or("pane not connected")?;
+        if !pane.claim(Instant::now())? {
+            return Err("input owned by another client; paste not sent");
+        }
         match pane.send_paste(text)? {
-            InputResult::Applied => Ok(()),
+            InputResult::Applied => pane.release_confirmed(),
             InputResult::NotOwner => Err("input owned by another client; paste not sent"),
             InputResult::Failed(label) => Err(label),
         }
@@ -1068,9 +1066,6 @@ impl Net {
             SPLIT_DEADLINE,
         )?;
         attached.set_deadline(OP_DEADLINE);
-        // Claim input now so keys typed right after the split (the new pane
-        // is focused) are delivered instead of being refused as not-owner.
-        let _ = attached.claim(now);
         self.panes.push(attached);
         self.next_layout = now;
         Ok(new_target)
@@ -1378,7 +1373,7 @@ mod tests {
     }
 
     #[test]
-    fn scrollbar_extent_probe_is_read_only_cached_and_invalidated_by_revision() {
+    fn wheel_history_uses_one_read_and_explicit_seek_refreshes_extent_read_only() {
         use panelink::handshake_protocol::{Welcome, CAPABILITY_READ};
         use panelink::protocol_wire::{Frame, MessageKind};
         use panelink::screen_checkpoint::{encode, CheckpointMetadata};
@@ -1449,26 +1444,26 @@ mod tests {
             let peer = scope.spawn(move || {
                 let mut peer = AuthenticatedStream::new(server).unwrap();
                 peer.enable_snapshot_writes().unwrap();
-                // The second wheel reuses the extent. A new revision refreshes
-                // it; a later alternate-screen reply must not probe or inject.
-                for (requested, revision, available, alternate) in [
-                    (3, 1, 100, false),
-                    (MAX_HISTORY_OFFSET_ROWS, 1, 100, false),
-                    (6, 1, 100, false),
-                    (9, 2, 110, false),
-                    (MAX_HISTORY_OFFSET_ROWS, 2, 110, false),
-                    (12, 4, 100, false),
-                    (MAX_HISTORY_OFFSET_ROWS, 5, 120, false),
-                    (15, 4, 100, false),
-                    (MAX_HISTORY_OFFSET_ROWS, 4, u16::MAX, false),
-                    (18, 4, 100, false),
-                    (MAX_HISTORY_OFFSET_ROWS, 4, u16::MAX - 1, false),
-                    (21, 4, 100, false),
-                    (MAX_HISTORY_OFFSET_ROWS, 4, 100, false),
-                    (24, 6, 0, true),
-                    // A scrollbar request may race an app enabling both
-                    // alternate screen and mouse reporting. It stays READ-only.
-                    (27, 7, 0, true),
+                // Each wheel, including cache misses and revision changes,
+                // receives exactly its requested read. Explicit seeks may make
+                // one bounded MAX-offset read to refresh the read-only extent.
+                for (requested, offset, revision, alternate, mouse, invalid) in [
+                    (3, 3, 1, false, false, false),
+                    (6, 6, 1, false, false, false),
+                    (MAX_HISTORY_OFFSET_ROWS, 100, 1, false, false, false),
+                    (9, 9, 1, false, false, false),
+                    (12, 12, 2, false, false, false),
+                    (15, 15, 2, false, false, false),
+                    (MAX_HISTORY_OFFSET_ROWS, 110, 2, false, false, false),
+                    (18, 18, 2, false, false, false),
+                    (21, 21, 4, false, false, false),
+                    (MAX_HISTORY_OFFSET_ROWS, 100, 4, false, false, false),
+                    (24, 24, 4, false, false, false),
+                    (25, 25, 5, false, false, false),
+                    (MAX_HISTORY_OFFSET_ROWS, 25, 5, false, false, true),
+                    (26, 26, 5, false, false, false),
+                    (27, 0, 6, true, true, false),
+                    (30, 0, 7, true, true, false),
                 ] {
                     let deadline = Instant::now() + Duration::from_secs(2);
                     let frame = peer.read_frame(deadline).unwrap();
@@ -1476,18 +1471,14 @@ mod tests {
                     let UiRequest::HistoryQuery(query) =
                         decode_ui_request(frame.payload()).unwrap()
                     else {
-                        panic!("extent inspection sent a mutation or input");
+                        panic!("history inspection sent a mutation or input");
                     };
                     assert_eq!(query.target, target);
                     assert_eq!(query.offset_rows, requested);
-                    if available >= u16::MAX - 1 {
-                        let kind = if available == u16::MAX {
-                            MessageKind::Error
-                        } else {
-                            MessageKind::Snapshot
-                        };
+                    if invalid {
                         peer.write_frame(
-                            &Frame::new(kind, frame.request_id(), b"invalid").unwrap(),
+                            &Frame::new(MessageKind::Error, frame.request_id(), b"invalid")
+                                .unwrap(),
                             deadline,
                         )
                         .unwrap();
@@ -1503,15 +1494,9 @@ mod tests {
                     if alternate {
                         record[80] = 1;
                     }
-                    let bytes = prefix_history_reply(
-                        target,
-                        revision,
-                        requested.min(available),
-                        alternate,
-                        alternate && revision == 7,
-                        record,
-                    )
-                    .unwrap();
+                    let bytes =
+                        prefix_history_reply(target, revision, offset, alternate, mouse, record)
+                            .unwrap();
                     peer.write_frame(
                         &Frame::new(MessageKind::Snapshot, frame.request_id(), &bytes).unwrap(),
                         deadline,
@@ -1519,16 +1504,7 @@ mod tests {
                     .unwrap();
                 }
             });
-            for (epoch, offset, total) in [
-                (1, 3, 100),
-                (2, 6, 100),
-                (3, 9, 110),
-                (4, 12, 12),
-                (5, 15, 15),
-                (6, 18, 18),
-                (7, 21, 100),
-            ] {
-                let update = net.scroll(target, epoch, offset, 0, 0, true);
+            let assert_history = |update: ScrollUpdate, expected_offset, expected_total| {
                 let ScrollResult::History {
                     offset_rows,
                     total_rows,
@@ -1537,23 +1513,118 @@ mod tests {
                 else {
                     panic!("history unavailable");
                 };
-                assert_eq!((offset_rows, total_rows), (offset, total));
-                assert_eq!(net.panes[0].owner_revision, None);
-            }
-            let update = net.scroll(target, 8, 24, 0, 0, true);
+                assert_eq!((offset_rows, total_rows), (expected_offset, expected_total));
+            };
+
+            assert_history(net.scroll(target, 1, 3, 0, 0, true), 3, 3);
+            // This seek explicitly refreshes the extent with one follow-up READ.
+            assert_history(net.seek_history(target, 2, 6), 6, 100);
+            assert_history(net.scroll(target, 3, 9, 0, 0, true), 9, 100);
+            // A new revision is returned immediately with a conservative extent.
+            assert_history(net.scroll(target, 4, 12, 0, 0, true), 12, 12);
+            assert_history(net.seek_history(target, 5, 15), 15, 110);
+            assert_history(net.scroll(target, 6, 18, 0, 0, true), 18, 110);
+            assert_history(net.scroll(target, 7, 21, 0, 0, true), 21, 21);
+            // The maximum-offset request itself discovers and caches the extent.
+            assert_history(
+                net.seek_history(target, 8, MAX_HISTORY_OFFSET_ROWS),
+                100,
+                100,
+            );
+            assert_history(net.scroll(target, 9, 24, 0, 0, true), 24, 100);
+            // Failed optional discovery preserves the valid seek result and
+            // does not cache a conservative extent for the next wheel.
+            assert_history(net.seek_history(target, 10, 25), 25, 25);
+            assert_history(net.scroll(target, 11, 26, 0, 0, true), 26, 26);
             assert!(matches!(
-                update.result,
+                net.seek_history(target, 12, 27).result,
                 ScrollResult::AlternateScreenNoMouse
             ));
-            assert_eq!(net.panes[0].owner_revision, None);
-            let update = net.seek_history(target, 9, 27);
             assert!(matches!(
-                update.result,
+                net.seek_history(target, 13, 30).result,
                 ScrollResult::AlternateScreenNoMouse
             ));
-            assert_eq!(net.panes[0].owner_revision, None);
+            assert!(net.panes[0].owner_revision.is_none());
             peer.join().unwrap();
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_poll_of_focused_pane_does_not_claim_input() {
+        use panelink::handshake_protocol::{Welcome, CAPABILITY_READ};
+        use panelink::transport::AuthenticatedStream;
+        use std::io::Read;
+        use std::os::unix::{fs::DirBuilderExt, net::UnixStream};
+        use std::sync::atomic::AtomicBool;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        struct Root(PathBuf);
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = Root(PathBuf::from(format!(
+            "/private/tmp/panelink-idle-poll-{}-{serial}",
+            std::process::id()
+        )));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root.0)
+            .unwrap();
+        let target = target(7, 3, 1);
+        let now = Instant::now();
+        let (client, mut peer) = UnixStream::pair().unwrap();
+        let pane = PaneConn::attach(
+            &root.0,
+            &root.0,
+            target,
+            Some(Bootstrap {
+                stream: AuthenticatedStream::new(client).unwrap(),
+                welcome: Welcome {
+                    nonce: 1,
+                    generation: 7,
+                    lease: 10,
+                    selected_capabilities: CAPABILITY_READ,
+                    ttl_seconds: 1800,
+                },
+                used: 0,
+                started: now,
+            }),
+            now,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let mut pane = pane;
+        pane.next_watch = now + Duration::from_secs(60);
+        let mut net = Net {
+            directory: root.0.clone(),
+            context_dir: root.0.clone(),
+            panes: vec![pane],
+            next_layout: now + Duration::from_secs(60),
+            resize_sent: None,
+            endpoint_identity: None,
+            layout: Some(view_with_target(target).layout),
+            pane_operations: None,
+            pane_operations_pending: false,
+            screen_revisions: [(None, 0); panelink::pane_layout::MAX_PANES],
+            history_extents: [(None, 0, 0); panelink::pane_layout::MAX_PANES],
+        };
+
+        let update = net.poll(NetView { desired_root: None }, now, &AtomicBool::new(false));
+        assert_eq!(update.status, None);
+        assert_eq!(net.panes[0].owner_revision, None);
+        peer.set_nonblocking(true).unwrap();
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            peer.read(&mut byte).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]

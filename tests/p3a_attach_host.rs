@@ -545,13 +545,13 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     assert!(!capture.windows(8).any(|w| w == b"\x1b[?1000h"));
     assert!(!capture.windows(8).any(|w| w == b"\x1b[?1003h"));
 
-    // The client resizes the server root to the host and claims pane 1.
-    wait_control("root resize and pane-1 claim", || {
+    // The client resizes the root while leaving the idle pane available to
+    // other writers until a user input batch actually needs ownership.
+    wait_control("root resize with pane 1 unclaimed", || {
         let (_, layout) = fixture.control("one.ctx", &["layout"]);
         let (_, described) = fixture.control("one.ctx", &["describe"]);
-        (field(&layout, "columns") == Some("100")
-            && field(&described, "owner_lease").is_some_and(|lease| lease != "0"))
-        .then_some(layout)
+        (field(&layout, "columns") == Some("100") && field(&described, "owner_lease") == Some("0"))
+            .then_some(layout)
     });
 
     client.type_slowly(b"echo ACK$((40+1))\r");
@@ -577,12 +577,10 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     let second = panes[1].clone();
     let (code, init) = fixture.control("two.ctx", &["init", &second]);
     assert_eq!(code, 0, "init pane 2: {init}");
-    // The new pane is claimed by the client and its prompt is rendered.
-    wait_control("pane-2 claim", || {
+    // Splitting creates and focuses pane 2 without reserving its input owner.
+    wait_control("pane 2 remains unclaimed", || {
         let (_, described) = fixture.control("two.ctx", &["describe"]);
-        field(&described, "owner_lease")
-            .is_some_and(|lease| lease != "0")
-            .then_some(described)
+        (field(&described, "owner_lease") == Some("0")).then_some(described)
     });
     wait_control("pane-2 prompt", || {
         let text = read_pane(&fixture, "two.ctx", &second);
@@ -680,12 +678,20 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     assert_eq!(field(&described, "child_exited"), Some("false"));
     drop(client);
 
-    // Re-attach resumes both durable contexts, re-claims and shows both panes.
+    // Re-attach resumes both durable contexts without claiming either idle pane.
     let mut again = Client::spawn(&fixture);
     again.wait_raw_mode();
     again.wait_screen("both panes after re-attach", |screen| {
         screen.contains("ACK41") && screen.contains("ACK42")
     });
+    for context in ["one.ctx", "two.ctx"] {
+        let (_, described) = fixture.control(context, &["describe"]);
+        assert_eq!(
+            field(&described, "owner_lease"),
+            Some("0"),
+            "reattached idle pane in {context} remains unclaimed: {described}"
+        );
+    }
     again.write(b"\x18");
     assert_eq!(again.wait_attach_exit(), 0);
     drop(again);

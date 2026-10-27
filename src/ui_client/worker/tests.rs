@@ -11,6 +11,7 @@ enum GateCommand {
     Keys(usize),
     Paste(usize),
     PaneOperation,
+    Scroll(u64),
     Seek(u16),
     Poll,
 }
@@ -35,11 +36,15 @@ impl Backend for SlowBackend {
                 let _ = self.release.recv();
                 ClientResult::Paste(Ok(()))
             }
-            Command::Scroll { target, epoch, .. } => ClientResult::Scroll(ScrollUpdate {
-                target,
-                epoch,
-                result: ScrollResult::Failed("test scroll"),
-            }),
+            Command::Scroll { target, epoch, .. } => {
+                let _ = self.entered.send(GateCommand::Scroll(epoch));
+                let _ = self.release.recv();
+                ClientResult::Scroll(ScrollUpdate {
+                    target,
+                    epoch,
+                    result: ScrollResult::Failed("test scroll"),
+                })
+            }
             Command::SeekHistory {
                 target,
                 epoch,
@@ -510,4 +515,45 @@ fn history_seek_is_bounded_separate_from_wheel_and_releases_pending_state() {
     assert!(!worker.scroll_pending);
     assert_eq!(worker.budget.lock().unwrap().count, 0);
     assert_eq!(worker.budget.lock().unwrap().bytes, 0);
+}
+
+#[test]
+fn pending_scroll_suppresses_poll_before_coalesced_followup() {
+    let (mut worker, entered, release, _) = slow_worker();
+
+    worker.scroll(target(), 51, 12, 4, 5, true).unwrap();
+    assert!(matches!(
+        entered.recv_timeout(Duration::from_secs(1)),
+        Ok(GateCommand::Scroll(51))
+    ));
+    assert!(worker.scroll_pending);
+
+    // A periodic poll arriving before the coalesced follow-up must not enter
+    // the FIFO between the two scroll requests.
+    worker.poll(NetView::default());
+    assert!(!worker.poll_pending);
+    release.send(()).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut saw_scroll_result = false;
+    while Instant::now() < deadline && !saw_scroll_result {
+        if let Some(envelope) = worker.try_result() {
+            saw_scroll_result = matches!(
+                worker.release_result(envelope),
+                ClientResult::Scroll(ScrollUpdate { epoch: 51, .. })
+            );
+        } else {
+            thread::yield_now();
+        }
+    }
+    assert!(saw_scroll_result);
+    assert!(!worker.scroll_pending);
+
+    worker.scroll(target(), 52, 9, 4, 5, true).unwrap();
+    assert!(matches!(
+        entered.recv_timeout(Duration::from_secs(1)),
+        Ok(GateCommand::Scroll(52))
+    ));
+    assert!(matches!(entered.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    release.send(()).unwrap();
 }
