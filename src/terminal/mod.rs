@@ -780,6 +780,18 @@ where
     Ok(())
 }
 
+fn enqueue_text(
+    queue: &mut InputQueue,
+    text: &str,
+    submit: bool,
+    bracketed: bool,
+) -> Result<(), TerminalError> {
+    let open: &[u8] = if bracketed { b"\x1b[200~" } else { b"" };
+    let close: &[u8] = if bracketed { b"\x1b[201~" } else { b"" };
+    let enter: &[u8] = if submit { b"\r" } else { b"" };
+    queue.append_parts(&[open, text.as_bytes(), close, enter])
+}
+
 fn enqueue_paste(queue: &mut InputQueue, text: &str, bracketed: bool) -> Result<(), TerminalError> {
     let open: &[u8] = if bracketed { b"\x1b[200~" } else { b"" };
     let close: &[u8] = if bracketed { b"\x1b[201~" } else { b"" };
@@ -934,6 +946,15 @@ impl fmt::Debug for TerminalSession {
 }
 
 impl TerminalSession {
+    /// Current PTY foreground process-group leader; no process command line is read.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub fn foreground_process_id(&self) -> Option<u32> {
+        let master = self.master.as_ref()?;
+        // SAFETY: tcgetpgrp only queries this live, borrowed descriptor.
+        let pid = unsafe { libc::tcgetpgrp(std::os::fd::AsRawFd::as_raw_fd(master)) };
+        (pid > 0 && self.exit_status.is_none()).then_some(pid as u32)
+    }
+
     /// Spawn an already-resolved executable with exactly the supplied environment.
     pub fn spawn(
         launch: &ResolvedLaunch,
@@ -1051,7 +1072,9 @@ impl TerminalSession {
         enqueue_paste(&mut self.input, text, bracketed)
     }
 
-    /// Queue literal printable text and an optional Enter as one bounded unit.
+    /// Queue printable text and an optional Enter as one bounded unit.
+    /// A submission honors bracketed-paste mode so its Enter is outside the
+    /// pasted text; plain typing retains literal key-stream semantics.
     pub fn text(&mut self, text: &str, submit: bool) -> Result<(), TerminalError> {
         if !self.input_enabled {
             return Err(TerminalError::InputDisabled);
@@ -1059,8 +1082,8 @@ impl TerminalSession {
         if text.chars().any(char::is_control) {
             return Err(TerminalError::InvalidKey);
         }
-        let suffix: &[u8] = if submit { b"\r" } else { b"" };
-        self.input.append_parts(&[text.as_bytes(), suffix])
+        let bracketed = submit && self.parser.screen().bracketed_paste();
+        enqueue_text(&mut self.input, text, submit, bracketed)
     }
 
     /// Whether the child has enabled a VT mouse tracking mode.

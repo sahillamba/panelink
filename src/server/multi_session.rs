@@ -1671,8 +1671,30 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 | CAPABILITY_PANE_METADATA
                 | CAPABILITY_SCREEN_ROW_WRAPS
                 | crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS
+                | crate::handshake_protocol::CAPABILITY_AGENT_OBSERVATION
+                | crate::handshake_protocol::CAPABILITY_BUILD_IDENTITY
                 | workspace_capability,
         )
+    }
+
+    /// Return read-only server identity for a live connection that negotiated
+    /// `CAPABILITY_BUILD_IDENTITY`. Runtime transports must not expose this
+    /// helper before peer authentication and normal handshake completion.
+    pub fn build_identity(
+        &self,
+        connection: &Connection,
+        now_secs: u64,
+    ) -> Result<crate::build_info::ServerIdentity, ServerError> {
+        self.global.require_live_connection(connection, now_secs)?;
+        let selected_capabilities = connection.selected_capabilities();
+        if selected_capabilities & crate::handshake_protocol::CAPABILITY_BUILD_IDENTITY == 0 {
+            return Err(ServerError::Unauthorized);
+        }
+        Ok(crate::build_info::ServerIdentity {
+            build: crate::build_info::current(),
+            generation: self.global.generation,
+            selected_capabilities,
+        })
     }
 
     /// Read one bounded screen and bind it to this target's metadata and journal.
@@ -2453,6 +2475,91 @@ impl<E: EffectSink> MultiSessionOwner<E> {
         let mut handler = SessionHandler::new(&mut self.global, session);
         handler.synchronize_metadata();
         Ok(observe(&handler.session.effects))
+    }
+
+    /// Deliver a process- and screen-pinned agent submission after exact-key
+    /// duplicate lookup and existing input-owner checks.
+    pub fn handle_guarded_agent_submit<V>(
+        &mut self,
+        connection: &Connection,
+        request: &crate::agent_protocol::GuardedSubmit<'_>,
+        payload: &[u8],
+        now_secs: u64,
+        validate_agent: V,
+    ) -> Result<Vec<u8>, ServerError>
+    where
+        V: FnOnce(&E) -> Result<(), RejectionCode>,
+    {
+        let key = request.key;
+        self.global.require_live_connection(connection, now_secs)?;
+        let required = CAPABILITY_INPUT | crate::handshake_protocol::CAPABILITY_AGENT_OBSERVATION;
+        if key.lease != connection.lease
+            || key.generation != self.global.generation
+            || connection.selected_capabilities & required != required
+        {
+            return rejected_reply(key, RejectionCode::Unauthorized);
+        }
+        // Exact original request equality comes before mutable target/process
+        // observations. A duplicate never re-evaluates or resends its input.
+        if let Some(reply) = known_reply(&self.global, key, payload, now_secs)? {
+            return Ok(reply);
+        }
+        if self
+            .global
+            .require_target_scope(connection, request.target)
+            .is_err()
+        {
+            return rejected_reply(key, RejectionCode::Unauthorized);
+        }
+        let session = match self.launches.session_mut(request.target) {
+            Ok(session) => session,
+            Err(RegistryError::InvalidTarget | RegistryError::EffectsUnavailable) => {
+                return rejected_reply(key, RejectionCode::StaleTarget);
+            }
+            Err(_) => return Err(ServerError::Internal),
+        };
+        let mut handler = SessionHandler::new(&mut self.global, session);
+        let result = (|| {
+            let mut candidate = handler.session.input_owner.clone();
+            if let Err(error) = candidate.begin_input(
+                Owner::Client(key.lease),
+                request.owner_revision,
+                key,
+                now_secs,
+            ) {
+                return rejected_reply(key, owner_rejection(error));
+            }
+            let command = Command::Submit {
+                owner_revision: request.owner_revision,
+                text: request.text,
+            };
+            if let Err(code) = handler
+                .session
+                .effects
+                .validate(command)
+                .and_then(|()| validate_agent(&handler.session.effects))
+            {
+                return rejected_reply(key, code);
+            }
+            match handler.global.ledger.admit(key, payload, now_secs) {
+                Ok(Admission::Execute) => {}
+                Ok(Admission::InProgress) => return status_reply(key, OperationStatus::InProgress),
+                Ok(Admission::Completed(outcome)) => {
+                    return status_reply(key, OperationStatus::Completed(outcome))
+                }
+                Err(error) if is_capacity_error(&error) => {
+                    return rejected_reply(key, RejectionCode::Capacity)
+                }
+                Err(error) => return Err(ServerError::Protocol(error)),
+            }
+            handler.session.input_owner = candidate;
+            let outcome = terminal_outcome(handler.session.effects.input(command));
+            handler.global.ledger.complete(key, outcome)?;
+            handler.session.input_owner.finish_input(key)?;
+            status_reply(key, OperationStatus::Completed(outcome))
+        })();
+        handler.synchronize_metadata();
+        result
     }
 
     /// Admit and synchronously deliver one non-replayable typed-key input.
@@ -4143,6 +4250,39 @@ mod tests {
             owner.connect(target, &widened, 4_000),
             Err(ServerError::UnknownContext)
         ));
+    }
+
+    #[test]
+    fn server_identity_requires_negotiated_read_only_capability() {
+        let mut owner = owner();
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let mut journal = Journal::new(&effects);
+        let target = launch(&mut owner, 1, &mut journal, &effects)
+            .unwrap()
+            .target
+            .unwrap();
+
+        let (legacy, _) = owner.connect(target, &hello(), 3).unwrap();
+        assert!(matches!(
+            owner.build_identity(&legacy, 3),
+            Err(ServerError::Unauthorized)
+        ));
+
+        let mut identity_hello = hello();
+        identity_hello.hello.optional_capabilities |=
+            crate::handshake_protocol::CAPABILITY_BUILD_IDENTITY;
+        let (connection, welcome) = owner.connect(target, &identity_hello, 4).unwrap();
+        assert_ne!(
+            welcome.selected_capabilities & crate::handshake_protocol::CAPABILITY_BUILD_IDENTITY,
+            0
+        );
+        let identity = owner.build_identity(&connection, 4).unwrap();
+        assert_eq!(identity.generation, GENERATION);
+        assert_eq!(
+            identity.selected_capabilities,
+            welcome.selected_capabilities
+        );
+        assert!(identity.to_json().contains("\"build_identity\""));
     }
 
     #[test]
@@ -8338,6 +8478,83 @@ mod runtime_helper_tests {
             keys: &[Key::Char('a'), Key::Enter],
         })
         .unwrap()
+    }
+
+    #[test]
+    fn guarded_agent_input_rejects_stale_observations_and_duplicates_never_revalidate() {
+        use crate::agent_protocol::{AgentIdentity, AgentKind, GuardedSubmit};
+        let (mut owner, target) = owner_with_first(true);
+        let mut connection = connect(&mut owner, target, 77);
+        let capability = crate::handshake_protocol::CAPABILITY_AGENT_OBSERVATION;
+        connection.selected_capabilities |= capability;
+        owner
+            .global
+            .grants
+            .get_mut(&connection.lease())
+            .unwrap()
+            .capabilities |= capability;
+        claim(&mut owner, &connection, target);
+        let request = GuardedSubmit {
+            key: key(&connection, 2),
+            target,
+            owner_revision: 2,
+            identity: AgentIdentity {
+                pid: 42,
+                start_seconds: 100,
+                start_microseconds: 1,
+                kind: AgentKind::Codex,
+            },
+            screen_revision: 1,
+            text: "review the diff",
+        };
+        let payload = crate::agent_protocol::encode_submit(&request).unwrap();
+        let rejected = owner
+            .handle_guarded_agent_submit(&connection, &request, &payload, NOW, |_| {
+                Err(RejectionCode::StaleTarget)
+            })
+            .unwrap();
+        assert_eq!(
+            decode_response_payload(&rejected).unwrap().body,
+            ResponseBody::Rejected(RejectionCode::StaleTarget)
+        );
+        let applied = owner
+            .handle_guarded_agent_submit(&connection, &request, &payload, NOW, |_| Ok(()))
+            .unwrap();
+        assert_eq!(
+            decode_response_payload(&applied).unwrap().body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        let duplicate = owner
+            .handle_guarded_agent_submit(&connection, &request, &payload, NOW, |_| {
+                panic!("duplicate must not revalidate or resend")
+            })
+            .unwrap();
+        assert_eq!(duplicate, applied);
+        let changed = GuardedSubmit {
+            text: "different",
+            ..request
+        };
+        let changed_payload = crate::agent_protocol::encode_submit(&changed).unwrap();
+        assert!(owner
+            .handle_guarded_agent_submit(&connection, &changed, &changed_payload, NOW, |_| panic!(
+                "payload mismatch must not reach validation"
+            ))
+            .is_err());
+        let no_owner = GuardedSubmit {
+            key: key(&connection, 3),
+            owner_revision: 99,
+            ..changed
+        };
+        let payload = crate::agent_protocol::encode_submit(&no_owner).unwrap();
+        let refused = owner
+            .handle_guarded_agent_submit(&connection, &no_owner, &payload, NOW, |_| {
+                panic!("owner check must precede agent validation")
+            })
+            .unwrap();
+        assert!(matches!(
+            decode_response_payload(&refused).unwrap().body,
+            ResponseBody::Rejected(_)
+        ));
     }
 
     #[test]

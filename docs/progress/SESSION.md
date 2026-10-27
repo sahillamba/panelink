@@ -1,5 +1,190 @@
 # Implementation session checkpoint — 2026-10-17
 
+## v0.1.4 live activation — 2026-10-27 (current)
+
+User explicitly approved restarting and ending current pane processes. Installed
+panelink stop exited0 and ended the two old panes in generation15642535525154316808.
+Default open selected a fresh shell at the saved-layout prompt; no saved input
+or layout was replayed. New generation15642535525154316809 has one live zsh shell
+in /Users/sahillamba/panelink. UI displayed v0.1.4; the temporary verification
+attachment was detached with Ctrl-X, preserving the shell/server.
+
+Live server-info reports client and server version0.1.4, revision10d81c24cdc2,
+source fingerprint1edf2c210c2de12d and selected capability mask511, including
+agent observations and build identity. Agent list succeeds; the fresh plain
+shell correctly remains unrecognized. Input ownership is none while attached.
+Server-info succeeds after detach. No input was sent to the shell and no provider
+was launched. Server-side feedback corrections are activated. Run panelink to
+reattach. No source change, commit or push in this activation turn.
+
+
+## Agent feedback corrections — 2026-10-27 (current)
+
+User requested all five prioritized feedback improvements. Version 0.1.4 adds
+mode-aware bracketed submission, fixed control/ownership diagnostics, bounded
+bottom reads, styled/cursor-checked Codex empty-composer recognition and separate
+client/server build identity. See [contracts and evidence](AGENT-FEEDBACK-FIXES-2026-10-27.md).
+A private real Codex 0.164.0 local /status reproduction confirms the raw-input
+failure and bracketed acceptance with zero tokens; private Panelink end-to-end
+acceptance also passes. Broader final verification/install details are recorded
+in the linked evidence. Existing user panes/server remain running, with no
+input sent or server restart performed. No commit or push.
+
+Final serial checks: library 907/0/4 ignored, client 252/0, agent CLI 7/0,
+recognized 2/0, shared 2/0, input PTY 3/0. Strict Clippy, formatting, whitespace,
+eight Markdown files and optimized release build pass. Earlier fixture startup
+failures and a test-created disk-space failure remain in the linked record;
+private package copies were removed and the final probe uses --no-daemon.
+One authenticated connection now serves each bounded agent wait. The installed
+artifact's real Codex /status probe passes with zero tokens and no daemon.
+Installed source fingerprint 1edf2c210c2de12d; SHA256
+878f5e9595675cc7bf6426ed5fc1adf5b6fd4a74677c064c01b2669cbac8b070.
+Previous 0.1.3 binary retained. Current server returns identity unsupported;
+server-side activation still requires explicit permission to restart/end its
+current pane processes. Existing panes were preserved.
+
+
+## Live activation — 2026-10-27
+
+User explicitly approved restarting and ending both existing shells. Installed
+0.1.3 `panelink stop` returned workspace stopped; default open started a fresh
+shell from /Users/sahillamba/panelink after its saved-layout prompt. Generation
+advanced from 15642535525154316807 to 15642535525154316808. The saved layout was
+not replayed; current workspace has one fresh shell. The temporary verification
+UI displayed v0.1.3 and was detached with Ctrl-X, preserving the server/shell.
+
+Installed agent list succeeds both while attached and after detach. The plain
+zsh shell correctly reports recognized:false/kind:unknown; no real provider was
+launched. Pane list while attached reports input_owner:none, and bounded pane
+read succeeds. No child input or provider/model prompt was sent. Existing-server
+activation is complete; real Codex/OpenCode recognition/state acceptance remains
+separate. Root main stays clean. Run panelink to reattach the updated client.
+
+## Shared pane input and recognized agents — 2026-10-27 (current)
+
+User selected shared per-operation input and included recognized-agent commands.
+The bounded implementation is installed as optimized 0.1.3; see
+[contracts, verification and activation boundary](HERDR-WORKFLOW-IMPLEMENTATION.md).
+Idle UI clients no longer reserve input. pane submit claims, submits text+Enter
+once and releases after confirmed delivery. agent list/get/read/prompt/wait use
+native foreground process refs and conservative screen markers; new schema14 /
+capability128 requires a matching server. Legacy retained claims remain exclusive.
+
+Final serial verification: library898/0/4ignored, client247/0; agent CLI7/0,
+recognized private fixtures2/0, shared two-attachment tests2/0, input PTY2/0.
+Pointer outer-PTY passes after known-extent distinction fixes return-to-tail;
+three other outer-PTY scenarios passed before this small correction. Clippy,
+fmt, whitespace, ten-document links and release build pass. Initial failures,
+review correction and coverage limits are preserved in the evidence above.
+
+Current older server has two live panes; read-only inspection returns unsupported
+for recognized agents. No user-pane input, detach or restart performed. Reattach
+new UI for scoped shared input; restart/new server needed for agent observations.
+Restarting existing workspace ends its shells and awaits user approval. Root
+main clean and safety stashes retained. No phase-completion, commit or push.
+
+## Scroll responsiveness and Codex socket access — 2026-10-27 (prior checkpoint)
+
+User reported slow scrolling and sandboxed Codex control_unavailable. User then
+requested reading AGENT-API-PROPOSAL.md and understanding Herdr before selecting
+input-control policy. Handoff design remains unselected: no Allow agents, global
+yield, forced takeover, new exact-target command or negotiated composite submit
+was implemented. The overbroad UI automation child was cancelled before edits.
+[Herdr source study](HERDR-INPUT-CONTROL-2026-10-27.md) records the inspected model.
+
+Local 0.1.2 removes the optional oldest-history range probe from ordinary wheel
+reads and suppresses new background poll admission while a scroll is pending.
+Normal history's cache-miss critical path uses one read rather than two. Explicit
+read-only seeks still discover the extent, matching target and screen revision.
+Parent review fixed maximum-offset caching to use the requested offset before
+reply-pattern shadowing, and ensured a conservative extent cannot cap future
+oldest-history seeks or scrollbar range discovery. Alternate-screen mode checks,
+input ownership, operation keys, bounded queues and no-replay rules stay intact.
+An already queued/in-flight poll can still delay scrolling; child TUI wheel
+processing and the 16 ms render cadence remain. Zero lag or a numeric end-to-end
+latency budget is not established. A 15-sample debug CLI read baseline (median
+38.98 ms, max44.92 ms) is recorded in
+/private/tmp/panelink-scroll-access-debug-baseline.json; it is not wheel latency
+and no before/after wheel performance claim is derived from it.
+
+Codex 0.164.0 :workspace with the user's stable temporary context reproduced
+control_unavailable. Adding the exact legacy control.sock permitted discovery.
+The named panelink profile in ~/.codex/config.toml extends :workspace and grants
+writes only to the existing Panelink agent-contexts directory plus that socket;
+network_proxy is enabled, with no allowed external domains. Default-profile
+sandbox discovery and a bounded pane read pass; a direct unrelated external
+connection remains denied. Original config retained at
+~/.codex/config.toml.before-panelink-20261027-142414. Existing Codex sessions
+must load/select the updated profile through their host; editing defaults does
+not mutate a running session's policy. Other routes need their exact endpoints.
+
+Permission-denied socket/directory failures now return control_permission_denied
+rather than grouping them as control_unavailable. Unauthorized input/claims
+return input_not_authorized with owner inspection/release guidance. Read access
+is verified, while writing to attached UI-owned panes remains blocked by the
+existing leases until the user chooses the ownership design. No input was sent
+to the user's panes and no server was restarted.
+
+Parent verification: binary242/0; compositor37/0; locked offline optimized build,
+strict lib/binary Clippy, root cargo fmt and whitespace checks pass. Socketpair
+request-order tests cover cache misses/revisions, explicit read-only extent
+queries and no background poll between pending/follow-up scroll. State tests
+cover conservative range navigation. The final installed release passes sandboxed
+list/read; forcing :workspace without the socket produces the new specific
+control_permission_denied. A full canonical verifier and fresh Apple Terminal
+wheel-to-display acceptance were not run.
+
+Installed ~/.local/bin/panelink now links directly to this worktree's optimized
+target/release/panelink; --version is panelink0.1.2. Previous launcher preserved as
+~/.local/bin/panelink.before-0.1.2-20261027-143404. Binary SHA-256:
+6ece06c1bf2c999a9d795733a0d7f860ed701f7025e98998d00cc01ab2f21845.
+A fresh attach loads v0.1.2; existing attached clients remain their original
+processes. The debug bin/panelink launcher remains a separate development path.
+Skills and docs reflect installed behavior and the unresolved handoff choice.
+No commit or push requested.
+
+## Local install and corner version — 2026-10-27 (prior checkpoint)
+
+User selected latest main plus the transferred local changes for installation.
+This worktree/branch `codex/main-local-changes-20261027` was fast-forwarded
+from bd84625 to origin/main at 10d81c2. The old scrollback code, tests and
+skill/research files were already integrated upstream; newer implementations
+were preserved. The unique agent API proposal and its documentation links
+remain proposed. Original changes remain recoverable in stash
+95e4d0856e28ab68ef4e674b00c4e2e16812c07d and the additional pre-install stash;
+original main checkout remains clean at bd84625.
+
+Package version is now 0.1.1. The padded compositor draws `v0.1.1` in the
+bottom margin of the pane touching the viewport's bottom-right corner.
+PTY/content geometry and hitboxes are unchanged; modal overlays take priority
+and damage restoration redraws the badge. Unpadded recovery views omit it.
+The badge identifies the client package, not the running server or Git SHA.
+README, specification and usage skill describe these limits.
+
+Installed via the existing development-launcher workflow: `~/.local/bin/panelink`
+now resolves to this worktree's `bin/panelink` and built `target/debug/panelink`.
+Previous launcher retained as `~/.local/bin/panelink.before-0.1.1-20261027-133756`.
+The broken global skill link was repointed to this worktree's repository copy,
+with its previous target retained as a backup symlink. Installed `--version`
+reports `panelink 0.1.1`; binary SHA-256 is
+5929ea4931b53762d96890801837b1567cac7f6e361c196b1566c993109dbcfd.
+Existing servers and attached clients were not restarted; a fresh attach loads
+the updated presentation.
+
+Verification: compositor 37 passed/0 failed; client state 92 passed/0 failed;
+locked offline build and strict lib/binary Clippy passed. Parsed VT100 cells
+cover placement, unchanged frames, split panes, placeholders, modal restoration
+and partial-write recovery. The first new-test run had one blank-cell fixture
+expectation failure (empty cell text versus spaces); corrected and rerun.
+An initial client-test filter matched zero tests; the corrected module filter
+ran the 92 cases above. No full product, Apple Terminal or reboot acceptance
+is claimed. Bundled skill validator could not import PyYAML; exact frontmatter
+was checked with the standard library and affected Markdown links were checked.
+Root-package `cargo fmt --check`, whitespace and eight affected Markdown checks
+pass. An extra `cargo fmt --all --check` also examined vendored code and
+reported existing vendor formatting differences; those sources were unchanged.
+No commit or push was requested.
+
 
 ## PR 3 CI socket readiness repair — 2026-10-27 (current)
 

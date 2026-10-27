@@ -2,6 +2,8 @@
 //! client. This module does not open a server, own a PTY, or persist input.
 
 mod pane_run;
+mod recognized;
+mod scoped;
 
 use crate::default_open::{self, StateRoot};
 use crate::p3_cli::{AgentReconciliation, WorkspaceLink};
@@ -36,6 +38,7 @@ struct CliError {
     code: &'static str,
     message: &'static str,
     usage: bool,
+    details: String,
 }
 
 impl CliError {
@@ -44,6 +47,7 @@ impl CliError {
             code,
             message,
             usage: false,
+            details: String::new(),
         }
     }
 
@@ -52,6 +56,7 @@ impl CliError {
             code: "invalid_arguments",
             message: "invalid pane command syntax; run 'panelink --help'",
             usage: true,
+            details: String::new(),
         }
     }
 }
@@ -137,10 +142,11 @@ pub(crate) fn run(args: Vec<OsString>) -> i32 {
                 push_json_string(&mut json, error.code);
                 json.push_str(",\"message\":");
                 push_json_string(&mut json, error.message);
+                json.push_str(&error.details);
                 json.push('}');
                 write_line(&json);
             } else if !error.usage {
-                eprintln!("panelink: {}", error.message);
+                eprintln!("panelink: {}{}", error.message, error.details);
             }
             code
         }
@@ -153,6 +159,7 @@ thread_local! {
 
 fn run_inner(args: Vec<OsString>) -> Result<i32, CliError> {
     JSON_ERRORS.with(|enabled| enabled.set(false));
+    crate::p3_cli::reset_control_diagnostic();
     if args.first().is_some_and(|word| word == "pane")
         && args.get(1).is_some_and(|word| word == "run")
     {
@@ -175,7 +182,23 @@ fn run_inner(args: Vec<OsString>) -> Result<i32, CliError> {
     };
 
     match words[0] {
+        "server-info" => {
+            if words[1..] != ["--json"] {
+                return Err(CliError::usage());
+            }
+            let workspace = workspace(options.caller)?;
+            let server = crate::p3_cli::server_identity(&workspace.state.server, &workspace.caller_dir.join("server-info.ctx")).map_err(|error| {
+                if error == "server_identity_unsupported" { diagnostic_error(CliError::new(error, "the running server does not expose build identity; its revision is unknown"), error) } else { link_error(error) }
+            })?;
+            write_line(&format!(
+                "{{\"ok\":true,\"client\":{},\"server\":{}}}",
+                panelink::build_info::current().to_json(),
+                server.to_json()
+            ));
+            Ok(0)
+        }
         "pane" => run_pane(&words[1..], options),
+        "agent" => recognized::run(&words[1..], options),
         "wait" => run_wait(&words[1..], options),
         "events" => run_events(&words[1..], options),
         "--help" | "-h" => {
@@ -342,6 +365,12 @@ impl Workspace {
         WorkspaceLink::open_for_target(&self.state.server, &path, target).map_err(link_error)
     }
 
+    fn pane_agent_link(&self, target: TargetRef) -> Result<WorkspaceLink, CliError> {
+        let name = target_name(target);
+        let path = self.caller_dir.join(format!("{name}-agent.ctx"));
+        WorkspaceLink::open_for_target_agent(&self.state.server, &path, target).map_err(link_error)
+    }
+
     fn pane_metadata_link(&self, target: TargetRef) -> Result<WorkspaceLink, CliError> {
         let path = self
             .caller_dir
@@ -372,7 +401,11 @@ fn target_name(target: TargetRef) -> String {
 }
 
 fn link_error(error: &'static str) -> CliError {
-    match error {
+    let result = match error {
+        "control_permission_denied" => CliError::new(
+            "control_permission_denied",
+            "the host denied access to the local control socket or its private directory; allow the selected Panelink endpoint in the agent's permission profile",
+        ),
         "context_target_mismatch" => CliError::new(
             "stale_target",
             "stale pane target; re-run 'panelink pane list'",
@@ -389,7 +422,52 @@ fn link_error(error: &'static str) -> CliError {
             "control_unavailable",
             "could not connect to or query the workspace; ensure it is running and the agent is permitted to connect to its local control socket",
         ),
+    };
+    diagnostic_error(result, error)
+}
+
+fn diagnostic_error(mut error: CliError, cause: &'static str) -> CliError {
+    let diagnostic = crate::p3_cli::control_diagnostic();
+    error.details.push_str(",\"cause\":");
+    push_json_string(&mut error.details, cause);
+    error.details.push_str(",\"stage\":");
+    push_json_string(&mut error.details, diagnostic.phase);
+    error.details.push_str(",\"transport_stage\":");
+    push_json_string(&mut error.details, diagnostic.transport);
+    error.details.push_str(",\"reconciliation\":");
+    push_json_string(
+        &mut error.details,
+        if diagnostic.pending.is_some() {
+            "pending_or_unobserved"
+        } else {
+            "no_pending_observed"
+        },
+    );
+    error.details.push_str(",\"operation_key\":");
+    scoped::push_key(&mut error.details, diagnostic.pending);
+    error
+}
+
+fn owner_failure(mut error: CliError, link: &WorkspaceLink, info: SessionInfo) -> CliError {
+    if link.pending_operation_key().is_some() {
+        error.code = "outcome_unknown";
+        error.message =
+            "an operation remains unresolved; retain this caller context and do not resend input";
     }
+    // This is the pre-operation observation, not a promise that the lease is
+    // still valid after a transport failure. No query/retry is hidden here.
+    error.details.push_str(",\"input_owner_info\":");
+    push_owner_info_json(
+        &mut error.details,
+        PaneOwner {
+            info,
+            caller_lease: link.lease(),
+        }
+        .structured(),
+    );
+    error.details.push_str(",\"owner_observation\":\"before_operation\",\"current_ownership\":\"unverified\",\"pending_operation_key\":");
+    scoped::push_key(&mut error.details, link.pending_operation_key());
+    error
 }
 
 fn run_pane(args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
@@ -401,6 +479,7 @@ fn run_pane(args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
         "claim" => pane_owner(&workspace, &args[1..], options, true),
         "release" => pane_owner(&workspace, &args[1..], options, false),
         "send" => pane_send(&workspace, &args[1..], options),
+        "submit" => scoped::command(&workspace, &args[1..], options),
         "keys" => pane_keys(&workspace, &args[1..], options),
         "interrupt" => pane_interrupt(&workspace, &args[1..], options),
         "close" => pane_close(&workspace, &args[1..], options),
@@ -505,7 +584,13 @@ fn push_pane_json(
     push_optional_path(json, observation.cwd.value.as_deref());
     json.push_str(",\"command\":");
     push_optional_path(json, observation.executable.value.as_deref());
-    let _ = write!(json, ",\"metadata_source\":\"managed_child\",\"sampled_at_mono_ms\":{},\"cwd_status\":\"{}\",\"command_status\":\"{}\"", observation.sampled_at_mono_ms, path_status(observation.cwd.status), path_status(observation.executable.status));
+    let _ = write!(
+        json,
+        ",\"metadata_source\":\"managed_child\",\"sampled_at_mono_ms\":{},\"cwd_status\":\"{}\",\"command_status\":\"{}\"",
+        observation.sampled_at_mono_ms,
+        path_status(observation.cwd.status),
+        path_status(observation.executable.status)
+    );
     let _ = write!(
         json,
         ",\"size\":{{\"rows\":{},\"columns\":{},\"x\":{},\"y\":{}}},\"alive\":{},\"exited\":{}",
@@ -578,7 +663,7 @@ fn push_exit_json(json: &mut String, exit: Option<panelink::multi_runtime::PaneE
 }
 
 fn pane_read(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
-    let (index, lines, scrollback) = parse_read_args(args)?;
+    let (index, lines, scrollback, bottom) = parse_read_args(args)?;
     let (target, revision, _) = resolve_index(workspace, index)?;
     ensure_current_index(workspace, index, target, revision)?;
     let mut link = workspace.pane_link(target)?;
@@ -592,9 +677,15 @@ fn pane_read(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
         return Err(CliError::new(
             "previous_operation_settled",
             match status {
-                OperationStatus::NotAdmitted => "an earlier operation was not admitted; no replacement operation was issued",
-                OperationStatus::Completed(_) => "an earlier operation was settled after an uncertain acknowledgment; no replacement operation was issued",
-                OperationStatus::InProgress => "an earlier operation is still in progress; no replacement operation was issued",
+                OperationStatus::NotAdmitted => {
+                    "an earlier operation was not admitted; no replacement operation was issued"
+                }
+                OperationStatus::Completed(_) => {
+                    "an earlier operation was settled after an uncertain acknowledgment; no replacement operation was issued"
+                }
+                OperationStatus::InProgress => {
+                    "an earlier operation is still in progress; no replacement operation was issued"
+                }
             },
         ));
     }
@@ -603,8 +694,8 @@ fn pane_read(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
     } else {
         ReadSource::Screen
     };
-    let screen = link
-        .read_screen(target, source, 65_536, lines)
+    let mut screen = link
+        .read_screen(target, source, 65_536, if bottom { 1024 } else { lines })
         .map_err(|error| {
             if error == "live_scrollback_unavailable" {
                 CliError::new(
@@ -614,12 +705,18 @@ fn pane_read(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
             } else if error == "stale_target" {
                 stale_target()
             } else {
-                CliError::new(
-                    "read_failed",
-                    "pane read failed; the target was not retargeted",
+                diagnostic_error(
+                    CliError::new(
+                        "read_failed",
+                        "pane read failed; the target was not retargeted",
+                    ),
+                    error,
                 )
             }
         })?;
+    if bottom {
+        select_bottom(&mut screen, lines)?;
+    }
     let (current, current_revision, _) = resolve_index(workspace, index)?;
     if current != target || current_revision != revision {
         return Err(stale_target());
@@ -630,7 +727,7 @@ fn pane_read(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
         push_json_string(&mut json, &target_string(screen.target));
         let _ = write!(
             json,
-            ",\"source\":\"{}\",\"screen_revision\":{},\"truncated\":{},\"text\":",
+            ",\"source\":\"{}\",\"screen_revision\":{},\"truncated\":{}",
             if scrollback {
                 "live_scrollback"
             } else {
@@ -638,6 +735,17 @@ fn pane_read(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
             },
             screen.screen_revision,
             screen.truncated
+        );
+        let _ = write!(
+            json,
+            ",\"row_selection\":\"{}\",\"text\":",
+            if bottom {
+                "bottom"
+            } else if scrollback {
+                "history_tail"
+            } else {
+                "top"
+            }
         );
         push_json_string(&mut json, &screen.text);
         json.push('}');
@@ -672,9 +780,15 @@ fn pane_owner(
         return Err(CliError::new(
             "previous_operation_settled",
             match status {
-                OperationStatus::NotAdmitted => "an earlier operation was not admitted; no replacement input was sent",
-                OperationStatus::Completed(_) => "an earlier operation was settled after an uncertain acknowledgment; no replacement input was sent",
-                OperationStatus::InProgress => "an earlier operation is still in progress; no replacement input was sent",
+                OperationStatus::NotAdmitted => {
+                    "an earlier operation was not admitted; no replacement input was sent"
+                }
+                OperationStatus::Completed(_) => {
+                    "an earlier operation was settled after an uncertain acknowledgment; no replacement input was sent"
+                }
+                OperationStatus::InProgress => {
+                    "an earlier operation is still in progress; no replacement input was sent"
+                }
             },
         ));
     }
@@ -684,7 +798,7 @@ fn pane_owner(
     }
     let status = link
         .change_owner(target, before.owner_revision, claim)
-        .map_err(owner_error)?;
+        .map_err(|error| owner_failure(owner_error(error), &link, before))?;
     let after = link.describe_info().map_err(link_error)?;
     if after.target != target || after.owner_lease != if claim { link.lease() } else { 0 } {
         return Err(CliError::new(
@@ -748,7 +862,7 @@ fn pane_send(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
     let owner_revision = if claim {
         let status = link
             .change_owner(target, before.owner_revision, true)
-            .map_err(owner_error)?;
+            .map_err(|error| owner_failure(owner_error(error), &link, before))?;
         if status != OperationStatus::Completed(Outcome::Applied) {
             return Err(CliError::new("claim_failed", "input claim was not applied"));
         }
@@ -763,9 +877,13 @@ fn pane_send(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
         after_claim.owner_revision
     } else {
         if before.owner_lease != link.lease() {
-            return Err(CliError::new(
-                "input_not_claimed",
-                "claim this pane before sending input (or pass --claim)",
+            return Err(owner_failure(
+                CliError::new(
+                    "input_not_claimed",
+                    "claim this pane before sending input (or pass --claim)",
+                ),
+                &link,
+                before,
             ));
         }
         before.owner_revision
@@ -776,7 +894,7 @@ fn pane_send(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
     // send into a reported failure.
     let status = link
         .send_text(target, owner_revision, &text, enter)
-        .map_err(owner_error)?;
+        .map_err(|error| owner_failure(owner_error(error), &link, before))?;
     emit_status_result(
         options,
         "pane_send",
@@ -813,14 +931,15 @@ fn pane_keys(workspace: &Workspace, args: &[&str], options: Options<'_>) -> Resu
     }
     let info = link.describe_info().map_err(link_error)?;
     if info.owner_lease != link.lease() {
-        return Err(CliError::new(
-            "input_not_claimed",
-            "claim this pane before sending keys",
+        return Err(owner_failure(
+            CliError::new("input_not_claimed", "claim this pane before sending keys"),
+            &link,
+            info,
         ));
     }
     let status = link
         .send_keys(target, info.owner_revision, &keys)
-        .map_err(owner_error)?;
+        .map_err(|error| owner_failure(owner_error(error), &link, info))?;
     let (current, current_revision, _) = resolve_index(workspace, index)?;
     if current != target || current_revision != revision {
         return Err(stale_target());
@@ -857,14 +976,18 @@ fn pane_interrupt(
     }
     let info = link.describe_info().map_err(link_error)?;
     if info.owner_lease != link.lease() {
-        return Err(CliError::new(
-            "input_not_claimed",
-            "claim this pane before interrupting it",
+        return Err(owner_failure(
+            CliError::new(
+                "input_not_claimed",
+                "claim this pane before interrupting it",
+            ),
+            &link,
+            info,
         ));
     }
     let status = link
         .interrupt_target(target, info.owner_revision)
-        .map_err(owner_error)?;
+        .map_err(|error| owner_failure(owner_error(error), &link, info))?;
     let (current, current_revision, _) = resolve_index(workspace, index)?;
     if current != target || current_revision != revision {
         return Err(stale_target());
@@ -975,24 +1098,42 @@ fn emit_status_result(
 }
 
 fn owner_error(error: &'static str) -> CliError {
-    match error {
-        "input_ownership_lost" | "input_not_claimed" | "stale_owner" | "expired_owner" => CliError::new(
-            "input_ownership_lost",
-            "input ownership was lost (possibly taken back by the human UI); no input was retried",
+    let result = match error {
+        "unauthorized" => CliError::new(
+            "input_not_authorized",
+            "input or claim was refused; inspect input_owner_info in 'pane list --json'; another controller must release its claim before this caller can acquire input; no input was retried",
         ),
+        "input_ownership_lost" | "input_not_claimed" | "stale_owner" | "expired_owner" => {
+            CliError::new(
+                "input_ownership_lost",
+                "input ownership expired or changed; no input was retried",
+            )
+        }
         "stale_target" | "context_target_mismatch" => stale_target(),
         "previous_operation_settled" => CliError::new(
             "previous_operation_settled",
             "an earlier operation was reconciled; no replacement input was sent",
         ),
-        "operation_acknowledgment_lost" | "operation_uncertain" | "outcome_unknown" => CliError::new(
-            "outcome_unknown",
-            "operation outcome is unknown; non-replayable input was not resent",
+        "operation_acknowledgment_lost" | "operation_uncertain" | "outcome_unknown" => {
+            CliError::new(
+                "outcome_unknown",
+                "operation outcome is unknown; non-replayable input was not resent",
+            )
+        }
+        "operation_refused" | "input_busy" => CliError::new(
+            "input_busy",
+            "input claim was refused because another owner holds the pane",
         ),
-        "operation_refused" | "input_busy" => CliError::new("input_busy", "input claim was refused because another owner holds the pane"),
-        "live_scrollback_unavailable" => CliError::new("live_scrollback_unavailable", "live scrollback is not available in this server"),
-        _ => CliError::new("input_failed", "pane input or ownership operation failed; no input was retried"),
-    }
+        "live_scrollback_unavailable" => CliError::new(
+            "live_scrollback_unavailable",
+            "live scrollback is not available in this server",
+        ),
+        _ => CliError::new(
+            "input_failed",
+            "pane input or ownership operation failed; no input was retried",
+        ),
+    };
+    diagnostic_error(result, error)
 }
 
 fn resolve_index(
@@ -1046,13 +1187,18 @@ fn parse_index(value: &str) -> Result<usize, CliError> {
         .ok_or_else(CliError::usage)
 }
 
-fn parse_read_args(args: &[&str]) -> Result<(usize, u16, bool), CliError> {
+fn parse_read_args(args: &[&str]) -> Result<(usize, u16, bool, bool), CliError> {
     let index = parse_index(args.first().copied().ok_or_else(CliError::usage)?)?;
     let mut lines = DEFAULT_VISIBLE_LINES;
     let mut scrollback = false;
+    let mut bottom = false;
     let mut cursor = 1;
     while cursor < args.len() {
         match args[cursor] {
+            "--bottom" => {
+                bottom = true;
+                cursor += 1;
+            }
             "--scrollback" => {
                 scrollback = true;
                 cursor += 1;
@@ -1073,7 +1219,33 @@ fn parse_read_args(args: &[&str]) -> Result<(usize, u16, bool), CliError> {
             _ => return Err(CliError::usage()),
         }
     }
-    Ok((index, lines, scrollback))
+    if bottom && scrollback {
+        return Err(CliError::usage());
+    }
+    Ok((index, lines, scrollback, bottom))
+}
+
+// Select only after obtaining a complete bounded snapshot. Never label the
+// end of a byte-truncated prefix as the bottom of the actual screen.
+fn select_bottom(screen: &mut crate::p3_cli::AgentScreen, lines: u16) -> Result<(), CliError> {
+    if screen.truncated {
+        return Err(CliError::new(
+            "bottom_read_truncated",
+            "the full screen exceeded the bounded read budget; its bottom could not be established",
+        ));
+    }
+    let rows = screen.text.split('\n').count();
+    let skip = rows.saturating_sub(usize::from(lines));
+    if skip != 0 {
+        let start = screen
+            .text
+            .match_indices('\n')
+            .nth(skip - 1)
+            .map_or(0, |(index, _)| index + 1);
+        screen.text = screen.text[start..].to_owned();
+        screen.truncated = true;
+    }
+    Ok(())
 }
 
 fn parse_key(value: &str) -> Result<Key, CliError> {
@@ -1353,7 +1525,9 @@ fn finish_wait(
             "wait condition did not match"
         };
         if options.json {
-            let mut json = String::from("{\"ok\":false,\"action\":\"wait\",\"matched\":false,\"status\":\"timed_out\",\"condition\":");
+            let mut json = String::from(
+                "{\"ok\":false,\"action\":\"wait\",\"matched\":false,\"status\":\"timed_out\",\"condition\":",
+            );
             push_json_string(&mut json, condition);
             let _ = write!(json, ",\"index\":{index},\"target\":");
             push_json_string(&mut json, &target_string(target));
@@ -1371,7 +1545,9 @@ fn finish_wait(
         None
     };
     if options.json {
-        let mut json = String::from("{\"ok\":true,\"action\":\"wait\",\"matched\":true,\"status\":\"matched\",\"condition\":");
+        let mut json = String::from(
+            "{\"ok\":true,\"action\":\"wait\",\"matched\":true,\"status\":\"matched\",\"condition\":",
+        );
         push_json_string(&mut json, condition);
         let _ = write!(json, ",\"index\":{index},\"target\":");
         push_json_string(&mut json, &target_string(target));
@@ -2128,12 +2304,53 @@ fn write_line(value: &str) {
 }
 
 fn print_help() {
-    println!("Agent pane commands:\n  panelink pane list [--as NAME] [--json]\n  panelink pane run [--pane N] [--direction left|right|up|down] [--cwd DIR] [--as NAME] [--json] -- COMMAND [ARG ...]\n  panelink pane read N [--lines K] [--scrollback] [--json]\n  panelink pane claim|release N [--json]\n  panelink pane send N TEXT [--enter] [--claim] [--json]\n  panelink pane keys N Enter|Tab|Esc|C-c|Up|Down|Left|Right|Backspace... [--json]\n  panelink pane interrupt|close N [--json]\n  panelink wait N (--text STRING [--regex] | --quiet SECS | --exit | --change) --timeout SECS [--json]\n  panelink events [--pane N] [--timeout SECS] --json\n\nSet PANELINK_AGENT_CONTEXT_DIR to an absolute, stable private directory when the default context location is not writable. It must be owned by this user, have mode 0700, and remain the same across invocations.");
+    println!(
+        "Agent pane commands:\n  panelink pane list [--as NAME] [--json]\n  panelink pane run [--pane N] [--direction left|right|up|down] [--cwd DIR] [--as NAME] [--json] -- COMMAND [ARG ...]\n  panelink pane read N [--lines K] [--bottom | --scrollback] [--json]\n  panelink pane claim|release N [--json]\n  panelink pane send N TEXT [--enter] [--claim] [--json]\n  panelink pane submit N TEXT [--json] [--as NAME]\n  panelink pane keys N Enter|Tab|Esc|C-c|Up|Down|Left|Right|Backspace... [--json]\n  panelink pane interrupt|close N [--json]\n  panelink wait N (--text STRING [--regex] | --quiet SECS | --exit | --change) --timeout SECS [--json]\n  panelink events [--pane N] [--timeout SECS] --json\n  panelink agent list [--json]\n  panelink agent get N|AGENT_REF [--json]\n  panelink agent read N|AGENT_REF [--lines K] [--bottom] [--json]\n  panelink agent prompt AGENT_REF TEXT [--wait] [--until idle|working|blocked|unknown] [--timeout SECS] [--json]\n  panelink agent wait N|AGENT_REF [--until STATE] [--timeout SECS] [--json]\n\nSet PANELINK_AGENT_CONTEXT_DIR to an absolute, stable private directory when the default context location is not writable. It must be owned by this user, have mode 0700, and remain the same across invocations."
+    );
 }
 
 #[cfg(test)]
 mod parser_tests {
     use super::*;
+
+    #[test]
+    fn bottom_reads_preserve_physical_rows_and_refuse_truncated_prefixes() {
+        assert_eq!(
+            parse_read_args(&["1", "--bottom", "--lines", "2"]).unwrap(),
+            (1, 2, false, true)
+        );
+        assert!(parse_read_args(&["1", "--bottom", "--scrollback"]).is_err());
+        let mut screen = crate::p3_cli::AgentScreen {
+            target: TargetRef {
+                generation: 1,
+                workspace: 1,
+                pane: 1,
+                session: 1,
+                occupant_revision: 1,
+            },
+            screen_revision: 1,
+            truncated: false,
+            text: "top\nprompt é\n".into(),
+        };
+        select_bottom(&mut screen, 2).unwrap();
+        assert_eq!(screen.text, "prompt é\n");
+        assert!(screen.truncated);
+        assert_eq!(
+            select_bottom(&mut screen, 2).unwrap_err().code,
+            "bottom_read_truncated"
+        );
+    }
+
+    #[test]
+    fn diagnostic_labels_and_pending_key_do_not_include_payloads() {
+        crate::p3_cli::reset_control_diagnostic();
+        let error = link_error("transport_unavailable");
+        assert!(error
+            .details
+            .contains("\"cause\":\"transport_unavailable\""));
+        assert!(error.details.contains("\"stage\":"));
+        assert!(!error.details.contains("/Users/"));
+    }
 
     #[test]
     fn common_dispatch_options_and_regex_limits_are_explicit() {
@@ -2174,6 +2391,21 @@ mod parser_tests {
 #[cfg(test)]
 mod owner_identity_tests {
     use super::*;
+
+    #[test]
+    fn permission_and_owner_refusals_have_distinct_actionable_errors() {
+        assert_eq!(
+            link_error("control_permission_denied").code,
+            "control_permission_denied"
+        );
+        assert_eq!(
+            link_error("transport_unavailable").code,
+            "control_unavailable"
+        );
+        assert_eq!(owner_error("unauthorized").code, "input_not_authorized");
+        assert_eq!(owner_error("operation_uncertain").code, "outcome_unknown");
+        assert_eq!(owner_error("stale_owner").code, "input_ownership_lost");
+    }
 
     fn observation(generation: u64, owner_lease: u64) -> PaneOwner {
         PaneOwner {

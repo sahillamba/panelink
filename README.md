@@ -23,7 +23,12 @@ panelink
 ```
 
 That's it. The first run starts your workspace with one shell. Later runs
-reattach to it.
+reattach to it. The client version appears in the bottom-right pane margin
+(`v0.1.4` in this local build), matching `panelink --version`.
+Use `panelink build-info --json` for the client revision/source fingerprint and
+`panelink server-info --json` for the running server's identity and negotiated
+capabilities. An older server reports identity unsupported; the client version
+does not identify that server.
 
 | Action | How |
 | --- | --- |
@@ -50,7 +55,8 @@ reattach to it.
 | Close the workspace | `exit` in every shell, or `panelink stop` |
 
 Normal-history scrolling keeps the last screen visible while the next view is
-fetched. The scrollbar uses the pane's existing right padding; its range is
+fetched. Normal-history wheel reads do not wait for a separate range probe.
+The scrollbar uses the pane's existing right padding; its range is
 refreshed when you scroll. Track clicks page through history, and dragging the
 thumb previews a position before seeking on release. An initial click on an
 unknown range reads its extent. Alternate-screen apps such as OpenCode

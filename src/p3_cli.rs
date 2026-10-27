@@ -7,6 +7,7 @@
 use super::{
     capture_child_arguments, os_str_byte_len, preflight_serve_launch, prepare_probe, ProbeRequest,
 };
+use panelink::agent_protocol::{self, GuardedSubmit, Observation as AgentObservation};
 use panelink::client_context::{ContextError, ContextFile, ReconcileResult};
 use panelink::close_protocol::{
     decode_close_result, encode_close_request, encode_close_status_query, CloseOutcome,
@@ -19,8 +20,8 @@ use panelink::control_protocol::{
 use panelink::event_journal::EventCursor;
 use panelink::event_protocol::{decode_event, Event, EventBody};
 use panelink::handshake_protocol::{
-    validate_welcome, Hello, Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT, CAPABILITY_READ,
-    CAPABILITY_WORKSPACE_EVENTS,
+    validate_welcome, Hello, Welcome, CAPABILITY_AGENT_OBSERVATION, CAPABILITY_EVENTS,
+    CAPABILITY_INPUT, CAPABILITY_READ, CAPABILITY_WORKSPACE_EVENTS,
 };
 use panelink::launch::{Environment, LaunchContext};
 use panelink::managed_launch_protocol::LaunchRequest;
@@ -856,9 +857,90 @@ fn emit_receipt(context: &ContextFile, stream: &mut AuthenticatedStream, key: Op
     }
 }
 
+pub(crate) fn server_identity(
+    directory: &Path,
+    context_path: &Path,
+) -> Result<panelink::build_info::IdentityReply, &'static str> {
+    // Reuse one dedicated observer lease across short-lived CLI invocations.
+    // No mutation is admitted on this context and old grants are not widened.
+    let mut link = WorkspaceLink::open_for_target_inner(
+        directory,
+        context_path,
+        None,
+        false,
+        panelink::handshake_protocol::KNOWN_CAPABILITIES & !CAPABILITY_READ,
+    )?;
+    diagnostic_phase("capability_negotiation");
+    if link.selected_capabilities & panelink::handshake_protocol::CAPABILITY_BUILD_IDENTITY == 0 {
+        return Err("server_identity_unsupported");
+    }
+    diagnostic_phase("server_identity_query");
+    let id = link.request_id();
+    let bytes = exchange_with_id(&mut link.stream, id, &panelink::build_info::QUERY)?;
+    let identity =
+        panelink::build_info::decode_server_identity(&bytes).ok_or("response_invalid")?;
+    if identity.generation != link.context.context().generation()
+        || identity.selected_capabilities != link.selected_capabilities
+    {
+        return Err("response_invalid");
+    }
+    Ok(identity)
+}
+
+// Fixed labels and operation identifiers only; never include payloads or paths.
+#[derive(Clone, Copy)]
+pub(crate) struct ControlDiagnostic {
+    pub(crate) phase: &'static str,
+    pub(crate) transport: &'static str,
+    pub(crate) pending: Option<OperationKey>,
+}
+thread_local! {
+    static CONTROL_DIAGNOSTIC: std::cell::Cell<ControlDiagnostic> = const { std::cell::Cell::new(ControlDiagnostic { phase: "open", transport: "none", pending: None }) };
+}
+pub(crate) fn control_diagnostic() -> ControlDiagnostic {
+    CONTROL_DIAGNOSTIC.with(std::cell::Cell::get)
+}
+pub(crate) fn reset_control_diagnostic() {
+    CONTROL_DIAGNOSTIC.with(|state| {
+        state.set(ControlDiagnostic {
+            phase: "open",
+            transport: "none",
+            pending: None,
+        })
+    });
+}
+fn diagnostic_phase(phase: &'static str) {
+    CONTROL_DIAGNOSTIC.with(|state| {
+        let mut value = state.get();
+        value.phase = phase;
+        value.transport = "none";
+        state.set(value);
+    });
+}
+fn diagnostic_transport(transport: &'static str) {
+    CONTROL_DIAGNOSTIC.with(|state| {
+        let mut value = state.get();
+        value.transport = transport;
+        state.set(value);
+    });
+}
+fn diagnostic_pending(pending: Option<OperationKey>) {
+    CONTROL_DIAGNOSTIC.with(|state| {
+        let mut value = state.get();
+        value.pending = pending;
+        state.set(value);
+    });
+}
+
 fn connect_stream(directory: &Path) -> Result<AuthenticatedStream, &'static str> {
-    AuthenticatedStream::connect(directory, deadline_after(CLIENT_DEADLINE))
-        .map_err(|_| "transport_unavailable")
+    diagnostic_transport("connect");
+    AuthenticatedStream::connect(directory, deadline_after(CLIENT_DEADLINE)).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            "control_permission_denied"
+        } else {
+            "transport_unavailable"
+        }
+    })
 }
 
 fn handshake(
@@ -895,6 +977,7 @@ fn handshake_full(
     target: Option<TargetRef>,
     observation_capabilities: u64,
 ) -> Result<Welcome, &'static str> {
+    diagnostic_phase("handshake");
     let hello = Hello {
         nonce: fresh_nonce(),
         required_capabilities: CAPABILITY_READ | if require_events { CAPABILITY_EVENTS } else { 0 },
@@ -1041,11 +1124,17 @@ fn display_lines(text: &str) -> usize {
 fn reconciliation_json(state: &Reconciliation<'_>) -> String {
     let mut json = String::from("{\"ok\":true,\"action\":\"reconcile\",\"target\":");
     push_target(&mut json, state.info.target);
-    let _ = write!(json,
+    let _ = write!(
+        json,
         ",\"cursor\":\"{}:{}\",\"screen_revision\":{},\"owner_revision\":{},\"owner_lease\":{},\"child_exited\":{},\"truncated\":{},\"text\":",
-        state.cursor.generation, state.cursor.sequence, state.screen_revision,
-        state.info.owner_revision, state.info.owner_lease, state.info.child_exited,
-        state.truncated);
+        state.cursor.generation,
+        state.cursor.sequence,
+        state.screen_revision,
+        state.info.owner_revision,
+        state.info.owner_lease,
+        state.info.child_exited,
+        state.truncated
+    );
     push_json_string(&mut json, state.text);
     json.push('}');
     json
@@ -1131,7 +1220,8 @@ fn emit_watch(events: &[Event], end: WatchEnd) -> i32 {
     };
     let mut json = format!(
         "{{\"ok\":{changed},\"action\":\"watch\",\"status\":\"{status}\",\"cursor\":\"{}:{}\",\"events\":[",
-        end.cursor.generation, end.cursor.sequence);
+        end.cursor.generation, end.cursor.sequence
+    );
     for (index, event) in events.iter().enumerate() {
         if index != 0 {
             json.push(',');
@@ -1150,7 +1240,10 @@ fn emit_watch(events: &[Event], end: WatchEnd) -> i32 {
                 revision,
                 owner_lease,
             } => {
-                let _ = write!(json, ",\"kind\":\"input_owner_changed\",\"revision\":{revision},\"owner_lease\":{owner_lease}");
+                let _ = write!(
+                    json,
+                    ",\"kind\":\"input_owner_changed\",\"revision\":{revision},\"owner_lease\":{owner_lease}"
+                );
             }
             EventBody::ChildExited => json.push_str(",\"kind\":\"child_exited\""),
         }
@@ -1166,6 +1259,7 @@ fn write_frame(
     request_id: u64,
     payload: &[u8],
 ) -> Result<(), &'static str> {
+    diagnostic_transport("request_write");
     let frame = Frame::new(kind, request_id, payload).map_err(|_| "request_invalid")?;
     stream
         .write_frame(&frame, deadline_after(CLIENT_DEADLINE))
@@ -1175,6 +1269,7 @@ fn write_frame(
 fn read_frame(
     stream: &mut AuthenticatedStream,
 ) -> Result<panelink::transport::OwnedFrame, &'static str> {
+    diagnostic_transport("reply_read");
     stream
         .read_frame(deadline_after(CLIENT_DEADLINE))
         .map_err(|_| "transport_failed")
@@ -1418,7 +1513,11 @@ fn run_server_probe(request: ServerProbe) -> i32 {
             &format!(
                 "{{\"ok\":true,\"action\":\"server-probe\",\"state\":\"stopped\",\"generation\":{generation}}}"
             ),
-            if startup_outcome == Outcome::Applied { 0 } else { 1 },
+            if startup_outcome == Outcome::Applied {
+                0
+            } else {
+                1
+            },
         )
     }
 }
@@ -1553,7 +1652,7 @@ fn run_serve(request: ServerProbe) -> i32 {
         // EPERM/EACCES is reported distinctly so callers can tell an
         // environment-denied pathname bind from any other bind failure.
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            return emit_failure("listener_permission_denied")
+            return emit_failure("listener_permission_denied");
         }
         Err(_) => return emit_failure("listener_unavailable"),
     };
@@ -1672,7 +1771,11 @@ fn run_serve(request: ServerProbe) -> i32 {
         ",\"startup_outcome\":\"{}\",\"rows\":{rows},\"columns\":{columns},\"allow_input\":{},\"history_capture\":\"{}\"}}",
         outcome_name(startup.outcome),
         request.allow_input,
-        if driver.history_available() && !driver.history_capture_failed() { "enabled" } else { "unavailable" }
+        if driver.history_available() && !driver.history_capture_failed() {
+            "enabled"
+        } else {
+            "unavailable"
+        }
     );
     let clock = monotonic_clock(Instant::now());
     let history_failure = driver.history_failure_signal();
@@ -1788,7 +1891,11 @@ fn run_serve(request: ServerProbe) -> i32 {
             &format!(
                 "{{\"ok\":true,\"action\":\"serve\",\"state\":\"stopped\",\"generation\":{generation}}}"
             ),
-            if startup.outcome == Outcome::Applied { 0 } else { 1 },
+            if startup.outcome == Outcome::Applied {
+                0
+            } else {
+                1
+            },
         )
     }
 }
@@ -2295,6 +2402,8 @@ pub(crate) struct WorkspaceLink {
     pub(crate) settled_uncertain: Option<OperationStatus>,
     selected_capabilities: u64,
     lease_schedule: ObserverLeaseSchedule,
+    last_operation_key: Option<OperationKey>,
+    last_operation_status: Option<OperationStatus>,
 }
 
 /// Safe failure from a managed pane launch. Once a durable key is reserved,
@@ -2391,6 +2500,14 @@ pub(crate) struct AgentReconciliation {
 }
 
 impl WorkspaceLink {
+    fn acknowledge(&mut self, key: OperationKey) -> Result<(), &'static str> {
+        self.context
+            .ack(key)
+            .map_err(|error| context_error_label(&error))?;
+        diagnostic_pending(self.context.context().uncertain());
+        Ok(())
+    }
+
     /// Resume (or create) the CLI context at `context_path` against the server
     /// in `directory`.
     pub(crate) fn open(directory: &Path, context_path: &Path) -> Result<Self, &'static str> {
@@ -2415,6 +2532,21 @@ impl WorkspaceLink {
         target: TargetRef,
     ) -> Result<Self, &'static str> {
         Self::open_for_target_inner(directory, context_path, Some(target), true, 0)
+    }
+
+    /// Open a target-pinned connection that negotiates native agent observation.
+    pub(crate) fn open_for_target_agent(
+        directory: &Path,
+        context_path: &Path,
+        target: TargetRef,
+    ) -> Result<Self, &'static str> {
+        Self::open_for_target_inner(
+            directory,
+            context_path,
+            Some(target),
+            false,
+            CAPABILITY_AGENT_OBSERVATION,
+        )
     }
 
     /// Open a dedicated workspace observation lease. A fresh Hello offers
@@ -2453,6 +2585,7 @@ impl WorkspaceLink {
         &mut self,
         target: TargetRef,
     ) -> Result<ProcessObservation, &'static str> {
+        diagnostic_phase("process_query");
         self.ensure_target(target)?;
         if self.selected_capabilities & CAPABILITY_PANE_METADATA == 0 {
             return Ok(ProcessObservation::unavailable(
@@ -2472,6 +2605,77 @@ impl WorkspaceLink {
         Ok(observation)
     }
 
+    /// Request a negotiated native foreground-agent observation for one exact target.
+    pub(crate) fn observe_agent(
+        &mut self,
+        target: TargetRef,
+    ) -> Result<AgentObservation, &'static str> {
+        diagnostic_phase("agent_query");
+        self.ensure_target(target)?;
+        if self.selected_capabilities & CAPABILITY_AGENT_OBSERVATION == 0 {
+            return Err("agent_observation_unsupported");
+        }
+        let payload = agent_protocol::encode_query(target).map_err(|_| "request_invalid")?;
+        let id = self.request_id();
+        let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
+        let observation =
+            agent_protocol::decode_observation(&bytes).map_err(|_| "response_invalid")?;
+        if observation.target != target {
+            return Err("response_invalid");
+        }
+        Ok(observation)
+    }
+
+    /// Submit text only if the server still observes the exact foreground agent
+    /// and screen revision supplied by the caller. The request is reserved once
+    /// and is never replayed.
+    pub(crate) fn guarded_submit(
+        &mut self,
+        target: TargetRef,
+        owner_revision: u64,
+        observation: &AgentObservation,
+        text: &str,
+    ) -> Result<OperationStatus, &'static str> {
+        self.ensure_target(target)?;
+        if self.selected_capabilities & CAPABILITY_AGENT_OBSERVATION == 0 {
+            return Err("agent_observation_unsupported");
+        }
+        if observation.target != target {
+            return Err("stale_target");
+        }
+        let key = candidate_key(self.context.context());
+        let request = GuardedSubmit {
+            key,
+            target,
+            owner_revision,
+            identity: observation.identity,
+            screen_revision: observation.screen_revision,
+            text,
+        };
+        let payload = agent_protocol::encode_submit(&request).map_err(|_| "request_invalid")?;
+        let reserved = self.reserve_mutation_key(key)?;
+        let id = self.request_id();
+        let bytes = match exchange_with_id(&mut self.stream, id, &payload) {
+            Ok(bytes) => bytes,
+            Err("server_rejected") => return self.reconcile_rejected_mutation(reserved),
+            Err(error) => return Err(error),
+        };
+        self.decode_operation_status(reserved, &bytes, true)
+    }
+
+    /// The most recently reserved durable mutation key, retained after ack.
+    pub(crate) const fn last_operation_key(&self) -> Option<OperationKey> {
+        self.last_operation_key
+    }
+
+    pub(crate) fn pending_operation_key(&self) -> Option<OperationKey> {
+        self.context.context().uncertain()
+    }
+
+    pub(crate) const fn last_operation_status(&self) -> Option<OperationStatus> {
+        self.last_operation_status
+    }
+
     fn open_for_target_inner(
         directory: &Path,
         context_path: &Path,
@@ -2479,14 +2683,19 @@ impl WorkspaceLink {
         require_events: bool,
         observation_capabilities: u64,
     ) -> Result<Self, &'static str> {
+        diagnostic_phase("context_open");
+        diagnostic_pending(None);
         let workspace_events = observation_capabilities & CAPABILITY_WORKSPACE_EVENTS != 0;
         let mut discarded_uncertain = false;
+        let mut discarded_key = None;
         if fs::symlink_metadata(context_path).is_ok() {
             let context = ContextFile::open_existing(
                 context_path,
                 deadline_after(CLOSE_CLIENT_DEADLINE + CLIENT_DEADLINE),
             )
             .map_err(|error| context_error_label(&error))?;
+            let prior_uncertain_key = context.context().uncertain();
+            diagnostic_pending(prior_uncertain_key);
             let handshake_started = Instant::now();
             let mut stream = connect_stream(directory)?;
             match handshake_full(
@@ -2497,6 +2706,7 @@ impl WorkspaceLink {
                 observation_capabilities,
             ) {
                 Ok(welcome) => {
+                    let pending_key = context.context().uncertain();
                     let mut link = Self {
                         directory: directory.to_path_buf(),
                         context,
@@ -2506,8 +2716,11 @@ impl WorkspaceLink {
                         settled_uncertain: None,
                         selected_capabilities: welcome.selected_capabilities,
                         lease_schedule: ObserverLeaseSchedule::new(handshake_started),
+                        last_operation_key: pending_key,
+                        last_operation_status: None,
                     };
                     link.settled_uncertain = link.settle_uncertain()?;
+                    link.last_operation_status = link.settled_uncertain;
                     if let Some(expected) = target {
                         let observed = link.describe_info()?.target;
                         let mismatch = if workspace_events {
@@ -2526,7 +2739,8 @@ impl WorkspaceLink {
                     // The lease is unknown to this server, so no result for
                     // it can ever be observed; replace the record while it
                     // is still locked.
-                    discarded_uncertain = context.context().uncertain().is_some();
+                    discarded_uncertain = prior_uncertain_key.is_some();
+                    discarded_key = prior_uncertain_key;
                     fs::remove_file(context_path).map_err(|_| "context_storage_failed")?;
                     drop(context);
                 }
@@ -2558,6 +2772,8 @@ impl WorkspaceLink {
             settled_uncertain: None,
             selected_capabilities: welcome.selected_capabilities,
             lease_schedule: ObserverLeaseSchedule::new(handshake_started),
+            last_operation_key: discarded_key,
+            last_operation_status: None,
         })
     }
 
@@ -2620,9 +2836,11 @@ impl WorkspaceLink {
     /// Settle an earlier uncertain key by schema-2 status; never resend it.
     /// Returns the observed status when a key was uncertain.
     fn settle_uncertain(&mut self) -> Result<Option<OperationStatus>, &'static str> {
+        diagnostic_pending(self.context.context().uncertain());
         let Some(key) = self.context.context().uncertain() else {
             return Ok(None);
         };
+        diagnostic_phase("reconciliation");
         let payload = encode_session_request(&SessionRequest::OperationStatus { key })
             .map_err(|_| "request_invalid")?;
         let id = self.request_id();
@@ -2639,19 +2857,24 @@ impl WorkspaceLink {
             .reconcile(key, status)
             .map_err(|error| context_error_label(&error))?
         {
-            ReconcileResult::Cleared => Ok(Some(status)),
+            ReconcileResult::Cleared => {
+                diagnostic_pending(None);
+                Ok(Some(status))
+            }
             ReconcileResult::StillInProgress => Err("operation_uncertain"),
         }
     }
 
     /// Current layout panes in spatial order.
     pub(crate) fn panes(&mut self) -> Result<PaneReply, &'static str> {
+        diagnostic_phase("pane_query");
         let id = self.request_id();
         request_panes(&mut self.stream, id)
     }
 
     /// Read current metadata for the target pinned to this caller lease.
     pub(crate) fn describe_info(&mut self) -> Result<SessionInfo, &'static str> {
+        diagnostic_phase("owner_query");
         let payload =
             encode_session_request(&SessionRequest::Describe).map_err(|_| "request_invalid")?;
         let id = self.request_id();
@@ -2787,9 +3010,7 @@ impl WorkspaceLink {
                 return Err("operation_uncertain");
             }
             observed = Some(result.into());
-            self.context
-                .ack(reserved)
-                .map_err(|error| context_error_label(&error))?;
+            self.acknowledge(reserved)?;
             Ok(result)
         })();
         result.map_err(|code| RunPaneFailure {
@@ -2813,6 +3034,7 @@ impl WorkspaceLink {
         &mut self,
         target: TargetRef,
     ) -> Result<WorkspaceReconciliation, &'static str> {
+        diagnostic_phase("workspace_reconciliation");
         self.ensure_workspace_lease()?;
         self.ensure_target(target)?;
         if !self.has_workspace_events() {
@@ -2851,6 +3073,7 @@ impl WorkspaceLink {
         limit: u16,
         wait_ms: u16,
     ) -> Result<WorkspaceWatchReply, &'static str> {
+        diagnostic_phase("workspace_watch");
         self.ensure_workspace_lease()?;
         self.ensure_target(target)?;
         if !self.has_workspace_events()
@@ -2902,6 +3125,7 @@ impl WorkspaceLink {
         max_bytes: u32,
         max_lines: u16,
     ) -> Result<AgentScreen, &'static str> {
+        diagnostic_phase("screen_read");
         self.ensure_target(target)?;
         let key = candidate_key(self.context.context());
         let payload = encode_control(&ControlRequest {
@@ -2920,6 +3144,7 @@ impl WorkspaceLink {
         if reserved != key {
             return Err("context_key_mismatch");
         }
+        diagnostic_pending(Some(reserved));
         let id = self.request_id();
         let bytes = exchange_with_id(&mut self.stream, id, &payload)?;
         let response = decode_response_payload(&bytes).map_err(|_| "response_invalid")?;
@@ -2934,9 +3159,7 @@ impl WorkspaceLink {
                 truncated,
                 text,
             } if response_target == target && response_source == source => {
-                self.context
-                    .ack(reserved)
-                    .map_err(|error| context_error_label(&error))?;
+                self.acknowledge(reserved)?;
                 Ok(AgentScreen {
                     target,
                     screen_revision,
@@ -2947,21 +3170,15 @@ impl WorkspaceLink {
             ResponseBody::Rejected(RejectionCode::Unsupported)
                 if source == ReadSource::LiveScrollback =>
             {
-                self.context
-                    .ack(reserved)
-                    .map_err(|error| context_error_label(&error))?;
+                self.acknowledge(reserved)?;
                 Err("live_scrollback_unavailable")
             }
             ResponseBody::Rejected(_) => {
-                self.context
-                    .ack(reserved)
-                    .map_err(|error| context_error_label(&error))?;
+                self.acknowledge(reserved)?;
                 Err("read_rejected")
             }
             ResponseBody::Status(status) => {
-                self.context
-                    .ack(reserved)
-                    .map_err(|error| context_error_label(&error))?;
+                self.acknowledge(reserved)?;
                 Err(match status {
                     OperationStatus::NotAdmitted => "read_not_admitted",
                     OperationStatus::InProgress => "read_uncertain",
@@ -2978,6 +3195,7 @@ impl WorkspaceLink {
         &mut self,
         target: TargetRef,
     ) -> Result<AgentReconciliation, &'static str> {
+        diagnostic_phase("screen_reconciliation");
         self.ensure_target(target)?;
         let request = WatchRequest::Reconcile {
             target,
@@ -3009,6 +3227,7 @@ impl WorkspaceLink {
         limit: u16,
         wait_ms: u16,
     ) -> Result<(Vec<Event>, WatchEnd), &'static str> {
+        diagnostic_phase("event_watch");
         self.ensure_target(target)?;
         let request = WatchRequest::Watch {
             target,
@@ -3059,19 +3278,17 @@ impl WorkspaceLink {
         let status = match response.body {
             ResponseBody::Status(status) => status,
             ResponseBody::Rejected(code) => {
-                self.context
-                    .ack(reserved)
-                    .map_err(|error| context_error_label(&error))?;
+                self.last_operation_status = Some(OperationStatus::NotAdmitted);
+                self.acknowledge(reserved)?;
                 return Err(owner_rejection_label(code));
             }
             ResponseBody::Read { .. } => return Err("response_invalid"),
         };
+        self.last_operation_status = Some(status);
         if matches!(status, OperationStatus::InProgress) {
             return Err("operation_uncertain");
         }
-        self.context
-            .ack(reserved)
-            .map_err(|error| context_error_label(&error))?;
+        self.acknowledge(reserved)?;
         Ok(status)
     }
 
@@ -3186,6 +3403,10 @@ impl WorkspaceLink {
         if reserved != key {
             return Err("context_key_mismatch");
         }
+        diagnostic_phase("mutation");
+        diagnostic_pending(Some(reserved));
+        self.last_operation_key = Some(reserved);
+        self.last_operation_status = None;
         Ok(reserved)
     }
 
@@ -3194,9 +3415,18 @@ impl WorkspaceLink {
         key: OperationKey,
     ) -> Result<OperationStatus, &'static str> {
         match self.settle_uncertain()? {
-            Some(OperationStatus::NotAdmitted) => Err("operation_refused"),
-            Some(OperationStatus::Completed(_)) => Err("operation_acknowledgment_lost"),
-            Some(OperationStatus::InProgress) => Err("operation_uncertain"),
+            Some(status @ OperationStatus::NotAdmitted) => {
+                self.last_operation_status = Some(status);
+                Err("operation_refused")
+            }
+            Some(status @ OperationStatus::Completed(_)) => {
+                self.last_operation_status = Some(status);
+                Err("operation_acknowledgment_lost")
+            }
+            Some(status @ OperationStatus::InProgress) => {
+                self.last_operation_status = Some(status);
+                Err("operation_uncertain")
+            }
             None => {
                 let _ = key;
                 Err("operation_uncertain")
@@ -3215,11 +3445,13 @@ impl WorkspaceLink {
             return Err("response_invalid");
         }
         match response.body {
-            ResponseBody::Status(OperationStatus::InProgress) => Err("operation_uncertain"),
+            ResponseBody::Status(OperationStatus::InProgress) => {
+                self.last_operation_status = Some(OperationStatus::InProgress);
+                Err("operation_uncertain")
+            }
             ResponseBody::Status(status) => {
-                self.context
-                    .ack(key)
-                    .map_err(|error| context_error_label(&error))?;
+                self.last_operation_status = Some(status);
+                self.acknowledge(key)?;
                 if status != OperationStatus::Completed(Outcome::Applied) {
                     return Err(if is_input {
                         "input_not_applied"
@@ -3230,9 +3462,8 @@ impl WorkspaceLink {
                 Ok(status)
             }
             ResponseBody::Rejected(code) => {
-                self.context
-                    .ack(key)
-                    .map_err(|error| context_error_label(&error))?;
+                self.last_operation_status = Some(OperationStatus::NotAdmitted);
+                self.acknowledge(key)?;
                 if is_input
                     && matches!(
                         code,
@@ -3418,10 +3649,8 @@ fn emit_read(
     push_target(&mut json, target);
     let _ = write!(
         json,
-        ",\"generation\":{},\"lease\":{},\"sequence\":{},\"source\":\"screen\",\"screen_revision\":{screen_revision},\"truncated\":{truncated},\"text\":" ,
-        key.generation,
-        key.lease,
-        key.sequence
+        ",\"generation\":{},\"lease\":{},\"sequence\":{},\"source\":\"screen\",\"screen_revision\":{screen_revision},\"truncated\":{truncated},\"text\":",
+        key.generation, key.lease, key.sequence
     );
     push_json_string(&mut json, text);
     json.push('}');
@@ -3977,6 +4206,8 @@ mod tests {
             settled_uncertain: None,
             selected_capabilities: CAPABILITY_READ | CAPABILITY_WORKSPACE_EVENTS,
             lease_schedule: ObserverLeaseSchedule::new(now),
+            last_operation_key: None,
+            last_operation_status: None,
         }
     }
 
@@ -4818,7 +5049,79 @@ mod tests {
             settled_uncertain: None,
             selected_capabilities: capabilities,
             lease_schedule: ObserverLeaseSchedule::new(now),
+            last_operation_key: None,
+            last_operation_status: None,
         }
+    }
+
+    #[test]
+    fn explicit_input_rejection_is_not_admitted_and_not_pending() {
+        let (directory, _, context) = test_context(false);
+        let (client, _server) = UnixStream::pair().unwrap();
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        let key = candidate_key(link.context.context());
+        link.reserve_mutation_key(key).unwrap();
+        let response = panelink::response_protocol::Response {
+            key,
+            body: ResponseBody::Rejected(RejectionCode::StaleTarget),
+        };
+        let mut bytes = Vec::new();
+        panelink::response_protocol::encode_response_payload(&response, &mut bytes).unwrap();
+        assert_eq!(
+            link.decode_operation_status(key, &bytes, true),
+            Err("stale_target")
+        );
+        assert_eq!(
+            link.last_operation_status(),
+            Some(OperationStatus::NotAdmitted)
+        );
+        assert_eq!(link.pending_operation_key(), None);
+        assert_eq!(control_diagnostic().pending, None);
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn lost_key_ack_and_failed_reconciliation_keep_the_same_pending_key() {
+        let (directory, _, context) = test_context(false);
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let worker = thread::spawn(move || {
+            let (_, payload) = read_test_frame(&mut server);
+            assert!(panelink::ui_protocol::decode_ui_request(&payload).is_ok());
+        });
+        let mut link = run_pane_test_link(
+            context,
+            AuthenticatedStream::new(client).unwrap(),
+            CAPABILITY_READ | CAPABILITY_INPUT,
+        );
+        assert_eq!(
+            link.send_keys(test_target(), 1, &[Key::Enter]),
+            Err("transport_failed")
+        );
+        worker.join().unwrap();
+        let key = link.pending_operation_key().unwrap();
+        assert_eq!(control_diagnostic().phase, "mutation");
+        assert_eq!(control_diagnostic().transport, "reply_read");
+        assert_eq!(control_diagnostic().pending, Some(key));
+        let (client, mut server) = UnixStream::pair().unwrap();
+        link.stream = AuthenticatedStream::new(client).unwrap();
+        let worker = thread::spawn(move || {
+            let (_, payload) = read_test_frame(&mut server);
+            assert!(
+                matches!(panelink::session_protocol::decode_session_request(&payload), Ok(SessionRequest::OperationStatus { key: queried }) if queried == key)
+            );
+        });
+        assert_eq!(link.settle_uncertain(), Err("transport_failed"));
+        worker.join().unwrap();
+        assert_eq!(link.pending_operation_key(), Some(key));
+        assert_eq!(control_diagnostic().phase, "reconciliation");
+        assert_eq!(control_diagnostic().transport, "reply_read");
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

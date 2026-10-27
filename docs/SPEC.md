@@ -1,6 +1,6 @@
 # Panelink: working implementation specification
 
-Revision: 0.26, 2026-10-27. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
+Revision: 0.27, 2026-10-27. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
 
 Development identity evidence updated2026-10-24: pinned OpenCode2.0.32 private
 fixtures now also prove an API-created/UI-selected new root, a static nonempty
@@ -11,9 +11,84 @@ bindings. See [remaining-case evidence](progress/P4-REMAINING-IDENTITY.md).
 This is scoped fixture evidence. Production bridge and durable/manual recovery
 acceptance remain separate; no current-at-crash guarantee is established.
 
+The broad [agent API proposal](AGENT-API-PROPOSAL.md) remains proposed. A bounded
+source implementation now covers shared per-batch UI ownership, additive pane
+submit, and recognized foreground-agent list/get/read/prompt/wait commands.
+Those additions have bounded private-runtime evidence; broader acceptance
+remains open. See
+[agent control](AGENT-CONTROL.md) and the proposal's supersession note. The
+socket sandbox permission prerequisite remains unchanged.
+
+## Agent feedback corrections — 2026-10-27
+
+Submit honors child-enabled bracketed paste, framing text and placing the one
+Enter after the closing marker. The bounded input is admitted atomically, with
+unchanged deduplication and no replay of uncertain input. Applied proves a PTY
+write; receipts retain `application_submission:unverified`. A private offline
+Codex 0.164.0 `/status` check distinguishes raw-stream draft retention from
+accepted bracketed submission without a model call.
+
+`pane read` and `agent read` accept `--bottom --lines K` for the last K physical
+visible rows, including blanks. Default short reads remain top-oriented;
+scrollback remains a tail and cannot combine with bottom selection. The client
+selects from one complete bounded snapshot; a byte-truncated prefix is refused
+as `bottom_read_truncated`. Codex empty-placeholder detection uses the exact
+observed dim style; typed drafts stay unknown and activity/approval priority
+remains conservative. State remains an observation rather than task success.
+
+Finite agent waits reuse one authenticated connection and caller-context lock
+through their bounded observation loop. Process identity is checked on every
+query; a connection failure is reported without reconnecting or replaying input.
+
+Fixed control diagnostics report logical/transport failure stages and pending
+operation identities without payloads, credentials or paths. Owner observations
+on input errors are labeled before-operation; current ownership is unverified.
+
+`build-info --json` exposes local package, revision, source-dirty state and a
+noncryptographic FNV-1a source fingerprint covering application/vendored sources,
+manifest/lockfile and embedded assets. It is not an artifact checksum or security
+attestation. `server-info --json` separately queries authenticated live server
+identity/generation and connection-selected capabilities via strict bounded
+schema15 after optional capability256 negotiation. Older peers ignore the
+optional bit; no query is sent without selection, and unknown server identity
+is never replaced with client identity. See
+[feedback implementation evidence](progress/AGENT-FEEDBACK-FIXES-2026-10-27.md).
+
+## Bounded shared input and recognized-agent slice — 2026-10-27
+
+The attached UI does not hold idle-pane claims. Each admitted UI input batch
+uses separate operation keys for a short claim, input and release. Release
+occurs only after known `Applied` input; failed, partial or uncertain input is
+never replayed or released. This coordinates admitted batches, but does not
+protect an unfinished human draft between batches. Existing
+`pane claim` / `pane release` remain retained ownership; a retained claim blocks
+other writers until a known release. The UI and one-shot submit do not steal or
+clear retained claims.
+
+`pane submit N TEXT [--json] [--as NAME]` is additive to the existing pane
+commands. It submits nonempty printable text (maximum 32,768 UTF-8 bytes) plus
+Enter. Claim, submit and release are separate operations with separate keys.
+Release follows only a known `Applied` submit. Failed, partial or uncertain
+input is neither replayed nor released. If release fails after `Applied`,
+delivery is confirmed and release is unconfirmed.
+
+The recognized-agent commands are `agent list`, `agent get REF`, `agent read
+REF`, `agent prompt REF TEXT`, and `agent wait REF`. They require negotiated
+capability 128 and the schema-14 agent messages, as well as a matching server.
+Process recognition uses the native PTY foreground process PID, kernel birth
+identity and executable basename `codex` or `opencode`; wrappers remain unknown.
+State is a conservative screen-marker heuristic. It does not identify a
+provider conversation or guarantee per-prompt completion. Wait observes state
+transitions and remains bounded. Old-server compatibility can require a server
+restart and UI detach/reattach. Implementation source and this contract do not
+establish runtime acceptance.
+
 ## Current usability contract, 2026-10-24
 
 Each pane reserves a one-cell margin on all four sides of its outer rectangle.
+The bottom-right pane margin displays the client package version, without
+changing PTY dimensions; modal notices temporarily cover it. Unpadded saved
+recovery views do not show this badge.
 The top margin carries pane Menu and close controls; normal-history scrollbars
 use the right margin. The shared compositor geometry defines their hitboxes.
 Its PTY and snapshots use the inset content size, with a minimum of 5 rows by
@@ -27,6 +102,14 @@ wheel input only when mouse reporting is enabled, through the same ownership,
 deduplication and nonreplayable admission rules as keyboard input. Without
 mouse reporting, alternate-screen scrolling stays at live output and reports
 that limitation. Querying scroll mode never claims input ownership.
+
+Scroll responsiveness update (local 0.1.2): ordinary wheel history queries return
+one requested viewport without an eager range probe. An exact target/revision
+extent cache is used when available; otherwise range is conservative until a
+read-only seek refreshes it. Lower bounds cannot cap oldest-history navigation.
+New background polls are deferred while a scroll result is outstanding. These
+changes do not remove an already in-flight poll, the render cadence, or child
+application latency; alternate-screen input checks are unchanged.
 
 Scrolling presentation update (2026-10-27): pending history reads preserve the
 last valid pane snapshot instead of replacing it with a loading placeholder.

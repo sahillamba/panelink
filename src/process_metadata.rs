@@ -46,6 +46,16 @@ pub(crate) fn capture_identity(pid: u32) -> Option<ProcessIdentity> {
     read_identity(pid).ok()
 }
 
+/// Read only executable identity for a caller-observed PTY foreground leader.
+/// The double birth check rejects PID reuse; argv and environment are untouched.
+pub(crate) fn foreground_executable(pid: u32) -> Option<(u64, u64, String)> {
+    let pid = i32::try_from(pid).ok()?;
+    let before = read_identity(pid).ok()?;
+    let path = read_executable(pid).value?;
+    let after = read_identity(pid).ok()?;
+    (before == after).then_some((before.start_seconds, before.start_microseconds, path))
+}
+
 /// One identity-bound request for the worker.
 pub(crate) struct MetadataJob {
     pub(crate) id: u64,

@@ -602,6 +602,7 @@ fn wheel_routes_to_outer_pane_with_content_local_coordinates_and_typing_invalida
             target: target(1),
             epoch,
             result: ScrollResult::History {
+                extent_known: true,
                 total_rows: 100,
                 revision: 1,
                 offset_rows: 3,
@@ -686,6 +687,7 @@ fn closing_pane_discards_late_history_reply() {
             target: target(1),
             epoch,
             result: ScrollResult::History {
+                extent_known: true,
                 total_rows: 100,
                 revision: 1,
                 offset_rows: 3,
@@ -735,6 +737,7 @@ fn negotiated_row_wraps_follow_the_exact_live_and_history_checkpoint() {
             target: target(1),
             epoch: 12,
             result: ScrollResult::History {
+                extent_known: true,
                 total_rows: 100,
                 revision: 9,
                 offset_rows: 3,
@@ -1073,6 +1076,7 @@ fn keyboard_copy_uses_the_visible_history_snapshot() {
             target: target(1),
             epoch: 7,
             result: ScrollResult::History {
+                extent_known: true,
                 total_rows: 100,
                 revision: 4,
                 offset_rows: 3,
@@ -1281,6 +1285,7 @@ fn alternate_live_screen_and_same_target_resize_invalidate_history_replies() {
             target: target(1),
             epoch: pending_epoch,
             result: ScrollResult::History {
+                extent_known: true,
                 total_rows: 100,
                 revision: 1,
                 offset_rows: 3,
@@ -2706,6 +2711,7 @@ fn finish_history(app: &mut App, epoch: u64, offset_rows: u16, text: &str) {
             target: target(1),
             epoch,
             result: ScrollResult::History {
+                extent_known: true,
                 revision: 1,
                 offset_rows,
                 total_rows: 100,
@@ -2861,6 +2867,38 @@ fn scrollbar_is_in_right_padding_and_selection_cannot_copy_it() {
 }
 
 #[test]
+fn conservative_wheel_extent_does_not_cap_seeks_and_track_discovers_range() {
+    for use_track in [false, true] {
+        let (mut app, mut fake) = scroll_fixture();
+        wheel(&mut app, &mut fake, true);
+        finish_history(&mut app, fake.scrolls[0].1, 3, "history text");
+        app.screens[0].history_total = 3;
+        app.screens[0].history_extent_known = false;
+        if use_track {
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Down(MouseButton::Left),
+                80,
+                2,
+            );
+        } else {
+            app.seek_history(
+                Instant::now(),
+                panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS,
+                &mut fake,
+            );
+        }
+        assert_eq!(fake.seeks.len(), 1);
+        assert_eq!(
+            fake.seeks[0].2,
+            panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS
+        );
+        assert!(fake.keys.is_empty() && fake.pastes.is_empty());
+    }
+}
+
+#[test]
 fn scrollbar_track_pages_with_read_only_history_seek() {
     let (mut app, mut fake) = scroll_fixture();
     wheel(&mut app, &mut fake, true);
@@ -2886,55 +2924,57 @@ fn scrollbar_track_pages_with_read_only_history_seek() {
 
 #[test]
 fn scrollbar_drag_previews_locally_and_seeks_once_on_release() {
-    let (mut app, mut fake) = scroll_fixture();
-    wheel(&mut app, &mut fake, true);
-    finish_history(&mut app, fake.scrolls[0].1, 50, "history text");
-    fake.scrolls.clear();
-    let geometry = scrollbar_geometry(
-        rect(0, 0, 24, 81),
-        Scrollbar {
-            offset_rows: 50,
-            total_rows: 100,
-        },
-    )
-    .unwrap();
-    let press = Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: geometry.thumb.x,
-        row: geometry.thumb.y,
-        modifiers: KeyModifiers::NONE,
-    });
-    let motion = Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Drag(MouseButton::Left),
-        column: geometry.thumb.x,
-        row: geometry.track.y + geometry.track.rows - 1,
-        modifiers: KeyModifiers::NONE,
-    });
-    let release = Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Up(MouseButton::Left),
-        column: geometry.thumb.x,
-        row: geometry.track.y + geometry.track.rows - 1,
-        modifiers: KeyModifiers::NONE,
-    });
-    for event in [&press, &motion] {
+    for offset in [50, 100] {
+        let (mut app, mut fake) = scroll_fixture();
+        wheel(&mut app, &mut fake, true);
+        finish_history(&mut app, fake.scrolls[0].1, offset, "history text");
+        fake.scrolls.clear();
+        let geometry = scrollbar_geometry(
+            rect(0, 0, 24, 81),
+            Scrollbar {
+                offset_rows: offset,
+                total_rows: 100,
+            },
+        )
+        .unwrap();
+        let press = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: geometry.thumb.x,
+            row: geometry.thumb.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        let motion = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: geometry.thumb.x,
+            row: geometry.track.y + geometry.track.rows - 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        let release = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: geometry.thumb.x,
+            row: geometry.track.y + geometry.track.rows - 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        for event in [&press, &motion] {
+            app.handle_event(
+                event,
+                Instant::now(),
+                Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                &mut fake,
+            );
+        }
+        assert!(fake.seeks.is_empty(), "motion only previews local geometry");
+        assert_eq!(app.pointer_seek.map(|drag| drag.preview_offset), Some(0));
         app.handle_event(
-            event,
+            &release,
             Instant::now(),
             Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
             &mut fake,
         );
+        assert_eq!(fake.seeks.len(), 1);
+        assert_eq!(fake.seeks[0].2, 0);
+        assert!(fake.scrolls.is_empty());
     }
-    assert!(fake.seeks.is_empty(), "motion only previews local geometry");
-    assert_eq!(app.pointer_seek.map(|drag| drag.preview_offset), Some(0));
-    app.handle_event(
-        &release,
-        Instant::now(),
-        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
-        &mut fake,
-    );
-    assert_eq!(fake.seeks.len(), 1);
-    assert_eq!(fake.seeks[0].2, 0);
-    assert!(fake.scrolls.is_empty());
 }
 
 #[test]

@@ -1,8 +1,12 @@
 # Panelink CLI workflows
 
-Baseline: the consolidated `codex/p5-acceptance-continuation` source in worktree
-7060, based on `1060668` and merged with `origin/main` at `584abe4`, reviewed
-2026-10-27. This identifies source coverage, not host or workload acceptance.
+Baseline: current source in the selected worktree, reviewed 2026-10-27. The
+recognized-agent and scoped-submit interfaces below have bounded private-runtime
+checks, including a local Codex `/status` check; broader provider/host acceptance
+remains open. The client and server must both support
+capability 128 / schema 14. An older running server may need a restart and an
+attached UI may need detach/reattach after updating. This reference is not proof
+that the installed executable or live server supports those commands.
 Help from PATH may belong to another worktree. In the examples, set
 `panelink_cli` to the absolute path of the chosen launcher or binary.
 
@@ -14,9 +18,12 @@ cannot grant access to the local socket.
 
 ```sh
 "$panelink_cli" --version
+"$panelink_cli" build-info --json
+"$panelink_cli" server-info --json
 "$panelink_cli" --help
 "$panelink_cli" pane list --as worker-a --json
 "$panelink_cli" pane read 1 --lines 40 --as worker-a --json
+"$panelink_cli" pane read 1 --bottom --lines 12 --as worker-a --json
 "$panelink_cli" pane read 1 --scrollback --lines 100 --as worker-a --json
 ```
 
@@ -31,7 +38,12 @@ replace its managed shell's identity. `input_owner_info` identifies the observed
 owner and whether it matches this caller; it grants no input authority. Pane
 numbers, process metadata and screen titles cannot identify a provider conversation.
 
-Screen reads contain sanitized visible text. `--scrollback` reads only retained
+Screen reads contain sanitized visible text. Without `--bottom`, a short
+`--lines K` selects the top K physical visible rows. `pane read N --bottom
+--lines K` and `agent read REF --bottom --lines K` select the last K visible
+physical rows, including blanks, and return `row_selection:bottom`. Selection
+uses one complete bounded snapshot; an over-budget full screen fails with
+`bottom_read_truncated`. `--bottom` and `--scrollback` cannot combine. `--scrollback` reads only retained
 normal-buffer history, newest selected rows in chronological order, excluding
 visible screen rows and alternate-screen output. Wrapped physical rows remain
 separate. Reads are bounded by row and wire budgets. `truncated` can report
@@ -43,21 +55,37 @@ and current handoff for actual verification and limits.
 
 ## Authorized input
 
-Once discovery and readiness establish the intended target, a caller can type
-task-authorized text and submit it:
+For one complete text plus Enter submission, use the additive scoped command:
+
+```sh
+"$panelink_cli" pane submit 1 'printf "PANELINK_%s\n" DONE' --json --as worker-a
+```
+
+The command claims, submits the whole text plus Enter, and releases using three
+separately keyed operations. It accepts nonempty printable text up to the
+existing input byte limit; shell arguments after TEXT are joined with spaces.
+Check the returned target and delivery/release status. When bracketed paste is
+enabled by the child, text is framed as paste with Enter outside the closing
+marker. `application_submission:unverified` means PTY delivery has not proved
+application acceptance; read an observable response. Release occurs only when
+the submit result is known `Applied`. Partial, failed, or uncertain input is
+never replayed or released. If release fails after `Applied`, delivery remains
+confirmed and release is reported unconfirmed. A retained claim by the same
+caller makes scoped submit fail with `input_already_claimed`.
+
+Legacy retained ownership remains available:
 
 ```sh
 "$panelink_cli" pane claim 1 --as worker-a --json
 "$panelink_cli" pane send 1 'printf "PANELINK_%s\n" DONE' --enter --as worker-a --json
-"$panelink_cli" wait 1 --text PANELINK_DONE --timeout 10 --as worker-a --json
 "$panelink_cli" pane release 1 --as worker-a --json
 ```
 
-These illustrate individual commands, not an unconditional script: check each
-result and target before proceeding. In real work use a completion condition
-that distinguishes actual output from terminal input echo. Input statuses can
-be partial or unknown; process exit or layout collapse can invalidate later
-commands. Inspect the resulting state rather than sending again.
+These are separate operations. A retained claim blocks other writers until a
+known release. No command steals it. The attached UI no longer holds idle-pane
+claims; each UI input batch uses short per-batch ownership. That lock does not
+protect a human's unfinished draft between input batches. Check every outcome
+and inspect the resulting state rather than sending uncertain input again.
 
 `pane send N TEXT --claim --enter` combines claim and submit. Without `--enter`,
 it only types. Text must be printable; `pane keys N KEY` accepts `Enter`, `Tab`,
@@ -65,6 +93,41 @@ it only types. Text must be printable; `pane keys N KEY` accepts `Enter`, `Tab`,
 Shell-quote text; never interpolate untrusted output as shell code.
 `pane interrupt N` signals the target and also requires ownership. `pane close N`
 terminates that pane's process; closing the last pane ends the workspace.
+
+## Recognized foreground agents
+
+These commands require the client and server to negotiate capability 128 and
+schema 14. They address the default workspace, preserve the caller context, and
+have only the bounded acceptance recorded in the repository handoff:
+
+```sh
+"$panelink_cli" agent list --json --as worker-a
+"$panelink_cli" agent get 1 --json --as worker-a
+"$panelink_cli" agent read 1 --lines 80 --json --as worker-a
+"$panelink_cli" agent prompt 'TARGET_REF' Please inspect this error --wait --json --as worker-a
+"$panelink_cli" agent wait 'TARGET_REF' --until idle --timeout 30 --json --as worker-a
+```
+
+`agent list` reports each current pane, including unrecognized occupants. `get`
+and `read` accept a pane number or returned `agent_ref`; read is screen-only,
+defaults to 80 lines and permits 1 through 1024. Recognized references pin the
+full target and process tuple, formatted as
+`GEN:WORKSPACE:PANE:SESSION:OCCUPANT@PID:START_SECONDS:START_MICROSECONDS:KIND`.
+A reference is stale if the pane occupant or foreground process changes.
+`prompt` requires a returned process-bound reference and an observed `idle` screen; it refuses
+`blocked`, `working`, and `unknown`. Text arguments are joined with spaces and
+use the same bounded printable-text limit as pane submit. Optional `--wait`
+waits for observed activity, then the requested state; it does not prove that
+this prompt completed. `wait` defaults to `idle` or `blocked`, a 30-second
+timeout, and supports `--until idle|working|blocked|unknown`; timeout range is
+1 through 300 seconds. Neither state nor wait output establishes provider
+conversation identity or per-prompt completion.
+
+Process recognition uses the native PTY foreground-group leader PID, kernel
+birth identity and executable basename `codex` or `opencode`. Wrappers are
+`unknown`. State is a bounded terminal-screen heuristic over at most the last
+80 rows and first 240 Unicode scalar values per row; it is not an agent
+readiness guarantee. An older server reports this optional feature unsupported.
 
 ## Wait and observe
 
@@ -143,3 +206,24 @@ restore a process, recover every overwritten screen, or resume an agent's
 conversation. Provider identity/resume and full reboot acceptance need their
 own current evidence. The older disposable `probe` has different lifetime and
 input behavior; its quit action stops its child.
+
+## Build and control diagnostics
+
+`build-info --json` is local. `server-info --json` makes a read-only schema-15
+query after capability 256 is negotiated, returning separate client/server
+revision, source fingerprint, source-dirty flag and connection-selected
+capabilities. The FNV-1a fingerprint distinguishes source contents; it is not
+an artifact checksum, security attestation or reproducible-build proof. Missing
+server support returns `server_identity_unsupported`, never client identity.
+
+Connection/input errors include fixed `cause`, `stage`, `transport_stage` and
+reconciliation information where observed. Pending operation identifiers contain
+no input payload. Input refusals can include `input_owner_info`, labeled
+`owner_observation:before_operation`; `current_ownership:unverified` prevents
+mistaking a prior lease for current authority. Retain the same context and
+inspect/reconcile the pending key. No error authorizes replay.
+
+A finite `agent wait` holds one authenticated connection and its private context
+lock, checking the exact foreground process on every observation. Concurrent
+clients need distinct stable caller names. Connection loss is reported, without
+reconnecting, changing caller identity or replaying a prompt.

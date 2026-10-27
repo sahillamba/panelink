@@ -46,6 +46,25 @@ pub const CAPABILITY_SCREEN_ROW_WRAPS: u64 = 32;
 /// Runtime paths must not offer it until those operations are implemented.
 pub const CAPABILITY_PANE_OPERATIONS: u64 = 64;
 
+/// Live foreground-agent process observations and guarded submissions.
+pub const CAPABILITY_AGENT_OBSERVATION: u64 = 128;
+
+/// Read-only server build identity query after handshake negotiation.
+pub const CAPABILITY_BUILD_IDENTITY: u64 = 256;
+
+/// Stable names for every capability bit supported by this protocol revision.
+pub const CAPABILITY_NAMES: &[(u64, &str)] = &[
+    (CAPABILITY_READ, "read"),
+    (CAPABILITY_INPUT, "input"),
+    (CAPABILITY_EVENTS, "events"),
+    (CAPABILITY_WORKSPACE_EVENTS, "workspace_events"),
+    (CAPABILITY_PANE_METADATA, "pane_metadata"),
+    (CAPABILITY_SCREEN_ROW_WRAPS, "screen_row_wraps"),
+    (CAPABILITY_PANE_OPERATIONS, "pane_operations"),
+    (CAPABILITY_AGENT_OBSERVATION, "agent_observation"),
+    (CAPABILITY_BUILD_IDENTITY, "build_identity"),
+];
+
 /// All capability bits currently defined by this schema.
 pub const KNOWN_CAPABILITIES: u64 = CAPABILITY_READ
     | CAPABILITY_INPUT
@@ -53,7 +72,9 @@ pub const KNOWN_CAPABILITIES: u64 = CAPABILITY_READ
     | CAPABILITY_WORKSPACE_EVENTS
     | CAPABILITY_PANE_METADATA
     | CAPABILITY_SCREEN_ROW_WRAPS
-    | CAPABILITY_PANE_OPERATIONS;
+    | CAPABILITY_PANE_OPERATIONS
+    | CAPABILITY_AGENT_OBSERVATION
+    | CAPABILITY_BUILD_IDENTITY;
 
 /// Client capability request for the v1.0 handshake.
 ///

@@ -1,5 +1,19 @@
 # Panelink implementation roadmap
 
+Active user-selected work (2026-10-27): Herdr-style scoped pane input
+and recognized-agent list/prompt/wait. See [implementation plan](docs/progress/HERDR-WORKFLOW-IMPLEMENTATION.md). Shared input does not protect an unfinished human draft;
+exact-target, per-operation owner and no-replay checks remain.
+
+Local repair (2026-10-27): optimized client 0.1.2 removes eager wheel range probes
+and avoids queuing background polls during scrolling. Scoped Codex socket/context
+permissions verify discovery and reads. This earlier repair preceded the accepted
+shared-input design above. See [current evidence](docs/progress/SESSION.md).
+
+Local install (2026-10-27): client 0.1.1 adds a bottom-right version badge in
+existing pane padding. Latest main plus local documentation additions is installed
+from `codex/main-local-changes-20261027`; focused compositor/client checks pass.
+See [current install evidence](docs/progress/SESSION.md). Phase gates remain as below.
+
 CI baseline (2026-10-26): standard GitHub-hosted Apple Silicon validation
 passed on PR #2 head `1060668`; weekly dependency-update proposals are
 configured. Required-check activation remains a repository setting; see

@@ -154,7 +154,6 @@ pub(crate) struct PaneConn {
     pub(crate) cursor: u64,
     /// Our input-owner revision when we hold the claim.
     pub(crate) owner_revision: Option<u64>,
-    pub(crate) next_claim: Instant,
     pub(crate) lease_schedule: LeaseSchedule,
     pub(crate) next_retry: Instant,
     retry_backoff: Duration,
@@ -356,7 +355,6 @@ impl PaneConn {
         self.lease_schedule.renewed(started);
         self.retry_backoff = Duration::from_secs(1);
         self.needs_screen = true;
-        self.next_claim = now;
         self.settle_uncertain()
     }
 
@@ -377,7 +375,6 @@ impl PaneConn {
             screen_row_wraps: welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS != 0,
             cursor: 0,
             owner_revision: None,
-            next_claim: renewed_at,
             lease_schedule: LeaseSchedule::new(renewed_at),
             next_retry: renewed_at,
             retry_backoff: Duration::from_secs(1),
@@ -545,9 +542,9 @@ impl PaneConn {
         }
     }
 
-    /// Ensure we hold (or renew) the input-owner claim.
-    pub(crate) fn claim(&mut self, now: Instant) -> Result<bool, &'static str> {
-        self.next_claim = now + Duration::from_secs(10);
+    /// Acquire input ownership for one input batch. Callers must not retain it
+    /// across idle polling or reads.
+    pub(crate) fn claim(&mut self, _now: Instant) -> Result<bool, &'static str> {
         let info = self.describe()?;
         if info.owner_lease != 0 && info.owner_lease != self.lease() {
             self.owner_revision = None;
@@ -579,22 +576,40 @@ impl PaneConn {
         }
     }
 
-    /// Release our claim (best effort at detach).
-    pub(crate) fn release(&mut self) {
-        let Some(revision) = self.owner_revision.take() else {
-            return;
-        };
+    /// Release this connection's claim and verify the exact target is vacant.
+    /// The locally held revision is retained on any uncertainty or refusal.
+    pub(crate) fn release_confirmed(&mut self) -> Result<(), &'static str> {
+        self.release_confirmed_inner()
+            .map_err(|_| "input delivery confirmed; ownership release unconfirmed")
+    }
+
+    fn release_confirmed_inner(&mut self) -> Result<(), &'static str> {
+        let revision = self.owner_revision.ok_or("input owner not held")?;
         let target = self.target;
-        if let Ok((key, reply)) = self.keyed(|key| {
+        let (key, reply) = self.keyed(|key| {
             encode_session_request(&SessionRequest::Release {
                 key,
                 target,
                 expected_owner_revision: revision,
             })
             .map_err(|_| "request_invalid")
-        }) {
-            let _ = self.settle_response(key, reply);
+        })?;
+        let outcome = self.settle_response(key, reply)?;
+        if outcome != ResponseOutcome::Status(OperationStatus::Completed(Outcome::Applied)) {
+            return Err("release refused");
         }
+        let info = self.describe()?;
+        if info.target != target || info.owner_lease != 0 {
+            return Err("release not confirmed");
+        }
+        self.owner_revision = None;
+        Ok(())
+    }
+
+    /// Best-effort detach cleanup. Its result is intentionally not used to
+    /// infer that the claim was released.
+    pub(crate) fn release(&mut self) {
+        let _ = self.release_confirmed();
     }
 
     /// Deliver typed keys once; never resent.
@@ -649,7 +664,6 @@ impl PaneConn {
                 RejectionCode::InputBusy | RejectionCode::StaleOwner | RejectionCode::ExpiredOwner,
             ) => {
                 self.owner_revision = None;
-                self.next_claim = Instant::now();
                 MouseInputResult::NotOwner
             }
             ResponseOutcome::ServerError(label) => MouseInputResult::Failed(label),
@@ -695,7 +709,6 @@ impl PaneConn {
                 RejectionCode::InputBusy | RejectionCode::StaleOwner | RejectionCode::ExpiredOwner,
             ) => {
                 self.owner_revision = None;
-                self.next_claim = Instant::now();
                 InputResult::NotOwner
             }
             ResponseOutcome::ServerError(label) => InputResult::Failed(label),
@@ -1153,6 +1166,145 @@ mod tests {
             0
         );
         server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confirmed_release_requires_applied_reply_and_vacant_matching_describe() {
+        use panelink::handshake_protocol::{Welcome, CAPABILITY_READ};
+        use panelink::response_protocol::{encode_response_payload, Response, ResponseBody};
+        use panelink::session_protocol::{
+            decode_session_request, encode_session_info, SessionInfo, SessionRequest,
+        };
+        use panelink::transport::AuthenticatedStream;
+        use std::os::unix::{fs::DirBuilderExt, net::UnixStream};
+        use std::time::SystemTime;
+
+        #[derive(Clone, Copy)]
+        enum ReplyCase {
+            AppliedAndVacant,
+            Refused,
+            Lost,
+        }
+
+        for case in [
+            ReplyCase::AppliedAndVacant,
+            ReplyCase::Refused,
+            ReplyCase::Lost,
+        ] {
+            let serial = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let directory = PathBuf::from(format!(
+                "/private/tmp/panelink-release-{}-{serial}",
+                std::process::id()
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&directory)
+                .unwrap();
+            let target = TargetRef {
+                generation: 7,
+                workspace: 3,
+                pane: 1,
+                session: 1,
+                occupant_revision: 1,
+            };
+            let now = Instant::now();
+            let (client_socket, peer_socket) = UnixStream::pair().unwrap();
+            let mut pane = PaneConn::attach(
+                &directory,
+                &directory,
+                target,
+                Some(Bootstrap {
+                    stream: AuthenticatedStream::new(client_socket).unwrap(),
+                    welcome: Welcome {
+                        nonce: 1,
+                        generation: target.generation,
+                        lease: 10,
+                        selected_capabilities: CAPABILITY_READ,
+                        ttl_seconds: 1800,
+                    },
+                    used: 0,
+                    started: now,
+                }),
+                now,
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            pane.owner_revision = Some(5);
+            let peer = std::thread::spawn(move || {
+                let mut peer = AuthenticatedStream::new(peer_socket).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let request = peer.read_frame(deadline).unwrap();
+                let SessionRequest::Release {
+                    key,
+                    target: request_target,
+                    expected_owner_revision,
+                } = decode_session_request(request.payload()).unwrap()
+                else {
+                    panic!("expected keyed release");
+                };
+                assert_eq!(request_target, target);
+                assert_eq!(expected_owner_revision, 5);
+                if matches!(case, ReplyCase::Lost) {
+                    return;
+                }
+                let mut bytes = Vec::new();
+                let body = match case {
+                    ReplyCase::AppliedAndVacant => {
+                        ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+                    }
+                    ReplyCase::Refused => ResponseBody::Rejected(RejectionCode::StaleOwner),
+                    ReplyCase::Lost => unreachable!(),
+                };
+                encode_response_payload(&Response { key, body }, &mut bytes).unwrap();
+                peer.write_frame(
+                    &Frame::new(MessageKind::Response, request.request_id(), &bytes).unwrap(),
+                    deadline,
+                )
+                .unwrap();
+                if matches!(case, ReplyCase::AppliedAndVacant) {
+                    let describe = peer.read_frame(deadline).unwrap();
+                    assert_eq!(
+                        decode_session_request(describe.payload()).unwrap(),
+                        SessionRequest::Describe
+                    );
+                    let bytes = encode_session_info(&SessionInfo {
+                        target,
+                        owner_revision: 6,
+                        owner_lease: 0,
+                        owner_expires_secs: 0,
+                        child_exited: false,
+                    })
+                    .unwrap();
+                    peer.write_frame(
+                        &Frame::new(MessageKind::Response, describe.request_id(), &bytes).unwrap(),
+                        deadline,
+                    )
+                    .unwrap();
+                }
+            });
+
+            let result = pane.release_confirmed();
+            match case {
+                ReplyCase::AppliedAndVacant => {
+                    assert_eq!(result, Ok(()));
+                    assert_eq!(pane.owner_revision, None);
+                }
+                ReplyCase::Refused | ReplyCase::Lost => {
+                    assert_eq!(
+                        result,
+                        Err("input delivery confirmed; ownership release unconfirmed")
+                    );
+                    assert_eq!(pane.owner_revision, Some(5));
+                }
+            }
+            peer.join().unwrap();
+            drop(pane);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[test]

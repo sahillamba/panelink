@@ -252,6 +252,7 @@ struct ScreenSlot {
     view_epoch: u64,
     history_pending: bool,
     history_total: u16,
+    history_extent_known: bool,
     /// Bounded accumulated normal-history motion; never queued child input.
     queued_scroll: Option<(i16, u16, u16)>,
     queued_seek: Option<u16>,
@@ -319,6 +320,7 @@ impl App {
                 view_epoch: 0,
                 history_pending: false,
                 history_total: 0,
+                history_extent_known: false,
                 queued_scroll: None,
                 queued_seek: None,
             })
@@ -372,6 +374,7 @@ impl App {
         self.layout.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn focus(&self) -> Option<TargetRef> {
         self.focus
     }
@@ -937,6 +940,7 @@ impl App {
                     });
                     if old_rect != Some(pane.rect) {
                         slot.history_total = 0;
+                        slot.history_extent_known = false;
                         slot.history_offset = 0;
                         slot.history_revision = 0;
                         slot.view_epoch = slot.view_epoch.wrapping_add(1);
@@ -948,6 +952,7 @@ impl App {
                 } else {
                     slot.target = None;
                     slot.history_total = 0;
+                    slot.history_extent_known = false;
                     slot.revision = 0;
                     slot.history_offset = 0;
                     slot.history_revision = 0;
@@ -1256,10 +1261,12 @@ impl App {
                 revision,
                 offset_rows,
                 total_rows,
+                extent_known,
                 checkpoint,
                 row_wraps,
             } => {
                 slot.history_total = total_rows;
+                slot.history_extent_known = extent_known;
                 match panelink::screen_checkpoint::decode(&checkpoint) {
                     Ok(snapshot) if offset_rows > 0 => {
                         if slot.history.load_checkpoint(&snapshot).is_ok() {
@@ -1298,6 +1305,7 @@ impl App {
                 slot.queued_scroll = None;
                 slot.queued_seek = None;
                 slot.history_total = 0;
+                slot.history_extent_known = false;
                 slot.history_offset = 0;
                 slot.history_revision = 0;
                 self.dirty = true;
@@ -1306,6 +1314,7 @@ impl App {
                 slot.queued_scroll = None;
                 slot.queued_seek = None;
                 slot.history_total = 0;
+                slot.history_extent_known = false;
                 slot.history_offset = 0;
                 slot.history_revision = 0;
                 self.dirty = true;
@@ -1360,7 +1369,9 @@ impl App {
         if slot.snapshot.alternate_screen() {
             return;
         }
-        let maximum = if slot.history_total == 0 {
+        // A wheel's immediate reply may know only its current offset. That
+        // lower bound must not cap subsequent paging or oldest-history seeks.
+        let maximum = if !slot.history_extent_known {
             panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS
         } else {
             slot.history_total.max(slot.history_offset)
@@ -1482,7 +1493,11 @@ impl App {
             if slot.snapshot.alternate_screen() {
                 return;
             }
-            let offset = offset.min(slot.history_total.max(slot.history_offset));
+            let offset = if slot.history_extent_known {
+                offset.min(slot.history_total.max(slot.history_offset))
+            } else {
+                offset
+            };
             if offset == slot.history_offset {
                 return;
             }
@@ -1582,6 +1597,7 @@ impl App {
                 old_buffer.is_some_and(|old| old != slot.snapshot.alternate_screen());
             if buffer_changed {
                 slot.history_total = 0;
+                slot.history_extent_known = false;
                 slot.history_offset = 0;
                 slot.history_pending = false;
                 slot.queued_scroll = None;
@@ -2248,7 +2264,7 @@ impl App {
                         .iter()
                         .find(|slot| slot.target == Some(target))
                         .map(|slot| {
-                            if slot.history_total == 0 {
+                            if !slot.history_extent_known {
                                 panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS
                             } else {
                                 slot.history_total.max(slot.history_offset)
@@ -3253,7 +3269,14 @@ impl App {
         self.focus_target(target);
         self.prefix = None;
         let layout_revision = self.layout.map_or(0, |layout| layout.revision);
-        if total == 0 {
+        // Equal offset/extent may be a fast wheel's conservative lower bound;
+        // discover the real extent before calculating page/drag destinations.
+        let extent_known = self
+            .screens
+            .iter()
+            .find(|slot| slot.target == Some(target))
+            .is_some_and(|slot| slot.history_extent_known);
+        if !extent_known {
             self.set_focus(Some(target));
             self.seek_history_for_target(
                 target,

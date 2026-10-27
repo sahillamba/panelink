@@ -42,6 +42,7 @@ const MAX_EXECUTABLE_AND_ARGUMENT_BYTES: usize = 64 * 1024;
 enum Command {
     Help,
     Version,
+    BuildInfo,
     Doctor,
     PtyProbe(ProbeRequest),
 }
@@ -166,7 +167,11 @@ where
             return default_open::open();
         }
         if arguments.peek().is_some_and(|argument| {
-            argument == "pane" || argument == "wait" || argument == "events"
+            argument == "pane"
+                || argument == "agent"
+                || argument == "wait"
+                || argument == "events"
+                || argument == "server-info"
         }) {
             let mut captured = Vec::new();
             for argument in arguments {
@@ -286,6 +291,10 @@ where
             println!("panelink {}", env!("CARGO_PKG_VERSION"));
             0
         }
+        Command::BuildInfo => {
+            println!("{}", panelink::build_info::current().to_json());
+            0
+        }
         Command::Doctor => {
             println!("Panelink runtime diagnostics");
             println!(
@@ -330,6 +339,15 @@ where
     if first == OsStr::new("doctor") {
         return if arguments.next().is_none() {
             Ok(Command::Doctor)
+        } else {
+            Err(CliError::InvalidArguments)
+        };
+    }
+    if first == OsStr::new("build-info") {
+        return if arguments.next().as_deref() == Some(OsStr::new("--json"))
+            && arguments.next().is_none()
+        {
+            Ok(Command::BuildInfo)
         } else {
             Err(CliError::InvalidArguments)
         };
@@ -682,10 +700,14 @@ fn print_help() {
     println!("  panelink close <n>    close pane n: hang up its shell (SIGKILL after 1 s);");
     println!("                        the other pane fills the window; closing the last");
     println!("                        pane ends the workspace");
-    println!("  panelink pane list|read|claim|release|send|keys|interrupt|close ...");
+    println!("  panelink pane list|read|claim|release|send|submit|keys|interrupt|close ...");
     println!("  panelink pane run [--pane N] [--direction left|right|up|down] [--cwd DIR] [--as NAME] [--json] -- COMMAND [ARG ...]");
     println!("  panelink wait <n> --text STRING|--quiet SECS|--exit|--change --timeout SECS");
     println!("  panelink events [--pane N] [--timeout SECS] --json");
+    println!("  panelink agent list|get|read|prompt|wait ... [--json]");
+    println!("  panelink pane submit N TEXT [--json]   submit text with Enter, then release");
+    println!("  panelink pane read N [--lines K] [--bottom | --scrollback] [--json]");
+    println!("  panelink agent read N|REF [--lines K] [--bottom] [--json]");
     println!();
     println!("In the workspace: right-click a pane to split it; click a pane to focus it.");
     println!("Control-B (not Command-B) enters NAV mode: r/l/u/d split, arrows/Tab switch");
@@ -711,6 +733,8 @@ fn print_help() {
     println!("  panelink --help");
     println!("  panelink -h");
     println!("  panelink --version");
+    println!("  panelink build-info --json");
+    println!("  panelink server-info --json");
     println!("  panelink doctor");
     println!("  panelink pty-probe --terminfo <absolute-dir> -- <executable> [arguments...]");
     println!("  panelink server-probe --directory <private-dir> --terminfo <absolute-dir> [--initialize] [--allow-input] -- <executable> [arguments...]");
@@ -816,10 +840,22 @@ mod tests {
                 assert_eq!(request.executable, OsString::from("/bin/sh"));
                 assert_eq!(request.arguments, arguments(&["-c", "exit 7"]));
             }
-            Command::Help | Command::Version | Command::Doctor => {
+            Command::Help | Command::Version | Command::BuildInfo | Command::Doctor => {
                 panic!("expected the pty-probe command")
             }
         }
+    }
+
+    #[test]
+    fn build_info_requires_the_explicit_json_flag() {
+        assert!(matches!(
+            parse_command(arguments(&["build-info", "--json"])),
+            Ok(Command::BuildInfo)
+        ));
+        assert!(matches!(
+            parse_command(arguments(&["build-info"])),
+            Err(CliError::InvalidArguments)
+        ));
     }
 
     #[test]

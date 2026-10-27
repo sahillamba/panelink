@@ -8,6 +8,25 @@ show them; this does not replace a separately packaged release binary.
 [CLI workflows](cli.md) describes the same consolidated source baseline.
 Resolve the selected binary before explaining support.
 
+Input ownership is per admitted batch: the UI holds no idle-pane claims, and a
+short batch lock does not protect a human's unfinished draft between keystrokes.
+Legacy retained CLI claims still block other writers. See the
+[CLI ownership workflow](cli.md#authorized-input) for the confirmed source
+contract and its pending runtime acceptance.
+
+Local build 0.1.2 displays `v0.1.2` in the bottom-right pane margin. This is
+the client version, matching `--version`; it does not identify the running
+server. Modal notices can temporarily cover it. Unpadded saved-layout views
+do not carry a badge. Detach and reattach to display a rebuilt client.
+
+Normal-history wheel reads return the requested viewport without first probing
+the oldest row solely to size the scrollbar. Until an explicit seek discovers
+the full range, the thumb uses a conservative extent. A first track interaction
+with an unknown extent discovers that range. Background polls are not newly
+queued while a scroll is outstanding; a poll already in flight can still delay
+it. Alternate-screen app scrolling retains its fresh mode/ownership checks and
+is not accelerated by replaying or batching uncertain input.
+
 Its render area is bounded to 80 rows by 240 columns, including in larger host
 windows. Host size and child PTY size can therefore differ; discover the current
 pane dimensions through the matching executable's CLI.
