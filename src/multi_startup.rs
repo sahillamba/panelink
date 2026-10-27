@@ -394,18 +394,19 @@ mod tests {
             &bridge_environment,
         )
         .unwrap();
+        let expected = format!(
+            "{}\n{}\n",
+            cwd.0.join("private-config").display(),
+            cwd.0.join("bridge.sock").display()
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !output.exists() && std::time::Instant::now() < deadline {
+        // Shell redirection creates the file before printf writes its contents.
+        while fs::read_to_string(&output).ok().as_deref() != Some(expected.as_str())
+            && std::time::Instant::now() < deadline
+        {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert_eq!(
-            fs::read_to_string(&output).unwrap(),
-            format!(
-                "{}\n{}\n",
-                cwd.0.join("private-config").display(),
-                cwd.0.join("bridge.sock").display()
-            )
-        );
+        assert_eq!(fs::read_to_string(&output).unwrap(), expected);
         assert_eq!(std::env::var_os("PANELINK_BRIDGE_SOCKET"), parent_socket);
         assert_eq!(std::env::var_os("OPENCODE_CONFIG_DIR"), parent_config);
         let journal = fs::read(storage_dir.0.join("launch.journal")).unwrap();

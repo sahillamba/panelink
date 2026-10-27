@@ -180,6 +180,23 @@ See [accepted task](P3-PANE-RUN-TASK.md) and
 - Two clippy findings were fixed. `p3_agent_cli` now passes 2/2 on three
   consecutive runs; before the fixes it failed consistently.
 
+## Wait reliability fixes — 2026-10-27
+
+Observed live while waiting on a tescode/OpenCode pane for a completion marker:
+
+- `wait` ended with `stale_target` on every layout revision, including a host
+  terminal resize that left the full target at the same index. Waits now pin the
+  full target and its original index; only a replaced occupant, closed pane or
+  renumbered index is stale. No replacement target is ever selected.
+- `wait --text` searched only the reconciliation's default 24-row/4 KiB prefix,
+  so a marker (or footer) lower on a 41-row pane never matched. Wait
+  reconciliation now requests the protocol maximum (64 KiB/1,024 rows), which
+  existing servers already accept; `events` keeps the smaller budget.
+- `p3_agent_cli::wait_text_survives_resizes_and_matches_rows_below_the_first_24`
+  covers both. It fails on the previous code for each bug separately and passes
+  with the fix. `agent wait` was already identity-pinned rather than
+  layout-pinned and is unchanged.
+
 ## Verification record
 
 The isolated real-server integration scenario currently passes: one test covers
