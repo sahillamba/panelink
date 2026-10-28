@@ -1,10 +1,10 @@
 //! Zero-configuration `panelink`: open (or reattach to) the user's workspace.
 //!
-//! Running `panelink` with no arguments resolves one private per-user state
-//! root, compiles the bundled terminfo entry once, starts the background
-//! multi-session server if none is running, and attaches the interactive
-//! client. Ctrl-X detaches; the shells keep running in the server, and the next
-//! `panelink` reattaches. `panelink stop` ends the workspace.
+//! Running `panelink` with no arguments resolves the visible workspace catalog,
+//! preserves its saved-layout/recovery decision, starts the selected route's
+//! server if needed, and attaches the catalog-aware interactive client. An
+//! empty catalog starts no server. Ctrl-X detaches; shells keep running, and
+//! the next `panelink` reattaches. `panelink stop` ends the legacy route.
 //!
 //! Lifecycle rules:
 //! - Every opener and `stop` first takes an exclusive `flock` on
@@ -31,6 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use panelink::control_protocol::TargetRef;
 use panelink::history_rows;
 use panelink::history_store::HistoryStore;
+use panelink::launch::LaunchContext;
 use panelink::layout_store::{LayoutSlot, LayoutStore};
 use panelink::pane_layout::{PaneGeometry, Rect, SplitDirection};
 use panelink::recovery_chooser::{self, ChooserChoice, ChooserPlan, LayoutSummary};
@@ -472,6 +473,38 @@ pub(crate) fn ensure_workspace_route_cancellable(
     Ok(())
 }
 
+/// Ensure a registered route is ready. `may_spawn` is false on a repeated
+/// uncertain create intent, which permits readiness reconciliation but never
+/// a second server spawn attempt.
+pub(crate) fn ensure_route_server(
+    app_root: &Path,
+    route: panelink::workspace_tabs::WorkspaceRouteId,
+    launch_context: &LaunchContext,
+    may_spawn: bool,
+) -> Result<(), OpenError> {
+    let state = workspace_state(route.project.get(), route.tab.get())?;
+    if route.project.get() != 1 || route.tab.get() != 1 {
+        prepare_workspace_namespace(route.project.get(), route.tab.get(), &state)?;
+    }
+    prepare_root(&state)?;
+    ensure_terminfo(&state)?;
+    let check_registration = || {
+        workspace_catalog_checked(app_root, route.project.get(), route.tab.get())
+            .map(|_| ())
+            .map_err(map_registry_route_error)
+    };
+    if may_spawn {
+        ensure_server_checked_with_launch(&state, Some(launch_context), check_registration)
+    } else {
+        let _lifecycle = lifecycle_lock(&state, START_TIMEOUT + STOP_TIMEOUT)?;
+        check_registration()?;
+        if !server_lock_held_checked(&state.server).map_err(|_| OpenError::StaleEndpointUnsafe)? {
+            return Err(OpenError::ServerStartFailed);
+        }
+        wait_ready(&state, None)
+    }
+}
+
 /// Persist the current selection as a best-effort metadata-only update.
 /// Callers run this on the bounded metadata worker, never the UI loop.
 pub(crate) fn save_workspace_selection(
@@ -527,17 +560,22 @@ pub(crate) fn stop_workspace_ids(project: u64, tab: u64) -> Result<(), &'static 
         return Ok(());
     }
     let _lifecycle = lifecycle_lock(&state, STOP_TIMEOUT).map_err(|_| "workspace busy")?;
+    stop_workspace_locked(&state)
+}
+
+/// Stop the current route while its lifecycle lock is held by the caller.
+pub(crate) fn stop_workspace_locked(state: &StateRoot) -> Result<(), &'static str> {
     let lock_held = server_lock_held_checked(&state.server)?;
     if !lock_held {
         if path_entry_exists(&state.root.join(PID_NAME))?
             || endpoint_state_checked(&state.socket_path())? != EndpointState::Absent
-            || server_ready(&state)
+            || server_ready(state)
         {
             return Err("workspace state uncertain");
         }
         return Ok(());
     }
-    let pid = live_server_pid(&state).ok_or("workspace identity unavailable")?;
+    let pid = live_server_pid(state).ok_or("workspace identity unavailable")?;
     // SAFETY: `live_server_pid` verifies the exact recorded process identity.
     if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
         return Err("workspace stop failed");
@@ -554,6 +592,57 @@ pub(crate) fn stop_workspace_ids(project: u64, tab: u64) -> Result<(), &'static 
     }
     remove_pid_record(&state.root.join(PID_NAME))?;
     Ok(())
+}
+
+/// Acquire the exact route lifecycle lock before a registry lock is taken.
+pub(crate) fn lock_workspace_route(
+    route: panelink::workspace_tabs::WorkspaceRouteId,
+) -> Result<(StateRoot, LifecycleLock), &'static str> {
+    let project = route.project.get();
+    let tab = route.tab.get();
+    let state = workspace_state(project, tab).map_err(|_| "workspace unavailable")?;
+    if project == 1 && tab == 1 {
+        prepare_root(&state).map_err(|_| "workspace unavailable")?;
+    } else {
+        prepare_workspace_namespace(project, tab, &state).map_err(|_| "workspace unavailable")?;
+    }
+    let lock = lifecycle_lock(&state, STOP_TIMEOUT).map_err(|_| "workspace busy")?;
+    Ok((state, lock))
+}
+
+/// Read the generation only when the route's server lock is currently held.
+/// The counter's exact private record is checked before it is trusted.
+pub(crate) fn live_server_generation(state: &StateRoot) -> Result<Option<u64>, &'static str> {
+    if !server_lock_held_checked(&state.server)? {
+        return Ok(None);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(state.server.join("generation"))
+        .map_err(|_| "workspace state uncertain")?;
+    let metadata = file.metadata().map_err(|_| "workspace state uncertain")?;
+    if !metadata.is_file()
+        || metadata.uid() != current_uid()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+        || metadata.len() != 24
+    {
+        return Err("workspace state uncertain");
+    }
+    let mut bytes = [0_u8; 24];
+    (&file)
+        .read_exact(&mut bytes)
+        .map_err(|_| "workspace state uncertain")?;
+    if &bytes[..8] != b"PLGEN001" {
+        return Err("workspace state uncertain");
+    }
+    let generation = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
+    let inverse = u64::from_be_bytes(bytes[16..24].try_into().unwrap());
+    if generation == 0 || inverse != !generation || !server_lock_held_checked(&state.server)? {
+        return Err("workspace state uncertain");
+    }
+    Ok(Some(generation))
 }
 
 pub(crate) fn workspace_remove_guard<T>(
@@ -973,7 +1062,7 @@ fn server_lock_held_checked(server_dir: &Path) -> Result<bool, &'static str> {
 }
 
 /// Exclusive per-root lifecycle lock (released on drop/close).
-struct LifecycleLock {
+pub(crate) struct LifecycleLock {
     _file: File,
 }
 
@@ -1041,14 +1130,25 @@ fn is_executable_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
 }
 
-/// Start `panelink serve` detached in its own session. The server inherits
-/// this invocation's environment and working directory as the explicit
-/// launch context for its first shell (existing `serve` behavior).
-fn spawn_server(state: &StateRoot) -> Result<std::process::Child, OpenError> {
+/// Start `panelink serve` detached in its own session. Ordinary startup keeps
+/// the inherited invocation context; managed-tab creation supplies an explicit
+/// captured cwd/environment that stays transient through `serve` startup.
+fn spawn_server(
+    state: &StateRoot,
+    launch_context: Option<&LaunchContext>,
+) -> Result<std::process::Child, OpenError> {
     let executable = std::env::current_exe().map_err(|_| OpenError::ServerStartFailed)?;
     let log = open_log(state)?;
     let log_err = log.try_clone().map_err(|_| OpenError::ServerStartFailed)?;
-    let shell = default_shell(std::env::var_os("SHELL"));
+    let shell = default_shell(launch_context.map_or_else(
+        || std::env::var_os("SHELL"),
+        |context| {
+            context
+                .environment
+                .get(std::ffi::OsStr::new("SHELL"))
+                .cloned()
+        },
+    ));
     let mut command = Command::new(executable);
     command
         .arg("serve")
@@ -1066,6 +1166,15 @@ fn spawn_server(state: &StateRoot) -> Result<std::process::Child, OpenError> {
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
+    if let Some(context) = launch_context {
+        if !context.working_directory.is_absolute() {
+            return Err(OpenError::ServerStartFailed);
+        }
+        command
+            .current_dir(&context.working_directory)
+            .env_clear()
+            .envs(&context.environment);
+    }
     // SAFETY: setsid is async-signal-safe and only detaches the child from
     // this terminal's session so closing the window cannot hang it up.
     unsafe {
@@ -1113,16 +1222,16 @@ fn process_start_time(pid: i32) -> Option<u64> {
     Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
-/// Ensure a server is running for `state`, starting one if needed.
-///
-/// The whole inspect/cleanup/spawn/wait sequence runs under the lifecycle
-/// lock, so a concurrent opener simply waits and then finds the server.
-fn ensure_server(state: &StateRoot) -> Result<(), OpenError> {
-    ensure_server_checked(state, || Ok(()))
-}
-
 fn ensure_server_checked(
     state: &StateRoot,
+    still_registered: impl FnOnce() -> Result<(), OpenError>,
+) -> Result<(), OpenError> {
+    ensure_server_checked_with_launch(state, None, still_registered)
+}
+
+fn ensure_server_checked_with_launch(
+    state: &StateRoot,
+    launch_context: Option<&LaunchContext>,
     still_registered: impl FnOnce() -> Result<(), OpenError>,
 ) -> Result<(), OpenError> {
     let _lifecycle = lifecycle_lock(state, START_TIMEOUT + STOP_TIMEOUT)?;
@@ -1139,7 +1248,7 @@ fn ensure_server_checked(
         }
         EndpointAction::Start => {}
     }
-    let child = spawn_server(state)?;
+    let child = spawn_server(state, launch_context)?;
     wait_ready(state, Some(child))
 }
 
@@ -1173,7 +1282,42 @@ fn prepare() -> Result<StateRoot, OpenError> {
 
 /// `panelink` with no arguments.
 pub(crate) fn open() -> i32 {
-    let state = match resolve_root(std::env::var_os("PANELINK_HOME"), std::env::var_os("HOME")) {
+    let app_root = match prepare_app_root() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("panelink: {}", error.message());
+            return 1;
+        }
+    };
+    // Choose the route without writing anything: quitting the recovery chooser
+    // must leave no runtime or registry files behind. A first run (no registry)
+    // targets the legacy Default/Main route; initialization happens only once
+    // the user actually opens it (see `open_workspace_tabbed`).
+    let route = if crate::workspace_lifecycle::registry_exists(&app_root) {
+        let presentation = match crate::workspace_lifecycle::presentation_snapshot_within(
+            &app_root,
+            START_TIMEOUT + STOP_TIMEOUT,
+        ) {
+            Ok((snapshot, _)) => snapshot,
+            Err(error) => {
+                eprintln!("panelink: {error}");
+                return 1;
+            }
+        };
+        let Some(route) = presentation.active_route else {
+            return run_empty_workspace(app_root, presentation);
+        };
+        route
+    } else {
+        match (
+            panelink::workspace_index::ProjectId::new(1),
+            panelink::workspace_index::WorkspaceTabId::new(1),
+        ) {
+            (Ok(project), Ok(tab)) => panelink::workspace_tabs::WorkspaceRouteId { project, tab },
+            _ => return 1,
+        }
+    };
+    let state = match workspace_state(route.project.get(), route.tab.get()) {
         Ok(state) => state,
         Err(error) => {
             eprintln!("panelink: {}", error.message());
@@ -1181,9 +1325,9 @@ pub(crate) fn open() -> i32 {
         }
     };
 
-    // Preserve direct attachment when the server is already reachable. On a
-    // stopped root, inspect historical metadata before creating or initializing
-    // any runtime paths.
+    // Preserve the existing recovery decision for the registry-selected
+    // route. Live servers attach directly; stopped routes still offer the
+    // saved-layout/recovery prompt before a fresh shell is started.
     let live_server = observe_live_server(&state).unwrap_or(false);
     let (current, previous) = if live_server {
         (None, None)
@@ -1192,24 +1336,100 @@ pub(crate) fn open() -> i32 {
     };
     let interactive = isatty(io::stdin()) && isatty(io::stdout());
     match recovery_chooser::plan(live_server, interactive, current, previous) {
-        ChooserPlan::AttachExisting | ChooserPlan::FreshShell => open_workspace(state),
-        ChooserPlan::Prompt { .. } => {
-            run_startup_chooser(state, current.expect("prompt has current layout"), previous)
+        ChooserPlan::AttachExisting | ChooserPlan::FreshShell => {
+            open_workspace_tabbed(state, app_root, route)
         }
+        ChooserPlan::Prompt { .. } => run_startup_chooser(
+            state,
+            app_root,
+            route,
+            current.expect("prompt has current layout"),
+            previous,
+        ),
     }
 }
 
-/// Resume the existing plain-open path after a user selected a fresh shell or
-/// when the chooser does not apply.
-fn open_workspace(state: StateRoot) -> i32 {
+/// Zero visible tabs: interactive terminals get the client-only empty state
+/// (New tab / Detach, no server, no spawn); non-interactive callers get a
+/// notice. Neither path starts a server or creates a route by itself.
+pub(crate) fn run_empty_workspace(
+    app_root: PathBuf,
+    presentation: panelink::workspace_index::TabPresentationSnapshot,
+) -> i32 {
+    if !(isatty(io::stdin()) && isatty(io::stdout())) {
+        println!("No open tabs. Run `panelink workspace tab create ...`");
+        return 0;
+    }
+    // The legacy route's directories only locate the client context; the
+    // empty client opens no Net connection to them.
+    let state = match workspace_state(1, 1) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("panelink: {}", error.message());
+            return 1;
+        }
+    };
+    crate::ui_client::run_workspace_empty(state.server, state.contexts, app_root, presentation)
+}
+
+/// Resume the regular recovery/open path with an already selected catalog route.
+fn open_workspace_tabbed(
+    state: StateRoot,
+    app_root: PathBuf,
+    route: panelink::workspace_tabs::WorkspaceRouteId,
+) -> i32 {
+    // Serialize first-run v1/sidecar initialization with concurrent ordinary
+    // openers through the legacy route's lifecycle lock; no server is started
+    // while it is held here.
+    {
+        let legacy_state = match workspace_state(1, 1) {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("panelink: {}", error.message());
+                return 1;
+            }
+        };
+        let _registry_startup_guard =
+            match lifecycle_lock(&legacy_state, START_TIMEOUT + STOP_TIMEOUT) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    eprintln!("panelink: {}", error.message());
+                    return 1;
+                }
+            };
+        if let Err(error) = crate::workspace_lifecycle::initialize_presentation(&app_root) {
+            eprintln!("panelink: {error}");
+            return 1;
+        }
+    }
     let result: Result<StateRoot, OpenError> = (|| {
         prepare_root(&state)?;
         ensure_terminfo(&state)?;
-        ensure_server(&state)?;
+        ensure_server_checked(&state, || {
+            workspace_catalog_checked(&app_root, route.project.get(), route.tab.get())
+                .map(|_| ())
+                .map_err(map_registry_route_error)
+        })?;
         Ok(state)
     })();
     match result {
-        Ok(state) => crate::ui_client::run(state.server, state.contexts),
+        Ok(state) => {
+            let (latest, checked_route) =
+                match workspace_catalog_checked(&app_root, route.project.get(), route.tab.get()) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        eprintln!("panelink: {}", map_registry_route_error(error).message());
+                        return 1;
+                    }
+                };
+            crate::ui_client::run_workspace(
+                state.server,
+                state.contexts,
+                app_root,
+                latest,
+                checked_route,
+            )
+        }
         Err(error) => {
             eprintln!("panelink: {}", error.message());
             1
@@ -1262,13 +1482,15 @@ fn inspect_saved_layouts(state: &StateRoot) -> (Option<LayoutSummary>, Option<La
 
 fn run_startup_chooser(
     state: StateRoot,
+    app_root: PathBuf,
+    route: panelink::workspace_tabs::WorkspaceRouteId,
     current: LayoutSummary,
     previous: Option<LayoutSummary>,
 ) -> i32 {
     loop {
         let prompt = chooser_prompt(current, previous);
         match read_startup_choice(prompt.as_bytes()) {
-            ChooserChoice::Fresh => return open_workspace(state),
+            ChooserChoice::Fresh => return open_workspace_tabbed(state, app_root, route),
             ChooserChoice::Quit => return 0,
             ChooserChoice::ViewCurrent => {
                 view_saved_layout(&state, RecoverySlot::Current);
@@ -1276,7 +1498,7 @@ fn run_startup_chooser(
             ChooserChoice::ViewPrevious if previous.is_some() => {
                 view_saved_layout(&state, RecoverySlot::Previous);
             }
-            ChooserChoice::ViewPrevious => return open_workspace(state),
+            ChooserChoice::ViewPrevious => return open_workspace_tabbed(state, app_root, route),
         }
     }
 }
@@ -2780,7 +3002,7 @@ fn ensure_relaunch_server(state: &StateRoot) -> Result<(), OpenError> {
         }
         EndpointAction::Start => {}
     }
-    let child = spawn_server(state)?;
+    let child = spawn_server(state, None)?;
     wait_ready(state, Some(child))
 }
 

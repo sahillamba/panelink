@@ -202,27 +202,32 @@ Confirmed hierarchy (user decision2026-10-25): **Project → workspace tabs →
 split panes**. Each project can expose workspace tabs, and each workspace owns
 its pane layout. Tabs are the workspace navigation surface; they are not a
 second nested tab layer inside a workspace. Switching a tab must preserve the
-server-owned processes in other workspaces. The bounded opt-in `workspace open`
-client now shows a persistent row-zero project/tab strip and supports in-client
-route switching. Each registered tab routes to an independent existing
-four-pane server/storage/context domain. This is a bounded UI slice; full
-Phase5 acceptance remains open. Projects are named groups in this slice,
-without source-root discovery. Legacy commands with no workspace selector keep
-the original default route; only `workspace open` without IDs follows persisted
-active selection. Removal requires a stopped, unambiguous runtime and retains
-its saved files. Plain `panelink` and raw attach remain legacy/headerless. See
+server-owned processes in other workspaces. The interactive client (plain
+`panelink` on a TTY) shows a persistent row-zero project/tab strip and supports
+in-client create, rename, close and route switching. Each registered tab routes
+to an independent existing four-pane server/storage/context domain. This is a
+bounded UI slice; full Phase5 acceptance remains open. Projects are named groups
+in this slice, without source-root discovery. Legacy commands with no workspace
+selector keep the original default route. Removal requires a stopped,
+unambiguous runtime and retains its saved files. Raw `attach` remains
+headerless. See
 [the routing contract and result](progress/P5-WORKSPACE-ROUTING-RESULT-2026-10-25.md)
 and [tab integration evidence](progress/P5-TAB-INTEGRATION-2026-10-25.md).
 
-### Bounded opt-in tab UI behavior
+### Interactive client tab behavior
 
-The `workspace open` client reserves row zero for a persistent project/tab
+Plain `panelink` on a TTY reserves row zero for a persistent project/tab
 strip. Clicking the project control opens its chooser; clicking a tab requests
-that route. Ctrl-B then `w` opens the chooser;
-`n`/`p` navigate tabs and `[`/`]` navigate projects. The chooser uses an
-immutable catalog snapshot. A refresh does not replace the displayed active
-snapshot if that active route has since been removed. This UI only navigates
-registered entries; it does not create, remove, or stop projects or tabs.
+that route. The `+` button and `Ctrl-B +` admit one create intent and open one
+managed "Shell N" tab, then switch to it. `Ctrl-B t` opens tab actions
+(Rename/Close) for the active tab. `Ctrl-B w` opens the searchable All tabs
+chooser; `n`/`p` navigate tabs and `[`/`]` navigate projects. When no tabs are
+visible the client shows an empty state with New tab / Detach controls; no
+process is started. Closing requires the tab to be open (active route) so the
+exact runtime generation is known; an inactive tab displays "open this tab first
+to close it". The chooser uses an immutable catalog snapshot. A refresh does
+not replace the displayed active snapshot if that active route has since been
+removed.
 
 Only one route preparation may be pending. While it runs, the current route is
 shown and child input is frozen. A switch cancels local copy/selection work;

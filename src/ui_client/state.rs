@@ -16,25 +16,37 @@ use panelink::protocol::Outcome;
 use panelink::screen_checkpoint::ScreenCheckpoint;
 use panelink::split_menu::{
     Availability, CloseConfirm, CloseIntent, ConfirmResponse, MenuResponse, MenuState,
-    OverlayStyle as MenuStyle, SplitIntent,
+    OverlayStyle as MenuStyle, PaneActionAvailability, PaneActionModel, PaneMenuAction,
+    SplitIntent,
 };
 use panelink::terminal::compose::{
-    pane_controls, scrollbar_geometry, ComposeFrame, Compositor, CopyCaretOverlay, OverlayLine,
-    OverlayStyle, OverlayView, PaneContent, PaneView, Scrollbar, SelectionOverlay,
+    divider_at, pane_controls, pane_history_controls, pane_version_badge, pointer_content_point,
+    scrollbar_geometry, ComposeFrame, Compositor, CopyCaretOverlay, HistoryLabelKind, OverlayLine,
+    OverlayStyle, OverlayView, PaneChrome, PaneContent, PaneView, Scrollbar, SelectionOverlay,
 };
 use panelink::terminal::{Key, ScreenSnapshot, TerminalError, TerminalSize};
 use panelink::terminal_selection::{Point, SelectionError, ViewIdentity};
-use panelink::ui_protocol::{planned_split_size, LayoutReply, MAX_KEYS};
-use panelink::workspace_index::WorkspaceIndex;
+use panelink::ui_protocol::{planned_split_size, LayoutReply, WireHistoryCursor, MAX_KEYS};
+use panelink::workspace_index::{
+    ProjectId, TabPresentationSnapshot, WorkspaceIndex, MAX_DISPLAY_NAME_BYTES,
+    MAX_TABS_PER_PROJECT,
+};
 use panelink::workspace_tabs::{self, TabAction, TabNavigation, TabsLayout, WorkspaceRouteId};
 
+use super::clipboard::ClipboardStatus;
 use super::keys::{
     confirm_input, copy_mode_key, map_key, menu_input, mouse_button, mouse_wheel,
-    pane_operation_key, workspace_navigation, CopyModeKey, KeyAction, PaneOperationKey,
+    pane_operation_key, workspace_navigation, workspace_tab_command, CopyModeKey, KeyAction,
+    PaneOperationKey, WorkspaceTabCommand,
 };
 use super::net::{NetUpdate, ScrollResult, ScrollUpdate};
 use super::pane_operations::PaneAction;
+use super::routes::{MetadataRequestId, MetadataResult};
 use super::selection::{capture, reanchor, FrozenDrag};
+use crate::workspace_lifecycle::{
+    CreateIntentId, CreateShellTab, CreateStatus, ExpectedRuntimeIdentity, LifecycleError,
+    RenameOutcome,
+};
 
 /// Largest root the client requests (terminal-core and compositor bound).
 pub(crate) const MAX_ROOT_ROWS: u16 = 80;
@@ -43,6 +55,7 @@ pub(crate) const MAX_ROOT_COLUMNS: u16 = 240;
 const MIN_ROOT_ROWS: u16 = panelink::pane_layout::MIN_PANE_ROWS;
 const MIN_ROOT_COLUMNS: u16 = panelink::pane_layout::MIN_PANE_COLUMNS;
 const STATUS_TTL: Duration = Duration::from_secs(3);
+const COPY_FEEDBACK_TTL: Duration = Duration::from_millis(1_500);
 /// Navigation mode ends by itself after this long without a key.
 const NAV_TIMEOUT: Duration = Duration::from_secs(4);
 /// Bottom banner shown while navigation mode (after Ctrl-B) is active.
@@ -51,6 +64,9 @@ pub(crate) const NAV_BANNER: &str =
 const WORKSPACE_NAV_BANNER: &str =
     " NAV  ? help | c copy | z zoom | m swap | e divider | w workspaces | n/p tabs | [/] projects | s menu | v saved | l r u d split | arrows/o focus | x close | ^X detach | Esc ";
 const TOO_SMALL: &str = "Panelink: terminal too small for the pane layout; enlarge it";
+const EMPTY_MESSAGE: &str = "No open tabs.";
+const EMPTY_ACTIONS: &str = "[ New tab (N) ]   [ Detach (Ctrl-X) ]";
+const TAB_FILTER_MAX_BYTES: usize = 64;
 const HELP_LINES: [&str; 8] = [
     "Panelink help [Close]",
     "Ctrl-B ?: help | s: menu | c: copy | z: zoom | m: swap | e: divider",
@@ -65,12 +81,76 @@ const WORKSPACE_HELP_LINES: [&str; 8] = [
     "Panelink help [Close]",
     "Ctrl-B ?: help | s: menu | c: copy | z: zoom | m: swap | e: divider",
     "Ctrl-B l/r/u/d: split | arrows/Tab/o: focus | PgUp/PgDn: history",
-    "Ctrl-B n/p: next/previous tab | [/]: previous/next project",
-    "Ctrl-B x: close pane (confirm y)",
-    "Click [Menu]/[x]; drag dividers; click/drag normal-history scrollbar",
-    "Esc: leave navigation or close help | Ctrl-X: detach",
-    "Press Esc or ? to close help; run Panelink again to reconnect",
+    "Ctrl-B n/p tabs | [/] projects | w searchable All tabs",
+    "Click tab to switch; active/right-click tab for Rename/Close",
+    "[+] / Ctrl-B + new | t actions | All: type, Backspace, Enter, [Clear]",
+    "Rename Enter saves/Esc cancels | Close ends processes; Cancel default",
+    "Click [Menu]/[x], drag divider/scrollbar | Ctrl-B x pane | Ctrl-X detach",
 ];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TabDialog {
+    Actions {
+        route: WorkspaceRouteId,
+        selected: usize,
+    },
+    Rename {
+        route: WorkspaceRouteId,
+        expected_revision: u64,
+        draft: String,
+        error: Option<&'static str>,
+        saving: bool,
+    },
+    Close {
+        expected: ExpectedRuntimeIdentity,
+        expected_revision: u64,
+        close_selected: bool,
+        pending: bool,
+    },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceMetadataMutation {
+    Rename {
+        route: WorkspaceRouteId,
+        name: String,
+        expected_revision: u64,
+    },
+    Close {
+        route: WorkspaceRouteId,
+        expected: ExpectedRuntimeIdentity,
+        expected_revision: u64,
+    },
+}
+
+fn add_history_rows(offset: u16, delta: u64) -> u16 {
+    u64::from(offset)
+        .saturating_add(delta)
+        .min(u64::from(panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS)) as u16
+}
+
+fn history_label_kind(slot: &ScreenSlot) -> Option<HistoryLabelKind> {
+    (slot.history_offset > 0).then_some(if slot.history_truncated {
+        HistoryLabelKind::Truncated
+    } else if slot.new_output {
+        HistoryLabelKind::NewOutput
+    } else {
+        HistoryLabelKind::History
+    })
+}
+
+fn pointer_seek_offset(drag: PointerSeek, y: u16) -> u16 {
+    let travel = drag.track.rows.saturating_sub(drag.thumb_rows);
+    if travel == 0 {
+        return drag.total_rows;
+    }
+    let top = y
+        .saturating_sub(drag.track.y)
+        .saturating_sub(drag.grab_offset)
+        .min(travel);
+    let older_rows = u64::from(top) * u64::from(drag.total_rows) / u64::from(travel);
+    drag.total_rows.saturating_sub(older_rows as u16)
+}
 
 /// One fully planned split built from a captured menu intent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,7 +181,35 @@ struct ConfirmUiGeometry {
     overlay: Rect,
     close: Rect,
     cancel: Rect,
-    warning: &'static str,
+    position: u8,
+    consequence: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EmptyWorkspaceGeometry {
+    overlay: Rect,
+    new_tab: Rect,
+    detach: Rect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingCreate {
+    project: ProjectId,
+    source_route: Option<WorkspaceRouteId>,
+    request_id: Option<MetadataRequestId>,
+    intent_id: Option<CreateIntentId>,
+    dispatched: bool,
+    /// Outcome unknown: the intent is kept, and only an explicit New tab
+    /// re-dispatches it (same intent ID) for reconciliation.
+    awaiting_reconcile: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingMetadata {
+    request_id: MetadataRequestId,
+    route: WorkspaceRouteId,
+    source_route: Option<WorkspaceRouteId>,
+    expected_revision: u64,
 }
 
 /// Network effects requested by input routing.
@@ -175,6 +283,22 @@ struct ActionsMenu {
     target: TargetRef,
     revision: u64,
     selected: usize,
+    model: PaneActionModel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ActionsMenuPage {
+    rect: Rect,
+    start: usize,
+    end: usize,
+    action_row: usize,
+    reason_row: usize,
+    navigation_row: usize,
+    cancel_row: usize,
+    line_count: usize,
+    back_column: Option<u16>,
+    more_column: Option<u16>,
+    cancel_column: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -188,6 +312,8 @@ struct PointerSeek {
     start_offset: u16,
     preview_offset: u16,
     grab_offset: u16,
+    last_y: u16,
+    awaiting_extent: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,7 +328,7 @@ struct PointerDivider {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LocalAction {
-    Split,
+    Split(SplitDirection),
     Zoom,
     Swap,
     Divider,
@@ -213,15 +339,18 @@ enum LocalAction {
     Detach,
 }
 
-const LOCAL_ACTIONS: [LocalAction; 9] = [
-    LocalAction::Split,
-    LocalAction::Zoom,
-    LocalAction::Swap,
+const LOCAL_ACTIONS: [LocalAction; panelink::split_menu::PANE_ACTION_COUNT] = [
+    LocalAction::Split(SplitDirection::Left),
+    LocalAction::Split(SplitDirection::Right),
+    LocalAction::Split(SplitDirection::Up),
+    LocalAction::Split(SplitDirection::Down),
     LocalAction::Divider,
     LocalAction::Copy,
+    LocalAction::Close,
+    LocalAction::Zoom,
+    LocalAction::Swap,
     LocalAction::SavedLayout,
     LocalAction::Help,
-    LocalAction::Close,
     LocalAction::Detach,
 ];
 
@@ -249,10 +378,16 @@ struct ScreenSlot {
     history: ScreenSnapshot,
     history_revision: u64,
     history_offset: u16,
+    /// Cursor against which `history_offset` is expressed.
+    history_base: Option<WireHistoryCursor>,
     view_epoch: u64,
     history_pending: bool,
+    history_inflight_offset: u16,
+    history_requested: u16,
     history_total: u16,
     history_extent_known: bool,
+    new_output: bool,
+    history_truncated: bool,
     /// Bounded accumulated normal-history motion; never queued child input.
     queued_scroll: Option<(i16, u16, u16)>,
     queued_seek: Option<u16>,
@@ -270,8 +405,17 @@ pub(crate) struct App {
     menu_revision: u64,
     /// Explicit y/n prompt before any close request is sent.
     confirm: CloseConfirm,
+    /// Pane-close buttons default to Cancel.
+    confirm_close_selected: bool,
+    /// One-shot keyboard that opened the prompt; its repeat/release stays local.
+    confirm_open_key: Option<(KeyCode, KeyModifiers)>,
     actions_menu: Option<ActionsMenu>,
     pointer_seek: Option<PointerSeek>,
+    /// A modal menu closed by a mouse press; consume its matching release too.
+    menu_release_latch: Option<MouseButton>,
+    /// A thumb gesture released before its extent discovery returned. The
+    /// discovery reply applies its final pointer row once, then drops it.
+    deferred_thumb_release: Option<PointerSeek>,
     pointer_divider: Option<PointerDivider>,
     /// Persistent local help modal, independent of the NAV timeout.
     help_open: bool,
@@ -281,12 +425,14 @@ pub(crate) struct App {
     pending_len: usize,
     pending_target: Option<TargetRef>,
     pending_blocked: bool,
-    pending_split: Option<(u64, u64, TargetRef)>,
-    pending_split_focus: Option<(u64, TargetRef)>,
+    pending_split: Option<(u64, u64, TargetRef, Option<WorkspaceRouteId>)>,
+    pending_split_focus: Option<(u64, TargetRef, Option<WorkspaceRouteId>)>,
     pending_close: Option<(u64, TargetRef, bool)>,
     next_request_id: u64,
     focus_generation: u64,
     status: Option<(&'static str, Instant)>,
+    persistent_status: Option<&'static str>,
+    server_present: bool,
     host: (u16, u16),
     screens: [ScreenSlot; crate::pane_layout::MAX_PANES],
     selection: Option<FrozenDrag>,
@@ -295,13 +441,28 @@ pub(crate) struct App {
     copy_exit_key: Option<(KeyCode, KeyModifiers)>,
     pane_mode_exit_key: Option<(KeyCode, KeyModifiers)>,
     pending_copy: Option<String>,
+    pending_copy_target: Option<TargetRef>,
+    pending_copy_id: Option<u64>,
+    next_copy_id: u64,
+    latest_copy_attempt: [Option<(TargetRef, u64)>; crate::pane_layout::MAX_PANES],
+    copied_feedback: [Option<(TargetRef, Instant)>; crate::pane_layout::MAX_PANES],
     workspace_index: Option<WorkspaceIndex>,
     current_route: Option<WorkspaceRouteId>,
+    tab_dialog: Option<TabDialog>,
+    pending_tab_mutation: Option<WorkspaceMetadataMutation>,
     picker_selection: Option<WorkspaceRouteId>,
+    picker_open: bool,
+    picker_filter: String,
     catalog_refresh_requested: bool,
     route_request: Option<WorkspaceRouteId>,
     route_switching: bool,
     route_switch_notice: Option<&'static str>,
+    workspace_revision: Option<u64>,
+    pending_create: Option<PendingCreate>,
+    /// A partial/unknown tab close keeps this client open on server end.
+    keep_tab_visible_on_server_end: bool,
+    pending_metadata: Option<PendingMetadata>,
+    preferred_focus: Option<TargetRef>,
     dirty: bool,
 }
 
@@ -317,10 +478,15 @@ impl App {
                 history: ScreenSnapshot::try_new(size)?,
                 history_revision: 0,
                 history_offset: 0,
+                history_base: None,
                 view_epoch: 0,
                 history_pending: false,
+                history_inflight_offset: 0,
+                history_requested: 0,
                 history_total: 0,
                 history_extent_known: false,
+                new_output: false,
+                history_truncated: false,
                 queued_scroll: None,
                 queued_seek: None,
             })
@@ -335,8 +501,12 @@ impl App {
             menu: MenuState::new(),
             menu_revision: 0,
             confirm: CloseConfirm::new(),
+            confirm_close_selected: false,
+            confirm_open_key: None,
             actions_menu: None,
             pointer_seek: None,
+            menu_release_latch: None,
+            deferred_thumb_release: None,
             pointer_divider: None,
             help_open: false,
             prefix: None,
@@ -350,6 +520,8 @@ impl App {
             next_request_id: 1,
             focus_generation: 0,
             status: None,
+            persistent_status: None,
+            server_present: true,
             host: (host_rows, host_columns),
             screens: [slot()?, slot()?, slot()?, slot()?],
             selection: None,
@@ -358,13 +530,27 @@ impl App {
             copy_exit_key: None,
             pane_mode_exit_key: None,
             pending_copy: None,
+            pending_copy_target: None,
+            pending_copy_id: None,
+            next_copy_id: 1,
+            latest_copy_attempt: [None; crate::pane_layout::MAX_PANES],
+            copied_feedback: [None; crate::pane_layout::MAX_PANES],
             workspace_index: None,
             current_route: None,
+            tab_dialog: None,
+            pending_tab_mutation: None,
             picker_selection: None,
+            picker_open: false,
+            picker_filter: String::new(),
             catalog_refresh_requested: false,
             route_request: None,
             route_switching: false,
             route_switch_notice: None,
+            workspace_revision: None,
+            pending_create: None,
+            keep_tab_visible_on_server_end: false,
+            pending_metadata: None,
+            preferred_focus: None,
             dirty: true,
         })
     }
@@ -383,28 +569,447 @@ impl App {
     /// keeps only the bounded index model and never opens routes or storage.
     pub(crate) fn install_workspace_tabs(
         &mut self,
-        index: WorkspaceIndex,
-        current: WorkspaceRouteId,
-    ) {
-        if workspace_tabs::layout(&index, current, 0, 0).is_err() {
-            return;
+        snapshot: TabPresentationSnapshot,
+        current: Option<WorkspaceRouteId>,
+    ) -> bool {
+        let Some(index) = presentation_index(&snapshot, current) else {
+            return false;
+        };
+        if current.is_some_and(|route| workspace_tabs::layout(&index, route, 0, 0).is_err()) {
+            return false;
         }
-        if self.current_route != Some(current) {
+        if self.current_route != current {
             self.cancel_selection();
         }
         self.workspace_index = Some(index);
-        self.current_route = Some(current);
+        self.current_route = current;
+        self.tab_dialog = None;
+        self.pending_tab_mutation = None;
         self.picker_selection = None;
+        self.picker_open = false;
+        self.picker_filter.clear();
         self.actions_menu = None;
         self.route_request = None;
         self.route_switching = false;
         self.route_switch_notice = None;
+        self.pending_create = None;
+        self.pending_metadata = None;
+        self.keep_tab_visible_on_server_end = false;
         self.dirty = true;
+        true
+    }
+
+    /// Compatibility helper for route callers that still hold the v1 catalog.
+    pub(crate) fn install_workspace_index(
+        &mut self,
+        index: WorkspaceIndex,
+        current: WorkspaceRouteId,
+    ) {
+        let snapshot = TabPresentationSnapshot::new(&index, false);
+        let _ = self.install_workspace_tabs(snapshot, Some(current));
+    }
+
+    /// Build a client-only state for a validated snapshot with no visible
+    /// routes. It allocates presentation caches only; no server connection or
+    /// route-start effect is created here.
+    pub(crate) fn new_workspace_empty(
+        host_rows: u16,
+        host_columns: u16,
+        snapshot: TabPresentationSnapshot,
+    ) -> Result<Self, TerminalError> {
+        let mut app = Self::new(host_rows, host_columns)?;
+        assert!(
+            app.install_workspace_tabs(snapshot, None),
+            "empty workspace constructor requires an empty presentation snapshot"
+        );
+        Ok(app)
+    }
+
+    pub(crate) fn current_route(&self) -> Option<WorkspaceRouteId> {
+        self.current_route
+    }
+
+    pub(crate) fn focused_target(&self) -> Option<TargetRef> {
+        self.focus
+    }
+
+    /// Restore one exact previously focused target after its route is prepared.
+    /// The preference is consumed by `set_layout` only if that occupant remains.
+    pub(crate) fn prefer_focus_when_valid(&mut self, target: TargetRef) {
+        if let Some(layout) = self.layout {
+            if layout
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == target)
+            {
+                self.focus_target(target);
+            } else {
+                self.preferred_focus = None;
+            }
+        } else {
+            self.preferred_focus = Some(target);
+        }
+    }
+
+    pub(crate) fn set_workspace_revision(&mut self, revision: u64) {
+        self.workspace_revision = Some(revision);
+    }
+
+    /// Record the expected route and revision for one future rename/close
+    /// result. The UI must call this only after the metadata worker admits it.
+    pub(crate) fn track_metadata_request(
+        &mut self,
+        request_id: MetadataRequestId,
+        route: WorkspaceRouteId,
+        expected_revision: u64,
+    ) {
+        self.pending_metadata = Some(PendingMetadata {
+            request_id,
+            route,
+            source_route: self.current_route,
+            expected_revision,
+        });
+    }
+
+    pub(crate) fn take_workspace_metadata_mutation(&mut self) -> Option<WorkspaceMetadataMutation> {
+        self.pending_tab_mutation.take()
+    }
+
+    pub(crate) fn reject_workspace_metadata_mutation(&mut self, label: &'static str, now: Instant) {
+        self.pending_metadata = None;
+        self.clear_applying_status();
+        match self.tab_dialog.as_mut() {
+            Some(TabDialog::Rename { error, saving, .. }) => {
+                *error = Some(label);
+                *saving = false;
+            }
+            Some(TabDialog::Close { pending, .. }) => *pending = false,
+            _ => {}
+        }
+        self.set_status(label, now);
+        self.dirty = true;
+    }
+
+    /// Accept only a result for the exact admitted request, route and current
+    /// catalog revision. A stale result never changes the active presentation.
+    pub(crate) fn accept_metadata_result(
+        &mut self,
+        request_id: MetadataRequestId,
+        route: WorkspaceRouteId,
+        observed_revision: u64,
+    ) -> bool {
+        let Some(pending) = self.pending_metadata else {
+            return false;
+        };
+        if pending.request_id != request_id
+            || pending.route != route
+            || self.current_route != pending.source_route
+            || observed_revision < pending.expected_revision
+            || self
+                .workspace_revision
+                .is_some_and(|revision| observed_revision < revision)
+            || self.route_switching
+        {
+            return false;
+        }
+        self.pending_metadata = None;
+        self.workspace_revision = Some(observed_revision);
+        true
+    }
+
+    pub(crate) fn complete_rename_metadata(
+        &mut self,
+        metadata: MetadataResult,
+        now: Instant,
+    ) -> bool {
+        let MetadataResult::Renamed {
+            request_id,
+            route,
+            expected_revision,
+            result,
+            observed_revision,
+            snapshot,
+        } = metadata
+        else {
+            return false;
+        };
+        if expected_revision == 0
+            || self
+                .pending_metadata
+                .is_none_or(|pending| pending.expected_revision != expected_revision)
+            || !self.take_metadata_result(request_id, route, observed_revision)
+        {
+            return false;
+        }
+        let result_revision = match &result {
+            Ok(RenameOutcome::Saved { revision })
+            | Ok(RenameOutcome::Conflict { revision, .. }) => Some(*revision),
+            Err(_) => None,
+        };
+        let current_revision = observed_revision.or(result_revision);
+        if let Some(revision) = current_revision {
+            self.workspace_revision = Some(revision);
+        }
+        if let (Some(snapshot), Some(revision), Some(source_route)) =
+            (snapshot, observed_revision, self.current_route)
+        {
+            self.update_workspace_presentation(Some(source_route), snapshot, revision);
+        }
+        match result {
+            Ok(RenameOutcome::Saved { .. }) => {
+                // Close only the rename dialog that is still awaiting this
+                // save; a newer dialog opened after Esc stays open.
+                if matches!(
+                    self.tab_dialog,
+                    Some(TabDialog::Rename {
+                        route: editing_route,
+                        saving: true,
+                        ..
+                    }) if editing_route == route
+                ) {
+                    self.tab_dialog = None;
+                }
+                self.set_status("tab renamed", now);
+            }
+            Ok(RenameOutcome::Conflict { revision, .. }) => {
+                if let Some(TabDialog::Rename {
+                    route: editing_route,
+                    expected_revision,
+                    error,
+                    saving,
+                    ..
+                }) = self.tab_dialog.as_mut()
+                {
+                    if *editing_route == route {
+                        *expected_revision = observed_revision.unwrap_or(revision);
+                        *error = Some("tab changed elsewhere; your edit is preserved");
+                        *saving = false;
+                    }
+                }
+                self.set_status("workspace metadata changed; edit preserved", now);
+            }
+            Err(error) => {
+                if let Some(TabDialog::Rename {
+                    route: editing_route,
+                    error: edit_error,
+                    saving,
+                    ..
+                }) = self.tab_dialog.as_mut()
+                {
+                    if *editing_route == route {
+                        *edit_error = Some(lifecycle_error_label(error));
+                        *saving = false;
+                    }
+                }
+                self.set_status(lifecycle_error_label(error), now);
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    pub(crate) fn complete_close_metadata(
+        &mut self,
+        metadata: MetadataResult,
+        now: Instant,
+    ) -> bool {
+        let MetadataResult::Closed {
+            request_id,
+            route,
+            expected,
+            outcome,
+            observed_revision,
+            snapshot,
+        } = metadata
+        else {
+            return false;
+        };
+        if expected.route != route
+            || !self.take_metadata_result(request_id, route, observed_revision)
+        {
+            return false;
+        }
+        if let Some(revision) = observed_revision {
+            self.workspace_revision = Some(revision);
+        }
+        self.tab_dialog = None;
+        match outcome {
+            crate::workspace_lifecycle::CloseOutcome::Stopped => {
+                self.keep_tab_visible_on_server_end = false;
+                self.clear_applying_status();
+                if self.current_route != Some(route) {
+                    if let (Some(snapshot), Some(revision), Some(source_route)) =
+                        (snapshot, observed_revision, self.current_route)
+                    {
+                        self.update_workspace_presentation(Some(source_route), snapshot, revision);
+                    }
+                } else if snapshot.is_none() || observed_revision.is_none() {
+                    self.set_status("tab stopped; workspace metadata unavailable", now);
+                }
+            }
+            crate::workspace_lifecycle::CloseOutcome::Partial { reason }
+            | crate::workspace_lifecycle::CloseOutcome::Unknown { reason } => {
+                self.keep_tab_visible_on_server_end = true;
+                self.set_persistent_status("Outcome unknown", now);
+                if let (Some(snapshot), Some(revision), Some(source_route)) =
+                    (snapshot, observed_revision, self.current_route)
+                {
+                    self.update_workspace_presentation(Some(source_route), snapshot, revision);
+                }
+                self.set_status(reason, now);
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn take_metadata_result(
+        &mut self,
+        request_id: MetadataRequestId,
+        route: WorkspaceRouteId,
+        observed_revision: Option<u64>,
+    ) -> bool {
+        if let Some(revision) = observed_revision {
+            return self.accept_metadata_result(request_id, route, revision);
+        }
+        let Some(pending) = self.pending_metadata else {
+            return false;
+        };
+        if pending.request_id != request_id
+            || pending.route != route
+            || self.current_route != pending.source_route
+            || self.route_switching
+        {
+            return false;
+        }
+        self.pending_metadata = None;
+        true
+    }
+
+    /// Next create dispatch: the project plus a prior intent to reuse when this
+    /// is an explicit reconciliation of an unknown outcome.
+    pub(crate) fn take_create_request(&mut self) -> Option<(ProjectId, Option<CreateIntentId>)> {
+        let pending = self.pending_create.as_mut()?;
+        if pending.dispatched || pending.awaiting_reconcile {
+            return None;
+        }
+        pending.dispatched = true;
+        Some((pending.project, pending.intent_id))
+    }
+
+    /// Keep an uncertain intent for explicit reconciliation; never success.
+    fn hold_uncertain_create(&mut self, now: Instant) {
+        if let Some(pending) = self.pending_create.as_mut() {
+            pending.dispatched = false;
+            pending.request_id = None;
+            pending.awaiting_reconcile = true;
+        }
+        self.set_status("tab creation outcome unknown; New tab rechecks it", now);
+    }
+
+    pub(crate) fn record_create_request(
+        &mut self,
+        request_id: MetadataRequestId,
+        intent_id: CreateIntentId,
+    ) -> bool {
+        let Some(pending) = self.pending_create.as_mut() else {
+            return false;
+        };
+        if !pending.dispatched || pending.source_route != self.current_route {
+            return false;
+        }
+        pending.request_id = Some(request_id);
+        pending.intent_id = Some(intent_id);
+        true
+    }
+
+    pub(crate) fn reject_create_request(&mut self, label: &'static str, now: Instant) {
+        self.pending_create = None;
+        self.set_status(label, now);
+    }
+
+    pub(crate) fn complete_create_result(
+        &mut self,
+        metadata: MetadataResult,
+        now: Instant,
+    ) -> Option<WorkspaceRouteId> {
+        let MetadataResult::Created {
+            request_id,
+            intent_id,
+            project,
+            result,
+            observed_revision,
+            snapshot,
+        } = metadata
+        else {
+            return None;
+        };
+        let pending = self.pending_create?;
+        if pending.request_id != Some(request_id)
+            || pending.intent_id != Some(intent_id)
+            || pending.project != project
+            || pending.source_route != self.current_route
+        {
+            return None;
+        }
+        if result
+            .as_ref()
+            .is_ok_and(|created| created.route.project != pending.project)
+        {
+            return None;
+        }
+        match result {
+            Ok(created) if created.status == CreateStatus::Ready => {
+                let current_revision = self.workspace_revision;
+                let revision_is_fresh = observed_revision.is_some_and(|revision| {
+                    revision > 0 && current_revision.is_none_or(|current| revision >= current)
+                });
+                let route_is_visible = snapshot.is_some_and(|snapshot| {
+                    snapshot.projects.iter().any(|project| {
+                        project.id == created.route.project
+                            && project.tabs.iter().any(|tab| tab.route == created.route)
+                    })
+                });
+                if !revision_is_fresh || !route_is_visible {
+                    self.hold_uncertain_create(now);
+                    return None;
+                }
+                self.workspace_revision = observed_revision;
+                self.pending_create = None;
+                self.dirty = true;
+                Some(created.route)
+            }
+            Ok(CreateShellTab {
+                status: CreateStatus::Unknown,
+                ..
+            }) => {
+                // Preserve the admitted intent: a later explicit reconciliation
+                // must reuse it rather than allocating a fresh route.
+                self.hold_uncertain_create(now);
+                None
+            }
+            Ok(_) => {
+                self.pending_create = None;
+                self.set_status("tab metadata changed; refresh and try again", now);
+                None
+            }
+            Err(LifecycleError::IntentUncertain) => {
+                self.hold_uncertain_create(now);
+                None
+            }
+            Err(error) => {
+                self.pending_create = None;
+                self.set_status(lifecycle_error_label(error), now);
+                None
+            }
+        }
     }
 
     /// Replace the immutable catalog without disturbing an in-flight route
     /// request or its input freeze. An invalid active route leaves the last
     /// valid snapshot and chooser untouched.
+    #[allow(dead_code)] // Retained for state-level legacy catalog scenarios.
     pub(crate) fn update_workspace_catalog(&mut self, index: WorkspaceIndex) -> bool {
         let (Some(current), Some(_)) = (self.current_route, self.workspace_index.as_ref()) else {
             return false;
@@ -413,13 +1018,60 @@ impl App {
             return false;
         }
         self.workspace_index = Some(index);
-        if self
-            .picker_selection
-            .is_some_and(|selection| !self.route_exists(selection))
+        if (self.picker_open || self.picker_selection.is_some())
+            && self
+                .picker_selection
+                .is_none_or(|selection| !self.picker_routes().contains(&selection))
         {
-            self.picker_selection = Some(current);
+            self.picker_selection = self.picker_routes().first().copied();
         }
         self.dirty = true;
+        true
+    }
+
+    pub(crate) fn update_workspace_presentation(
+        &mut self,
+        source_route: Option<WorkspaceRouteId>,
+        snapshot: TabPresentationSnapshot,
+        observed_revision: u64,
+    ) -> bool {
+        if self.route_switching
+            || self.current_route != source_route
+            || self
+                .workspace_revision
+                .is_some_and(|revision| observed_revision < revision)
+        {
+            return false;
+        }
+        if source_route.is_some_and(|route| {
+            !snapshot.projects.iter().any(|project| {
+                project.id == route.project && project.tabs.iter().any(|tab| tab.route == route)
+            })
+        }) || (source_route.is_none()
+            && (snapshot.active_route.is_some()
+                || snapshot
+                    .projects
+                    .iter()
+                    .any(|project| !project.tabs.is_empty())))
+        {
+            return false;
+        }
+        let Some(index) = presentation_index(&snapshot, source_route) else {
+            return false;
+        };
+        self.workspace_index = Some(index);
+        if (self.picker_open || self.picker_selection.is_some())
+            && self
+                .picker_selection
+                .is_none_or(|selection| !self.picker_routes().contains(&selection))
+        {
+            self.picker_selection = self
+                .current_route
+                .filter(|route| self.route_matches_filter(*route))
+                .or_else(|| self.picker_routes().first().copied());
+        }
+        self.dirty = true;
+        self.workspace_revision = Some(observed_revision);
         true
     }
 
@@ -428,6 +1080,7 @@ impl App {
         std::mem::replace(&mut self.catalog_refresh_requested, false)
     }
 
+    #[allow(dead_code)] // Used by the compatibility catalog updater above.
     fn route_exists(&self, route: WorkspaceRouteId) -> bool {
         self.workspace_index
             .as_ref()
@@ -437,7 +1090,15 @@ impl App {
 
     fn open_workspace_picker(&mut self) {
         self.cancel_selection();
-        self.picker_selection = self.current_route;
+        self.picker_open = true;
+        self.picker_filter.clear();
+        let routes = self.picker_routes();
+        self.picker_selection = routes
+            .iter()
+            .copied()
+            .find(|route| Some(*route) == self.current_route)
+            .or_else(|| routes.first().copied());
+        self.tab_dialog = None;
         self.prefix = None;
         self.catalog_refresh_requested = true;
         self.dirty = true;
@@ -454,7 +1115,18 @@ impl App {
     }
 
     pub(crate) const fn pane_mutations_blocked(&self) -> bool {
-        self.pane_mode.is_some() || self.pending_pane_operation.is_some()
+        !self.server_present || self.pane_mode.is_some() || self.pending_pane_operation.is_some()
+    }
+
+    pub(crate) fn tab_close_pending(&self) -> bool {
+        matches!(
+            self.tab_dialog,
+            Some(TabDialog::Close { pending: true, .. })
+        )
+    }
+
+    pub(crate) const fn keep_tab_visible_on_server_end(&self) -> bool {
+        self.keep_tab_visible_on_server_end
     }
 
     /// Freeze child effects while the host prepares a fresh route attachment.
@@ -462,22 +1134,31 @@ impl App {
         if self.route_switching {
             return;
         }
+        self.deferred_thumb_release = None;
         // An admitted server operation is not rolled back, but its stale UI
         // completion must not be applied to the destination route.
         self.pane_mode = None;
+        self.pane_mode_exit_key = None;
         self.pointer_seek = None;
         self.pointer_divider = None;
         self.actions_menu = None;
         self.menu.handle(panelink::split_menu::MenuInput::Cancel);
-        self.confirm = CloseConfirm::new();
+        self.dismiss_close_confirmation();
         self.help_open = false;
         self.pending_pane_operation = None;
         self.pane_operations = None;
         self.route_switching = true;
         self.prefix = None;
         self.picker_selection = None;
+        self.picker_open = false;
+        self.picker_filter.clear();
+        self.tab_dialog = None;
         self.cancel_selection();
         self.pending_copy = None;
+        self.pending_copy_target = None;
+        self.pending_copy_id = None;
+        self.latest_copy_attempt = [None; crate::pane_layout::MAX_PANES];
+        self.copied_feedback = [None; crate::pane_layout::MAX_PANES];
         for slot in &mut self.screens {
             slot.queued_scroll = None;
             slot.queued_seek = None;
@@ -501,6 +1182,8 @@ impl App {
         self.route_switch_notice = None;
         self.route_request = None;
         self.picker_selection = None;
+        self.picker_open = false;
+        self.picker_filter.clear();
         self.prefix = None;
         if failed {
             self.set_status("workspace switch failed", now);
@@ -522,16 +1205,18 @@ impl App {
                     LOCAL_ACTIONS.get(menu.selected) == Some(&LocalAction::SavedLayout)
                 }
                 Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    self.actions_menu_rect().is_some_and(|rect| {
-                        let y = rect
-                            .y
-                            .saturating_add(1 + u16::from(self.workspace_index.is_some()));
-                        let (start, end) = self.actions_page(menu);
-                        start <= 5
-                            && 5 < end
-                            && mouse.row == y.saturating_add((5 - start) as u16)
-                            && mouse.column >= rect.x
-                            && mouse.column < rect.x.saturating_add(rect.columns)
+                    self.actions_page_geometry(menu).is_some_and(|page| {
+                        page.start <= 9
+                            && 9 < page.end
+                            && mouse.row
+                                == page
+                                    .rect
+                                    .y
+                                    .saturating_add(page.action_row as u16)
+                                    .saturating_add(u16::from(self.workspace_index.is_some()))
+                                    .saturating_add((9 - page.start) as u16)
+                            && mouse.column >= page.rect.x
+                            && mouse.column < page.rect.x.saturating_add(page.rect.columns)
                     })
                 }
                 _ => false,
@@ -542,7 +1227,8 @@ impl App {
             || self.pane_mode.is_some()
             || self.pending_pane_operation.is_some()
             || self.help_open
-            || self.picker_selection.is_some()
+            || self.picker_open
+            || self.tab_dialog.is_some()
             || (self.workspace_index.is_some()
                 && matches!(event, Event::Mouse(mouse) if mouse.row == 0))
             || self.confirm.is_open()
@@ -618,24 +1304,16 @@ impl App {
                 columns: 7,
             },
             cancel: Rect {
-                x: 8,
+                x: 9,
                 y: button_y.saturating_add(header_offset),
                 rows: 1,
                 columns: 8,
             },
-            warning: if intent.last_pane && columns < 35 {
-                "Closing ends workspace"
+            position: intent.position,
+            consequence: if intent.last_pane {
+                "Ends the workspace"
             } else {
-                match (intent.position, intent.last_pane) {
-                    (1, true) => "Close pane 1? This is the last pane; the workspace ends. (y/n)",
-                    (2, true) => "Close pane 2? This is the last pane; the workspace ends. (y/n)",
-                    (3, true) => "Close pane 3? This is the last pane; the workspace ends. (y/n)",
-                    (4, true) => "Close pane 4? This is the last pane; the workspace ends. (y/n)",
-                    (1, false) => "Close pane 1? (y/n)",
-                    (2, false) => "Close pane 2? (y/n)",
-                    (3, false) => "Close pane 3? (y/n)",
-                    _ => "Close pane 4? (y/n)",
-                }
+                "Ends this process"
             },
         })
     }
@@ -649,33 +1327,325 @@ impl App {
 
     fn tabs_layout(&self) -> Option<TabsLayout> {
         let (rows, columns) = self.screen_viewport();
-        workspace_tabs::layout(
-            self.workspace_index.as_ref()?,
-            self.current_route?,
-            rows,
-            columns,
-        )
-        .ok()
+        let index = self.workspace_index.as_ref()?;
+        match self.current_route {
+            Some(route) => workspace_tabs::layout(index, route, rows, columns).ok(),
+            None if self.is_empty_workspace() => Some(workspace_tabs::empty_layout(rows, columns)),
+            None => None,
+        }
     }
 
-    fn route_at_index(&self, offset: isize, from: WorkspaceRouteId) -> Option<WorkspaceRouteId> {
-        let index = self.workspace_index.as_ref()?;
-        let routes: Vec<_> = index
-            .projects()
-            .flat_map(|project| {
-                project.tabs().map(move |tab| WorkspaceRouteId {
-                    project: project.id(),
-                    tab: tab.id,
-                })
-            })
-            .collect();
-        let current = routes.iter().position(|route| *route == from)?;
-        let len = isize::try_from(routes.len()).ok()?;
-        if len == 0 {
+    fn is_empty_workspace(&self) -> bool {
+        self.workspace_index.is_some() && self.current_route.is_none()
+    }
+
+    fn empty_action_geometry(&self) -> Option<EmptyWorkspaceGeometry> {
+        if !self.is_empty_workspace() {
             return None;
         }
-        let next = (isize::try_from(current).ok()? + offset).rem_euclid(len);
-        routes.get(usize::try_from(next).ok()?).copied()
+        let (rows, columns) = self.viewport();
+        if rows < 2 || columns == 0 {
+            return None;
+        }
+        let action_width = u16::try_from(EMPTY_ACTIONS.len()).ok()?;
+        let new_tab_width = u16::try_from("[ New tab (N) ]".len()).ok()?;
+        let separator_width = 3_u16;
+        let detach_width = u16::try_from("[ Detach (Ctrl-X) ]".len()).ok()?;
+        let action_start = columns.saturating_sub(action_width) / 2;
+        let top = rows.saturating_sub(2) / 2;
+        let button_row = top
+            .saturating_add(1)
+            .saturating_add(u16::from(self.workspace_index.is_some()));
+        Some(EmptyWorkspaceGeometry {
+            overlay: Rect {
+                x: 0,
+                y: top,
+                rows: 2,
+                columns,
+            },
+            new_tab: Rect {
+                x: action_start,
+                y: button_row,
+                rows: 1,
+                columns: new_tab_width,
+            },
+            detach: Rect {
+                x: action_start
+                    .saturating_add(new_tab_width)
+                    .saturating_add(separator_width),
+                y: button_row,
+                rows: 1,
+                columns: detach_width,
+            },
+        })
+    }
+
+    fn request_empty_create(&mut self, now: Instant) {
+        self.request_tab_create(
+            ProjectId::new(1).expect("Default project ID is nonzero"),
+            now,
+        );
+    }
+
+    fn request_tab_create(&mut self, project: ProjectId, now: Instant) {
+        self.prefix = None;
+        if let Some(pending) = self.pending_create.as_mut() {
+            // Explicit New tab after an unknown outcome reconciles the same
+            // intent; any other pending create ignores the repeat.
+            if pending.awaiting_reconcile {
+                pending.awaiting_reconcile = false;
+                self.dirty = true;
+            }
+            return;
+        }
+        if self.pending_metadata.is_some() || self.pending_tab_mutation.is_some() {
+            self.set_status("workspace metadata busy", now);
+            return;
+        }
+        if self
+            .workspace_index
+            .as_ref()
+            .and_then(|index| index.project(project).ok())
+            .is_some_and(|project| project.tabs().len() >= MAX_TABS_PER_PROJECT)
+        {
+            self.set_status("project tab limit reached (8)", now);
+            return;
+        }
+        self.pending_create = Some(PendingCreate {
+            project,
+            source_route: self.current_route,
+            request_id: None,
+            intent_id: None,
+            dispatched: false,
+            awaiting_reconcile: false,
+        });
+        self.dirty = true;
+    }
+
+    fn open_tab_actions(&mut self, route: WorkspaceRouteId) {
+        if !self.route_exists(route) {
+            return;
+        }
+        self.cancel_selection();
+        self.picker_open = false;
+        self.picker_selection = None;
+        self.tab_dialog = Some(TabDialog::Actions { route, selected: 0 });
+        self.prefix = None;
+        self.dirty = true;
+    }
+
+    fn begin_tab_rename(&mut self, route: WorkspaceRouteId) {
+        let Some(expected_revision) = self.workspace_revision else {
+            self.set_status("workspace metadata is still loading", Instant::now());
+            return;
+        };
+        let Some(name) = self
+            .workspace_index
+            .as_ref()
+            .and_then(|index| index.project(route.project).ok())
+            .and_then(|project| project.tabs().find(|tab| tab.id == route.tab))
+            .map(|tab| tab.display_name.to_owned())
+        else {
+            self.set_status("workspace tab unavailable", Instant::now());
+            return;
+        };
+        self.tab_dialog = Some(TabDialog::Rename {
+            route,
+            expected_revision,
+            draft: name,
+            error: None,
+            saving: false,
+        });
+        self.dirty = true;
+    }
+
+    fn begin_tab_close(&mut self, route: WorkspaceRouteId) {
+        if !self.route_exists(route) {
+            self.set_status("workspace tab unavailable", Instant::now());
+            return;
+        }
+        let Some(expected_revision) = self.workspace_revision else {
+            self.set_status("workspace metadata is still loading", Instant::now());
+            return;
+        };
+        // Close must bind the exact runtime generation so a confirmation can
+        // never stop a replacement server. Only the attached route's generation
+        // is known here; an inactive tab must be opened first.
+        if self.current_route != Some(route) {
+            self.set_status("open this tab first to close it", Instant::now());
+            return;
+        }
+        let Some(generation) = self.layout.and_then(|layout| {
+            layout
+                .panes
+                .iter()
+                .flatten()
+                .next()
+                .map(|pane| pane.target.generation)
+        }) else {
+            self.set_status("tab is still loading; try again", Instant::now());
+            return;
+        };
+        self.tab_dialog = Some(TabDialog::Close {
+            expected: ExpectedRuntimeIdentity {
+                route,
+                generation: Some(generation),
+            },
+            expected_revision,
+            close_selected: false,
+            pending: false,
+        });
+        self.dirty = true;
+    }
+
+    fn submit_tab_rename(&mut self, now: Instant) {
+        let Some(TabDialog::Rename {
+            route,
+            expected_revision,
+            draft,
+            saving,
+            error,
+        }) = self.tab_dialog.as_mut()
+        else {
+            return;
+        };
+        if *saving {
+            return;
+        }
+        if *error == Some("Tab names are limited to 64 UTF-8 bytes") {
+            self.dirty = true;
+            return;
+        }
+        if !valid_tab_name(draft) {
+            *error = Some("Name must be 1–64 bytes, trimmed, and control-free");
+            self.dirty = true;
+            return;
+        }
+        if self.pending_metadata.is_some() || self.pending_tab_mutation.is_some() {
+            *error = Some("workspace metadata busy");
+            self.dirty = true;
+            return;
+        }
+        self.pending_tab_mutation = Some(WorkspaceMetadataMutation::Rename {
+            route: *route,
+            name: draft.clone(),
+            expected_revision: *expected_revision,
+        });
+        *error = None;
+        *saving = true;
+        let _ = now;
+        self.dirty = true;
+    }
+
+    fn confirm_tab_close(&mut self, now: Instant) {
+        let Some(TabDialog::Close {
+            expected,
+            expected_revision,
+            pending,
+            ..
+        }) = self.tab_dialog.as_mut()
+        else {
+            return;
+        };
+        if *pending {
+            return;
+        }
+        if self.pending_metadata.is_some() || self.pending_tab_mutation.is_some() {
+            self.set_status("workspace metadata busy", now);
+            return;
+        }
+        self.pending_tab_mutation = Some(WorkspaceMetadataMutation::Close {
+            route: expected.route,
+            expected: *expected,
+            expected_revision: *expected_revision,
+        });
+        *pending = true;
+        self.set_persistent_status("Applying…", now);
+        self.dirty = true;
+    }
+
+    fn append_rename_text(&mut self, text: &str) {
+        let Some(TabDialog::Rename {
+            draft,
+            error,
+            saving,
+            ..
+        }) = self.tab_dialog.as_mut()
+        else {
+            return;
+        };
+        if *saving {
+            return;
+        }
+        *error = None;
+        for character in text.chars().filter(|character| !character.is_control()) {
+            if draft.len().saturating_add(character.len_utf8()) > MAX_DISPLAY_NAME_BYTES {
+                *error = Some("Tab names are limited to 64 UTF-8 bytes");
+                break;
+            }
+            draft.push(character);
+        }
+        self.dirty = true;
+    }
+
+    fn update_picker_filter(&mut self, text: &str) {
+        let mut changed = false;
+        for character in text.chars().filter(|character| !character.is_control()) {
+            if self
+                .picker_filter
+                .len()
+                .saturating_add(character.len_utf8())
+                > TAB_FILTER_MAX_BYTES
+            {
+                break;
+            }
+            self.picker_filter.push(character);
+            changed = true;
+        }
+        if changed {
+            self.picker_selection = self.picker_routes().first().copied();
+            self.dirty = true;
+        }
+    }
+
+    /// Empty clients have no Net worker. Keep their complete input path local
+    /// so it cannot accidentally target the legacy route or forward input.
+    pub(crate) fn handle_empty_workspace_event(
+        &mut self,
+        event: &Event,
+        now: Instant,
+    ) -> Option<Flow> {
+        if !self.is_empty_workspace() {
+            return None;
+        }
+        if matches!(event, Event::Mouse(mouse) if mouse.row == 0) {
+            self.handle_header_event(event, now);
+            return Some(Flow::Continue);
+        }
+        match event {
+            Event::Key(key) if (key.is_press() || key.is_repeat()) => {
+                if map_key(*key) == KeyAction::Quit {
+                    return Some(Flow::Quit);
+                }
+                let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+                if plain && matches!(key.code, KeyCode::Char('n' | 'N') | KeyCode::Enter) {
+                    self.request_empty_create(now);
+                }
+            }
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(geometry) = self.empty_action_geometry() {
+                    if geometry.new_tab.contains(mouse.column, mouse.row) {
+                        self.request_empty_create(now);
+                    } else if geometry.detach.contains(mouse.column, mouse.row) {
+                        return Some(Flow::Quit);
+                    }
+                }
+            }
+            Event::Resize(_, _) => self.dirty = true,
+            _ => {}
+        }
+        let _ = now;
+        Some(Flow::Continue)
     }
 
     fn request_route(&mut self, route: WorkspaceRouteId, now: Instant) {
@@ -683,6 +1653,9 @@ impl App {
             return;
         }
         self.cancel_selection();
+        self.tab_dialog = None;
+        self.picker_open = false;
+        self.picker_filter.clear();
         self.picker_selection = None;
         self.prefix = None;
         self.dirty = true;
@@ -711,8 +1684,10 @@ impl App {
     pub(crate) fn set_host(&mut self, rows: u16, columns: u16) {
         if self.host != (rows, columns) {
             self.pane_mode = None;
+            self.pane_mode_exit_key = None;
             self.actions_menu = None;
-            self.pointer_seek = None;
+            self.menu.close();
+            self.cancel_pointer_seek();
             self.pointer_divider = None;
             self.cancel_selection();
             for slot in &mut self.screens {
@@ -850,7 +1825,7 @@ impl App {
             intent.expected_layout_revision != reply.revision
                 || !captured_target_present(intent.target)
         }) {
-            self.confirm = CloseConfirm::new();
+            self.dismiss_close_confirmation();
             self.set_status("close cancelled: layout changed", Instant::now());
         }
         if self.actions_menu.is_some_and(|menu| {
@@ -862,17 +1837,20 @@ impl App {
                     .any(|pane| pane.target == menu.target)
         }) {
             self.actions_menu = None;
-            self.set_status("pane actions cancelled: layout changed", Instant::now());
+            self.set_status("menu cancelled: layout changed", Instant::now());
         }
         if self.pointer_seek.is_some_and(|drag| {
             drag.layout_revision != reply.revision
+                || self.layout.is_some_and(|layout| {
+                    layout.rows != reply.rows || layout.columns != reply.columns
+                })
                 || !reply
                     .panes
                     .iter()
                     .flatten()
                     .any(|pane| pane.target == drag.target && pane.rect == drag.pane_rect)
         }) {
-            self.pointer_seek = None;
+            self.cancel_pointer_seek();
         }
         if self.pointer_divider.is_some_and(|drag| {
             drag.revision != reply.revision
@@ -885,7 +1863,23 @@ impl App {
             self.pointer_divider = None;
             self.pane_mode = None;
         }
-        if self.layout.is_some_and(|layout| {
+        let divider_mode_stale = match self.pane_mode {
+            Some(PaneMode::Divider {
+                target, revision, ..
+            }) => {
+                revision != reply.revision
+                    || !captured_target_present(target)
+                    || self.layout.is_some_and(|layout| {
+                        layout.rows != reply.rows || layout.columns != reply.columns
+                    })
+            }
+            _ => false,
+        };
+        if divider_mode_stale {
+            self.pointer_divider = None;
+            self.pane_mode_exit_key = None;
+            self.pane_mode = None;
+        } else if self.layout.is_some_and(|layout| {
             layout.revision != reply.revision
                 || layout.rows != reply.rows
                 || layout.columns != reply.columns
@@ -905,7 +1899,13 @@ impl App {
         }
         self.local = local_layout(&reply);
         let present = |target: TargetRef| reply.panes.iter().flatten().any(|p| p.target == target);
-        if !self.focus.is_some_and(present) {
+        let preferred = self
+            .preferred_focus
+            .take()
+            .filter(|target| present(*target));
+        if let Some(target) = preferred {
+            self.set_focus(Some(target));
+        } else if !self.focus.is_some_and(present) {
             self.set_focus(reply.panes[0].map(|pane| pane.target));
         }
         if self.pending_target.is_some_and(|target| !present(target)) {
@@ -919,7 +1919,7 @@ impl App {
             .intent()
             .is_some_and(|intent| !present(intent.target))
         {
-            self.confirm = CloseConfirm::new();
+            self.dismiss_close_confirmation();
             self.status = Some(("pane already closed", Instant::now()));
         }
         for slot in &mut self.screens {
@@ -942,6 +1942,9 @@ impl App {
                         slot.history_total = 0;
                         slot.history_extent_known = false;
                         slot.history_offset = 0;
+                        slot.history_base = None;
+                        slot.new_output = false;
+                        slot.history_truncated = false;
                         slot.history_revision = 0;
                         slot.view_epoch = slot.view_epoch.wrapping_add(1);
                         slot.history_pending = false;
@@ -955,6 +1958,9 @@ impl App {
                     slot.history_extent_known = false;
                     slot.revision = 0;
                     slot.history_offset = 0;
+                    slot.history_base = None;
+                    slot.new_output = false;
+                    slot.history_truncated = false;
                     slot.history_revision = 0;
                     slot.view_epoch = slot.view_epoch.wrapping_add(1);
                     slot.history_pending = false;
@@ -965,13 +1971,26 @@ impl App {
             }
         }
         self.layout = Some(reply);
-        if let Some((generation, target)) = self.pending_split_focus {
+        for attempt in &mut self.latest_copy_attempt {
+            if attempt.is_some_and(|(target, _)| !captured_target_present(target)) {
+                *attempt = None;
+            }
+        }
+        for feedback in &mut self.copied_feedback {
+            if feedback.is_some_and(|(target, _)| !captured_target_present(target)) {
+                *feedback = None;
+            }
+        }
+        if let Some((generation, target, route)) = self.pending_split_focus {
             let present = reply
                 .panes
                 .iter()
                 .flatten()
                 .any(|pane| pane.target == target);
-            if generation != self.focus_generation {
+            if generation != self.focus_generation
+                || self.route_switching
+                || self.current_route != route
+            {
                 self.pending_split_focus = None;
             } else if present {
                 self.pending_split_focus = None;
@@ -1014,17 +2033,21 @@ impl App {
         result: Result<TargetRef, &'static str>,
         now: Instant,
     ) {
-        let Some((active_id, admitted_focus, source)) = self.pending_split else {
+        let Some((active_id, admitted_focus, source, route)) = self.pending_split else {
             return;
         };
         if active_id != request_id || admitted_focus != focus_generation || source != target {
             return;
         }
         self.pending_split = None;
+        self.clear_applying_status();
         match result {
             Ok(new_target) => {
-                if self.focus_generation == focus_generation {
-                    self.pending_split_focus = Some((focus_generation, new_target));
+                if self.focus_generation == focus_generation
+                    && !self.route_switching
+                    && self.current_route == route
+                {
+                    self.pending_split_focus = Some((focus_generation, new_target, route));
                     if self.layout.is_some_and(|layout| {
                         layout
                             .panes
@@ -1042,7 +2065,12 @@ impl App {
                     self.set_status("split applied", now);
                 }
             }
-            Err(label) => self.set_status(label, now),
+            Err(label) => {
+                if is_uncertain_mutation_error(label) {
+                    self.set_persistent_status("Outcome unknown", now);
+                }
+                self.set_status(label, now)
+            }
         }
     }
 
@@ -1063,6 +2091,11 @@ impl App {
         self.pending_close = None;
         match result {
             Ok(result) => {
+                if matches!(result.outcome, CloseOutcome::Stopped(StopOutcome::Unknown)) {
+                    self.set_persistent_status("Outcome unknown", now);
+                } else {
+                    self.clear_applying_status();
+                }
                 if matches!(
                     result.outcome,
                     CloseOutcome::Stopped(StopOutcome::Exited | StopOutcome::Escalated)
@@ -1071,7 +2104,14 @@ impl App {
                 }
                 self.set_status(close_message(&result, last_pane), now);
             }
-            Err(label) => self.set_status(label, now),
+            Err(label) => {
+                if is_uncertain_mutation_error(label) {
+                    self.set_persistent_status("Outcome unknown", now);
+                } else {
+                    self.clear_applying_status();
+                }
+                self.set_status(label, now);
+            }
         }
     }
 
@@ -1091,6 +2131,7 @@ impl App {
         self.pending_pane_operation = None;
         match result {
             Ok(update) if encode_view(&update.view).is_ok() => {
+                let outcome = update.outcome;
                 let view = update.view;
                 let may_install = self.pane_operations.is_none_or(|current| {
                     let current_identity = current
@@ -1111,7 +2152,13 @@ impl App {
                         || view.layout.revision >= current.layout.revision
                 });
                 if !may_install {
-                    self.set_status("pane operation applied; newer layout retained", now);
+                    if outcome == Outcome::Unknown {
+                        self.set_persistent_status("Outcome unknown", now);
+                        self.set_status("pane operation outcome unknown", now);
+                    } else {
+                        self.clear_applying_status();
+                        self.set_status("pane operation applied; newer layout retained", now);
+                    }
                     self.dirty = true;
                     return;
                 }
@@ -1125,23 +2172,43 @@ impl App {
                     },
                     now,
                 );
-                self.set_status(
-                    if update.outcome == Outcome::Partial {
-                        "pane operation applied; resize pending"
-                    } else {
-                        "pane operation applied"
-                    },
-                    now,
-                );
+                if outcome == Outcome::Unknown {
+                    self.set_persistent_status("Outcome unknown", now);
+                } else {
+                    self.clear_applying_status();
+                    self.set_status(
+                        if outcome == Outcome::Partial {
+                            "pane operation applied; resize pending"
+                        } else {
+                            "pane operation applied"
+                        },
+                        now,
+                    );
+                }
             }
-            Ok(_) => self.set_status("pane view unavailable", now),
-            Err(_) => self.set_status("pane operation status unknown; layout unchanged", now),
+            Ok(_) => {
+                self.set_persistent_status("Outcome unknown", now);
+                self.set_status("pane view unavailable", now);
+            }
+            Err(label) => {
+                if is_uncertain_mutation_error(label) {
+                    self.set_persistent_status("Outcome unknown", now);
+                    self.set_status("pane operation status unknown; layout unchanged", now);
+                } else {
+                    self.clear_applying_status();
+                    self.set_status(label, now);
+                }
+            }
         }
         self.dirty = true;
     }
 
     pub(crate) fn report_worker_status(&mut self, label: &'static str, now: Instant) {
-        self.set_status(label, now);
+        if is_uncertain_mutation_error(label) {
+            self.set_persistent_status("Outcome unknown", now);
+        } else {
+            self.set_status(label, now);
+        }
     }
 
     pub(crate) fn retry_pending_keys(&self) -> bool {
@@ -1159,6 +2226,17 @@ impl App {
     }
 
     pub(crate) fn apply_net_update(&mut self, update: NetUpdate, now: Instant) {
+        let reconciled =
+            update.server_present && (update.layout.is_some() || update.pane_operations.is_some());
+        if !update.server_present {
+            self.server_present = false;
+            if self.pending_len > 0 {
+                self.abandon_pending_keys();
+            }
+            self.dirty = true;
+        } else if reconciled {
+            self.server_present = true;
+        }
         let mut installed_operations = false;
         if let Some(view) = update.pane_operations {
             let ordering_ok = self.pane_operations.is_none_or(|current| {
@@ -1182,6 +2260,7 @@ impl App {
                 let geometry_changed = self.pane_operations.is_some_and(|current| current != view);
                 if geometry_changed {
                     self.pane_mode = None;
+                    self.cancel_pointer_seek();
                     self.cancel_selection();
                 }
                 self.pane_operations = Some(view);
@@ -1213,16 +2292,25 @@ impl App {
             }) {
                 if let Ok(checkpoint) = panelink::screen_checkpoint::decode(&screen.checkpoint) {
                     let loaded = match screen.row_wraps.as_deref() {
-                        Some(wraps) => self.load_screen_with_wraps(
+                        Some(wraps) => self.load_screen_with_history_cursor(
                             screen.target,
                             screen.revision,
                             &checkpoint,
                             Some(wraps),
+                            screen.history_cursor,
                         ),
-                        None => self.load_screen(screen.target, screen.revision, &checkpoint),
+                        None => self.load_screen_with_history_cursor(
+                            screen.target,
+                            screen.revision,
+                            &checkpoint,
+                            None,
+                            screen.history_cursor,
+                        ),
                     };
                     if loaded.is_err() {
                         self.set_status("screen invalid", now);
+                    } else {
+                        self.refresh_pointer_seek_on_output(screen.target);
                     }
                 } else {
                     self.set_status("screen invalid", now);
@@ -1264,12 +2352,44 @@ impl App {
                 extent_known,
                 checkpoint,
                 row_wraps,
+                history_cursor,
             } => {
                 slot.history_total = total_rows;
                 slot.history_extent_known = extent_known;
+                let requested_offset = slot.history_inflight_offset;
+                if extent_known && offset_rows < requested_offset {
+                    slot.history_truncated = true;
+                }
+                let mut effective_offset = offset_rows;
+                let mut cursor_epoch_changed = false;
+                if let (Some(reply_cursor), Some(live_cursor)) = (history_cursor, slot.history_base)
+                {
+                    if reply_cursor.epoch == live_cursor.epoch {
+                        if live_cursor.ordinal > reply_cursor.ordinal {
+                            let delta = live_cursor.ordinal - reply_cursor.ordinal;
+                            effective_offset = add_history_rows(effective_offset, delta);
+                            if extent_known {
+                                slot.history_total = add_history_rows(slot.history_total, delta);
+                            }
+                        }
+                        slot.history_base = Some(live_cursor);
+                    } else {
+                        slot.history_truncated = true;
+                        cursor_epoch_changed = true;
+                    }
+                } else if history_cursor.is_some() {
+                    slot.history_base = history_cursor;
+                }
+                // An older in-flight frame must not flash over the latest drag
+                // intent. Keep the last committed history snapshot until the
+                // replaceable queued seek completes.
+                let superseded = slot
+                    .queued_seek
+                    .is_some_and(|queued| queued != effective_offset)
+                    || cursor_epoch_changed;
                 match panelink::screen_checkpoint::decode(&checkpoint) {
                     Ok(snapshot) if offset_rows > 0 => {
-                        if slot.history.load_checkpoint(&snapshot).is_ok() {
+                        if !superseded && slot.history.load_checkpoint(&snapshot).is_ok() {
                             if let Some(wraps) = row_wraps.as_deref() {
                                 if slot.history.apply_row_wraps(wraps).is_err() {
                                     slot.history.clear_row_wraps();
@@ -1279,20 +2399,27 @@ impl App {
                                     return;
                                 }
                             }
-                            slot.history_offset = offset_rows;
+                            slot.history_offset = effective_offset;
                             slot.history_revision = revision;
+                            slot.history_requested = effective_offset;
                             self.dirty = true;
-                        } else {
+                        } else if !superseded {
                             slot.queued_scroll = None;
                             slot.queued_seek = None;
                             self.set_status("history snapshot invalid", now);
                         }
                     }
                     Ok(_) => {
-                        slot.history.clear_row_wraps();
-                        slot.history_offset = 0;
-                        slot.history_revision = revision;
-                        self.dirty = true;
+                        if !superseded {
+                            slot.history.clear_row_wraps();
+                            slot.history_offset = 0;
+                            slot.history_revision = revision;
+                            slot.history_base = history_cursor;
+                            slot.new_output = false;
+                            slot.history_truncated = false;
+                            slot.history_requested = 0;
+                            self.dirty = true;
+                        }
                     }
                     Err(_) => {
                         slot.queued_scroll = None;
@@ -1307,6 +2434,11 @@ impl App {
                 slot.history_total = 0;
                 slot.history_extent_known = false;
                 slot.history_offset = 0;
+                slot.history_requested = 0;
+                slot.history_inflight_offset = 0;
+                slot.history_base = None;
+                slot.new_output = false;
+                slot.history_truncated = false;
                 slot.history_revision = 0;
                 self.dirty = true;
             }
@@ -1316,6 +2448,11 @@ impl App {
                 slot.history_total = 0;
                 slot.history_extent_known = false;
                 slot.history_offset = 0;
+                slot.history_requested = 0;
+                slot.history_inflight_offset = 0;
+                slot.history_base = None;
+                slot.new_output = false;
+                slot.history_truncated = false;
                 slot.history_revision = 0;
                 self.dirty = true;
                 self.set_status("alternate-screen app; use its scroll keys", now);
@@ -1323,20 +2460,136 @@ impl App {
             ScrollResult::Failed(label) => {
                 slot.queued_scroll = None;
                 slot.queued_seek = None;
+                slot.history_requested = slot.history_offset;
                 self.set_status(label, now);
             }
         }
+        self.finish_unknown_extent_capture(update.target);
+    }
+
+    fn finish_unknown_extent_capture(&mut self, target: TargetRef) {
+        let (mut drag, released) = if let Some(drag) = self
+            .pointer_seek
+            .filter(|drag| drag.target == target && drag.awaiting_extent)
+        {
+            (drag, false)
+        } else if let Some(drag) = self
+            .deferred_thumb_release
+            .filter(|drag| drag.target == target)
+        {
+            // Consume the released gesture exactly once, whatever the reply.
+            self.deferred_thumb_release = None;
+            (drag, true)
+        } else {
+            return;
+        };
+        let layout_current = self
+            .layout
+            .is_some_and(|layout| layout.revision == drag.layout_revision);
+        let Some(slot) = self
+            .screens
+            .iter_mut()
+            .find(|slot| slot.target == Some(target))
+        else {
+            if !released {
+                self.pointer_seek = None;
+            }
+            return;
+        };
+        if !slot.history_extent_known || (released && !layout_current) {
+            return;
+        }
+        drag.total_rows = slot.history_total.max(slot.history_offset);
+        let rect = shifted_rect(drag.pane_rect, u16::from(self.workspace_index.is_some()));
+        let Some(geometry) = scrollbar_geometry(
+            rect,
+            Scrollbar {
+                offset_rows: slot.history_offset.min(drag.total_rows),
+                total_rows: drag.total_rows,
+            },
+        ) else {
+            self.pointer_seek = None;
+            return;
+        };
+        drag.track = geometry.track;
+        drag.thumb_rows = geometry.thumb.rows;
+        drag.grab_offset = drag.grab_offset.min(geometry.thumb.rows.saturating_sub(1));
+        drag.awaiting_extent = false;
+        drag.preview_offset = pointer_seek_offset(drag, drag.last_y);
+        if drag.preview_offset != slot.history_requested {
+            slot.queued_seek = Some(drag.preview_offset);
+            slot.history_requested = drag.preview_offset;
+        }
+        if !released {
+            self.pointer_seek = Some(drag);
+        }
+        self.dirty = true;
+    }
+
+    fn refresh_pointer_seek_on_output(&mut self, target: TargetRef) {
+        let Some(mut drag) = self
+            .pointer_seek
+            .filter(|drag| drag.target == target && !drag.awaiting_extent)
+        else {
+            return;
+        };
+        let Some(slot) = self
+            .screens
+            .iter_mut()
+            .find(|slot| slot.target == Some(target))
+        else {
+            self.cancel_pointer_seek();
+            return;
+        };
+        if !slot.history_extent_known {
+            return;
+        }
+        let total_rows = slot.history_total.max(slot.history_offset);
+        let rect = shifted_rect(drag.pane_rect, u16::from(self.workspace_index.is_some()));
+        let Some(geometry) = scrollbar_geometry(
+            rect,
+            Scrollbar {
+                offset_rows: slot.history_offset.min(total_rows),
+                total_rows,
+            },
+        ) else {
+            self.cancel_pointer_seek();
+            return;
+        };
+        drag.track = geometry.track;
+        drag.thumb_rows = geometry.thumb.rows;
+        drag.total_rows = total_rows;
+        drag.grab_offset = drag.grab_offset.min(geometry.thumb.rows.saturating_sub(1));
+        let previous = drag.preview_offset;
+        drag.preview_offset = pointer_seek_offset(drag, drag.last_y);
+        if drag.preview_offset != slot.history_requested {
+            slot.queued_seek = Some(drag.preview_offset);
+            slot.history_requested = drag.preview_offset;
+        }
+        self.pointer_seek = Some(drag);
+        self.dirty |= previous != drag.preview_offset;
     }
 
     fn return_to_live(&mut self, target: TargetRef) {
+        if self
+            .deferred_thumb_release
+            .is_some_and(|drag| drag.target == target)
+        {
+            self.deferred_thumb_release = None;
+        }
         if let Some(slot) = self
             .screens
             .iter_mut()
             .find(|slot| slot.target == Some(target))
         {
             slot.history_offset = 0;
+            slot.history_base = None;
             slot.history_revision = 0;
             slot.history_pending = false;
+            slot.new_output = false;
+            slot.history_truncated = false;
+            slot.history_requested = 0;
+            slot.history_inflight_offset = 0;
             slot.queued_scroll = None;
             slot.queued_seek = None;
             slot.view_epoch = slot.view_epoch.wrapping_add(1);
@@ -1359,6 +2612,31 @@ impl App {
         requested: u16,
         effects: &mut impl Effects,
     ) {
+        self.seek_history_for_target_mode(target, now, requested, false, effects);
+    }
+
+    fn discover_history_extent_for_target(
+        &mut self,
+        target: TargetRef,
+        now: Instant,
+        effects: &mut impl Effects,
+    ) {
+        let current_offset = self
+            .screens
+            .iter()
+            .find(|slot| slot.target == Some(target))
+            .map_or(0, |slot| slot.history_offset);
+        self.seek_history_for_target_mode(target, now, current_offset, true, effects);
+    }
+
+    fn seek_history_for_target_mode(
+        &mut self,
+        target: TargetRef,
+        now: Instant,
+        requested: u16,
+        refresh_extent: bool,
+        effects: &mut impl Effects,
+    ) {
         let Some(slot) = self
             .screens
             .iter_mut()
@@ -1378,19 +2656,25 @@ impl App {
         };
         let offset = requested.min(maximum);
         if slot.history_pending {
-            slot.queued_seek = Some(offset);
+            if slot.history_requested != offset {
+                slot.queued_seek = Some(offset);
+                slot.history_requested = offset;
+            }
             return;
         }
-        if offset == slot.history_offset {
+        if offset == slot.history_offset && !refresh_extent {
             return;
         }
         let epoch = slot.view_epoch.wrapping_add(1);
         slot.history_pending = true;
+        slot.history_requested = offset;
+        slot.history_inflight_offset = offset;
         slot.queued_scroll = None;
         match effects.seek_history(target, epoch, offset) {
             Ok(()) => slot.view_epoch = epoch,
             Err(label) => {
                 slot.history_pending = false;
+                slot.history_requested = slot.history_offset;
                 self.set_status(label, now);
             }
         }
@@ -1417,12 +2701,9 @@ impl App {
         let Some(content) = panelink::pane_layout::content_rect(pane.rect) else {
             return;
         };
-        let column = screen_x
-            .saturating_sub(content.x)
-            .min(content.columns.saturating_sub(1));
-        let row = screen_y
-            .saturating_sub(content.y)
-            .min(content.rows.saturating_sub(1));
+        let content = shifted_rect(content, u16::from(self.workspace_index.is_some()));
+        let point = pointer_content_point(content, screen_x, screen_y);
+        let (column, row) = (point.column, point.row);
         let Some(slot_index) = self
             .screens
             .iter()
@@ -1436,7 +2717,14 @@ impl App {
             slot.target = Some(target);
             slot.revision = 0;
             slot.history_offset = 0;
+            slot.history_base = None;
             slot.history_revision = 0;
+            slot.history_total = 0;
+            slot.history_extent_known = false;
+            slot.new_output = false;
+            slot.history_truncated = false;
+            slot.history_requested = 0;
+            slot.history_inflight_offset = 0;
         }
         // Preserve the in-flight epoch and combine only known normal-buffer
         // gestures. Alternate-screen wheel delivery is nonreplayable child input.
@@ -1461,6 +2749,8 @@ impl App {
         };
         let epoch = slot.view_epoch.wrapping_add(1);
         slot.history_pending = true;
+        slot.history_inflight_offset = requested;
+        slot.history_requested = requested;
         match effects.scroll(target, epoch, requested, column, row, up) {
             Ok(()) => slot.view_epoch = epoch,
             Err(label) => {
@@ -1498,14 +2788,13 @@ impl App {
             } else {
                 offset
             };
-            if offset == slot.history_offset {
-                return;
-            }
             let epoch = slot.view_epoch.wrapping_add(1);
             match effects.seek_history(target, epoch, offset) {
                 Ok(()) => {
                     slot.view_epoch = epoch;
                     slot.history_pending = true;
+                    slot.history_inflight_offset = offset;
+                    slot.history_requested = offset;
                 }
                 Err(label) => self.set_status(label, now),
             }
@@ -1539,6 +2828,8 @@ impl App {
             Ok(()) => {
                 slot.view_epoch = epoch;
                 slot.history_pending = true;
+                slot.history_inflight_offset = requested;
+                slot.history_requested = requested;
             }
             Err(label) => self.set_status(label, now),
         }
@@ -1554,6 +2845,7 @@ impl App {
     }
 
     /// Copy one decoded checkpoint into the pane's preallocated cache.
+    #[cfg(test)]
     pub(crate) fn load_screen(
         &mut self,
         target: TargetRef,
@@ -1563,12 +2855,24 @@ impl App {
         self.load_screen_with_wraps(target, revision, checkpoint, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn load_screen_with_wraps(
         &mut self,
         target: TargetRef,
         revision: u64,
         checkpoint: &ScreenCheckpoint<'_>,
         row_wraps: Option<&[bool]>,
+    ) -> Result<(), TerminalError> {
+        self.load_screen_with_history_cursor(target, revision, checkpoint, row_wraps, None)
+    }
+
+    fn load_screen_with_history_cursor(
+        &mut self,
+        target: TargetRef,
+        revision: u64,
+        checkpoint: &ScreenCheckpoint<'_>,
+        row_wraps: Option<&[bool]>,
+        history_cursor: Option<WireHistoryCursor>,
     ) -> Result<(), TerminalError> {
         if self.selection.as_ref().is_some_and(|drag| {
             drag.target == target
@@ -1587,6 +2891,7 @@ impl App {
             let slot = &mut self.screens[index];
             let old_buffer =
                 (slot.target == Some(target)).then(|| slot.snapshot.alternate_screen());
+            let old_revision = slot.revision;
             slot.snapshot.load_checkpoint(checkpoint)?;
             if let Some(wraps) = row_wraps {
                 slot.snapshot.apply_row_wraps(wraps)?;
@@ -1599,20 +2904,61 @@ impl App {
                 slot.history_total = 0;
                 slot.history_extent_known = false;
                 slot.history_offset = 0;
+                slot.history_base = None;
+                slot.new_output = false;
+                slot.history_truncated = false;
                 slot.history_pending = false;
                 slot.queued_scroll = None;
                 slot.queued_seek = None;
                 slot.view_epoch = slot.view_epoch.wrapping_add(1);
+            } else if slot.history_offset > 0 {
+                let revision_advanced = revision > old_revision;
+                slot.new_output |= revision_advanced;
+                if let Some(cursor) = history_cursor {
+                    match slot.history_base {
+                        Some(base) if base.epoch == cursor.epoch => {
+                            if cursor.ordinal >= base.ordinal {
+                                let delta = cursor.ordinal - base.ordinal;
+                                if delta > 0 {
+                                    slot.new_output = true;
+                                    slot.history_offset =
+                                        add_history_rows(slot.history_offset, delta);
+                                    if slot.history_extent_known {
+                                        slot.history_total =
+                                            add_history_rows(slot.history_total, delta);
+                                    }
+                                    slot.history_requested =
+                                        add_history_rows(slot.history_requested, delta);
+                                    if let Some(queued) = slot.queued_seek.as_mut() {
+                                        *queued = add_history_rows(*queued, delta);
+                                    }
+                                }
+                                slot.history_base = Some(cursor);
+                            }
+                        }
+                        Some(_) => {
+                            slot.history_truncated = true;
+                            slot.history_base = Some(cursor);
+                        }
+                        None => slot.history_base = Some(cursor),
+                    }
+                } else {
+                    // Older servers lack row identity: revision advances can
+                    // signal new output, but cannot compensate the frozen row offset.
+                }
             }
             buffer_changed
         };
         if buffer_changed {
             self.cancel_selection();
-            if self.pointer_divider.take().is_some() {
+            if self.pointer_divider.take().is_some()
+                || matches!(self.pane_mode, Some(PaneMode::Divider { .. }))
+            {
                 self.pane_mode = None;
+                self.pane_mode_exit_key = None;
             }
             if self.pointer_seek.is_some_and(|drag| drag.target == target) {
-                self.pointer_seek = None;
+                self.cancel_pointer_seek();
             }
         }
         self.dirty = true;
@@ -1624,17 +2970,104 @@ impl App {
         self.dirty = true;
     }
 
+    fn set_persistent_status(&mut self, label: &'static str, now: Instant) {
+        if self.persistent_status == Some("Outcome unknown") && label == "Applying…" {
+            self.set_status(label, now);
+            return;
+        }
+        self.persistent_status = Some(label);
+        self.set_status(label, now);
+    }
+
+    fn clear_applying_status(&mut self) {
+        if self.persistent_status == Some("Applying…") {
+            self.persistent_status = None;
+            if self.status.is_some_and(|(label, _)| label == "Applying…") {
+                self.status = None;
+            }
+            self.dirty = true;
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn take_copy_text(&mut self) -> Option<String> {
+        self.pending_copy_target = None;
+        self.pending_copy_id = None;
         self.pending_copy.take()
     }
 
+    pub(crate) fn take_copy_request(&mut self) -> Option<(TargetRef, u64, String)> {
+        let target = self.pending_copy_target?;
+        let request_id = self.pending_copy_id?;
+        let text = self.pending_copy.take()?;
+        self.pending_copy_target = None;
+        self.pending_copy_id = None;
+        Some((target, request_id, text))
+    }
+
     pub(crate) fn report_clipboard_unavailable(&mut self, now: Instant) {
-        self.set_status("clipboard unavailable", now);
+        self.report_clipboard_status(None, None, ClipboardStatus::Unavailable, now);
+    }
+
+    pub(crate) fn report_clipboard_status(
+        &mut self,
+        target: Option<TargetRef>,
+        request_id: Option<u64>,
+        status: ClipboardStatus,
+        now: Instant,
+    ) {
+        let current_attempt = target.zip(request_id).and_then(|(target, request_id)| {
+            self.latest_copy_attempt
+                .iter()
+                .flatten()
+                .any(|attempt| *attempt == (target, request_id))
+                .then_some((target, request_id))
+        });
+        if target.is_some() && request_id.is_some() && current_attempt.is_none() {
+            return;
+        }
+        if status == ClipboardStatus::Copied {
+            let Some((target, _request_id)) = current_attempt else {
+                return;
+            };
+            let Some(index) = self.layout.and_then(|layout| {
+                layout
+                    .panes
+                    .iter()
+                    .position(|pane| pane.is_some_and(|pane| pane.target == target))
+            }) else {
+                return;
+            };
+            self.copied_feedback[index] = Some((target, now + COPY_FEEDBACK_TTL));
+            if self
+                .status
+                .is_some_and(|(label, _)| is_clipboard_failure_label(label))
+            {
+                self.status = None;
+            }
+            self.dirty = true;
+            return;
+        }
+
+        if let Some((target, _request_id)) = current_attempt {
+            if let Some(index) = self.layout.and_then(|layout| {
+                layout
+                    .panes
+                    .iter()
+                    .position(|pane| pane.is_some_and(|pane| pane.target == target))
+            }) {
+                self.copied_feedback[index] = None;
+                self.dirty = true;
+            }
+        }
+        self.set_status(status.label(), now);
     }
 
     pub(crate) fn cancel_for_detach(&mut self) {
         self.cancel_selection();
         self.pending_copy = None;
+        self.pending_copy_target = None;
+        self.pending_copy_id = None;
     }
 
     fn cancel_selection(&mut self) {
@@ -1647,27 +3080,65 @@ impl App {
         }
     }
 
-    fn queue_copy_text(&mut self, text: String, now: Instant) {
+    fn queue_copy_text(&mut self, target: TargetRef, text: String, now: Instant) {
+        let request_id = self.mark_copy_attempt(target);
         if self.pending_copy.is_some() {
-            self.set_status("clipboard busy", now);
+            self.report_clipboard_status(
+                Some(target),
+                Some(request_id),
+                ClipboardStatus::Busy,
+                now,
+            );
         } else {
             self.pending_copy = Some(text);
-            self.set_status("copying selection", now);
+            self.pending_copy_target = Some(target);
+            self.pending_copy_id = Some(request_id);
+            self.dirty = true;
         }
+    }
+
+    fn mark_copy_attempt(&mut self, target: TargetRef) -> u64 {
+        let request_id = self.next_copy_id;
+        self.next_copy_id = self.next_copy_id.wrapping_add(1).max(1);
+        if let Some(index) = self.layout.and_then(|layout| {
+            layout
+                .panes
+                .iter()
+                .position(|pane| pane.is_some_and(|pane| pane.target == target))
+        }) {
+            for attempt in &mut self.latest_copy_attempt {
+                if attempt.is_some_and(|(attempt_target, _)| attempt_target == target) {
+                    *attempt = None;
+                }
+            }
+            self.latest_copy_attempt[index] = Some((target, request_id));
+            self.copied_feedback[index] = None;
+            self.dirty = true;
+        }
+        request_id
+    }
+
+    fn fail_copy_attempt(&mut self, target: TargetRef, label: &'static str, now: Instant) {
+        self.mark_copy_attempt(target);
+        self.set_status(label, now);
     }
 
     fn begin_copy_mode(&mut self, now: Instant) {
         let Some(target) = self.focus else {
-            self.set_status("copy unavailable", now);
+            self.set_status("Copy unavailable", now);
             return;
         };
+        self.begin_copy_mode_for_target(target, now);
+    }
+
+    fn begin_copy_mode_for_target(&mut self, target: TargetRef, now: Instant) {
         let Some((slot, content, snapshot, source_history, epoch)) = self.visible_source(target)
         else {
-            self.set_status("copy unavailable", now);
+            self.fail_copy_attempt(target, "Copy unavailable", now);
             return;
         };
         if snapshot.row_wraps().is_none() || content.rows == 0 || content.columns == 0 {
-            self.set_status("copy unavailable", now);
+            self.fail_copy_attempt(target, "Copy unavailable", now);
             return;
         }
         let mut caret = Point {
@@ -1696,7 +3167,7 @@ impl App {
                 self.prefix = None;
                 self.dirty = true;
             }
-            Err(_) => self.set_status("copy unavailable", now),
+            Err(_) => self.fail_copy_attempt(target, "Copy unavailable", now),
         }
     }
 
@@ -1727,7 +3198,7 @@ impl App {
                     if anchored {
                         self.copy_anchor = point;
                     } else {
-                        self.set_status("copy unavailable", now);
+                        self.set_status("Copy unavailable", now);
                     }
                 }
                 self.dirty = true;
@@ -1813,11 +3284,15 @@ impl App {
             .ok_or(SelectionError::StaleView)
             .and_then(|identity| drag.selection.finish(identity));
         match result {
-            Ok(text) => self.queue_copy_text(text, now),
+            Ok(text) => self.queue_copy_text(drag.target, text, now),
             Err(SelectionError::Empty) => {}
-            Err(SelectionError::UnknownWrap) => self.set_status("copy unavailable", now),
-            Err(SelectionError::TooLarge) => self.set_status("copy too large", now),
-            Err(_) => self.set_status("copy cancelled", now),
+            Err(SelectionError::UnknownWrap) => {
+                self.fail_copy_attempt(drag.target, "Copy unavailable", now)
+            }
+            Err(SelectionError::TooLarge) => {
+                self.fail_copy_attempt(drag.target, "Copy too large", now)
+            }
+            Err(_) => self.fail_copy_attempt(drag.target, "Copy cancelled", now),
         }
     }
 
@@ -1843,6 +3318,12 @@ impl App {
             self.status = None;
             self.dirty = true;
         }
+        for feedback in &mut self.copied_feedback {
+            if feedback.is_some_and(|(_, expires_at)| now >= expires_at) {
+                *feedback = None;
+                self.dirty = true;
+            }
+        }
     }
 
     /// Route one decoded host event. While the menu is open every event is
@@ -1854,6 +3335,12 @@ impl App {
         recovery_availability: Availability,
         effects: &mut impl Effects,
     ) -> Flow {
+        if let (Some(button), Event::Mouse(mouse)) = (self.menu_release_latch, event) {
+            if mouse.kind == MouseEventKind::Up(button) {
+                self.menu_release_latch = None;
+                return Flow::Continue;
+            }
+        }
         if let Event::Key(key) = event {
             if let Some((code, modifiers)) = self.pane_mode_exit_key {
                 match key.kind {
@@ -1884,7 +3371,23 @@ impl App {
                 }
             }
         }
-        if self.help_open || self.confirm.is_open() || self.menu.is_open() {
+        if matches!(event, Event::FocusLost | Event::Resize(_, _))
+            && matches!(self.pane_mode, Some(PaneMode::Divider { .. }))
+        {
+            self.pointer_divider = None;
+            self.pane_mode = None;
+            self.pane_mode_exit_key = None;
+            self.dirty = true;
+        }
+        if let Some(flow) = self.handle_empty_workspace_event(event, now) {
+            return flow;
+        }
+        if self.help_open
+            || self.confirm.is_open()
+            || self.menu.is_open()
+            || self.tab_dialog.is_some()
+            || self.picker_open
+        {
             self.cancel_selection();
         }
         match event {
@@ -1922,6 +3425,10 @@ impl App {
             }
             return Flow::Continue;
         }
+        if self.tab_dialog.is_some() {
+            self.handle_tab_dialog_event(event, now);
+            return Flow::Continue;
+        }
         if self.pointer_seek.is_some() || self.pointer_divider.is_some() {
             self.handle_pointer_seek_event(event, now, effects);
             return Flow::Continue;
@@ -1931,6 +3438,13 @@ impl App {
             return Flow::Continue;
         }
         if self.actions_menu.is_some() {
+            if let Event::Mouse(mouse) = event {
+                if let MouseEventKind::Down(button @ (MouseButton::Left | MouseButton::Right)) =
+                    mouse.kind
+                {
+                    self.menu_release_latch = Some(button);
+                }
+            }
             return self.handle_actions_menu_event(event, now, recovery_availability, effects);
         }
         if self.help_open {
@@ -1976,6 +3490,19 @@ impl App {
         if self.confirm.is_open() {
             // The prompt owns every event; none reaches a pane.
             self.dirty = true;
+            if let (Some((code, modifiers)), Event::Key(key)) = (self.confirm_open_key, event) {
+                match key.kind {
+                    KeyEventKind::Repeat if key.code == code && key.modifiers == modifiers => {
+                        return Flow::Continue;
+                    }
+                    KeyEventKind::Release if key.code == code && key.modifiers == modifiers => {
+                        self.confirm_open_key = None;
+                        return Flow::Continue;
+                    }
+                    KeyEventKind::Press => self.confirm_open_key = None,
+                    _ => {}
+                }
+            }
             if let Event::Mouse(mouse) = event {
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                     let Some(intent) = self.confirm.intent() else {
@@ -1986,26 +3513,58 @@ impl App {
                     if geometry
                         .is_some_and(|geometry| geometry.close.contains(mouse.column, mouse.row))
                     {
-                        self.confirm = CloseConfirm::new();
+                        self.dismiss_close_confirmation();
                         self.close_pane(intent, now, effects);
                         return Flow::Continue;
                     } else if geometry
                         .is_some_and(|geometry| geometry.cancel.contains(mouse.column, mouse.row))
                     {
-                        self.confirm = CloseConfirm::new();
+                        self.dismiss_close_confirmation();
                         self.set_status("close cancelled", now);
                         return Flow::Continue;
                     }
                 }
             }
             match self.confirm.handle(confirm_input(event)) {
-                ConfirmResponse::Confirmed(intent) => self.close_pane(intent, now, effects),
-                ConfirmResponse::Cancelled => self.set_status("close cancelled", now),
+                ConfirmResponse::Confirmed(intent) => {
+                    self.dismiss_close_confirmation();
+                    self.close_pane(intent, now, effects);
+                }
+                ConfirmResponse::Cancelled => {
+                    self.dismiss_close_confirmation();
+                    self.set_status("close cancelled", now);
+                }
                 ConfirmResponse::Consumed | ConfirmResponse::NotOpen => {}
+            }
+            match confirm_input(event) {
+                panelink::split_menu::ConfirmInput::Toggle => {
+                    self.confirm_close_selected = !self.confirm_close_selected;
+                }
+                panelink::split_menu::ConfirmInput::Activate => {
+                    if self.confirm_close_selected {
+                        if let ConfirmResponse::Confirmed(intent) =
+                            self.confirm.handle(panelink::split_menu::ConfirmInput::Yes)
+                        {
+                            self.dismiss_close_confirmation();
+                            self.close_pane(intent, now, effects);
+                        }
+                    } else {
+                        self.dismiss_close_confirmation();
+                        self.set_status("close cancelled", now);
+                    }
+                }
+                _ => {}
             }
             return Flow::Continue;
         }
         if self.menu.is_open() {
+            if let Event::Mouse(mouse) = event {
+                if let MouseEventKind::Down(button @ (MouseButton::Left | MouseButton::Right)) =
+                    mouse.kind
+                {
+                    self.menu_release_latch = Some(button);
+                }
+            }
             let mut input = if self.workspace_index.is_some()
                 && matches!(event, Event::Mouse(mouse) if mouse.row == 0)
             {
@@ -2025,10 +3584,17 @@ impl App {
             let response = self.menu.handle(input);
             self.dirty = true;
             match response {
-                MenuResponse::Activated(intent) => self.activate(intent, now, effects),
+                MenuResponse::Activated(intent) => self.activate(
+                    SplitIntent {
+                        expected_layout_revision: self.menu_revision,
+                        ..intent
+                    },
+                    now,
+                    effects,
+                ),
                 // The menu's mirror revision is local; use the server
                 // revision captured when the menu opened.
-                MenuResponse::CloseRequested(intent) => self.confirm.open(CloseIntent {
+                MenuResponse::CloseRequested(intent) => self.open_close_confirmation(CloseIntent {
                     expected_layout_revision: self.menu_revision,
                     ..intent
                 }),
@@ -2040,8 +3606,11 @@ impl App {
             }
             return Flow::Continue;
         }
-        if self.picker_selection.is_some() {
+        if self.picker_open || self.picker_selection.is_some() {
             self.handle_workspace_picker_event(event, now);
+            return Flow::Continue;
+        }
+        if self.handle_header_event(event, now) {
             return Flow::Continue;
         }
         if self.copy_mode {
@@ -2049,20 +3618,26 @@ impl App {
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                     if let Some((target, close)) = self.pane_control_at(mouse.column, mouse.row) {
                         self.cancel_selection();
-                        self.set_focus(Some(target));
                         if close {
-                            self.confirm_close_focused(now);
+                            self.confirm_close_target(
+                                target,
+                                self.layout.map_or(0, |layout| layout.revision),
+                                now,
+                            );
                         } else {
-                            self.open_actions_menu(target, now, effects);
+                            self.open_actions_menu(
+                                target,
+                                Some(MouseButton::Left),
+                                recovery_availability,
+                                now,
+                                effects,
+                            );
                         }
                         return Flow::Continue;
                     }
                 }
             }
             return self.handle_copy_mode_event(event, now, effects);
-        }
-        if self.handle_header_event(event, now) {
-            return Flow::Continue;
         }
         let recovery_availability = if self.needs_recovery_availability(event) {
             recovery_availability
@@ -2077,8 +3652,14 @@ impl App {
                         return Flow::Continue;
                     }
                     let operation_key = pane_operation_key(key.code, key.modifiers).is_some();
+                    let close_confirmation_key = (key.is_press() || key.is_repeat())
+                        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                        && matches!(key.code, KeyCode::Char('x' | 'X'));
                     let flow =
                         self.navigate(key.code, key.modifiers, now, recovery_availability, effects);
+                    if close_confirmation_key && self.confirm.is_open() {
+                        self.confirm_open_key = Some((key.code, key.modifiers));
+                    }
                     if operation_key {
                         self.pane_mode_exit_key = Some((key.code, key.modifiers));
                     }
@@ -2116,13 +3697,26 @@ impl App {
             }
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(target) = self.history_back_at(mouse.column, mouse.row) {
+                        self.return_to_live(target);
+                        return Flow::Continue;
+                    }
                     if let Some((target, close)) = self.pane_control_at(mouse.column, mouse.row) {
                         self.flush(now, effects);
-                        self.set_focus(Some(target));
                         if close {
-                            self.confirm_close_focused(now);
+                            self.confirm_close_target(
+                                target,
+                                self.layout.map_or(0, |layout| layout.revision),
+                                now,
+                            );
                         } else {
-                            self.open_actions_menu(target, now, effects);
+                            self.open_actions_menu(
+                                target,
+                                Some(MouseButton::Left),
+                                recovery_availability,
+                                now,
+                                effects,
+                            );
                         }
                         return Flow::Continue;
                     }
@@ -2159,7 +3753,13 @@ impl App {
                     if self.pending_pane_operation.is_some() {
                         self.set_status("pane operation pending", now);
                     } else if let Some(row) = self.pane_row(mouse.row) {
-                        self.open_at_pointer(mouse.column, row, now, recovery_availability);
+                        self.open_at_pointer(
+                            mouse.column,
+                            row,
+                            now,
+                            recovery_availability,
+                            effects,
+                        );
                     }
                 }
                 _ => {
@@ -2167,7 +3767,6 @@ impl App {
                         (mouse_wheel(mouse), self.pane_at(mouse.column, mouse.row))
                     {
                         self.flush(now, effects);
-                        self.focus_target(target);
                         if let Some(row) = self.pane_row(mouse.row) {
                             self.scroll_pane(target, mouse.column, row, up, now, effects);
                         }
@@ -2199,6 +3798,25 @@ impl App {
             return Flow::Continue;
         }
         if self.workspace_index.is_some() {
+            if let Some(command) = workspace_tab_command(code, modifiers) {
+                match command {
+                    WorkspaceTabCommand::Create => {
+                        let project = self
+                            .current_route
+                            .map(|route| route.project)
+                            .unwrap_or_else(|| {
+                                ProjectId::new(1).expect("Default project ID is nonzero")
+                            });
+                        self.request_tab_create(project, now);
+                    }
+                    WorkspaceTabCommand::Actions => {
+                        if let Some(route) = self.current_route {
+                            self.open_tab_actions(route);
+                        }
+                    }
+                }
+                return Flow::Continue;
+            }
             if let Some(action) = workspace_navigation(code, modifiers) {
                 self.navigate_workspace(action, now);
                 return Flow::Continue;
@@ -2302,7 +3920,7 @@ impl App {
                     self.set_status("pane operation pending", now);
                 } else {
                     if let Some(target) = self.focus {
-                        self.open_actions_menu(target, now, effects);
+                        self.open_actions_menu(target, None, recovery_availability, now, effects);
                     }
                 }
             }
@@ -2341,6 +3959,10 @@ impl App {
     }
 
     fn operation_ready(&mut self, now: Instant, effects: &mut impl Effects) -> bool {
+        if !self.server_present {
+            self.set_status("Disconnected", now);
+            return false;
+        }
         if self.pane_operations.is_none() {
             self.set_status("pane controls unsupported by this server", now);
             return false;
@@ -2368,16 +3990,50 @@ impl App {
         let Some(view) = self.pane_operations else {
             return;
         };
-        let zoomed = view.zoomed_target.is_none();
         let target = view.zoomed_target.or(self.focus);
         let Some(target) = target else {
             self.set_status("zoom unavailable: no focused pane", now);
             return;
         };
+        self.toggle_zoom_for_target(target, view.layout.revision, now, effects);
+    }
+
+    fn toggle_zoom_for_target(
+        &mut self,
+        target: TargetRef,
+        revision: u64,
+        now: Instant,
+        effects: &mut impl Effects,
+    ) {
+        if !self.operation_ready(now, effects) {
+            return;
+        }
+        let Some(view) = self.pane_operations else {
+            return;
+        };
+        if view.layout.revision != revision
+            || !view
+                .layout
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == target)
+        {
+            self.set_status("zoom cancelled: layout changed", now);
+            return;
+        }
+        let zoomed = match view.zoomed_target {
+            None => true,
+            Some(current) if current == target => false,
+            Some(_) => {
+                self.set_status("unzoom the active pane first", now);
+                return;
+            }
+        };
         self.submit_pane_operation(
             PaneAction::ZoomSet {
                 target,
-                expected_layout_revision: view.layout.revision,
+                expected_layout_revision: revision,
                 zoomed,
             },
             now,
@@ -2386,23 +4042,45 @@ impl App {
     }
 
     fn open_swap_mode(&mut self, now: Instant, effects: &mut impl Effects) {
-        if !self.operation_ready(now, effects) {
-            return;
-        }
-        if self
-            .pane_operations
-            .is_some_and(|view| view.zoomed_target.is_some())
-        {
-            self.set_status("unzoom before swapping panes", now);
-            return;
-        }
         let Some(view) = self.pane_operations else {
+            self.operation_ready(now, effects);
             return;
         };
         let Some(source) = self.focus else {
             self.set_status("swap unavailable: no focused pane", now);
             return;
         };
+        self.open_swap_mode_for_target(source, view.layout.revision, now, effects);
+    }
+
+    fn open_swap_mode_for_target(
+        &mut self,
+        source: TargetRef,
+        revision: u64,
+        now: Instant,
+        effects: &mut impl Effects,
+    ) {
+        if !self.operation_ready(now, effects) {
+            return;
+        }
+        let Some(view) = self.pane_operations else {
+            return;
+        };
+        if view.layout.revision != revision
+            || !view
+                .layout
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == source)
+        {
+            self.set_status("swap cancelled: layout changed", now);
+            return;
+        }
+        if view.zoomed_target.is_some() {
+            self.set_status("unzoom before swapping panes", now);
+            return;
+        }
         let mut choices = [None; crate::pane_layout::MAX_PANES];
         let mut count = 0;
         for pane in view.layout.panes.iter().flatten() {
@@ -2418,7 +4096,7 @@ impl App {
         self.cancel_selection();
         self.pane_mode = Some(PaneMode::Swap {
             source,
-            revision: view.layout.revision,
+            revision,
             choices,
             selected: 0,
         });
@@ -2427,27 +4105,47 @@ impl App {
     }
 
     fn open_divider_mode(&mut self, now: Instant, effects: &mut impl Effects) {
-        if !self.operation_ready(now, effects) {
-            return;
-        }
-        if self
-            .pane_operations
-            .is_some_and(|view| view.zoomed_target.is_some())
-        {
-            self.set_status("unzoom before adjusting dividers", now);
-            return;
-        }
-        let (Some(view), Some(target), Some(local)) =
-            (self.pane_operations, self.focus, self.local.as_ref())
-        else {
+        let (Some(view), Some(target)) = (self.pane_operations, self.focus) else {
             self.set_status("divider adjustment unavailable", now);
             return;
         };
+        self.open_divider_mode_for_target(target, view.layout.revision, now, effects);
+    }
+
+    fn open_divider_mode_for_target(
+        &mut self,
+        target: TargetRef,
+        revision: u64,
+        now: Instant,
+        effects: &mut impl Effects,
+    ) {
+        if !self.operation_ready(now, effects) {
+            return;
+        }
+        let (Some(view), Some(local)) = (self.pane_operations, self.local.as_ref()) else {
+            self.set_status("divider adjustment unavailable", now);
+            return;
+        };
+        if view.layout.revision != revision
+            || !view
+                .layout
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == target)
+        {
+            self.set_status("divider adjustment cancelled: layout changed", now);
+            return;
+        }
+        if view.zoomed_target.is_some() {
+            self.set_status("unzoom before adjusting dividers", now);
+            return;
+        }
         let mut indices = [None; crate::pane_layout::MAX_PANES - 1];
         let mut count = 0;
         let mut initial = None;
         for index in 0..indices.len() {
-            let Ok(info) = local.divider_info(target, view.layout.revision, index as u8) else {
+            let Ok(info) = local.divider_info(target, revision, index as u8) else {
                 continue;
             };
             indices[count] = Some(index as u8);
@@ -2463,7 +4161,7 @@ impl App {
         self.cancel_selection();
         self.pane_mode = Some(PaneMode::Divider {
             target,
-            revision: view.layout.revision,
+            revision,
             indices,
             selected,
             first_cells,
@@ -2482,7 +4180,7 @@ impl App {
         match effects.pane_operation(id, action) {
             Ok(()) => {
                 self.pending_pane_operation = Some((id, action));
-                self.set_status("pane operation pending", now);
+                self.set_persistent_status("Applying…", now);
             }
             Err("pane operations unavailable") => {
                 self.set_status("pane controls unsupported by this server", now)
@@ -2566,7 +4264,26 @@ impl App {
                         selected,
                         first_cells,
                     }) => {
-                        if let Some(divider_index) = indices.get(selected).copied().flatten() {
+                        if let Some(divider_index) = indices
+                            .get(selected)
+                            .copied()
+                            .flatten()
+                            .filter(|divider_index| {
+                                self.layout.is_some_and(|layout| {
+                                    layout.revision == revision
+                                        && layout
+                                            .panes
+                                            .iter()
+                                            .flatten()
+                                            .any(|pane| pane.target == target)
+                                }) && self.divider_value_valid(
+                                    target,
+                                    revision,
+                                    *divider_index,
+                                    first_cells,
+                                )
+                            })
+                        {
                             self.submit_pane_operation(
                                 PaneAction::DividerSet {
                                     target,
@@ -2793,13 +4510,7 @@ impl App {
         } else {
             first_cells.saturating_add(1)
         };
-        let Some(mut preview) = self.layout.and_then(|layout| local_layout(&layout)) else {
-            return;
-        };
-        if preview
-            .set_divider(target, revision, index, candidate)
-            .is_ok()
-        {
+        if let Some(candidate) = self.clamp_divider_span(target, revision, index, candidate) {
             *first_cells = candidate;
         }
     }
@@ -2820,22 +4531,256 @@ impl App {
         if mouse.row != 0 {
             return false;
         }
-        self.cancel_selection();
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            match layout.hit_test(mouse.column, mouse.row) {
-                Some(TabAction::ProjectChooser) => {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left | MouseButton::Right)
+        ) {
+            self.cancel_selection();
+            match (mouse.kind, layout.hit_test(mouse.column, mouse.row)) {
+                (MouseEventKind::Down(MouseButton::Right), Some(TabAction::Select(route))) => {
+                    self.open_tab_actions(route);
+                }
+                (MouseEventKind::Down(MouseButton::Left), Some(TabAction::ProjectChooser)) => {
                     self.open_workspace_picker();
                 }
-                Some(TabAction::Select(route)) => self.request_route(route, now),
-                Some(TabAction::PreviousTab) => {
+                (MouseEventKind::Down(MouseButton::Left), Some(TabAction::Select(route)))
+                    if self.current_route == Some(route) =>
+                {
+                    self.open_tab_actions(route);
+                }
+                (MouseEventKind::Down(MouseButton::Left), Some(TabAction::Select(route))) => {
+                    self.request_route(route, now)
+                }
+                (_, Some(TabAction::TabActions(route))) => self.open_tab_actions(route),
+                (MouseEventKind::Down(MouseButton::Left), Some(TabAction::Create)) => {
+                    let project = self
+                        .current_route
+                        .map(|route| route.project)
+                        .unwrap_or_else(|| {
+                            ProjectId::new(1).expect("Default project ID is nonzero")
+                        });
+                    self.request_tab_create(project, now);
+                }
+                (MouseEventKind::Down(MouseButton::Left), Some(TabAction::AllTabs)) => {
+                    self.open_workspace_picker();
+                }
+                (MouseEventKind::Down(MouseButton::Left), Some(TabAction::PreviousTab)) => {
                     self.navigate_workspace(TabNavigation::PreviousTab, now)
                 }
-                Some(TabAction::NextTab) => self.navigate_workspace(TabNavigation::NextTab, now),
-                None => {}
+                (MouseEventKind::Down(MouseButton::Left), Some(TabAction::NextTab)) => {
+                    self.navigate_workspace(TabNavigation::NextTab, now)
+                }
+                _ => {}
             }
         }
         // Every event on row zero is local, including blank strip cells.
         true
+    }
+
+    fn tab_dialog_geometry(&self) -> Option<Rect> {
+        let dialog = self.tab_dialog.as_ref()?;
+        let (rows, columns) = self.viewport();
+        let overlay_rows = match dialog {
+            TabDialog::Actions { .. } | TabDialog::Rename { .. } => 4,
+            TabDialog::Close { .. } => 3,
+        };
+        if rows < overlay_rows || columns == 0 {
+            return None;
+        }
+        Some(Rect {
+            x: 0,
+            y: rows.saturating_sub(overlay_rows) / 2,
+            rows: overlay_rows,
+            columns,
+        })
+    }
+
+    fn cancel_tab_dialog(&mut self) {
+        self.tab_dialog = None;
+        self.dirty = true;
+    }
+
+    fn activate_tab_action(&mut self, route: WorkspaceRouteId, selected: usize, now: Instant) {
+        match selected {
+            0 => {
+                self.tab_dialog = None;
+                self.request_route(route, now);
+            }
+            1 => self.begin_tab_rename(route),
+            2 => self.begin_tab_close(route),
+            _ => return,
+        }
+        self.dirty = true;
+    }
+
+    fn handle_tab_dialog_event(&mut self, event: &Event, now: Instant) {
+        let Some(dialog) = self.tab_dialog.clone() else {
+            return;
+        };
+        let geometry = self.tab_dialog_geometry();
+        match dialog {
+            TabDialog::Actions {
+                route,
+                mut selected,
+            } => match event {
+                Event::Key(key) if key.is_press() || key.is_repeat() => {
+                    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+                    match (key.code, plain) {
+                        (KeyCode::Esc, true) => self.cancel_tab_dialog(),
+                        (KeyCode::Up, true) => {
+                            selected = (selected + 2) % 3;
+                            self.tab_dialog = Some(TabDialog::Actions { route, selected });
+                            self.dirty = true;
+                        }
+                        (KeyCode::Down, true) => {
+                            selected = (selected + 1) % 3;
+                            self.tab_dialog = Some(TabDialog::Actions { route, selected });
+                            self.dirty = true;
+                        }
+                        (KeyCode::Enter, true) if key.is_press() => {
+                            self.activate_tab_action(route, selected, now)
+                        }
+                        (KeyCode::Char('s' | 'S'), true) => self.activate_tab_action(route, 0, now),
+                        (KeyCode::Char('r' | 'R'), true) => self.activate_tab_action(route, 1, now),
+                        (KeyCode::Char('x' | 'X'), true) => self.activate_tab_action(route, 2, now),
+                        _ => {}
+                    }
+                }
+                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(rect) = geometry {
+                        let screen_y = rect.y + u16::from(self.workspace_index.is_some());
+                        let row = mouse.row.saturating_sub(screen_y);
+                        if (1..=3).contains(&row) && mouse.column < rect.columns {
+                            self.activate_tab_action(route, usize::from(row - 1), now);
+                        }
+                    }
+                }
+                Event::Resize(_, _) => self.dirty = true,
+                _ => {}
+            },
+            TabDialog::Rename {
+                route,
+                expected_revision,
+                mut draft,
+                error,
+                saving,
+            } => match event {
+                Event::Key(key) if key.is_press() || key.is_repeat() => {
+                    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+                    match (key.code, plain) {
+                        (KeyCode::Esc, true) if key.is_press() => self.cancel_tab_dialog(),
+                        (KeyCode::Enter, true) if key.is_press() => self.submit_tab_rename(now),
+                        (KeyCode::Backspace, true) if !saving => {
+                            draft.pop();
+                            self.tab_dialog = Some(TabDialog::Rename {
+                                route,
+                                expected_revision,
+                                draft,
+                                error: None,
+                                saving,
+                            });
+                            self.dirty = true;
+                        }
+                        (KeyCode::Char(character), true) if !saving => {
+                            self.append_rename_text(&character.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Paste(text) if !saving => self.append_rename_text(text),
+                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(rect) = geometry {
+                        let save_y = rect
+                            .y
+                            .saturating_add(3 + u16::from(self.workspace_index.is_some()));
+                        if mouse.row == save_y && mouse.column < 6 {
+                            self.submit_tab_rename(now);
+                        } else if mouse.row == save_y && (7..15).contains(&mouse.column) {
+                            self.cancel_tab_dialog();
+                        }
+                    }
+                }
+                Event::Resize(_, _) => self.dirty = true,
+                _ => {
+                    let _ = error;
+                }
+            },
+            TabDialog::Close {
+                expected,
+                expected_revision,
+                mut close_selected,
+                pending,
+            } => match event {
+                Event::Key(key) if key.is_press() || key.is_repeat() => {
+                    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+                    match (key.code, plain) {
+                        (KeyCode::Esc, true) if key.is_press() => self.cancel_tab_dialog(),
+                        (KeyCode::Left | KeyCode::Right | KeyCode::Tab, true) if !pending => {
+                            close_selected = !close_selected;
+                            self.tab_dialog = Some(TabDialog::Close {
+                                expected,
+                                expected_revision,
+                                close_selected,
+                                pending,
+                            });
+                            self.dirty = true;
+                        }
+                        (KeyCode::Enter, true) if key.is_press() && !pending => {
+                            if close_selected {
+                                self.confirm_tab_close(now);
+                            } else {
+                                self.cancel_tab_dialog();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(rect) = geometry {
+                        let button_y = rect
+                            .y
+                            .saturating_add(2 + u16::from(self.workspace_index.is_some()));
+                        if mouse.row == button_y && mouse.column < 11 && !pending {
+                            self.confirm_tab_close(now);
+                        } else if mouse.row == button_y
+                            && (12..20).contains(&mouse.column)
+                            && !pending
+                        {
+                            self.cancel_tab_dialog();
+                        }
+                    }
+                }
+                Event::Resize(_, _) => self.dirty = true,
+                _ => {}
+            },
+        }
+    }
+
+    fn clear_picker_filter(&mut self) {
+        if !self.picker_filter.is_empty() {
+            self.picker_filter.clear();
+            self.picker_selection = self
+                .current_route
+                .filter(|route| self.route_matches_filter(*route))
+                .or_else(|| self.picker_routes().first().copied());
+            self.dirty = true;
+        }
+    }
+
+    fn route_matches_filter(&self, route: WorkspaceRouteId) -> bool {
+        let Some(index) = self.workspace_index.as_ref() else {
+            return false;
+        };
+        let Some(project) = index.project(route.project).ok() else {
+            return false;
+        };
+        let Some(tab) = project.tabs().find(|tab| tab.id == route.tab) else {
+            return false;
+        };
+        let query = self.picker_filter.to_lowercase();
+        query.is_empty()
+            || project.display_name().to_lowercase().contains(&query)
+            || tab.display_name.to_lowercase().contains(&query)
     }
 
     fn handle_workspace_picker_event(&mut self, event: &Event, now: Instant) {
@@ -2844,6 +4789,8 @@ impl App {
                 let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
                 match (key.code, plain) {
                     (KeyCode::Esc, true) => {
+                        self.picker_open = false;
+                        self.picker_filter.clear();
                         self.picker_selection = None;
                         self.dirty = true;
                     }
@@ -2856,12 +4803,31 @@ impl App {
                     (KeyCode::Down, true) => self.move_picker_selection(1),
                     (KeyCode::Left, true) => self.move_picker_project(-1),
                     (KeyCode::Right, true) => self.move_picker_project(1),
+                    (KeyCode::Backspace, true) => {
+                        self.picker_filter.pop();
+                        self.picker_selection = self.picker_routes().first().copied();
+                        self.dirty = true;
+                    }
+                    _ if key.modifiers == KeyModifiers::CONTROL
+                        && key.code == KeyCode::Char('u') =>
+                    {
+                        self.clear_picker_filter();
+                    }
+                    (KeyCode::Char(character), true) => {
+                        self.update_picker_filter(&character.to_string());
+                    }
                     _ => {}
                 }
             }
+            Event::Paste(text) => self.update_picker_filter(text),
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
                 if let Some((top, rows)) = self.picker_screen_geometry() {
-                    if mouse.row > top && mouse.row < top.saturating_add(rows) {
+                    if self
+                        .picker_clear_rect()
+                        .is_some_and(|rect| rect.contains(mouse.column, mouse.row))
+                    {
+                        self.clear_picker_filter();
+                    } else if mouse.row > top && mouse.row < top.saturating_add(rows) {
                         if let Some(route) = self.picker_route_at_row(mouse.row - top - 1) {
                             self.request_route(route, now);
                         }
@@ -2884,7 +4850,19 @@ impl App {
                     tab: tab.id,
                 })
             })
+            .filter(|route| self.route_matches_filter(*route))
             .collect()
+    }
+
+    fn picker_clear_rect(&self) -> Option<Rect> {
+        let (top, _) = self.picker_screen_geometry()?;
+        let (_, columns) = self.viewport();
+        (columns >= 8).then_some(Rect {
+            x: 0,
+            y: top,
+            rows: 1,
+            columns: 7,
+        })
     }
 
     fn picker_route_at_row(&self, row: u16) -> Option<WorkspaceRouteId> {
@@ -2900,11 +4878,15 @@ impl App {
         if view_rows == 0 || columns == 0 {
             return None;
         }
-        let visible_routes = routes
-            .len()
-            .saturating_sub(offset)
-            .min(self.picker_visible_route_count());
-        let rows = (visible_routes + 1).min(usize::from(view_rows)) as u16;
+        let rows = if routes.is_empty() {
+            2.min(view_rows)
+        } else {
+            let visible_routes = routes
+                .len()
+                .saturating_sub(offset)
+                .min(self.picker_visible_route_count());
+            (visible_routes + 1).min(usize::from(view_rows)) as u16
+        };
         Some((1 + view_rows.saturating_sub(rows) / 2, rows))
     }
 
@@ -2916,18 +4898,31 @@ impl App {
     }
 
     fn picker_scroll_offset(&self) -> Option<usize> {
-        let selection = self.picker_selection?;
         let routes = self.picker_routes();
+        if routes.is_empty() {
+            return Some(0);
+        }
+        let Some(selection) = self.picker_selection else {
+            return Some(0);
+        };
         let selected = routes.iter().position(|route| *route == selection)?;
         let visible = self.picker_visible_route_count();
         Some(selected.saturating_sub(visible.saturating_sub(1)))
     }
 
     fn move_picker_selection(&mut self, delta: isize) {
-        if let Some(selection) = self.picker_selection {
-            self.picker_selection = self.route_at_index(delta, selection);
-            self.dirty = true;
+        let routes = self.picker_routes();
+        if routes.is_empty() {
+            return;
         }
+        let current = self
+            .picker_selection
+            .and_then(|selection| routes.iter().position(|route| *route == selection))
+            .unwrap_or(0);
+        let next = (isize::try_from(current).unwrap_or(0) + delta)
+            .rem_euclid(isize::try_from(routes.len()).unwrap_or(1));
+        self.picker_selection = routes.get(usize::try_from(next).unwrap_or(0)).copied();
+        self.dirty = true;
     }
 
     fn move_picker_project(&mut self, delta: isize) {
@@ -2994,6 +4989,22 @@ impl App {
     /// Open the close prompt for the focused pane, capturing its target and
     /// the current server layout revision now.
     fn confirm_close_focused(&mut self, now: Instant) {
+        let Some(layout) = self.layout else {
+            self.set_status("close unavailable: no layout", now);
+            return;
+        };
+        let Some(focus) = self.focus else {
+            self.set_status("close unavailable: no focused pane", now);
+            return;
+        };
+        self.confirm_close_target(focus, layout.revision, now);
+    }
+
+    fn confirm_close_target(&mut self, target: TargetRef, revision: u64, now: Instant) {
+        if !self.server_present {
+            self.set_status("Disconnected", now);
+            return;
+        }
         if self.pending_pane_operation.is_some() {
             self.set_status("pane operation pending", now);
             return;
@@ -3010,24 +5021,37 @@ impl App {
             self.set_status("close unavailable: no layout", now);
             return;
         };
-        let Some(focus) = self.focus else {
-            self.set_status("close unavailable: no focused pane", now);
+        if layout.revision != revision {
+            self.set_status("close unavailable: layout changed", now);
             return;
-        };
+        }
         let Some(index) = layout
             .panes
             .iter()
-            .position(|pane| pane.is_some_and(|pane| pane.target == focus))
+            .position(|pane| pane.is_some_and(|pane| pane.target == target))
         else {
-            self.set_status("close unavailable: no focused pane", now);
+            self.set_status("close unavailable: pane changed", now);
             return;
         };
-        self.confirm.open(CloseIntent {
-            target: focus,
-            expected_layout_revision: layout.revision,
+        self.open_close_confirmation(CloseIntent {
+            target,
+            expected_layout_revision: revision,
             position: u8::try_from(index + 1).unwrap_or(u8::MAX),
             last_pane: layout.panes.iter().flatten().count() <= 1,
         });
+    }
+
+    fn open_close_confirmation(&mut self, intent: CloseIntent) {
+        self.confirm.open(intent);
+        self.confirm_close_selected = false;
+        self.confirm_open_key = None;
+        self.dirty = true;
+    }
+
+    fn dismiss_close_confirmation(&mut self) {
+        self.confirm = CloseConfirm::new();
+        self.confirm_close_selected = false;
+        self.confirm_open_key = None;
         self.dirty = true;
     }
 
@@ -3036,6 +5060,22 @@ impl App {
     /// keys leave the closed pane at once; the authoritative collapsed layout
     /// arrives with the next layout poll.
     fn close_pane(&mut self, intent: CloseIntent, now: Instant, effects: &mut impl Effects) {
+        if !self.server_present {
+            self.set_status("Disconnected", now);
+            return;
+        }
+        let captured_target_is_current = self.layout.is_some_and(|layout| {
+            layout.revision == intent.expected_layout_revision
+                && layout
+                    .panes
+                    .iter()
+                    .flatten()
+                    .any(|pane| pane.target == intent.target)
+        });
+        if !captured_target_is_current {
+            self.set_status("close cancelled: layout changed", now);
+            return;
+        }
         if self.pending_pane_operation.is_some() {
             self.set_status("pane operation pending", now);
             return;
@@ -3064,9 +5104,12 @@ impl App {
         self.pending_close = Some((request_id, intent.target, intent.last_pane));
         match effects.close(plan, request_id) {
             Ok(Some(result)) => self.complete_close(request_id, intent.target, Ok(result), now),
-            Ok(None) => self.set_status("closing pane...", now),
+            Ok(None) => self.set_persistent_status("Applying…", now),
             Err(label) => {
                 self.pending_close = None;
+                if is_uncertain_mutation_error(label) {
+                    self.set_persistent_status("Outcome unknown", now);
+                }
                 self.set_status(label, now)
             }
         }
@@ -3252,6 +5295,30 @@ impl App {
         })
     }
 
+    fn history_back_at(&self, x: u16, y: u16) -> Option<TargetRef> {
+        if !self.fits() {
+            return None;
+        }
+        let (host_rows, host_columns) = self.screen_viewport();
+        let header_offset = u16::from(self.workspace_index.is_some());
+        self.display_layout()?
+            .panes
+            .iter()
+            .flatten()
+            .find_map(|pane| {
+                let slot = self
+                    .screens
+                    .iter()
+                    .find(|slot| slot.target == Some(pane.target))?;
+                let label = history_label_kind(slot)?;
+                let rect = shifted_rect(pane.rect, header_offset);
+                let badge = pane_version_badge(rect, host_rows, host_columns);
+                pane_history_controls(rect, label, badge)
+                    .filter(|controls| controls.back.contains(x, y))
+                    .map(|_| pane.target)
+            })
+    }
+
     fn begin_scrollbar_pointer(
         &mut self,
         x: u16,
@@ -3266,26 +5333,20 @@ impl App {
         };
         self.cancel_selection();
         self.flush(now, effects);
-        self.focus_target(target);
         self.prefix = None;
+        self.deferred_thumb_release = None;
         let layout_revision = self.layout.map_or(0, |layout| layout.revision);
-        // Equal offset/extent may be a fast wheel's conservative lower bound;
-        // discover the real extent before calculating page/drag destinations.
-        let extent_known = self
+        let (extent_known, current_offset, known_total) = self
             .screens
             .iter()
             .find(|slot| slot.target == Some(target))
-            .is_some_and(|slot| slot.history_extent_known);
-        if !extent_known {
-            self.set_focus(Some(target));
-            self.seek_history_for_target(
-                target,
-                now,
-                panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS,
-                effects,
-            );
-            return true;
-        }
+            .map_or((false, 0, total), |slot| {
+                (
+                    slot.history_extent_known,
+                    slot.history_offset,
+                    slot.history_total.max(slot.history_offset),
+                )
+            });
         let rect = self.display_layout().and_then(|layout| {
             layout
                 .panes
@@ -3295,11 +5356,48 @@ impl App {
                 .map(|pane| shifted_rect(pane.rect, u16::from(self.workspace_index.is_some())))
         });
         let Some(rect) = rect else { return true };
+
+        if !extent_known {
+            // Before extent discovery, use the protocol's bounded maximum only
+            // for the local thumb mapping. The read itself stays at the current
+            // offset and cannot jump the frozen view to the oldest row.
+            let conservative_total = panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS;
+            let Some(geometry) = scrollbar_geometry(
+                rect,
+                Scrollbar {
+                    offset_rows: current_offset.min(conservative_total),
+                    total_rows: conservative_total,
+                },
+            ) else {
+                return true;
+            };
+            let grab_offset = if geometry.thumb.contains(x, y) {
+                y.saturating_sub(geometry.thumb.y)
+            } else {
+                0
+            };
+            self.pointer_seek = Some(PointerSeek {
+                target,
+                layout_revision,
+                pane_rect,
+                track: geometry.track,
+                thumb_rows: geometry.thumb.rows,
+                total_rows: conservative_total,
+                start_offset: current_offset,
+                preview_offset: current_offset,
+                grab_offset,
+                last_y: y,
+                awaiting_extent: true,
+            });
+            self.discover_history_extent_for_target(target, now, effects);
+            self.dirty = true;
+            return true;
+        }
         let Some(geometry) = scrollbar_geometry(
             rect,
             Scrollbar {
                 offset_rows: offset,
-                total_rows: total,
+                total_rows: known_total,
             },
         ) else {
             return true;
@@ -3311,10 +5409,12 @@ impl App {
                 pane_rect,
                 track,
                 thumb_rows,
-                total_rows: total,
+                total_rows: known_total,
                 start_offset: offset,
                 preview_offset: offset,
                 grab_offset: y.saturating_sub(geometry.thumb.y),
+                last_y: y,
+                awaiting_extent: false,
             });
         } else {
             let page = panelink::pane_layout::content_rect(pane_rect)
@@ -3324,7 +5424,6 @@ impl App {
             } else {
                 offset.saturating_sub(page)
             };
-            self.set_focus(Some(target));
             self.seek_history_for_target(target, now, requested, effects);
         }
         self.dirty = true;
@@ -3354,6 +5453,14 @@ impl App {
                     {
                         if revision == capture.revision
                             && first_cells != capture.initial_span
+                            && self.layout.is_some_and(|layout| {
+                                layout.revision == capture.revision
+                                    && layout
+                                        .panes
+                                        .iter()
+                                        .flatten()
+                                        .any(|pane| pane.target == capture.target)
+                            })
                             && self.divider_value_valid(
                                 capture.target,
                                 capture.revision,
@@ -3391,18 +5498,22 @@ impl App {
         }
         match event {
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Drag(MouseButton::Left) => {
-                self.update_pointer_seek(mouse.row);
+                self.update_pointer_seek(mouse.row, now, effects);
             }
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Up(MouseButton::Left) => {
-                self.update_pointer_seek(mouse.row);
+                self.update_pointer_seek(mouse.row, now, effects);
                 let drag = self.pointer_seek.take();
-                if let Some(drag) = drag {
-                    if drag.preview_offset != drag.start_offset
+                if let Some(drag) = drag.filter(|drag| drag.awaiting_extent) {
+                    // Extent discovery is still in flight: apply this release
+                    // when it returns instead of silently dropping the gesture.
+                    self.deferred_thumb_release = Some(drag);
+                } else if let Some(drag) = drag {
+                    if !drag.awaiting_extent
+                        && self.latest_history_request(drag.target) != Some(drag.preview_offset)
                         && self
                             .layout
                             .is_some_and(|layout| layout.revision == drag.layout_revision)
                     {
-                        self.set_focus(Some(drag.target));
                         self.seek_history_for_target(
                             drag.target,
                             now,
@@ -3414,33 +5525,56 @@ impl App {
                 self.dirty = true;
             }
             Event::Key(key) if key.code == KeyCode::Esc && key.is_press() => {
-                self.pointer_seek = None;
+                if let Some(drag) = self.pointer_seek.take() {
+                    self.seek_history_for_target(drag.target, now, drag.start_offset, effects);
+                }
                 self.dirty = true;
             }
             Event::Resize(_, _) | Event::FocusLost => {
-                self.pointer_seek = None;
+                self.cancel_pointer_seek();
                 self.dirty = true;
             }
             _ => {}
         }
     }
 
-    fn update_pointer_seek(&mut self, y: u16) {
+    fn update_pointer_seek(&mut self, y: u16, now: Instant, effects: &mut impl Effects) {
         let Some(mut drag) = self.pointer_seek else {
             return;
         };
-        let travel = drag.track.rows.saturating_sub(drag.thumb_rows);
-        if travel == 0 {
-            return;
-        }
-        let top = y
-            .saturating_sub(drag.track.y)
-            .saturating_sub(drag.grab_offset)
-            .min(travel);
-        let older_rows = u64::from(top) * u64::from(drag.total_rows) / u64::from(travel);
-        drag.preview_offset = drag.total_rows.saturating_sub(older_rows as u16);
+        drag.last_y = y;
+        let previous = drag.preview_offset;
+        drag.preview_offset = pointer_seek_offset(drag, y);
+
         self.pointer_seek = Some(drag);
         self.dirty = true;
+        if !drag.awaiting_extent && previous != drag.preview_offset {
+            self.seek_history_for_target(drag.target, now, drag.preview_offset, effects);
+        }
+    }
+
+    fn latest_history_request(&self, target: TargetRef) -> Option<u16> {
+        self.screens
+            .iter()
+            .find(|slot| slot.target == Some(target))
+            .map(|slot| slot.history_requested)
+    }
+
+    fn cancel_pointer_seek(&mut self) {
+        if let Some(drag) = self.pointer_seek.take() {
+            if let Some(slot) = self
+                .screens
+                .iter_mut()
+                .find(|slot| slot.target == Some(drag.target))
+            {
+                slot.queued_seek = None;
+                slot.history_requested = if slot.history_pending {
+                    slot.history_inflight_offset
+                } else {
+                    slot.history_offset
+                };
+            }
+        }
     }
 
     fn begin_divider_pointer(
@@ -3498,15 +5632,10 @@ impl App {
         let local = self.local.as_ref()?;
         let revision = self.layout?.revision;
         let root_y = screen_y.checked_sub(u16::from(self.workspace_index.is_some()))?;
-        for (index, divider) in layout.dividers.iter().enumerate() {
-            let Some(divider) = divider else { continue };
-            if !divider.contains(x, root_y) {
-                continue;
-            }
-            for pane in layout.panes.iter().flatten() {
-                if let Ok(info) = local.divider_info(pane.target, revision, index as u8) {
-                    return Some((pane.target, revision, index as u8, info));
-                }
+        let (index, _) = divider_at(layout.dividers, x, root_y)?;
+        for pane in layout.panes.iter().flatten() {
+            if let Ok(info) = local.divider_info(pane.target, revision, index as u8) {
+                return Some((pane.target, revision, index as u8, info));
             }
         }
         None
@@ -3602,7 +5731,15 @@ impl App {
     }
 
     fn divider_value_valid(&self, target: TargetRef, revision: u64, index: u8, value: u16) -> bool {
-        self.layout
+        self.layout.is_some_and(|layout| {
+            layout.revision == revision
+                && layout
+                    .panes
+                    .iter()
+                    .flatten()
+                    .any(|pane| pane.target == target)
+        }) && self
+            .layout
             .and_then(|layout| local_layout(&layout))
             .is_some_and(|mut layout| layout.set_divider(target, revision, index, value).is_ok())
     }
@@ -3684,14 +5821,7 @@ impl App {
             self.set_status("selection unavailable", now);
             return;
         }
-        let point = Point {
-            row: y
-                .saturating_sub(content.y)
-                .min(content.rows.saturating_sub(1)),
-            column: x
-                .saturating_sub(content.x)
-                .min(content.columns.saturating_sub(1)),
-        };
+        let point = pointer_content_point(content, x, y);
         match capture(
             target,
             slot,
@@ -3705,20 +5835,13 @@ impl App {
                 self.selection = Some(drag);
                 self.dirty = true;
             }
-            Err(SelectionError::TooLarge) => self.set_status("selection too large", now),
-            Err(_) => self.set_status("selection unavailable", now),
+            Err(SelectionError::TooLarge) => self.fail_copy_attempt(target, "Copy too large", now),
+            Err(_) => self.set_status("Copy unavailable", now),
         }
     }
 
     fn selection_point(drag: &FrozenDrag, x: u16, y: u16) -> Point {
-        Point {
-            row: y
-                .saturating_sub(drag.content_rect.y)
-                .min(drag.content_rect.rows.saturating_sub(1)),
-            column: x
-                .saturating_sub(drag.content_rect.x)
-                .min(drag.content_rect.columns.saturating_sub(1)),
-        }
+        pointer_content_point(drag.content_rect, x, y)
     }
 
     fn extend_selection(&mut self, x: u16, y: u16) {
@@ -3757,13 +5880,15 @@ impl App {
             .ok_or(SelectionError::StaleView)
             .and_then(|identity| drag.selection.finish(identity));
         match result {
-            Ok(text) => self.queue_copy_text(text, now),
+            Ok(text) => self.queue_copy_text(drag.target, text, now),
             Err(SelectionError::Empty) => {}
             Err(SelectionError::UnknownWrap) => {
-                self.set_status("selection unavailable: line wrapping unknown", now)
+                self.fail_copy_attempt(drag.target, "Copy unavailable", now)
             }
-            Err(SelectionError::TooLarge) => self.set_status("selection too large", now),
-            Err(_) => self.set_status("selection cancelled", now),
+            Err(SelectionError::TooLarge) => {
+                self.fail_copy_attempt(drag.target, "Copy too large", now)
+            }
+            Err(_) => self.fail_copy_attempt(drag.target, "Copy cancelled", now),
         }
     }
 
@@ -3773,6 +5898,7 @@ impl App {
         y: u16,
         now: Instant,
         recovery_availability: Availability,
+        effects: &mut impl Effects,
     ) {
         self.cancel_selection();
         let (Some(local), Some(layout), true) = (self.local.as_ref(), self.layout, self.fits())
@@ -3786,31 +5912,74 @@ impl App {
             .open_at_pointer_with_recovery(local, x, y, rows, columns, recovery_availability)
             .is_ok()
         {
+            self.menu.set_compact_reasons(true);
             self.menu_revision = layout.revision;
+            if let Some(target) = self.menu.captured_target() {
+                self.open_actions_menu(
+                    target,
+                    Some(MouseButton::Right),
+                    recovery_availability,
+                    now,
+                    effects,
+                );
+            }
             self.dirty = true;
         }
     }
 
+    #[cfg(test)]
     fn open_for_focused(&mut self, now: Instant, recovery_availability: Availability) {
+        let (Some(layout), Some(target)) = (self.layout, self.focus) else {
+            self.set_status("menu unavailable: terminal too small", now);
+            return;
+        };
+        self.open_for_target(target, layout.revision, now, recovery_availability);
+    }
+
+    #[cfg(test)]
+    fn open_for_target(
+        &mut self,
+        target: TargetRef,
+        revision: u64,
+        now: Instant,
+        recovery_availability: Availability,
+    ) {
         self.cancel_selection();
-        let (Some(local), Some(layout), Some(focus), true) =
-            (self.local.as_ref(), self.layout, self.focus, self.fits())
+        let (Some(local), Some(layout), true) = (self.local.as_ref(), self.layout, self.fits())
         else {
             self.set_status("menu unavailable: terminal too small", now);
             return;
         };
+        if layout.revision != revision
+            || !layout
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == target)
+        {
+            self.set_status("menu cancelled: layout changed", now);
+            return;
+        }
         let (rows, columns) = self.viewport();
         if self
             .menu
-            .open_for_focused_with_recovery(local, focus, rows, columns, recovery_availability)
+            .open_for_focused_with_recovery(local, target, rows, columns, recovery_availability)
             .is_ok()
         {
-            self.menu_revision = layout.revision;
+            self.menu.set_compact_reasons(true);
+            self.menu_revision = revision;
             self.dirty = true;
         }
     }
 
-    fn open_actions_menu(&mut self, target: TargetRef, now: Instant, effects: &mut impl Effects) {
+    fn open_actions_menu(
+        &mut self,
+        target: TargetRef,
+        opening_release: Option<MouseButton>,
+        recovery_availability: Availability,
+        now: Instant,
+        effects: &mut impl Effects,
+    ) {
         let Some(layout) = self.layout else {
             self.set_status("pane actions unavailable: no layout", now);
             return;
@@ -3828,12 +5997,153 @@ impl App {
         self.flush(now, effects);
         self.cancel_selection();
         self.prefix = None;
+        let Some(model) = self.pane_action_model(target, layout.revision, recovery_availability)
+        else {
+            self.set_status("pane actions unavailable: layout changed", now);
+            return;
+        };
         self.actions_menu = Some(ActionsMenu {
             target,
             revision: layout.revision,
             selected: 0,
+            model,
         });
+        self.menu_release_latch = opening_release;
         self.dirty = true;
+    }
+
+    fn pane_action_model(
+        &self,
+        target: TargetRef,
+        revision: u64,
+        saved_layout: Availability,
+    ) -> Option<PaneActionModel> {
+        let local = self.local.as_ref()?;
+        let pending = self.pending_pane_operation.is_some()
+            || self.pending_split.is_some()
+            || self.pending_close.is_some();
+        let queued_input = self.pending_len != 0;
+        let pane_ops_available = self.pane_operations.is_some();
+        let zoomed_target = self.pane_operations.and_then(|view| view.zoomed_target);
+        let zoomed = zoomed_target == Some(target);
+        let zoom_conflict = zoomed_target.is_some_and(|zoomed| zoomed != target);
+        let has_divider = (0..crate::pane_layout::MAX_PANES - 1)
+            .any(|index| local.divider_info(target, revision, index as u8).is_ok());
+        let has_other_pane = self.layout.is_some_and(|layout| {
+            layout
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target != target)
+        });
+        let copy_available =
+            self.visible_source(target)
+                .is_some_and(|(_, content, snapshot, _, _)| {
+                    content.rows > 0 && content.columns > 0 && snapshot.row_wraps().is_some()
+                });
+        let showing_history = self
+            .screens
+            .iter()
+            .find(|slot| slot.target == Some(target))
+            .is_some_and(|slot| slot.history_offset > 0);
+        let available = Availability::Enabled;
+        let pending_reason =
+            Availability::Disabled(panelink::split_menu::DisabledReason::OperationPending);
+        let queued_reason =
+            Availability::Disabled(panelink::split_menu::DisabledReason::QueuedInput);
+        let server_reason = Availability::Disabled(if self.server_present {
+            panelink::split_menu::DisabledReason::ServerIncompatible
+        } else {
+            panelink::split_menu::DisabledReason::Disconnected
+        });
+        let zoom_reason = Availability::Disabled(panelink::split_menu::DisabledReason::ZoomActive);
+        let resize = if !self.server_present || !pane_ops_available {
+            server_reason
+        } else if pending {
+            pending_reason
+        } else if queued_input {
+            queued_reason
+        } else if zoomed_target.is_some() {
+            zoom_reason
+        } else if !has_divider {
+            Availability::Disabled(panelink::split_menu::DisabledReason::NoDivider)
+        } else {
+            available
+        };
+        let copy = if copy_available {
+            available
+        } else {
+            Availability::Disabled(panelink::split_menu::DisabledReason::CopyUnavailable)
+        };
+        let back_to_live = if showing_history {
+            available
+        } else {
+            Availability::Disabled(panelink::split_menu::DisabledReason::PaneUnavailable)
+        };
+        let close = if !self.server_present {
+            server_reason
+        } else if pending {
+            pending_reason
+        } else if queued_input {
+            queued_reason
+        } else if zoomed_target.is_some() {
+            zoom_reason
+        } else {
+            available
+        };
+        let zoom = if !self.server_present || !pane_ops_available {
+            server_reason
+        } else if pending {
+            pending_reason
+        } else if queued_input {
+            queued_reason
+        } else if zoom_conflict {
+            zoom_reason
+        } else {
+            available
+        };
+        let swap = if !self.server_present || !pane_ops_available {
+            server_reason
+        } else if pending {
+            pending_reason
+        } else if queued_input {
+            queued_reason
+        } else if zoomed_target.is_some() {
+            zoom_reason
+        } else if !has_other_pane {
+            Availability::Disabled(panelink::split_menu::DisabledReason::NoOtherPane)
+        } else {
+            available
+        };
+        let split = if !self.server_present {
+            server_reason
+        } else if pending {
+            pending_reason
+        } else if queued_input {
+            queued_reason
+        } else {
+            available
+        };
+        PaneActionModel::capture(
+            local,
+            target,
+            revision,
+            PaneActionAvailability {
+                split,
+                resize,
+                copy,
+                back_to_live,
+                close,
+                zoom,
+                swap,
+                saved_layout,
+                help: available,
+                detach: available,
+                showing_history,
+                zoomed,
+            },
+        )
+        .ok()
     }
 
     fn actions_menu_rect(&self) -> Option<Rect> {
@@ -3848,13 +6158,63 @@ impl App {
         })
     }
 
+    fn local_action_item(
+        &self,
+        menu: ActionsMenu,
+        index: usize,
+    ) -> Option<(PaneMenuAction, &'static str, Availability)> {
+        LOCAL_ACTIONS.get(index).copied()?;
+        let item = menu.model.item(index)?;
+        let label = if item.action == PaneMenuAction::ClosePane {
+            "--- Close pane"
+        } else {
+            item.label
+        };
+        Some((item.action, label, item.availability))
+    }
+
     /// Leave room for a title, page navigation and Cancel even at minimum
     /// pane height. Keyboard selection and pointer pages use this same slice.
+    #[cfg(test)]
     fn actions_page(&self, menu: ActionsMenu) -> (usize, usize) {
-        let capacity = usize::from(self.viewport().0.min(9).saturating_sub(3)).max(1);
+        self.actions_page_geometry(menu)
+            .map_or((0, 0), |page| (page.start, page.end))
+    }
+
+    fn actions_page_geometry(&self, menu: ActionsMenu) -> Option<ActionsMenuPage> {
+        let rect = self.actions_menu_rect()?;
+        let capacity = usize::from(rect.rows.saturating_sub(3)).max(1);
         let last_action = LOCAL_ACTIONS.len() - 1;
         let start = menu.selected.min(last_action) / capacity * capacity;
-        (start, (start + capacity).min(last_action + 1))
+        let end = (start + capacity).min(last_action + 1);
+        let reason_row = 1 + end - start;
+        let navigation_row = reason_row + 1;
+        let back = start > 0;
+        let more = end < LOCAL_ACTIONS.len();
+        let (back_column, more_column, cancel_column) = if menu.selected == LOCAL_ACTIONS.len() {
+            (None, None, 0)
+        } else {
+            match (back, more) {
+                (true, true) => (Some(0), Some(7), 14),
+                (true, false) => (Some(0), None, 7),
+                (false, true) => (None, Some(0), 7),
+                (false, false) => (None, None, 0),
+            }
+        };
+        let cancel_row = navigation_row;
+        Some(ActionsMenuPage {
+            rect,
+            start,
+            end,
+            action_row: 1,
+            reason_row,
+            navigation_row,
+            cancel_row,
+            line_count: cancel_row + 1,
+            back_column,
+            more_column,
+            cancel_column,
+        })
     }
 
     fn handle_actions_menu_event(
@@ -3871,6 +6231,7 @@ impl App {
             Event::Key(key) if key.is_press() || key.is_repeat() => {
                 if key.code == KeyCode::Esc && key.modifiers.is_empty() {
                     self.actions_menu = None;
+                    self.menu.close();
                 } else if key.code == KeyCode::Up {
                     menu.selected =
                         (menu.selected + LOCAL_ACTIONS.len()) % (LOCAL_ACTIONS.len() + 1);
@@ -3880,41 +6241,106 @@ impl App {
                     self.actions_menu = Some(menu);
                 } else if key.code == KeyCode::Enter {
                     return self.activate_local_action(menu, now, recovery_availability, effects);
+                } else if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                    && matches!(
+                        key.code,
+                        KeyCode::Char('l' | 'L' | 'r' | 'R' | 'u' | 'U' | 'd' | 'D')
+                    )
+                {
+                    let direction = match key.code {
+                        KeyCode::Char('l' | 'L') => SplitDirection::Left,
+                        KeyCode::Char('r' | 'R') => SplitDirection::Right,
+                        KeyCode::Char('u' | 'U') => SplitDirection::Up,
+                        KeyCode::Char('d' | 'D') => SplitDirection::Down,
+                        _ => unreachable!("guarded split direction"),
+                    };
+                    let split_index = match direction {
+                        SplitDirection::Left => 0,
+                        SplitDirection::Right => 1,
+                        SplitDirection::Up => 2,
+                        SplitDirection::Down => 3,
+                    };
+                    if menu.model.items()[split_index].availability == Availability::Enabled {
+                        self.actions_menu = None;
+                        self.menu.close();
+                        self.activate(
+                            SplitIntent {
+                                target: menu.target,
+                                expected_layout_revision: menu.revision,
+                                direction,
+                            },
+                            now,
+                            effects,
+                        );
+                        return Flow::Continue;
+                    }
+                    menu.selected = split_index;
+                    self.actions_menu = Some(menu);
+                    self.set_status("split unavailable; see the menu reason", now);
+                } else if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                    && matches!(key.code, KeyCode::Char('v' | 'V'))
+                {
+                    if recovery_availability == Availability::Enabled {
+                        self.actions_menu = None;
+                        self.menu.close();
+                        return Flow::ViewRecovery;
+                    }
+                    self.set_status("No previous layout saved", now);
                 }
                 self.dirty = true;
             }
-            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(rect) = self.actions_menu_rect() {
+            Event::Mouse(mouse)
+                if matches!(
+                    mouse.kind,
+                    MouseEventKind::Down(MouseButton::Left | MouseButton::Right)
+                ) =>
+            {
+                if let Some(page) = self.actions_page_geometry(menu) {
+                    let rect = page.rect;
                     let offset = u16::from(self.workspace_index.is_some());
-                    if mouse.column >= rect.x
+                    let inside = mouse.column >= rect.x
                         && mouse.column < rect.x.saturating_add(rect.columns)
+                        && mouse.row >= rect.y.saturating_add(offset)
+                        && mouse.row < rect.y.saturating_add(rect.rows + offset);
+                    if !inside {
+                        self.actions_menu = None;
+                        self.menu.close();
+                        self.dirty = true;
+                        return Flow::Continue;
+                    }
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                         && mouse.row >= rect.y.saturating_add(1 + offset)
-                        && mouse.row < rect.y.saturating_add(rect.rows + offset)
                     {
-                        let index = usize::from(mouse.row - rect.y - 1 - offset);
-                        let (start, end) = self.actions_page(menu);
-                        let count = end - start;
-                        if index < count {
-                            menu.selected = start + index;
+                        let row = usize::from(mouse.row - rect.y - offset);
+                        if (page.action_row..page.reason_row).contains(&row) {
+                            menu.selected = page.start + row - page.action_row;
                             return self.activate_local_action(
                                 menu,
                                 now,
                                 recovery_availability,
                                 effects,
                             );
-                        } else if index == count {
-                            let back = start > 0;
-                            let more = end < LOCAL_ACTIONS.len();
-                            if back && (!more || mouse.column < rect.x + 8) {
-                                menu.selected = start.saturating_sub(1);
-                            } else if more {
-                                menu.selected = end;
+                        } else if row == page.navigation_row {
+                            let column = mouse.column.saturating_sub(rect.x);
+                            if column >= page.cancel_column
+                                && column < page.cancel_column.saturating_add(8)
+                            {
+                                self.actions_menu = None;
+                                self.menu.close();
+                                self.dirty = true;
+                            } else if page.back_column.is_some_and(|start| {
+                                column >= start && column < start.saturating_add(6)
+                            }) {
+                                menu.selected = page.start.saturating_sub(1);
+                                self.actions_menu = Some(menu);
+                                self.dirty = true;
+                            } else if page.more_column.is_some_and(|start| {
+                                column >= start && column < start.saturating_add(6)
+                            }) {
+                                menu.selected = page.end;
+                                self.actions_menu = Some(menu);
+                                self.dirty = true;
                             }
-                            self.actions_menu = Some(menu);
-                            self.dirty = true;
-                        } else if index == count + 1 {
-                            self.actions_menu = None;
-                            self.dirty = true;
                         }
                     }
                 }
@@ -3934,6 +6360,7 @@ impl App {
     ) -> Flow {
         let Some(layout) = self.layout else {
             self.actions_menu = None;
+            self.menu.close();
             return Flow::Continue;
         };
         if layout.revision != menu.revision
@@ -3944,21 +6371,59 @@ impl App {
                 .any(|pane| pane.target == menu.target)
         {
             self.actions_menu = None;
+            self.menu.close();
             self.set_status("pane actions cancelled: layout changed", now);
             return Flow::Continue;
         }
-        self.actions_menu = None;
         let Some(action) = LOCAL_ACTIONS.get(menu.selected).copied() else {
+            self.actions_menu = None;
+            self.menu.close();
             self.dirty = true;
             return Flow::Continue;
         };
-        self.set_focus(Some(menu.target));
+        if menu.selected < LOCAL_ACTIONS.len()
+            && self
+                .local_action_item(menu, menu.selected)
+                .is_some_and(|(_, _, availability)| availability != Availability::Enabled)
+        {
+            self.actions_menu = Some(menu);
+            self.set_status(
+                if action == LocalAction::SavedLayout {
+                    "No previous layout saved"
+                } else {
+                    "action unavailable; see the menu reason"
+                },
+                now,
+            );
+            return Flow::Continue;
+        }
+        self.actions_menu = None;
+        if !matches!(action, LocalAction::Split(_)) {
+            self.menu.close();
+        }
         match action {
-            LocalAction::Split => self.open_for_focused(now, recovery_availability),
-            LocalAction::Zoom => self.toggle_zoom(now, effects),
-            LocalAction::Swap => self.open_swap_mode(now, effects),
-            LocalAction::Divider => self.open_divider_mode(now, effects),
-            LocalAction::Copy => self.begin_copy_mode(now),
+            LocalAction::Split(direction) => self.activate(
+                SplitIntent {
+                    target: menu.target,
+                    expected_layout_revision: menu.revision,
+                    direction,
+                },
+                now,
+                effects,
+            ),
+            LocalAction::Zoom => {
+                self.toggle_zoom_for_target(menu.target, menu.revision, now, effects)
+            }
+            LocalAction::Swap => {
+                self.open_swap_mode_for_target(menu.target, menu.revision, now, effects)
+            }
+            LocalAction::Divider => {
+                self.open_divider_mode_for_target(menu.target, menu.revision, now, effects)
+            }
+            LocalAction::Copy => match menu.model.item(5).map(|item| item.action) {
+                Some(PaneMenuAction::BackToLive) => self.return_to_live(menu.target),
+                _ => self.begin_copy_mode_for_target(menu.target, now),
+            },
             LocalAction::SavedLayout => {
                 if recovery_availability == Availability::Enabled {
                     return Flow::ViewRecovery;
@@ -3966,7 +6431,7 @@ impl App {
                 self.set_status("No previous layout saved", now);
             }
             LocalAction::Help => self.help_open = true,
-            LocalAction::Close => self.confirm_close_focused(now),
+            LocalAction::Close => self.confirm_close_target(menu.target, menu.revision, now),
             LocalAction::Detach => {
                 self.flush(now, effects);
                 return Flow::Quit;
@@ -3980,6 +6445,10 @@ impl App {
     /// always starts at revision 1, so the server revision captured together
     /// with the menu (`menu_revision`) replaces the mirror's revision.
     fn activate(&mut self, intent: SplitIntent, now: Instant, effects: &mut impl Effects) {
+        if !self.server_present {
+            self.set_status("Disconnected", now);
+            return;
+        }
         if self.pending_pane_operation.is_some() {
             self.set_status("pane operation pending", now);
             return;
@@ -4004,6 +6473,16 @@ impl App {
             self.set_status("split unavailable: no layout", now);
             return;
         };
+        if layout.revision != intent.expected_layout_revision
+            || !layout
+                .panes
+                .iter()
+                .flatten()
+                .any(|pane| pane.target == intent.target)
+        {
+            self.set_status("split unavailable: layout changed; reopen the menu", now);
+            return;
+        }
         let Ok((rows, columns)) = planned_split_size(&layout, intent.target, intent.direction)
         else {
             self.set_status("split unavailable: layout changed; reopen the menu", now);
@@ -4011,14 +6490,15 @@ impl App {
         };
         let plan = SplitPlan {
             target: intent.target,
-            expected_layout_revision: self.menu_revision,
+            expected_layout_revision: intent.expected_layout_revision,
             direction: intent.direction,
             rows,
             columns,
         };
         let request_id = self.next_request_id();
         let focus_generation = self.focus_generation;
-        self.pending_split = Some((request_id, focus_generation, plan.target));
+        let route = self.current_route;
+        self.pending_split = Some((request_id, focus_generation, plan.target, route));
         match effects.split(plan, request_id, focus_generation) {
             Ok(Some(new_target)) => {
                 self.complete_split(
@@ -4029,9 +6509,12 @@ impl App {
                     now,
                 );
             }
-            Ok(None) => self.set_status("split pending", now),
+            Ok(None) => self.set_persistent_status("Applying…", now),
             Err(label) => {
                 self.pending_split = None;
+                if is_uncertain_mutation_error(label) {
+                    self.set_persistent_status("Outcome unknown", now);
+                }
                 self.set_status(label, now)
             }
         }
@@ -4055,6 +6538,8 @@ impl App {
         }
         let mut panes = [None; crate::pane_layout::MAX_PANES];
         let mut scrollbars = [None; crate::pane_layout::MAX_PANES];
+        let mut history_controls = [None; crate::pane_layout::MAX_PANES];
+        let mut labels = [None; crate::pane_layout::MAX_PANES];
         let mut divider = None;
         let mut dividers = [None; crate::pane_layout::MAX_PANES - 1];
         let mut focused = None;
@@ -4063,6 +6548,11 @@ impl App {
         if let (Some(layout), true) = (display_layout, fits) {
             for (index, pane) in layout.panes.iter().enumerate() {
                 let Some(pane) = pane else { continue };
+                if self.copied_feedback[index]
+                    .is_some_and(|(target, expires_at)| target == pane.target && now < expires_at)
+                {
+                    labels[index] = Some("Copied");
+                }
                 let screen = self
                     .screens
                     .iter()
@@ -4121,15 +6611,19 @@ impl App {
                     (false, Some(_), None) => PaneContent::Placeholder("pane too small"),
                 };
                 if let (false, Some(slot), PaneContent::Snapshot(_)) = (pending, screen, content) {
+                    history_controls[index] = history_label_kind(slot);
                     if !slot.snapshot.alternate_screen() {
                         scrollbars[index] = Some(Scrollbar {
+                            // A capture still awaiting extent discovery has
+                            // only a conservative range; draw the real view
+                            // until the discovered extent can map the pointer.
                             offset_rows: self
                                 .pointer_seek
-                                .filter(|drag| drag.target == pane.target)
+                                .filter(|drag| drag.target == pane.target && !drag.awaiting_extent)
                                 .map_or(slot.history_offset, |drag| drag.preview_offset),
                             total_rows: self
                                 .pointer_seek
-                                .filter(|drag| drag.target == pane.target)
+                                .filter(|drag| drag.target == pane.target && !drag.awaiting_extent)
                                 .map_or(slot.history_total.max(slot.history_offset), |drag| {
                                     drag.total_rows
                                 }),
@@ -4153,6 +6647,7 @@ impl App {
         let (view_rows, view_columns) = self.viewport();
         let menu_lines = self.menu.overlay_lines();
         let confirm = self.confirm_ui_geometry(view_rows, view_columns);
+        let confirm_text: String;
         let mut lines = [OverlayLine {
             text: "",
             style: OverlayStyle::Normal,
@@ -4160,6 +6655,9 @@ impl App {
         let mut action_text: [String; panelink::split_menu::MAX_OVERLAY_ROWS] =
             std::array::from_fn(|_| String::new());
         let action_count = if let Some(menu) = self.actions_menu {
+            let Some(page) = self.actions_page_geometry(menu) else {
+                return Ok(());
+            };
             let pane = self
                 .layout
                 .and_then(|layout| {
@@ -4169,47 +6667,58 @@ impl App {
                         .position(|pane| pane.is_some_and(|pane| pane.target == menu.target))
                 })
                 .map_or(1, |index| index + 1);
-            let (start, end) = self.actions_page(menu);
-            action_text[0] = format!("Pane {pane} actions (Esc cancels)");
-            const LABELS: [&str; 9] = [
-                "Split pane...",
-                "Zoom / unzoom",
-                "Swap pane",
-                "Resize divider",
-                "Keyboard copy",
-                "Saved layout",
-                "Shortcut help",
-                "Close pane...",
-                "Detach",
-            ];
-            for (row, index) in (start..end).enumerate() {
-                action_text[row + 1] = format!(
-                    "{} {}",
-                    if menu.selected == index { ">" } else { " " },
-                    LABELS[index]
-                );
-            }
-            let count = end - start;
-            action_text[count + 1] = match (start > 0, end < LABELS.len()) {
-                (true, true) => "[Back]  [More]",
-                (true, false) => "[Back]",
-                (false, true) => "[More]",
-                (false, false) => "",
-            }
-            .into();
-            action_text[count + 2] = if menu.selected == LOCAL_ACTIONS.len() {
-                "> [Cancel]"
+            let (start, end) = (page.start, page.end);
+            action_text[0] = if end < LOCAL_ACTIONS.len() {
+                format!("Pane {pane} actions: Split pane... (More: Zoom)")
             } else {
-                "  [Cancel]"
+                format!("Pane {pane} actions (Esc cancels)")
+            };
+            for (row, index) in (start..end).enumerate() {
+                let (action, label, availability) = self
+                    .local_action_item(menu, index)
+                    .expect("bounded local action index");
+                let marker = if menu.selected == index { "> " } else { "  " };
+                action_text[page.action_row + row] = match (action, availability) {
+                    (PaneMenuAction::Split(direction), Availability::Disabled(reason)) => {
+                        format!(
+                            "{marker}{} - {}",
+                            split_menu_direction(direction),
+                            reason.compact_label()
+                        )
+                    }
+                    _ => format!("{marker}{label}"),
+                };
+                if menu.selected == index {
+                    action_text[page.reason_row] = match availability {
+                        Availability::Enabled => String::from("Enter: activate"),
+                        Availability::Disabled(reason) if page.rect.columns < 36 => {
+                            reason.compact_label()
+                        }
+                        Availability::Disabled(reason) => reason.to_string(),
+                    };
+                }
             }
-            .into();
-            count + 3
+            if menu.selected == LOCAL_ACTIONS.len() {
+                action_text[page.reason_row] = "Cancel menu".into();
+            }
+            action_text[page.navigation_row] = if menu.selected == LOCAL_ACTIONS.len() {
+                "> [Cancel]".into()
+            } else {
+                match (start > 0, end < LOCAL_ACTIONS.len()) {
+                    (true, true) => "[Back] [More] [Cancel]".into(),
+                    (true, false) if start > 3 => "[Back] [Cancel] Close on prior page".into(),
+                    (true, false) => "[Back] [Cancel]".into(),
+                    (false, true) => "[More] [Cancel]".into(),
+                    (false, false) => "[Cancel]".into(),
+                }
+            };
+            page.line_count
         } else {
             0
         };
         let mut picker_text: [String; panelink::split_menu::MAX_OVERLAY_ROWS] =
             std::array::from_fn(|_| String::new());
-        let picker_count = if self.picker_selection.is_some() {
+        let picker_count = if self.picker_open {
             self.picker_overlay_text(&mut picker_text)
         } else {
             0
@@ -4222,9 +6731,74 @@ impl App {
                 } else if self
                     .picker_routes()
                     .get(self.picker_scroll_offset().unwrap_or(0) + index.saturating_sub(1))
-                    == self.picker_selection.as_ref()
+                    .is_some_and(|route| Some(*route) == self.picker_selection)
                 {
                     OverlayStyle::Selected
+                } else {
+                    OverlayStyle::Normal
+                },
+            };
+        }
+        let mut tab_dialog_text = [String::new(), String::new(), String::new(), String::new()];
+        let mut tab_dialog_selected = [false; 4];
+        let tab_dialog_count = match self.tab_dialog.as_ref() {
+            Some(TabDialog::Actions { selected, .. }) => {
+                tab_dialog_text[0] = "Tab actions (Esc cancels)".into();
+                let labels = ["Select tab", "Rename", "Close tab"];
+                for (index, label) in labels.iter().enumerate() {
+                    tab_dialog_text[index + 1] =
+                        format!("{} [{}]", if *selected == index { ">" } else { " " }, label);
+                    tab_dialog_selected[index + 1] = *selected == index;
+                }
+                4
+            }
+            Some(TabDialog::Rename {
+                draft,
+                error,
+                saving,
+                ..
+            }) => {
+                tab_dialog_text[0] = "Rename tab (Enter saves; Esc cancels)".into();
+                tab_dialog_text[1] =
+                    format!("Name: {draft}{}", if *saving { " (saving)" } else { "_" });
+                tab_dialog_text[2] = error.unwrap_or(" ").to_owned();
+                tab_dialog_text[3] = "[Save] [Cancel]".into();
+                tab_dialog_selected[0] = true;
+                if error.is_some() {
+                    tab_dialog_selected[2] = true;
+                }
+                4
+            }
+            Some(TabDialog::Close {
+                close_selected,
+                pending,
+                ..
+            }) => {
+                tab_dialog_text[0] = if *close_selected {
+                    "Close selected: close tab"
+                } else {
+                    "Cancel selected: close tab"
+                }
+                .into();
+                tab_dialog_text[1] = "Ends all tab processes".into();
+                tab_dialog_text[2] = "[Close tab] [Cancel]".into();
+                if *pending {
+                    tab_dialog_text[1] = "Closing tab; verifying process stop...".into();
+                    tab_dialog_text[2] = "Close pending".into();
+                }
+                tab_dialog_selected[0] = true;
+                tab_dialog_selected[2] = !close_selected && !pending;
+                3
+            }
+            None => 0,
+        };
+        for (index, text) in tab_dialog_text.iter().enumerate().take(tab_dialog_count) {
+            lines[index] = OverlayLine {
+                text,
+                style: if tab_dialog_selected[index] {
+                    OverlayStyle::Selected
+                } else if index == 0 {
+                    OverlayStyle::Status
                 } else {
                     OverlayStyle::Normal
                 },
@@ -4318,8 +6892,10 @@ impl App {
             }
             None => 0,
         };
+        let empty_geometry = self.empty_action_geometry();
+        let mut empty_text = [String::new(), String::new()];
         let overlay = if self.help_open && view_rows > 0 && view_columns > 0 {
-            let help_lines = if header_enabled {
+            let help_lines: &[&str] = if header_enabled {
                 &WORKSPACE_HELP_LINES
             } else {
                 &HELP_LINES
@@ -4353,24 +6929,47 @@ impl App {
                 },
                 usize::from(rows),
             ))
-        } else if action_count > 0 {
-            for (index, text) in action_text.iter().enumerate().take(action_count) {
-                lines[index] = OverlayLine {
-                    text,
-                    style: if index == 0 || text.starts_with('>') {
-                        OverlayStyle::Selected
-                    } else {
-                        OverlayStyle::Normal
-                    },
-                };
-            }
-            let rect = self.actions_menu_rect().unwrap_or(Rect {
+        } else if tab_dialog_count > 0 {
+            let rect = self.tab_dialog_geometry().unwrap_or(Rect {
                 x: 0,
                 y: 0,
                 rows: 0,
                 columns: 0,
             });
-            Some((rect, action_count.min(usize::from(rect.rows))))
+            Some((rect, tab_dialog_count.min(usize::from(rect.rows))))
+        } else if action_count > 0 {
+            let page = self
+                .actions_menu
+                .and_then(|menu| self.actions_page_geometry(menu))
+                .expect("actions menu page was rendered above");
+            for (index, text) in action_text.iter().enumerate().take(action_count) {
+                lines[index] = OverlayLine {
+                    text,
+                    style: if index == 0 {
+                        OverlayStyle::Selected
+                    } else if index == page.reason_row {
+                        OverlayStyle::Status
+                    } else if text.starts_with('>') {
+                        OverlayStyle::Selected
+                    } else if self.actions_menu.is_some_and(|menu| {
+                        (page.start..page.end)
+                            .contains(&(page.start + index.saturating_sub(page.action_row)))
+                            && self
+                                .local_action_item(
+                                    menu,
+                                    page.start + index.saturating_sub(page.action_row),
+                                )
+                                .is_some_and(|(_, _, availability)| {
+                                    availability != Availability::Enabled
+                                })
+                    }) {
+                        OverlayStyle::Disabled
+                    } else {
+                        OverlayStyle::Normal
+                    },
+                };
+            }
+            Some((page.rect, action_count.min(usize::from(page.rect.rows))))
         } else if pane_mode_count > 0 {
             for (index, text) in pane_mode_text.iter().enumerate().take(pane_mode_count) {
                 lines[index] = OverlayLine {
@@ -4404,19 +7003,25 @@ impl App {
             }
             Some((rect, menu_lines.len()))
         } else if let Some(geometry) = confirm {
+            confirm_text = format!(
+                "Close pane {}? {}. (y/n)",
+                geometry.position, geometry.consequence
+            );
             lines[0] = OverlayLine {
-                text: geometry.warning,
-                style: OverlayStyle::Selected,
+                text: &confirm_text,
+                style: OverlayStyle::Status,
             };
             lines[1] = OverlayLine {
-                text: "[Close] [Cancel]",
-                style: OverlayStyle::Selected,
+                text: if self.confirm_close_selected {
+                    "[Close]> [Cancel]"
+                } else {
+                    "[Close] >[Cancel]"
+                },
+                style: OverlayStyle::Normal,
             };
             Some((geometry.overlay, usize::from(geometry.overlay.rows)))
-        } else if let (Some((top, rows)), true) = (
-            self.picker_screen_geometry(),
-            self.picker_selection.is_some(),
-        ) {
+        } else if let (Some((top, rows)), true) = (self.picker_screen_geometry(), self.picker_open)
+        {
             Some((
                 Rect {
                     x: 0,
@@ -4426,13 +7031,51 @@ impl App {
                 },
                 usize::from(rows).min(picker_count),
             ))
+        } else if self.is_empty_workspace() {
+            empty_geometry.map(|geometry| {
+                empty_text[0] = centered_ascii(
+                    if let Some(pending) = self.pending_create {
+                        if pending.awaiting_reconcile {
+                            "Create outcome unknown; New tab rechecks it"
+                        } else {
+                            "Opening tab..."
+                        }
+                    } else {
+                        EMPTY_MESSAGE
+                    },
+                    view_columns,
+                );
+                empty_text[1] = centered_ascii(EMPTY_ACTIONS, view_columns);
+                lines[0] = OverlayLine {
+                    text: &empty_text[0],
+                    style: OverlayStyle::Status,
+                };
+                lines[1] = OverlayLine {
+                    text: &empty_text[1],
+                    style: OverlayStyle::Selected,
+                };
+                (geometry.overlay, 2)
+            })
         } else {
-            let notice = if self.copy_mode {
+            let notice = if !self.server_present {
+                Some(("Disconnected", view_rows.saturating_sub(1)))
+            } else if let Some(label) = self.persistent_status {
+                Some((label, view_rows.saturating_sub(1)))
+            } else if self.copy_mode {
                 None
             } else if self.route_switching {
                 Some((
                     self.route_switch_notice
                         .unwrap_or("workspace switch preparing"),
+                    view_rows.saturating_sub(1),
+                ))
+            } else if let Some(pending) = self.pending_create {
+                Some((
+                    if pending.awaiting_reconcile {
+                        "Create outcome unknown; press + to reconcile"
+                    } else {
+                        "Opening tab..."
+                    },
                     view_rows.saturating_sub(1),
                 ))
             } else if !fits && self.layout.is_some() {
@@ -4519,12 +7162,16 @@ impl App {
         } else {
             None
         };
-        compositor.render_with_chrome(
+        compositor.render_with_history_controls(
             &frame,
             selection,
             caret,
             tabs_layout.as_ref().map(|layout| layout.header_cells()),
-            scrollbars,
+            PaneChrome {
+                scrollbars,
+                history: history_controls,
+                labels,
+            },
             output,
         )
     }
@@ -4534,19 +7181,17 @@ impl App {
         lines: &mut [String; panelink::split_menu::MAX_OVERLAY_ROWS],
     ) -> usize {
         let routes = self.picker_routes();
-        let Some(selected) = self.picker_selection else {
-            return 0;
-        };
         let Some(offset) = self.picker_scroll_offset() else {
             return 0;
         };
         let Some(index) = self.workspace_index.as_ref() else {
             return 0;
         };
-        let Some(project) = index.project(selected.project).ok() else {
-            return 0;
-        };
-        lines[0] = format!("Project: {}  (Esc closes)", project.display_name());
+        lines[0] = format!("[Clear] All tabs: {} (Esc closes)", self.picker_filter);
+        if routes.is_empty() {
+            lines[1] = "No tabs match your search.".into();
+            return 2;
+        }
         let visible = self
             .picker_visible_route_count()
             .min(lines.len().saturating_sub(1));
@@ -4581,6 +7226,19 @@ impl App {
 fn shifted_rect(mut rect: Rect, rows: u16) -> Rect {
     rect.y = rect.y.saturating_add(rows);
     rect
+}
+
+fn is_clipboard_failure_label(label: &str) -> bool {
+    label == ClipboardStatus::Unavailable.label() || label.starts_with("Copy ")
+}
+
+fn is_uncertain_mutation_error(label: &str) -> bool {
+    label.contains("unknown")
+        || label.contains("pending")
+        || label.contains("progress")
+        || label.contains("connection")
+        || label.contains("timed out")
+        || label.contains("lost")
 }
 
 fn normalize_point(snapshot: &ScreenSnapshot, point: Point) -> Point {
@@ -4630,6 +7288,89 @@ fn compose_style(style: MenuStyle) -> OverlayStyle {
         MenuStyle::Disabled => OverlayStyle::Disabled,
         MenuStyle::Border => OverlayStyle::Border,
         MenuStyle::Status => OverlayStyle::Status,
+    }
+}
+
+fn split_menu_direction(direction: SplitDirection) -> &'static str {
+    match direction {
+        SplitDirection::Left => "Split Left",
+        SplitDirection::Right => "Split Right",
+        SplitDirection::Up => "Split Up",
+        SplitDirection::Down => "Split Down",
+    }
+}
+
+fn presentation_index(
+    snapshot: &TabPresentationSnapshot,
+    current: Option<WorkspaceRouteId>,
+) -> Option<WorkspaceIndex> {
+    let has_routes = snapshot
+        .projects
+        .iter()
+        .any(|project| !project.tabs.is_empty());
+    match current {
+        Some(route)
+            if !snapshot.projects.iter().any(|project| {
+                project.id == route.project && project.tabs.iter().any(|tab| tab.route == route)
+            }) =>
+        {
+            return None;
+        }
+        None if has_routes || snapshot.active_route.is_some() => return None,
+        _ => {}
+    }
+
+    let mut index = WorkspaceIndex::new();
+    for project in &snapshot.projects {
+        let first = project.tabs.first()?;
+        if first.route.project != project.id {
+            return None;
+        }
+        index
+            .add_project(
+                project.id,
+                &project.display_name,
+                first.route.tab,
+                &first.display_name,
+            )
+            .ok()?;
+        for tab in project.tabs.iter().skip(1) {
+            if tab.route.project != project.id {
+                return None;
+            }
+            index
+                .add_tab(project.id, tab.route.tab, &tab.display_name)
+                .ok()?;
+        }
+    }
+    if let Some(route) = current {
+        index.select_tab(route.project, route.tab).ok()?;
+    }
+    Some(index)
+}
+
+fn centered_ascii(text: &str, columns: u16) -> String {
+    let padding = usize::from(columns).saturating_sub(text.len()) / 2;
+    format!("{}{}", " ".repeat(padding), text)
+}
+
+fn valid_tab_name(name: &str) -> bool {
+    (1..=MAX_DISPLAY_NAME_BYTES).contains(&name.len())
+        && !name.trim().is_empty()
+        && name.trim() == name
+        && !name.chars().any(char::is_control)
+}
+
+fn lifecycle_error_label(error: LifecycleError) -> &'static str {
+    match error {
+        LifecycleError::MetadataUnavailable => "workspace metadata unavailable",
+        LifecycleError::InvalidRoute => "workspace tab unavailable",
+        LifecycleError::InvalidName => "tab name is invalid",
+        LifecycleError::TabLimitReached => "project tab limit reached",
+        LifecycleError::RevisionConflict => "workspace metadata changed; refresh and retry",
+        LifecycleError::IntentConflict => "tab creation intent conflict",
+        LifecycleError::IntentUncertain => "tab creation outcome unknown",
+        LifecycleError::LaunchContextInvalid => "launch context unavailable",
     }
 }
 

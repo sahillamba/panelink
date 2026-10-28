@@ -88,20 +88,22 @@
 //!
 //! ScreenReply (carried in one `MessageKind::Snapshot` frame): `0 schema |
 //! 2 kind 0x8002 | 4 target (40) | 44 screen revision u64 nonzero | 52
-//! checkpoint length u32 | 56 wrap marker u16 | 58 reserved 6 zero | 64
+//! checkpoint length u32 | 56 extension flags u16 | 58 reserved 6 zero | 64
 //! checkpoint bytes` where the checkpoint is one complete `screen_checkpoint`
 //! record for the same target. Without the separately negotiated row-wrap
-//! capability, the marker is zero and the payload ends after the checkpoint.
-//! With it, marker bit 0 may announce a packed LSB-first row-wrap bitmap after
-//! the checkpoint; all other marker bits remain zero.
+//! capability, extension bit 0 is zero. Bit 0 may announce a packed LSB-first
+//! row-wrap bitmap after the checkpoint. Separately negotiated history-cursor
+//! bit 1 appends a fixed 16-byte big-endian `(epoch, ordinal)` cursor after any
+//! bitmap. Absent extensions preserve the legacy bytes exactly.
 //!
 //! HistoryReply (Snapshot frame) uses the ScreenReply layout with the offset
 //! at 52, mode flags at 54 (bit 0 alternate screen, bit 1 mouse reporting,
-//! bit 2 negotiated wrap-bitmap marker), checkpoint length at 56, four
+//! bit 2 negotiated wrap-bitmap marker, bit 3 history-cursor marker), checkpoint length at 56, four
 //! reserved zero bytes at 60, and checkpoint bytes at 64. When marked, the
-//! packed LSB-first row-wrap bitmap follows the checkpoint. Alternate-screen
-//! history is clamped to zero so a hidden shell buffer is never shown as app
-//! content.
+//! packed LSB-first row-wrap bitmap follows the checkpoint; a marked cursor
+//! follows the bitmap as a fixed 16-byte big-endian `(epoch, ordinal)` trailer.
+//! Alternate-screen history is clamped to zero so a hidden shell buffer is
+//! never shown as app content.
 //!
 //! ResizeReply: `0 schema | 2 kind 0x8003 | 4 key (24) | 28 status u16 (1
 //! Applied, 2 ResizePending) | 30 pending pane flags u16 (bit i = spatial pane
@@ -148,6 +150,8 @@ pub const LAYOUT_REPLY_BYTES: usize = 424;
 pub const SCREEN_REPLY_HEADER_BYTES: usize = 64;
 /// Maximum number of bytes in a packed row-wrap bitmap (80 terminal rows).
 pub const MAX_ROW_WRAP_BITMAP_BYTES: usize = 10;
+/// Fixed wire size of the optional history-cursor trailer.
+pub const HISTORY_CURSOR_TRAILER_BYTES: usize = 16;
 /// Exact size of a ResizeReply.
 pub const RESIZE_REPLY_BYTES: usize = 48;
 
@@ -169,11 +173,15 @@ const MAX_SCREEN_REPLY_CHECKPOINT_BYTES: usize =
     crate::screen_checkpoint::MAX_SCREEN_CHECKPOINT_BYTES;
 
 /// Maximum complete ScreenReply payload (header plus largest checkpoint).
-pub const MAX_SCREEN_REPLY_BYTES: usize =
-    SCREEN_REPLY_HEADER_BYTES + MAX_SCREEN_REPLY_CHECKPOINT_BYTES + MAX_ROW_WRAP_BITMAP_BYTES;
+pub const MAX_SCREEN_REPLY_BYTES: usize = SCREEN_REPLY_HEADER_BYTES
+    + MAX_SCREEN_REPLY_CHECKPOINT_BYTES
+    + MAX_ROW_WRAP_BITMAP_BYTES
+    + HISTORY_CURSOR_TRAILER_BYTES;
 /// Maximum complete HistoryReply payload (header plus checkpoint).
-pub const MAX_HISTORY_REPLY_BYTES: usize =
-    SCREEN_REPLY_HEADER_BYTES + MAX_SCREEN_REPLY_CHECKPOINT_BYTES + MAX_ROW_WRAP_BITMAP_BYTES;
+pub const MAX_HISTORY_REPLY_BYTES: usize = SCREEN_REPLY_HEADER_BYTES
+    + MAX_SCREEN_REPLY_CHECKPOINT_BYTES
+    + MAX_ROW_WRAP_BITMAP_BYTES
+    + HISTORY_CURSOR_TRAILER_BYTES;
 /// Fixed MouseWheelInput request size.
 pub const MOUSE_WHEEL_INPUT_BYTES: usize = 88;
 
@@ -534,6 +542,16 @@ impl fmt::Debug for LayoutReply {
     }
 }
 
+/// Row identity in the server's normal-history stream, distinct from visible
+/// screen revisions and retained-history offsets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WireHistoryCursor {
+    /// Nonzero history epoch; changes when normal history is reset/invalidated.
+    pub epoch: u64,
+    /// Number of normal-history rows accepted in this epoch.
+    pub ordinal: u64,
+}
+
 /// Borrowed decoded screen reply.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ScreenReplyView<'a> {
@@ -542,6 +560,7 @@ pub struct ScreenReplyView<'a> {
     checkpoint: &'a [u8],
     rows: u16,
     wraps: Option<&'a [u8]>,
+    history_cursor: Option<WireHistoryCursor>,
 }
 
 impl<'a> ScreenReplyView<'a> {
@@ -563,6 +582,11 @@ impl<'a> ScreenReplyView<'a> {
     /// Whether this reply included negotiated authoritative row-wrap metadata.
     pub const fn wrap_metadata_available(&self) -> bool {
         self.wraps.is_some()
+    }
+
+    /// Normal-history cursor included by the separately negotiated capability.
+    pub const fn history_cursor(&self) -> Option<WireHistoryCursor> {
+        self.history_cursor
     }
 
     /// Whether the zero-based checkpoint row soft-wraps into the next row.
@@ -594,6 +618,7 @@ pub struct HistoryReplyView<'a> {
     checkpoint: &'a [u8],
     rows: u16,
     wraps: Option<&'a [u8]>,
+    history_cursor: Option<WireHistoryCursor>,
 }
 
 impl<'a> HistoryReplyView<'a> {
@@ -630,6 +655,12 @@ impl<'a> HistoryReplyView<'a> {
     /// Whether this reply included negotiated authoritative row-wrap metadata.
     pub const fn wrap_metadata_available(&self) -> bool {
         self.wraps.is_some()
+    }
+
+    /// Normal-history cursor included by the separately negotiated capability.
+    /// It is absent while the pane is in alternate-screen mode.
+    pub const fn history_cursor(&self) -> Option<WireHistoryCursor> {
+        self.history_cursor
     }
 
     /// Whether the zero-based checkpoint row soft-wraps into the next row.
@@ -1045,35 +1076,60 @@ pub fn prefix_screen_reply(
     Ok(checkpoint)
 }
 
+/// Prefix a ScreenReply with optional negotiated row-wrap and history-cursor
+/// extensions. The row-wrap bitmap precedes the fixed-size cursor trailer.
+pub fn prefix_screen_reply_with_metadata(
+    target: TargetRef,
+    screen_revision: u64,
+    mut checkpoint: Vec<u8>,
+    wraps: Option<&[bool]>,
+    history_cursor: Option<WireHistoryCursor>,
+) -> Result<Vec<u8>, UiCodecError> {
+    validate_checkpoint(target, screen_revision, &checkpoint)?;
+    let (bitmap, bitmap_len) = encode_wrap_bitmap(target, screen_revision, &checkpoint, wraps)?;
+    validate_history_cursor(history_cursor)?;
+    if wraps.is_none() && history_cursor.is_none() {
+        return prefix_screen_reply(target, screen_revision, checkpoint);
+    }
+    let bitmap = bitmap.unwrap_or_default();
+    let mut prefix = [0_u8; SCREEN_REPLY_HEADER_BYTES];
+    put_header(&mut prefix, KIND_SCREEN_REPLY);
+    put_target(&mut prefix, 4, target);
+    put_u64(&mut prefix, 44, screen_revision);
+    put_u32(&mut prefix, 52, checkpoint.len() as u32);
+    put_u16(
+        &mut prefix,
+        56,
+        u16::from(wraps.is_some()) | (u16::from(history_cursor.is_some()) << 1),
+    );
+    let trailer_len =
+        bitmap_len + usize::from(history_cursor.is_some()) * HISTORY_CURSOR_TRAILER_BYTES;
+    checkpoint
+        .try_reserve_exact(SCREEN_REPLY_HEADER_BYTES + trailer_len)
+        .map_err(|_| UiCodecError::PayloadTooLarge)?;
+    checkpoint.splice(0..0, prefix);
+    if wraps.is_some() {
+        checkpoint.extend_from_slice(&bitmap[..bitmap_len]);
+    }
+    if let Some(cursor) = history_cursor {
+        append_history_cursor(&mut checkpoint, cursor);
+    }
+    if checkpoint.len() > MAX_SCREEN_REPLY_BYTES {
+        return Err(UiCodecError::PayloadTooLarge);
+    }
+    Ok(checkpoint)
+}
+
 /// Prefix a ScreenReply with an optional, separately negotiated row-wrap bitmap.
 /// Passing `None` emits the exact legacy bytes produced by
 /// [`prefix_screen_reply`].
 pub fn prefix_screen_reply_with_wraps(
     target: TargetRef,
     screen_revision: u64,
-    mut checkpoint: Vec<u8>,
+    checkpoint: Vec<u8>,
     wraps: Option<&[bool]>,
 ) -> Result<Vec<u8>, UiCodecError> {
-    let (bitmap, bitmap_len) = encode_wrap_bitmap(target, screen_revision, &checkpoint, wraps)?;
-    if wraps.is_none() {
-        return prefix_screen_reply(target, screen_revision, checkpoint);
-    }
-    let bitmap = bitmap.expect("bitmap is present when wrap flags are supplied");
-    let mut prefix = [0_u8; SCREEN_REPLY_HEADER_BYTES];
-    put_header(&mut prefix, KIND_SCREEN_REPLY);
-    put_target(&mut prefix, 4, target);
-    put_u64(&mut prefix, 44, screen_revision);
-    put_u32(&mut prefix, 52, checkpoint.len() as u32);
-    put_u16(&mut prefix, 56, 1);
-    checkpoint
-        .try_reserve_exact(SCREEN_REPLY_HEADER_BYTES + bitmap_len)
-        .map_err(|_| UiCodecError::PayloadTooLarge)?;
-    checkpoint.splice(0..0, prefix);
-    checkpoint.extend_from_slice(&bitmap[..bitmap_len]);
-    if checkpoint.len() > MAX_SCREEN_REPLY_BYTES {
-        return Err(UiCodecError::PayloadTooLarge);
-    }
-    Ok(checkpoint)
+    prefix_screen_reply_with_metadata(target, screen_revision, checkpoint, wraps, None)
 }
 
 /// Decode a ScreenReply and validate its embedded checkpoint record.
@@ -1087,6 +1143,16 @@ pub fn decode_screen_reply_with_wraps(
     bytes: &[u8],
     wraps_negotiated: bool,
 ) -> Result<ScreenReplyView<'_>, UiCodecError> {
+    decode_screen_reply_with_metadata(bytes, wraps_negotiated, false)
+}
+
+/// Decode a ScreenReply with explicit row-wrap and history-cursor negotiation.
+/// Marked extensions are rejected unless the matching capability was selected.
+pub fn decode_screen_reply_with_metadata(
+    bytes: &[u8],
+    wraps_negotiated: bool,
+    history_cursor_negotiated: bool,
+) -> Result<ScreenReplyView<'_>, UiCodecError> {
     if bytes.len() > MAX_SCREEN_REPLY_BYTES {
         return Err(UiCodecError::PayloadTooLarge);
     }
@@ -1095,12 +1161,16 @@ pub fn decode_screen_reply_with_wraps(
     }
     header(bytes, KIND_SCREEN_REPLY)?;
     let flags = read_u16(bytes, 56);
-    if flags & !1 != 0 {
+    if flags & !3 != 0 {
         return Err(UiCodecError::NonzeroReserved);
     }
     zero(&bytes[58..SCREEN_REPLY_HEADER_BYTES])?;
     let has_wraps = flags & 1 != 0;
+    let has_history_cursor = flags & 2 != 0;
     if has_wraps && !wraps_negotiated {
+        return Err(UiCodecError::InvalidStatus);
+    }
+    if has_history_cursor && !history_cursor_negotiated {
         return Err(UiCodecError::InvalidStatus);
     }
     let target = read_target(bytes, 4);
@@ -1121,21 +1191,31 @@ pub fn decode_screen_reply_with_wraps(
     let rows = crate::screen_checkpoint::decode(checkpoint)
         .map_err(|_| UiCodecError::InvalidCheckpoint)?
         .rows();
-    let wraps = if has_wraps {
+    let (wraps, trailer_start) = if has_wraps {
         let bitmap_len = wrap_bitmap_len(rows)?;
-        exact_size(bytes, checkpoint_end + bitmap_len)?;
-        validate_wrap_bitmap(&bytes[checkpoint_end..], rows)?;
-        Some(&bytes[checkpoint_end..])
+        let bitmap_end = checkpoint_end
+            .checked_add(bitmap_len)
+            .ok_or(UiCodecError::PayloadTooLarge)?;
+        if bytes.len() < bitmap_end {
+            return Err(UiCodecError::Truncated);
+        }
+        validate_wrap_bitmap(&bytes[checkpoint_end..bitmap_end], rows)?;
+        (Some(&bytes[checkpoint_end..bitmap_end]), bitmap_end)
     } else {
-        exact_size(bytes, checkpoint_end)?;
-        None
+        (None, checkpoint_end)
     };
+    let history_cursor = decode_history_cursor(bytes, trailer_start, has_history_cursor)?;
+    let expected_len = trailer_start
+        .checked_add(usize::from(has_history_cursor) * HISTORY_CURSOR_TRAILER_BYTES)
+        .ok_or(UiCodecError::PayloadTooLarge)?;
+    exact_size(bytes, expected_len)?;
     Ok(ScreenReplyView {
         target,
         screen_revision,
         checkpoint,
         rows,
         wraps,
+        history_cursor,
     })
 }
 
@@ -1177,6 +1257,65 @@ pub fn prefix_history_reply(
     Ok(checkpoint)
 }
 
+/// Prefix a HistoryReply with optional negotiated row-wrap and history-cursor
+/// extensions. The row-wrap bitmap precedes the fixed-size cursor trailer.
+#[allow(clippy::too_many_arguments)]
+pub fn prefix_history_reply_with_metadata(
+    target: TargetRef,
+    screen_revision: u64,
+    offset_rows: u16,
+    alternate_screen: bool,
+    mouse_reporting: bool,
+    mut checkpoint: Vec<u8>,
+    wraps: Option<&[bool]>,
+    history_cursor: Option<WireHistoryCursor>,
+) -> Result<Vec<u8>, UiCodecError> {
+    validate_target(target)?;
+    if screen_revision == 0 {
+        return Err(UiCodecError::ZeroRevision);
+    }
+    if offset_rows > MAX_HISTORY_OFFSET_ROWS {
+        return Err(UiCodecError::InvalidHistoryOffset);
+    }
+    validate_checkpoint(target, screen_revision, &checkpoint)?;
+    validate_history_cursor(history_cursor)?;
+    if alternate_screen && history_cursor.is_some() {
+        return Err(UiCodecError::InvalidStatus);
+    }
+    let (bitmap, bitmap_len) = encode_wrap_bitmap(target, screen_revision, &checkpoint, wraps)?;
+    let bitmap = bitmap.unwrap_or_default();
+    let mut prefix = [0_u8; SCREEN_REPLY_HEADER_BYTES];
+    put_header(&mut prefix, KIND_HISTORY_REPLY);
+    put_target(&mut prefix, 4, target);
+    put_u64(&mut prefix, 44, screen_revision);
+    put_u16(&mut prefix, 52, offset_rows);
+    put_u16(
+        &mut prefix,
+        54,
+        u16::from(alternate_screen)
+            | (u16::from(mouse_reporting) << 1)
+            | (u16::from(wraps.is_some()) << 2)
+            | (u16::from(history_cursor.is_some()) << 3),
+    );
+    put_u32(&mut prefix, 56, checkpoint.len() as u32);
+    let trailer_len =
+        bitmap_len + usize::from(history_cursor.is_some()) * HISTORY_CURSOR_TRAILER_BYTES;
+    checkpoint
+        .try_reserve_exact(SCREEN_REPLY_HEADER_BYTES + trailer_len)
+        .map_err(|_| UiCodecError::PayloadTooLarge)?;
+    checkpoint.splice(0..0, prefix);
+    if wraps.is_some() {
+        checkpoint.extend_from_slice(&bitmap[..bitmap_len]);
+    }
+    if let Some(cursor) = history_cursor {
+        append_history_cursor(&mut checkpoint, cursor);
+    }
+    if checkpoint.len() > MAX_HISTORY_REPLY_BYTES {
+        return Err(UiCodecError::PayloadTooLarge);
+    }
+    Ok(checkpoint)
+}
+
 /// Prefix a HistoryReply with an optional, separately negotiated row-wrap bitmap.
 /// Passing `None` emits the exact legacy bytes produced by
 /// [`prefix_history_reply`].
@@ -1186,48 +1325,19 @@ pub fn prefix_history_reply_with_wraps(
     offset_rows: u16,
     alternate_screen: bool,
     mouse_reporting: bool,
-    mut checkpoint: Vec<u8>,
+    checkpoint: Vec<u8>,
     wraps: Option<&[bool]>,
 ) -> Result<Vec<u8>, UiCodecError> {
-    if wraps.is_none() {
-        return prefix_history_reply(
-            target,
-            screen_revision,
-            offset_rows,
-            alternate_screen,
-            mouse_reporting,
-            checkpoint,
-        );
-    }
-    validate_target(target)?;
-    if screen_revision == 0 {
-        return Err(UiCodecError::ZeroRevision);
-    }
-    if offset_rows > MAX_HISTORY_OFFSET_ROWS {
-        return Err(UiCodecError::InvalidHistoryOffset);
-    }
-    let (bitmap, bitmap_len) = encode_wrap_bitmap(target, screen_revision, &checkpoint, wraps)?;
-    let bitmap = bitmap.expect("bitmap is present when wrap flags are supplied");
-    let mut prefix = [0_u8; SCREEN_REPLY_HEADER_BYTES];
-    put_header(&mut prefix, KIND_HISTORY_REPLY);
-    put_target(&mut prefix, 4, target);
-    put_u64(&mut prefix, 44, screen_revision);
-    put_u16(&mut prefix, 52, offset_rows);
-    put_u16(
-        &mut prefix,
-        54,
-        u16::from(alternate_screen) | (u16::from(mouse_reporting) << 1) | 4,
-    );
-    put_u32(&mut prefix, 56, checkpoint.len() as u32);
-    checkpoint
-        .try_reserve_exact(SCREEN_REPLY_HEADER_BYTES + bitmap_len)
-        .map_err(|_| UiCodecError::PayloadTooLarge)?;
-    checkpoint.splice(0..0, prefix);
-    checkpoint.extend_from_slice(&bitmap[..bitmap_len]);
-    if checkpoint.len() > MAX_HISTORY_REPLY_BYTES {
-        return Err(UiCodecError::PayloadTooLarge);
-    }
-    Ok(checkpoint)
+    prefix_history_reply_with_metadata(
+        target,
+        screen_revision,
+        offset_rows,
+        alternate_screen,
+        mouse_reporting,
+        checkpoint,
+        wraps,
+        None,
+    )
 }
 
 /// Decode and validate one history checkpoint reply.
@@ -1240,6 +1350,16 @@ pub fn decode_history_reply(bytes: &[u8]) -> Result<HistoryReplyView<'_>, UiCode
 pub fn decode_history_reply_with_wraps(
     bytes: &[u8],
     wraps_negotiated: bool,
+) -> Result<HistoryReplyView<'_>, UiCodecError> {
+    decode_history_reply_with_metadata(bytes, wraps_negotiated, false)
+}
+
+/// Decode a HistoryReply with explicit row-wrap and history-cursor negotiation.
+/// Marked extensions are rejected unless the matching capability was selected.
+pub fn decode_history_reply_with_metadata(
+    bytes: &[u8],
+    wraps_negotiated: bool,
+    history_cursor_negotiated: bool,
 ) -> Result<HistoryReplyView<'_>, UiCodecError> {
     if bytes.len() > MAX_HISTORY_REPLY_BYTES {
         return Err(UiCodecError::PayloadTooLarge);
@@ -1259,11 +1379,15 @@ pub fn decode_history_reply_with_wraps(
         return Err(UiCodecError::InvalidHistoryOffset);
     }
     let flags = read_u16(bytes, 54);
-    if flags & !0b111 != 0 {
+    if flags & !0b1111 != 0 {
         return Err(UiCodecError::InvalidStatus);
     }
     let has_wraps = flags & 4 != 0;
+    let has_history_cursor = flags & 8 != 0;
     if has_wraps && !wraps_negotiated {
+        return Err(UiCodecError::InvalidStatus);
+    }
+    if has_history_cursor && !history_cursor_negotiated {
         return Err(UiCodecError::InvalidStatus);
     }
     let checkpoint_len = read_u32(bytes, 56) as usize;
@@ -1279,15 +1403,27 @@ pub fn decode_history_reply_with_wraps(
     let rows = crate::screen_checkpoint::decode(checkpoint)
         .map_err(|_| UiCodecError::InvalidCheckpoint)?
         .rows();
-    let wraps = if has_wraps {
+    let (wraps, trailer_start) = if has_wraps {
         let bitmap_len = wrap_bitmap_len(rows)?;
-        exact_size(bytes, checkpoint_end + bitmap_len)?;
-        validate_wrap_bitmap(&bytes[checkpoint_end..], rows)?;
-        Some(&bytes[checkpoint_end..])
+        let bitmap_end = checkpoint_end
+            .checked_add(bitmap_len)
+            .ok_or(UiCodecError::PayloadTooLarge)?;
+        if bytes.len() < bitmap_end {
+            return Err(UiCodecError::Truncated);
+        }
+        validate_wrap_bitmap(&bytes[checkpoint_end..bitmap_end], rows)?;
+        (Some(&bytes[checkpoint_end..bitmap_end]), bitmap_end)
     } else {
-        exact_size(bytes, checkpoint_end)?;
-        None
+        (None, checkpoint_end)
     };
+    let history_cursor = decode_history_cursor(bytes, trailer_start, has_history_cursor)?;
+    let expected_len = trailer_start
+        .checked_add(usize::from(has_history_cursor) * HISTORY_CURSOR_TRAILER_BYTES)
+        .ok_or(UiCodecError::PayloadTooLarge)?;
+    exact_size(bytes, expected_len)?;
+    if flags & 1 != 0 && history_cursor.is_some() {
+        return Err(UiCodecError::InvalidStatus);
+    }
     Ok(HistoryReplyView {
         target,
         screen_revision,
@@ -1297,6 +1433,7 @@ pub fn decode_history_reply_with_wraps(
         checkpoint,
         rows,
         wraps,
+        history_cursor,
     })
 }
 
@@ -1415,6 +1552,40 @@ fn encode_wrap_bitmap(
         }
     }
     Ok((Some(bitmap), bitmap_len))
+}
+
+fn validate_history_cursor(cursor: Option<WireHistoryCursor>) -> Result<(), UiCodecError> {
+    if cursor.is_some_and(|cursor| cursor.epoch == 0) {
+        return Err(UiCodecError::InvalidStatus);
+    }
+    Ok(())
+}
+
+fn append_history_cursor(bytes: &mut Vec<u8>, cursor: WireHistoryCursor) {
+    bytes.extend_from_slice(&cursor.epoch.to_be_bytes());
+    bytes.extend_from_slice(&cursor.ordinal.to_be_bytes());
+}
+
+fn decode_history_cursor(
+    bytes: &[u8],
+    offset: usize,
+    present: bool,
+) -> Result<Option<WireHistoryCursor>, UiCodecError> {
+    if !present {
+        return Ok(None);
+    }
+    let end = offset
+        .checked_add(HISTORY_CURSOR_TRAILER_BYTES)
+        .ok_or(UiCodecError::PayloadTooLarge)?;
+    if bytes.len() < end {
+        return Err(UiCodecError::Truncated);
+    }
+    let cursor = WireHistoryCursor {
+        epoch: read_u64(bytes, offset),
+        ordinal: read_u64(bytes, offset + 8),
+    };
+    validate_history_cursor(Some(cursor))?;
+    Ok(Some(cursor))
 }
 
 fn wrap_bitmap_len(rows: u16) -> Result<usize, UiCodecError> {
@@ -2340,6 +2511,137 @@ mod tests {
     }
 
     #[test]
+    fn history_cursor_trailers_round_trip_preserve_legacy_bytes_and_validate_bounds() {
+        let record = checkpoint(TARGET, 9);
+        let wraps = [true, false, true, false, true];
+        let cursor = WireHistoryCursor {
+            epoch: 7,
+            ordinal: 1234,
+        };
+        let legacy_screen = prefix_screen_reply(TARGET, 9, record.clone()).unwrap();
+        let screen_without_cursor =
+            prefix_screen_reply_with_metadata(TARGET, 9, record.clone(), None, None).unwrap();
+        assert_eq!(screen_without_cursor, legacy_screen);
+        assert_eq!(
+            decode_screen_reply(&legacy_screen)
+                .unwrap()
+                .history_cursor(),
+            None
+        );
+
+        let screen = prefix_screen_reply_with_metadata(
+            TARGET,
+            9,
+            record.clone(),
+            Some(&wraps),
+            Some(cursor),
+        )
+        .unwrap();
+        assert_eq!(
+            screen.len(),
+            legacy_screen.len() + wraps.len().div_ceil(8) + HISTORY_CURSOR_TRAILER_BYTES
+        );
+        assert_eq!(
+            decode_screen_reply_with_metadata(&screen, true, true)
+                .unwrap()
+                .history_cursor(),
+            Some(cursor)
+        );
+        assert_eq!(
+            decode_screen_reply_with_metadata(&screen, true, false),
+            Err(UiCodecError::InvalidStatus)
+        );
+        let mut truncated_screen = screen.clone();
+        truncated_screen.pop();
+        assert_eq!(
+            decode_screen_reply_with_metadata(&truncated_screen, true, true),
+            Err(UiCodecError::Truncated)
+        );
+        let mut trailing_screen = screen.clone();
+        trailing_screen.push(0);
+        assert_eq!(
+            decode_screen_reply_with_metadata(&trailing_screen, true, true),
+            Err(UiCodecError::TrailingBytes)
+        );
+        let mut zero_epoch_screen = screen.clone();
+        let epoch_offset = SCREEN_REPLY_HEADER_BYTES + record.len() + wraps.len().div_ceil(8);
+        zero_epoch_screen[epoch_offset..epoch_offset + 8].fill(0);
+        assert_eq!(
+            decode_screen_reply_with_metadata(&zero_epoch_screen, true, true),
+            Err(UiCodecError::InvalidStatus)
+        );
+
+        let legacy_history =
+            prefix_history_reply(TARGET, 9, 3, false, false, record.clone()).unwrap();
+        let history_without_cursor = prefix_history_reply_with_metadata(
+            TARGET,
+            9,
+            3,
+            false,
+            false,
+            record.clone(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(history_without_cursor, legacy_history);
+        assert_eq!(
+            decode_history_reply(&legacy_history)
+                .unwrap()
+                .history_cursor(),
+            None
+        );
+        let history = prefix_history_reply_with_metadata(
+            TARGET,
+            9,
+            3,
+            false,
+            false,
+            record.clone(),
+            Some(&wraps),
+            Some(cursor),
+        )
+        .unwrap();
+        assert_eq!(
+            history.len(),
+            legacy_history.len() + wraps.len().div_ceil(8) + HISTORY_CURSOR_TRAILER_BYTES
+        );
+        let history_view = decode_history_reply_with_metadata(&history, true, true).unwrap();
+        assert_eq!(history_view.history_cursor(), Some(cursor));
+        assert_eq!(history_view.offset_rows(), 3);
+        assert!(history_view.wrap_metadata_available());
+        assert_eq!(
+            decode_history_reply_with_metadata(&history, true, false),
+            Err(UiCodecError::InvalidStatus)
+        );
+        let mut truncated_history = history.clone();
+        truncated_history.truncate(truncated_history.len() - 1);
+        assert_eq!(
+            decode_history_reply_with_metadata(&truncated_history, true, true),
+            Err(UiCodecError::Truncated)
+        );
+        let mut trailing_history = history.clone();
+        trailing_history.push(0);
+        assert_eq!(
+            decode_history_reply_with_metadata(&trailing_history, true, true),
+            Err(UiCodecError::TrailingBytes)
+        );
+        assert_eq!(
+            prefix_history_reply_with_metadata(
+                TARGET,
+                9,
+                0,
+                true,
+                false,
+                record,
+                None,
+                Some(cursor),
+            ),
+            Err(UiCodecError::InvalidStatus)
+        );
+    }
+
+    #[test]
     fn wrap_bitmap_round_trips_supported_row_counts_and_legacy_bytes() {
         assert_eq!(wrap_bitmap_len(1), Ok(1));
         assert_eq!(wrap_bitmap_len(8), Ok(1));
@@ -2422,7 +2724,7 @@ mod tests {
         );
 
         let mut bad_screen = screen.clone();
-        bad_screen[57] |= 2;
+        bad_screen[58] |= 2;
         assert_eq!(
             decode_screen_reply_with_wraps(&bad_screen, true),
             Err(UiCodecError::NonzeroReserved)
@@ -2487,6 +2789,7 @@ mod tests {
             SCREEN_REPLY_HEADER_BYTES
                 + crate::screen_checkpoint::MAX_SCREEN_CHECKPOINT_BYTES
                 + MAX_ROW_WRAP_BITMAP_BYTES
+                + HISTORY_CURSOR_TRAILER_BYTES
         );
         assert_eq!(MAX_HISTORY_REPLY_BYTES, MAX_SCREEN_REPLY_BYTES);
         let record = checkpoint_geometry(TARGET, 9, MAX_PANE_ROWS, MAX_PANE_COLUMNS);
@@ -2495,21 +2798,39 @@ mod tests {
             crate::screen_checkpoint::MAX_SCREEN_CHECKPOINT_BYTES
         );
         let wraps = [true; MAX_PANE_ROWS as usize];
-        let screen =
-            prefix_screen_reply_with_wraps(TARGET, 9, record.clone(), Some(&wraps)).unwrap();
+        let cursor = WireHistoryCursor {
+            epoch: 2,
+            ordinal: 99,
+        };
+        let screen = prefix_screen_reply_with_metadata(
+            TARGET,
+            9,
+            record.clone(),
+            Some(&wraps),
+            Some(cursor),
+        )
+        .unwrap();
         assert_eq!(screen.len(), MAX_SCREEN_REPLY_BYTES);
         assert_eq!(
-            decode_screen_reply_with_wraps(&screen, true)
+            decode_screen_reply_with_metadata(&screen, true, true)
                 .unwrap()
                 .row_wrapped(79),
             Some(true)
         );
-        let history =
-            prefix_history_reply_with_wraps(TARGET, 9, 0, false, false, record, Some(&wraps))
-                .unwrap();
+        let history = prefix_history_reply_with_metadata(
+            TARGET,
+            9,
+            0,
+            false,
+            false,
+            record,
+            Some(&wraps),
+            Some(cursor),
+        )
+        .unwrap();
         assert_eq!(history.len(), MAX_HISTORY_REPLY_BYTES);
         assert_eq!(
-            decode_history_reply_with_wraps(&history, true)
+            decode_history_reply_with_metadata(&history, true, true)
                 .unwrap()
                 .row_wrapped(79),
             Some(true)

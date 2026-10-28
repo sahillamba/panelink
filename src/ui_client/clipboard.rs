@@ -1,8 +1,8 @@
 //! Attached-client-only asynchronous writes to the host clipboard.
 //!
 //! Selection text is owned only by this bounded queue and its worker. It is
-//! never formatted, logged, or included in a diagnostic. The service is not
-//! wired into the event loop yet.
+//! never formatted, logged, or included in a diagnostic. Completion messages
+//! carry only a fixed status and optional source/attempt metadata.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use panelink::control_protocol::TargetRef;
 use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
 use rustix::io::{self as rio, Errno};
 
@@ -38,13 +39,13 @@ pub(crate) enum ClipboardStatus {
 impl ClipboardStatus {
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Copied => "clipboard copied",
-            Self::Unavailable => "clipboard unavailable",
-            Self::TimedOut => "clipboard timed out",
-            Self::WriteFailed => "clipboard write failed",
-            Self::Busy => "clipboard busy",
-            Self::TooLarge => "clipboard selection too large",
-            Self::Cancelled => "clipboard cancelled",
+            Self::Copied => "Copied",
+            Self::Unavailable => "Clipboard unavailable",
+            Self::TimedOut => "Copy failed (timed out)",
+            Self::WriteFailed => "Copy failed",
+            Self::Busy => "Copy busy",
+            Self::TooLarge => "Copy too large",
+            Self::Cancelled => "Copy cancelled",
         }
     }
 }
@@ -176,14 +177,26 @@ impl ClipboardSink for ProcessSink {
     }
 }
 
-struct Payload(Vec<u8>);
+struct Payload {
+    target: Option<TargetRef>,
+    request_id: Option<u64>,
+    bytes: Vec<u8>,
+}
 
 impl Drop for Payload {
     fn drop(&mut self) {
         // Keep selection bytes out of panic/debug paths and shorten their
         // lifetime in this worker-owned buffer after use.
-        self.0.fill(0);
+        self.bytes.fill(0);
     }
+}
+
+/// A completed clipboard operation, tied to its source pane without carrying
+/// selected text into the result channel.
+pub(crate) struct ClipboardResult {
+    pub(crate) target: Option<TargetRef>,
+    pub(crate) request_id: Option<u64>,
+    pub(crate) status: ClipboardStatus,
 }
 
 #[derive(Default)]
@@ -196,7 +209,7 @@ struct Accounting {
 /// One attached client's bounded clipboard writer.
 pub(crate) struct ClipboardWriter {
     sender: Option<SyncSender<Payload>>,
-    results: Receiver<ClipboardStatus>,
+    results: Receiver<ClipboardResult>,
     accounting: Arc<Mutex<Accounting>>,
     cancel: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -238,7 +251,27 @@ impl ClipboardWriter {
 
     /// Queue a selection without waiting for the worker or a child process.
     /// One payload may be active and one payload may wait in the bounded queue.
+    #[cfg(test)]
     pub(crate) fn try_send(&self, text: String) -> Result<(), ClipboardStatus> {
+        self.try_send_payload(None, None, text)
+    }
+
+    /// Queue one UI copy attempt with its exact source and ordering token.
+    pub(crate) fn try_send_request(
+        &self,
+        target: TargetRef,
+        request_id: u64,
+        text: String,
+    ) -> Result<(), ClipboardStatus> {
+        self.try_send_payload(Some(target), Some(request_id), text)
+    }
+
+    fn try_send_payload(
+        &self,
+        target: Option<TargetRef>,
+        request_id: Option<u64>,
+        text: String,
+    ) -> Result<(), ClipboardStatus> {
         let bytes = text.into_bytes();
         if bytes.len() > MAX_SELECTION_BYTES {
             return Err(ClipboardStatus::TooLarge);
@@ -260,7 +293,11 @@ impl ClipboardWriter {
         let Some(sender) = self.sender.as_ref() else {
             return Err(ClipboardStatus::Cancelled);
         };
-        match sender.try_send(Payload(bytes)) {
+        match sender.try_send(Payload {
+            target,
+            request_id,
+            bytes,
+        }) {
             Ok(()) => {
                 accounting.queued_bytes += byte_len;
                 Ok(())
@@ -271,7 +308,13 @@ impl ClipboardWriter {
     }
 
     /// Return the next fixed status, if the worker has completed a write.
+    #[cfg(test)]
     pub(crate) fn poll_result(&self) -> Option<ClipboardStatus> {
+        self.poll_result_for().map(|result| result.status)
+    }
+
+    /// Return one fixed result together with the originating pane identity.
+    pub(crate) fn poll_result_for(&self) -> Option<ClipboardResult> {
         self.results.try_recv().ok()
     }
 
@@ -304,7 +347,7 @@ impl Drop for ClipboardWriter {
 fn clipboard_loop<S: ClipboardSink>(
     sink: &mut S,
     receiver: Receiver<Payload>,
-    results: SyncSender<ClipboardStatus>,
+    results: SyncSender<ClipboardResult>,
     accounting: Arc<Mutex<Accounting>>,
     cancel: Arc<AtomicBool>,
 ) {
@@ -317,7 +360,7 @@ fn clipboard_loop<S: ClipboardSink>(
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        let byte_len = payload.0.len();
+        let byte_len = payload.bytes.len();
         let should_write = if let Ok(mut state) = accounting.lock() {
             state.queued_bytes = state.queued_bytes.saturating_sub(byte_len);
             if state.closing || cancel.load(Ordering::Acquire) {
@@ -332,7 +375,9 @@ fn clipboard_loop<S: ClipboardSink>(
         if !should_write {
             continue;
         }
-        let status = sink.write(&payload.0, &cancel, Instant::now() + WRITE_DEADLINE);
+        let target = payload.target;
+        let request_id = payload.request_id;
+        let status = sink.write(&payload.bytes, &cancel, Instant::now() + WRITE_DEADLINE);
         drop(payload);
         if let Ok(mut state) = accounting.lock() {
             state.active_bytes = 0;
@@ -340,7 +385,11 @@ fn clipboard_loop<S: ClipboardSink>(
         if cancel.load(Ordering::Acquire) {
             break;
         }
-        let _ = results.try_send(status);
+        let _ = results.try_send(ClipboardResult {
+            target,
+            request_id,
+            status,
+        });
     }
 }
 
@@ -405,6 +454,17 @@ mod tests {
         panic!("clipboard result did not arrive before test deadline");
     }
 
+    fn wait_result_for(writer: &ClipboardWriter, limit: Duration) -> ClipboardResult {
+        let end = Instant::now() + limit;
+        while Instant::now() < end {
+            if let Some(result) = writer.poll_result_for() {
+                return result;
+            }
+            thread::sleep(WORKER_POLL);
+        }
+        panic!("clipboard result did not arrive before test deadline");
+    }
+
     #[test]
     fn injected_sink_receives_exact_bytes_without_debugging_payload() {
         struct Recorder(Arc<Mutex<Vec<Vec<u8>>>>);
@@ -431,6 +491,39 @@ mod tests {
             observed.lock().unwrap().as_slice(),
             &["private text ✓".as_bytes()]
         );
+    }
+
+    #[test]
+    fn ui_copy_result_retains_only_its_source_and_request_id() {
+        struct Success;
+        impl ClipboardSink for Success {
+            fn write(
+                &mut self,
+                _bytes: &[u8],
+                _cancel: &AtomicBool,
+                _deadline: Instant,
+            ) -> ClipboardStatus {
+                ClipboardStatus::Copied
+            }
+        }
+
+        let target = TargetRef {
+            generation: 1,
+            workspace: 2,
+            pane: 3,
+            session: 4,
+            occupant_revision: 5,
+        };
+        let writer = ClipboardWriter::start(Success).unwrap();
+        writer
+            .try_send_request(target, 17, String::from("fixture-only payload"))
+            .unwrap();
+
+        let result = wait_result_for(&writer, Duration::from_secs(1));
+
+        assert_eq!(result.target, Some(target));
+        assert_eq!(result.request_id, Some(17));
+        assert_eq!(result.status, ClipboardStatus::Copied);
     }
 
     #[test]
@@ -534,9 +627,6 @@ mod tests {
     fn production_command_is_fixed_and_never_accepts_a_text_path() {
         let sink = ProcessSink::production();
         assert_eq!(sink.executable, Path::new(PBCOPY));
-        assert_eq!(
-            ClipboardStatus::WriteFailed.label(),
-            "clipboard write failed"
-        );
+        assert_eq!(ClipboardStatus::WriteFailed.label(), "Copy failed");
     }
 }

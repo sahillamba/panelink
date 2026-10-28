@@ -43,6 +43,28 @@ pub(crate) enum PaneOperationKey {
     Divider,
 }
 
+/// Additional workspace-tab commands accepted after Ctrl-B.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceTabCommand {
+    Create,
+    Actions,
+}
+
+pub(crate) fn workspace_tab_command(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<WorkspaceTabCommand> {
+    let plain = modifiers.is_empty() || modifiers == KeyModifiers::SHIFT;
+    if !plain {
+        return None;
+    }
+    match code {
+        KeyCode::Char('+') => Some(WorkspaceTabCommand::Create),
+        KeyCode::Char('t' | 'T') => Some(WorkspaceTabCommand::Actions),
+        _ => None,
+    }
+}
+
 pub(crate) fn pane_operation_key(
     code: KeyCode,
     modifiers: KeyModifiers,
@@ -202,19 +224,23 @@ pub(crate) fn menu_input(event: &Event) -> MenuInput {
 
 /// Translate any host event into the close prompt's input vocabulary.
 ///
-/// Only an unmodified (or shifted) `y` confirms. Every other key press,
-/// paste and mouse press cancels; key releases, mouse releases/motion/wheel,
-/// focus and resize events are ignored so a stray release cannot cancel the
-/// prompt that a click just opened. Every result is consumed by the prompt.
+/// An unmodified (or shifted) `y` confirms directly, and `n` explicitly
+/// cancels. Enter activates the selected button; Left/Right/Tab switch buttons,
+/// and Esc cancels. Key
+/// repeats cannot confirm or activate. Paste and mouse presses outside the
+/// buttons cancel; releases, motion, focus and resize events are ignored.
+/// Every result is consumed by the prompt.
 pub(crate) fn confirm_input(event: &Event) -> ConfirmInput {
     match event {
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
-            match key.code {
-                KeyCode::Char('y' | 'Y') if plain && key.kind == KeyEventKind::Press => {
-                    ConfirmInput::Yes
-                }
-                _ => ConfirmInput::Cancel,
+            match (key.code, key.kind) {
+                (KeyCode::Char('y' | 'Y'), KeyEventKind::Press) if plain => ConfirmInput::Yes,
+                (KeyCode::Char('n' | 'N'), KeyEventKind::Press) if plain => ConfirmInput::Cancel,
+                (KeyCode::Enter, KeyEventKind::Press) if plain => ConfirmInput::Activate,
+                (KeyCode::Esc, KeyEventKind::Press) if plain => ConfirmInput::Cancel,
+                (KeyCode::Left | KeyCode::Right | KeyCode::Tab, _) if plain => ConfirmInput::Toggle,
+                _ => ConfirmInput::Ignore,
             }
         }
         Event::Key(_) => ConfirmInput::Ignore,
@@ -352,6 +378,18 @@ mod tests {
         );
         assert_eq!(
             workspace_navigation(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            None
+        );
+        assert_eq!(
+            workspace_tab_command(KeyCode::Char('+'), KeyModifiers::SHIFT),
+            Some(WorkspaceTabCommand::Create)
+        );
+        assert_eq!(
+            workspace_tab_command(KeyCode::Char('t'), KeyModifiers::NONE),
+            Some(WorkspaceTabCommand::Actions)
+        );
+        assert_eq!(
+            workspace_tab_command(KeyCode::Char('t'), KeyModifiers::CONTROL),
             None
         );
     }
@@ -503,31 +541,27 @@ mod tests {
     }
 
     #[test]
-    fn only_y_confirms_and_other_presses_cancel() {
+    fn close_confirmation_translates_buttons_navigation_and_explicit_y() {
         assert_eq!(confirm_input(&decode(b"y")), ConfirmInput::Yes);
         assert_eq!(confirm_input(&decode(b"Y")), ConfirmInput::Yes);
+        assert_eq!(confirm_input(&decode(b"n")), ConfirmInput::Cancel);
+        assert_eq!(confirm_input(&decode(b"N")), ConfirmInput::Cancel);
+        assert_eq!(confirm_input(&decode(b"\r")), ConfirmInput::Activate);
+        assert_eq!(confirm_input(&decode(b"\x1b")), ConfirmInput::Cancel);
+        assert_eq!(confirm_input(&decode(b"\x1b[C")), ConfirmInput::Toggle);
+        assert_eq!(confirm_input(&decode(b"\x1b[D")), ConfirmInput::Toggle);
+        assert_eq!(confirm_input(&decode(b"\t")), ConfirmInput::Toggle);
         for bytes in [
-            &b"n"[..],
-            b"N",
-            b"\x1b",
-            b"\r",
-            b"x",
-            b" ",
-            b"\x19", // Ctrl-Y
-            b"\x03",
-            b"\x02",
-            b"\x1b[A",
-            b"\x1b[200~y\x1b[201~",
-            b"\x1b[<0;5;5M",
-            b"\x1b[<2;5;5M",
+            b"x", b" ", b"\x19", // Ctrl-Y
+            b"\x03", b"\x02",
         ] {
             assert_eq!(
                 confirm_input(&decode(bytes)),
-                ConfirmInput::Cancel,
+                ConfirmInput::Ignore,
                 "{bytes:?}"
             );
         }
-        // Releases and wheel events do not cancel.
+        // Releases, mouse presses and wheel events are local to the prompt.
         assert_eq!(
             confirm_input(&decode(b"\x1b[<2;5;5m")),
             ConfirmInput::Ignore
@@ -535,6 +569,18 @@ mod tests {
         assert_eq!(
             confirm_input(&decode(b"\x1b[<64;1;1M")),
             ConfirmInput::Ignore
+        );
+        assert_eq!(
+            confirm_input(&decode(b"\x1b[<0;5;5M")),
+            ConfirmInput::Cancel
+        );
+        assert_eq!(
+            confirm_input(&decode(b"\x1b[<2;5;5M")),
+            ConfirmInput::Cancel
+        );
+        assert_eq!(
+            confirm_input(&decode(b"\x1b[200~y\x1b[201~")),
+            ConfirmInput::Cancel
         );
     }
 }

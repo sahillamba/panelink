@@ -30,6 +30,9 @@ mod ui_client;
 mod workspace_cli;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod workspace_lifecycle;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use panelink::pane_layout;
 
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
@@ -306,7 +309,7 @@ where
             println!(
                 "Experimental PTY probe and server/control commands: available on macOS/aarch64."
             );
-            println!("Not yet supported: more than four panes, tabs, provider session recovery.");
+            println!("Not yet supported: more than four panes, provider session recovery.");
             1
         }
         Command::PtyProbe(request) => execute_probe(request),
@@ -694,7 +697,7 @@ fn print_help() {
         env!("CARGO_PKG_VERSION")
     );
     println!("Usage:");
-    println!("  panelink              open your workspace (starts it if needed, else reattaches)");
+    println!("  panelink              open the selected tab with its project/tab strip");
     println!("  panelink stop         stop the workspace and all of its shells");
     println!("  panelink panes        list the workspace's panes (1 = left/top)");
     println!("  panelink close <n>    close pane n: hang up its shell (SIGKILL after 1 s);");
@@ -717,12 +720,15 @@ fn print_help() {
     println!("Advanced:");
     println!("  panelink workspace list");
     println!("  panelink workspace project create <name> <first-tab-name>");
-    println!("  panelink workspace tab create <project-id> <name>");
+    println!("  panelink workspace tab create <project-id> <name>   register metadata only");
+    println!("  panelink workspace tab rename <project-id> <tab-id> <name>");
+    println!("  panelink workspace tab close <project-id> <tab-id>");
     println!("  panelink workspace select <project-id> <tab-id>");
     println!("  panelink workspace open [<project-id> <tab-id>]");
     println!("  panelink workspace stop|remove <project-id> <tab-id>");
+    println!("    tab close stops that route and preserves saved history/layout");
     println!(
-        "    remove requires a stopped workspace; commands without workspace keep the legacy route"
+        "    remove requires a stopped workspace; pane/stop/history commands without a route keep Default/Main"
     );
     println!("  panelink history list|show <target>|search <target> <text>|clear <target>");
     println!("  panelink history cleanup   discard uncommitted history files (workspace stopped)");

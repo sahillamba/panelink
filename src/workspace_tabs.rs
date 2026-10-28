@@ -32,6 +32,12 @@ pub enum TabAction {
     ProjectChooser,
     /// Select this stable project and tab pair.
     Select(WorkspaceRouteId),
+    /// Open the tab actions for this route.
+    TabActions(WorkspaceRouteId),
+    /// Admit one managed shell-tab create intent for the current project.
+    Create,
+    /// Open the searchable all-tabs overlay.
+    AllTabs,
     /// Navigate to the previous tab in the current project.
     PreviousTab,
     /// Navigate to the next tab in the current project.
@@ -222,10 +228,49 @@ pub fn layout(
     }
 
     let mut cells = vec![HeaderCell::blank(false); usize::from(columns)];
-    let mut hits = Vec::with_capacity(11);
+    let mut hits = Vec::with_capacity(16);
+    let screen_width = cells.len();
+
+    // The create action owns the final cell. On small hosts, All and tab
+    // navigation controls are omitted before the selected tab or create action.
+    let plus_at = screen_width - 1;
+    emit_control(&mut cells, &mut hits, plus_at, '+', TabAction::Create);
+    let mut controls_start = plus_at;
+    if screen_width >= 18 {
+        controls_start = controls_start.saturating_sub(3);
+        place_ascii(&mut cells, controls_start, "All");
+        hits.push(HitRegion {
+            start: controls_start as u16,
+            end: plus_at as u16,
+            action: TabAction::AllTabs,
+        });
+    }
+    if screen_width >= 28 && tabs.len() > 1 {
+        controls_start = controls_start.saturating_sub(2);
+        place_ascii(&mut cells, controls_start, "<>");
+        hits.push(HitRegion {
+            start: controls_start as u16,
+            end: controls_start as u16 + 1,
+            action: TabAction::PreviousTab,
+        });
+        hits.push(HitRegion {
+            start: controls_start as u16 + 1,
+            end: controls_start as u16 + 2,
+            action: TabAction::NextTab,
+        });
+    }
+
     let project_name = project.display_name();
-    let project_label = bracketed_label("[ ", project_name, " v ]", MAX_LABEL_CELLS);
-    let project_width = place_label(&mut cells, 0, &project_label, true, MAX_LABEL_CELLS);
+    let project_cap = MAX_LABEL_CELLS.min((screen_width / 3).max(3));
+    let project_label = bracketed_label("[ ", project_name, " ]", project_cap);
+    let project_budget = controls_start.saturating_sub(2);
+    let project_width = place_label(
+        &mut cells,
+        0,
+        &project_label,
+        false,
+        project_budget.min(project_cap),
+    );
     if project_width > 0 {
         hits.push(HitRegion {
             start: 0,
@@ -234,12 +279,14 @@ pub fn layout(
         });
     }
 
-    let mut cursor = project_width;
-    if cursor < cells.len() {
-        cursor += 1;
-    }
-    if cursor < cells.len() {
-        let remaining = cells.len() - cursor;
+    let mut cursor = if project_width > 0 {
+        project_width.saturating_add(1)
+    } else {
+        0
+    };
+    let tab_end = controls_start;
+    if cursor < tab_end {
+        let remaining = tab_end - cursor;
         let labels: Vec<Vec<Glyph>> = tabs
             .iter()
             .map(|tab| bracketed_label("[", tab.display_name, "]", MAX_LABEL_CELLS))
@@ -253,75 +300,35 @@ pub fn layout(
             .map(|label| label_width(label) + 1)
             .sum::<usize>()
             - 1;
-
-        if total_width <= remaining {
-            let mut at = cursor;
-            for (index, label) in labels.iter().enumerate() {
-                if index != 0 && at < cells.len() {
-                    at += 1;
-                }
-                let allowance = cells.len().saturating_sub(at);
-                let width = place_label(&mut cells, at, label, index == current_index, allowance);
-                if width > 0 {
-                    hits.push(HitRegion {
-                        start: at as u16,
-                        end: (at + width) as u16,
-                        action: TabAction::Select(WorkspaceRouteId {
-                            project: current.project,
-                            tab: tabs[index].id,
-                        }),
-                    });
-                    at += width;
-                }
+        let (start, end) = if total_width <= remaining {
+            (0, labels.len())
+        } else {
+            selected_window(&labels, current_index, remaining)
+        };
+        for index in start..end {
+            if index > start && cursor < tab_end {
+                cursor += 1;
             }
-        } else if remaining < 3 {
-            let width = place_label(&mut cells, cursor, &labels[current_index], true, remaining);
+            if cursor >= tab_end {
+                break;
+            }
+            let width = place_label(
+                &mut cells,
+                cursor,
+                &labels[index],
+                index == current_index,
+                tab_end - cursor,
+            );
             if width > 0 {
                 hits.push(HitRegion {
                     start: cursor as u16,
                     end: (cursor + width) as u16,
-                    action: TabAction::Select(current),
+                    action: TabAction::Select(WorkspaceRouteId {
+                        project: current.project,
+                        tab: tabs[index].id,
+                    }),
                 });
-            }
-        } else {
-            let tab_budget = remaining - 2;
-            let (start, end) = selected_window(&labels, current_index, tab_budget);
-            let mut at = cursor;
-            if start > 0 {
-                emit_control(&mut cells, &mut hits, at, '<', TabAction::PreviousTab);
-            }
-            at += 1;
-            let visible_end = at + tab_budget;
-            for index in start..end {
-                if index > start && at < visible_end {
-                    at += 1;
-                }
-                if at >= visible_end {
-                    break;
-                }
-                let allowance = visible_end - at;
-                let width = place_label(
-                    &mut cells,
-                    at,
-                    &labels[index],
-                    index == current_index,
-                    allowance,
-                );
-                if width > 0 {
-                    hits.push(HitRegion {
-                        start: at as u16,
-                        end: (at + width) as u16,
-                        action: TabAction::Select(WorkspaceRouteId {
-                            project: current.project,
-                            tab: tabs[index].id,
-                        }),
-                    });
-                    at += width;
-                }
-            }
-            if end < labels.len() {
-                let right = cells.len() - 1;
-                emit_control(&mut cells, &mut hits, right, '>', TabAction::NextTab);
+                cursor += width;
             }
         }
     }
@@ -338,6 +345,54 @@ pub fn layout(
         },
         hit_regions: hits,
     })
+}
+
+/// Reserve the workspace header row without advertising a route when no tabs
+/// are visible. Empty-state controls are rendered by the attached client below
+/// this header; this layout intentionally has no tab hit regions.
+pub fn empty_layout(host_rows: u16, host_columns: u16) -> TabsLayout {
+    let rows = host_rows.min(MAX_ROWS);
+    let columns = host_columns.min(MAX_COLUMNS);
+    let (mut header_cells, pane_root) = if rows == 0 || columns == 0 {
+        (
+            Vec::new(),
+            Rect {
+                x: 0,
+                y: 0,
+                rows: 0,
+                columns: 0,
+            },
+        )
+    } else {
+        (
+            vec![HeaderCell::blank(false); usize::from(columns)],
+            Rect {
+                x: 0,
+                y: 1,
+                rows: rows.saturating_sub(1),
+                columns,
+            },
+        )
+    };
+    let mut hit_regions = Vec::new();
+    if rows > 0 {
+        if let Some(plus_at) = usize::from(columns).checked_sub(1) {
+            emit_control(
+                &mut header_cells,
+                &mut hit_regions,
+                plus_at,
+                '+',
+                TabAction::Create,
+            );
+        }
+    }
+    TabsLayout {
+        rows,
+        columns,
+        header_cells,
+        pane_root,
+        hit_regions,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -461,6 +516,16 @@ fn emit_control(
             end: at as u16 + 1,
             action,
         });
+    }
+}
+
+fn place_ascii(cells: &mut [HeaderCell], start: usize, text: &str) {
+    for (offset, character) in text.chars().enumerate() {
+        if let Some(cell) = HeaderCell::glyph(&character.to_string(), false) {
+            if let Some(target) = cells.get_mut(start + offset) {
+                *target = cell;
+            }
+        }
     }
 }
 
@@ -790,5 +855,59 @@ mod tests {
             (1..=2).contains(&UnicodeWidthStr::width(glyph.text.as_str()))
                 && glyph.width == UnicodeWidthStr::width(glyph.text.as_str())
         }));
+    }
+
+    #[test]
+    fn narrow_overflow_keeps_active_tab_create_and_navigation_reachable() {
+        let mut index = WorkspaceIndex::new();
+        let project = id(40);
+        let active = tab(47);
+        index
+            .add_project(
+                project,
+                "A very long project label",
+                tab(40),
+                "A very long first tab",
+            )
+            .expect("project");
+        for value in 41..=47 {
+            let name = format!("Long workspace tab name {value}");
+            index
+                .add_tab(project, tab(value), &name)
+                .expect("workspace tab");
+        }
+        let current = route(40, active.get());
+
+        for columns in [40, 80, 120, 240] {
+            let rendered = layout(&index, current, 24, columns).expect("layout");
+            let selected = rendered
+                .hit_regions
+                .iter()
+                .find(|region| region.action == TabAction::Select(current))
+                .expect("active tab remains reachable");
+            assert_eq!(
+                rendered.hit_test(selected.start, 0),
+                Some(TabAction::Select(current))
+            );
+            assert!(rendered.header_cells()[usize::from(selected.start)].selected());
+            assert_eq!(
+                rendered.hit_test(columns - 1, 0),
+                Some(TabAction::Create),
+                "create stays in the final column at width {columns}"
+            );
+            assert!(rendered
+                .hit_regions
+                .iter()
+                .any(|region| region.action == TabAction::AllTabs));
+            assert!(rendered
+                .hit_regions
+                .iter()
+                .any(|region| region.action == TabAction::PreviousTab));
+            assert!(rendered
+                .hit_regions
+                .iter()
+                .any(|region| region.action == TabAction::NextTab));
+            assert_eq!(rendered.header_cells().len(), usize::from(columns));
+        }
     }
 }

@@ -115,6 +115,24 @@ pub enum DisabledReason {
     Unavailable,
     /// No previous layout is available for viewing.
     NoPreviousLayoutSaved,
+    /// The connected server does not support this pane operation.
+    ServerIncompatible,
+    /// The server connection was lost and mutations are unavailable.
+    Disconnected,
+    /// Another pane operation is already in flight.
+    OperationPending,
+    /// Buffered input must be sent to its pinned pane before a mutation.
+    QueuedInput,
+    /// A different pane must be unzoomed before this action is available.
+    ZoomActive,
+    /// The captured pane has no divider it can adjust.
+    NoDivider,
+    /// Another pane is required for this action.
+    NoOtherPane,
+    /// A stable visible copy source is not available for the captured pane.
+    CopyUnavailable,
+    /// The captured pane is no longer available.
+    PaneUnavailable,
 }
 
 impl fmt::Display for DisabledReason {
@@ -148,6 +166,46 @@ impl fmt::Display for DisabledReason {
             Self::TargetStale => f.write_str("Pane changed; reopen the menu"),
             Self::Unavailable => f.write_str("Split unavailable for this pane"),
             Self::NoPreviousLayoutSaved => f.write_str("No previous layout saved"),
+            Self::ServerIncompatible => f.write_str("Unsupported by this server"),
+            Self::Disconnected => f.write_str("Disconnected; reconnect to mutate panes"),
+            Self::OperationPending => f.write_str("Pane operation pending"),
+            Self::QueuedInput => f.write_str("Queued pane input must be sent first"),
+            Self::ZoomActive => f.write_str("Unzoom the active pane first"),
+            Self::NoDivider => f.write_str("No divider to resize"),
+            Self::NoOtherPane => f.write_str("Another pane is required"),
+            Self::CopyUnavailable => f.write_str("Copy mode unavailable for this pane"),
+            Self::PaneUnavailable => f.write_str("Pane changed; reopen the menu"),
+        }
+    }
+}
+
+impl DisabledReason {
+    /// A complete concise explanation for the narrowest interactive menu.
+    /// The selected action already names its direction, so dimensions and
+    /// limits stay explicit without clipping important values.
+    pub fn compact_label(self) -> String {
+        match self {
+            Self::TooNarrow { needed, actual, .. } => {
+                format!("Need {needed} cols; have {actual}")
+            }
+            Self::TooShort { needed, actual, .. } => {
+                format!("Need {needed} rows; have {actual}")
+            }
+            Self::TooLarge { .. } => String::from("Exceeds max pane size"),
+            Self::PaneLimit { limit } => format!("Pane limit reached ({limit})"),
+            Self::RevisionExhausted => String::from("Revision exhausted"),
+            Self::TargetStale => String::from("Pane changed; reopen"),
+            Self::Unavailable => String::from("Unavailable"),
+            Self::NoPreviousLayoutSaved => String::from("No saved layout"),
+            Self::ServerIncompatible => String::from("Unsupported by server"),
+            Self::Disconnected => String::from("Disconnected"),
+            Self::OperationPending => String::from("Pane operation pending"),
+            Self::QueuedInput => String::from("Queued input pending"),
+            Self::ZoomActive => String::from("Unzoom active pane"),
+            Self::NoDivider => String::from("No divider to resize"),
+            Self::NoOtherPane => String::from("Need another pane"),
+            Self::CopyUnavailable => String::from("Copy mode unavailable"),
+            Self::PaneUnavailable => String::from("Pane changed; reopen"),
         }
     }
 }
@@ -159,6 +217,255 @@ pub enum Availability {
     Enabled,
     /// The item is shown but cannot be activated, for the given reason.
     Disabled(DisabledReason),
+}
+
+/// The twelve selectable pane-menu actions shared by the pane button,
+/// right-click, and Ctrl-B `s` journeys. A separator is presentation chrome,
+/// not an action or selectable item.
+pub const PANE_ACTION_COUNT: usize = 12;
+
+/// One action in the shared pane menu.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneMenuAction {
+    /// Split the captured pane in one direction.
+    Split(SplitDirection),
+    /// Open divider adjustment for the captured pane.
+    ResizeDivider,
+    /// Enter keyboard copy mode for the captured pane.
+    CopyMode,
+    /// Return the captured pane to live output.
+    BackToLive,
+    /// Ask for confirmation to close the captured pane.
+    ClosePane,
+    /// Toggle zoom for the captured pane.
+    Zoom,
+    /// Open pane swap for the captured pane.
+    SwapPane,
+    /// View the previous saved layout.
+    SavedLayout,
+    /// Open shortcut help.
+    Help,
+    /// Detach while keeping server-owned processes running.
+    Detach,
+}
+
+/// Inputs that do not come from pane geometry and are held constant for one
+/// captured menu. Split availability is always derived by `PaneActionModel`
+/// from `PaneLayout::can_split`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneActionAvailability {
+    /// Split submission availability beyond layout geometry.
+    pub split: Availability,
+    /// Divider resize availability, including negotiated server support.
+    pub resize: Availability,
+    /// Keyboard copy availability when the pane is live.
+    pub copy: Availability,
+    /// Back-to-live availability when the pane is in history.
+    pub back_to_live: Availability,
+    /// Close action availability.
+    pub close: Availability,
+    /// Zoom action availability.
+    pub zoom: Availability,
+    /// Swap action availability.
+    pub swap: Availability,
+    /// Saved layout viewer availability.
+    pub saved_layout: Availability,
+    /// Help availability; normally enabled.
+    pub help: Availability,
+    /// Detach availability; normally enabled.
+    pub detach: Availability,
+    /// Whether the pane is currently showing a historical view.
+    pub showing_history: bool,
+    /// Whether the captured pane is currently zoomed.
+    pub zoomed: bool,
+}
+
+/// One bounded, immutable list of menu items with a captured target and
+/// server layout revision. Both input entry points use this value so labels,
+/// disabled reasons, and identities cannot drift between menus.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct PaneActionModel {
+    target: TargetRef,
+    expected_layout_revision: u64,
+    position: u8,
+    last_pane: bool,
+    items: [PaneActionItem; PANE_ACTION_COUNT],
+}
+
+/// One shared pane-menu item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneActionItem {
+    /// Action activated by this row.
+    pub action: PaneMenuAction,
+    /// Stable printable label for the action at menu-open time.
+    pub label: &'static str,
+    /// Whether the action is enabled, or the fixed reason it is disabled.
+    pub availability: Availability,
+}
+
+impl PaneActionModel {
+    /// Capture one menu's item labels, availability, pane ordinal and target.
+    /// Split reasons are derived from the same `can_split` method used by the
+    /// layout owner, never from copied size or capacity thresholds.
+    pub fn capture(
+        layout: &PaneLayout,
+        target: TargetRef,
+        expected_layout_revision: u64,
+        availability: PaneActionAvailability,
+    ) -> Result<Self, MenuOpenError> {
+        let snapshot = layout.snapshot();
+        let Some((index, pane)) =
+            snapshot
+                .panes
+                .into_iter()
+                .enumerate()
+                .find_map(|(index, pane)| {
+                    pane.filter(|pane| pane.target == target)
+                        .map(|pane| (index, pane))
+                })
+        else {
+            return Err(MenuOpenError::TargetNotInLayout);
+        };
+        let splits = MENU_DIRECTIONS.map(|direction| PaneActionItem {
+            action: PaneMenuAction::Split(direction),
+            label: split_action_label(direction),
+            availability: match availability.split {
+                disconnected @ Availability::Disabled(DisabledReason::Disconnected) => disconnected,
+                _ => match layout.can_split(target, direction) {
+                    Ok(()) => availability.split,
+                    Err(error) => Availability::Disabled(reason_for(error, direction, pane.rect)),
+                },
+            },
+        });
+        let (copy_action, copy_label, copy_availability) = if availability.showing_history {
+            (
+                PaneMenuAction::BackToLive,
+                "Back to live",
+                availability.back_to_live,
+            )
+        } else {
+            (PaneMenuAction::CopyMode, "Copy mode", availability.copy)
+        };
+        let (zoom_label, zoom_availability) = if availability.zoomed {
+            ("Unzoom pane", availability.zoom)
+        } else {
+            ("Zoom pane", availability.zoom)
+        };
+        let items = [
+            splits[0],
+            splits[1],
+            splits[2],
+            splits[3],
+            PaneActionItem {
+                action: PaneMenuAction::ResizeDivider,
+                label: "Resize divider",
+                availability: availability.resize,
+            },
+            PaneActionItem {
+                action: copy_action,
+                label: copy_label,
+                availability: copy_availability,
+            },
+            PaneActionItem {
+                action: PaneMenuAction::ClosePane,
+                label: "Close pane",
+                availability: availability.close,
+            },
+            PaneActionItem {
+                action: PaneMenuAction::Zoom,
+                label: zoom_label,
+                availability: zoom_availability,
+            },
+            PaneActionItem {
+                action: PaneMenuAction::SwapPane,
+                label: "Swap pane",
+                availability: availability.swap,
+            },
+            PaneActionItem {
+                action: PaneMenuAction::SavedLayout,
+                label: "Saved layout",
+                availability: availability.saved_layout,
+            },
+            PaneActionItem {
+                action: PaneMenuAction::Help,
+                label: "Shortcut help",
+                availability: availability.help,
+            },
+            PaneActionItem {
+                action: PaneMenuAction::Detach,
+                label: "Detach",
+                availability: availability.detach,
+            },
+        ];
+        Ok(Self {
+            target,
+            expected_layout_revision,
+            position: u8::try_from(index + 1).unwrap_or(u8::MAX),
+            last_pane: snapshot.pane_count() <= 1,
+            items,
+        })
+    }
+
+    /// Captured full target.
+    pub fn target(self) -> TargetRef {
+        self.target
+    }
+
+    /// Captured server layout revision.
+    pub fn expected_layout_revision(self) -> u64 {
+        self.expected_layout_revision
+    }
+
+    /// Captured one-based pane position.
+    pub fn position(self) -> u8 {
+        self.position
+    }
+
+    /// Whether closing this pane ends the workspace.
+    pub fn last_pane(self) -> bool {
+        self.last_pane
+    }
+
+    /// All action items in the specified stable order.
+    pub fn items(&self) -> &[PaneActionItem; PANE_ACTION_COUNT] {
+        &self.items
+    }
+
+    /// Return one item by bounded action index.
+    pub fn item(&self, index: usize) -> Option<PaneActionItem> {
+        self.items.get(index).copied()
+    }
+
+    /// Build an explicit close confirmation from the captured target/revision.
+    pub fn close_intent(self) -> CloseIntent {
+        CloseIntent {
+            target: self.target,
+            expected_layout_revision: self.expected_layout_revision,
+            position: self.position,
+            last_pane: self.last_pane,
+        }
+    }
+}
+
+impl fmt::Debug for PaneActionModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaneActionModel")
+            .field("target", &"[redacted]")
+            .field("expected_layout_revision", &"[redacted]")
+            .field("position", &self.position)
+            .field("last_pane", &self.last_pane)
+            .field("items", &self.items)
+            .finish()
+    }
+}
+
+fn split_action_label(direction: SplitDirection) -> &'static str {
+    match direction {
+        SplitDirection::Left => "Split Left [L]",
+        SplitDirection::Right => "Split Right [R]",
+        SplitDirection::Up => "Split Up [U]",
+        SplitDirection::Down => "Split Down [D]",
+    }
 }
 
 /// One split action listed in the menu.
@@ -608,6 +915,15 @@ impl MenuState {
         }
     }
 
+    /// Prefer complete, concise explanations in narrow compact overlays.
+    /// Legacy direct model callers retain the original clipped display unless
+    /// their client opts into this presentation contract.
+    pub fn set_compact_reasons(&mut self, enabled: bool) {
+        if let Some(menu) = self.open.as_mut() {
+            menu.compact_reasons = enabled;
+        }
+    }
+
     /// Returns the target captured when the menu opened.
     pub fn captured_target(&self) -> Option<TargetRef> {
         self.open.map(|menu| menu.target)
@@ -712,6 +1028,7 @@ struct OpenMenu {
     last_pane: bool,
     items: [MenuItem; ITEM_COUNT],
     recovery_availability: RecoveryAvailability,
+    compact_reasons: bool,
     selected: usize,
     anchor: (u16, u16),
     mode: OverlayMode,
@@ -755,6 +1072,7 @@ impl OpenMenu {
             last_pane: snapshot.pane_count() <= 1,
             items,
             recovery_availability,
+            compact_reasons: false,
             selected,
             anchor,
             mode,
@@ -900,10 +1218,16 @@ impl OpenMenu {
                         &self.item_label(index),
                     ));
                 }
+                let status = self.status();
+                let compact = status.compact_label();
                 lines.push(OverlayLine::boxed(
                     width,
                     OverlayStyle::Status,
-                    &self.status(),
+                    if self.compact_reasons && self.rect.columns < 36 {
+                        &compact
+                    } else {
+                        &status
+                    },
                 ));
                 lines.push(OverlayLine::border(width, None));
             }
@@ -916,10 +1240,16 @@ impl OpenMenu {
                     ));
                 }
                 if usize::from(self.rect.rows) > ROW_COUNT {
+                    let status = self.status();
+                    let compact = status.compact_label();
                     lines.push(OverlayLine::plain(
                         width,
                         OverlayStyle::Status,
-                        &self.status(),
+                        if self.compact_reasons && self.rect.columns < 36 {
+                            &compact
+                        } else {
+                            &status
+                        },
                     ));
                 }
             }
@@ -988,6 +1318,17 @@ impl fmt::Display for StatusText {
             Self::Recovery(Some(reason)) => reason.fmt(f),
             Self::Recovery(None) => f.write_str("Enter: view saved layout"),
             Self::Close => f.write_str(CLOSE_HINT),
+        }
+    }
+}
+
+impl StatusText {
+    fn compact_label(&self) -> String {
+        match self {
+            Self::Split(Some(reason)) | Self::Recovery(Some(reason)) => reason.compact_label(),
+            Self::Split(None) => String::from("Enter: split"),
+            Self::Recovery(None) => String::from("Enter: view layout"),
+            Self::Close => String::from("Enter: confirm close"),
         }
     }
 }
@@ -1102,7 +1443,11 @@ const _: () = assert!(MIN_MENU_ROWS as usize >= ROW_COUNT);
 pub enum ConfirmInput {
     /// `y` or `Y`: confirm the close.
     Yes,
-    /// Any other key press, paste or mouse press: cancel without closing.
+    /// Enter on the currently selected button.
+    Activate,
+    /// Left, Right or Tab: switch the selected button.
+    Toggle,
+    /// Esc, paste or a mouse press outside the buttons: cancel without closing.
     Cancel,
     /// Releases, focus and resize events: consumed, prompt stays open.
     Ignore,
@@ -1121,11 +1466,12 @@ pub enum ConfirmResponse {
     Confirmed(CloseIntent),
 }
 
-/// Explicit y/n confirmation for closing one captured pane.
+/// Button confirmation for closing one captured pane. The caller owns the
+/// selected button; this value preserves only the captured close intent.
 ///
-/// While open the prompt owns every input; nothing reaches a pane. Only
-/// [`ConfirmInput::Yes`] confirms. The intent is returned exactly as
-/// captured; it is never re-resolved from focus or a newer layout.
+/// While open the prompt owns every input; nothing reaches a pane. The intent
+/// is returned exactly as captured; it is never re-resolved from focus or a
+/// newer layout.
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 pub struct CloseConfirm {
     pending: Option<CloseIntent>,
@@ -1166,7 +1512,9 @@ impl CloseConfirm {
                 self.pending = None;
                 ConfirmResponse::Cancelled
             }
-            ConfirmInput::Ignore => ConfirmResponse::Consumed,
+            ConfirmInput::Activate | ConfirmInput::Toggle | ConfirmInput::Ignore => {
+                ConfirmResponse::Consumed
+            }
         }
     }
 
@@ -1195,11 +1543,15 @@ impl fmt::Display for ConfirmPrompt {
         if self.0.last_pane {
             write!(
                 f,
-                " Close pane {}? This is the last pane; the workspace ends. (y/n) ",
+                " Close pane {}? Ends the workspace. (y/n) ",
                 self.0.position
             )
         } else {
-            write!(f, " Close pane {}? (y/n) ", self.0.position)
+            write!(
+                f,
+                " Close pane {}? Ends this process. (y/n) ",
+                self.0.position
+            )
         }
     }
 }
@@ -2108,7 +2460,7 @@ mod tests {
     }
 
     #[test]
-    fn confirm_only_yes_confirms_and_every_other_input_cancels_or_is_consumed() {
+    fn confirm_yes_confirms_buttons_are_consumed_and_cancel_dismisses() {
         let mut confirm = CloseConfirm::new();
         assert_eq!(confirm.handle(ConfirmInput::Yes), ConfirmResponse::NotOpen);
         assert!(confirm.overlay_line(40).is_none());
@@ -2117,6 +2469,14 @@ mod tests {
         assert!(confirm.is_open());
         assert_eq!(
             confirm.handle(ConfirmInput::Ignore),
+            ConfirmResponse::Consumed
+        );
+        assert_eq!(
+            confirm.handle(ConfirmInput::Activate),
+            ConfirmResponse::Consumed
+        );
+        assert_eq!(
+            confirm.handle(ConfirmInput::Toggle),
             ConfirmResponse::Consumed
         );
         assert!(confirm.is_open());
@@ -2142,7 +2502,9 @@ mod tests {
         confirm.open(intent(false));
         let line = confirm.overlay_line(81).expect("open");
         assert_eq!(line.text().len(), 81);
-        assert!(line.text().starts_with(" Close pane 2? (y/n) "));
+        assert!(line
+            .text()
+            .starts_with(" Close pane 2? Ends this process. "));
         assert_eq!(line.style(), OverlayStyle::Selected);
         assert!(confirm.overlay_line(0).is_none());
         assert_eq!(confirm.overlay_line(10).expect("open").text(), " Close ...");
@@ -2155,7 +2517,7 @@ mod tests {
         let line = confirm.overlay_line(81).expect("open");
         assert!(line
             .text()
-            .starts_with(" Close pane 2? This is the last pane; the workspace ends. (y/n)"));
+            .starts_with(" Close pane 2? Ends the workspace. "));
     }
 
     #[test]
@@ -2206,5 +2568,181 @@ mod tests {
             }
         }
         assert!(format!("{menu:?}").contains("[redacted]"));
+    }
+
+    #[test]
+    fn shared_pane_action_model_keeps_items_and_reasons_identical_for_open_paths() {
+        let layout = single(14, 44);
+        let availability = PaneActionAvailability {
+            split: Availability::Enabled,
+            resize: Availability::Disabled(DisabledReason::ServerIncompatible),
+            copy: Availability::Enabled,
+            back_to_live: Availability::Disabled(DisabledReason::PaneUnavailable),
+            close: Availability::Enabled,
+            zoom: Availability::Disabled(DisabledReason::ServerIncompatible),
+            swap: Availability::Disabled(DisabledReason::NoOtherPane),
+            saved_layout: Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+            help: Availability::Enabled,
+            detach: Availability::Enabled,
+            showing_history: false,
+            zoomed: false,
+        };
+
+        // Pointer, pane-button, and keyboard opens all capture through this
+        // same bounded constructor; only the caller's anchor/input differs.
+        let pointer = PaneActionModel::capture(&layout, target_a(), 41, availability).unwrap();
+        let keyboard = PaneActionModel::capture(&layout, target_a(), 41, availability).unwrap();
+        let button = PaneActionModel::capture(&layout, target_a(), 41, availability).unwrap();
+        assert_eq!(pointer, keyboard);
+        assert_eq!(pointer, button);
+        assert_eq!(pointer.target(), target_a());
+        assert_eq!(pointer.expected_layout_revision(), 41);
+        assert_eq!(
+            pointer.items().map(|item| item.action),
+            [
+                PaneMenuAction::Split(SplitDirection::Left),
+                PaneMenuAction::Split(SplitDirection::Right),
+                PaneMenuAction::Split(SplitDirection::Up),
+                PaneMenuAction::Split(SplitDirection::Down),
+                PaneMenuAction::ResizeDivider,
+                PaneMenuAction::CopyMode,
+                PaneMenuAction::ClosePane,
+                PaneMenuAction::Zoom,
+                PaneMenuAction::SwapPane,
+                PaneMenuAction::SavedLayout,
+                PaneMenuAction::Help,
+                PaneMenuAction::Detach,
+            ]
+        );
+        assert_eq!(pointer.items()[0].label, "Split Left [L]");
+        assert_eq!(pointer.items()[4].label, "Resize divider");
+        assert_eq!(pointer.items()[5].label, "Copy mode");
+        assert_eq!(pointer.items()[6].label, "Close pane");
+        assert_eq!(
+            pointer.items()[0].availability,
+            Availability::Disabled(DisabledReason::TooNarrow {
+                direction: SplitDirection::Left,
+                needed: SPLIT_MIN_COLUMNS,
+                actual: 44,
+            })
+        );
+        assert_eq!(
+            pointer.items()[2].availability,
+            Availability::Disabled(DisabledReason::TooShort {
+                direction: SplitDirection::Up,
+                needed: SPLIT_MIN_ROWS,
+                actual: 14,
+            })
+        );
+        assert_eq!(
+            pointer.items()[4].availability,
+            Availability::Disabled(DisabledReason::ServerIncompatible)
+        );
+        assert_eq!(
+            pointer.close_intent(),
+            CloseIntent {
+                target: target_a(),
+                expected_layout_revision: 41,
+                position: 1,
+                last_pane: true,
+            }
+        );
+    }
+
+    #[test]
+    fn shared_pane_action_model_uses_back_to_live_label_and_layout_capacity() {
+        let mut layout = split_right(40, 161);
+        let first = layout.snapshot();
+        let third = TargetRef {
+            pane: 88,
+            session: 99,
+            ..target_b()
+        };
+        let preview = layout
+            .preview_split(target_a(), first.revision, SplitDirection::Down, third)
+            .unwrap();
+        layout.commit_split(preview).unwrap();
+        let second_revision = layout.snapshot().revision;
+        let fourth = TargetRef {
+            pane: 90,
+            session: 101,
+            ..target_b()
+        };
+        let preview = layout
+            .preview_split(target_a(), second_revision, SplitDirection::Up, fourth)
+            .unwrap();
+        layout.commit_split(preview).unwrap();
+        let model = PaneActionModel::capture(
+            &layout,
+            target_a(),
+            73,
+            PaneActionAvailability {
+                split: Availability::Enabled,
+                resize: Availability::Enabled,
+                copy: Availability::Enabled,
+                back_to_live: Availability::Enabled,
+                close: Availability::Enabled,
+                zoom: Availability::Enabled,
+                swap: Availability::Enabled,
+                saved_layout: Availability::Enabled,
+                help: Availability::Enabled,
+                detach: Availability::Enabled,
+                showing_history: true,
+                zoomed: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(model.items()[5].action, PaneMenuAction::BackToLive);
+        assert_eq!(model.items()[5].label, "Back to live");
+        assert!(model.items()[..ITEM_COUNT]
+            .iter()
+            .all(|item| item.availability
+                == Availability::Disabled(DisabledReason::PaneLimit {
+                    limit: MAX_PANES as u8,
+                })));
+        assert_eq!(model.items()[7].label, "Unzoom pane");
+        let expected_position = layout
+            .snapshot()
+            .panes
+            .iter()
+            .position(|pane| pane.is_some_and(|pane| pane.target == target_a()))
+            .unwrap()
+            + 1;
+        assert_eq!(usize::from(model.position()), expected_position);
+        assert!(!model.last_pane());
+    }
+
+    #[test]
+    fn compact_disabled_reasons_keep_the_decisive_values_within_twenty_two_columns() {
+        let reasons = [
+            DisabledReason::TooNarrow {
+                direction: SplitDirection::Right,
+                needed: 45,
+                actual: 44,
+            },
+            DisabledReason::TooShort {
+                direction: SplitDirection::Down,
+                needed: 15,
+                actual: 14,
+            },
+            DisabledReason::PaneLimit { limit: PANE_LIMIT },
+            DisabledReason::ServerIncompatible,
+            DisabledReason::OperationPending,
+        ];
+        for reason in reasons {
+            assert!(
+                reason.compact_label().len() <= usize::from(MIN_MENU_COLUMNS),
+                "compact reason exceeded the 22-column viewport: {reason}"
+            );
+        }
+        assert_eq!(
+            DisabledReason::TooNarrow {
+                direction: SplitDirection::Right,
+                needed: 45,
+                actual: 44,
+            }
+            .compact_label(),
+            "Need 45 cols; have 44"
+        );
     }
 }

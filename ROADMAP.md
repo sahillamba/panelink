@@ -4,9 +4,14 @@ UI/UX planning (2026-10-27): six interview rounds confirm smooth history scrolli
 continuous scrollbar updates, reliable dividers, full tab controls, button-only
 confirmations and stronger focus chrome. Four panes; no whole-pane drag, sidebar
 or zoom expansion. [Consolidated outcome and eight packets](docs/UI-UX-PLAN.md)
-await final shared-understanding confirmation; see the [interview](docs/design/UI-UX-INTERVIEW.md).
-After confirmation and an implementation request, begin UX-01 with current
-evidence/phase order. No application behavior or acceptance gate changes here.
+were confirmed by the user on 2026-10-27 with an implementation request; see the
+[interview](docs/design/UI-UX-INTERVIEW.md). UX-01..UX-07 are implemented in the
+uncommitted working tree of `t3/panelink-ui-ux-plan` (2026-10-28); UX-08
+automated verification: full serial Rust 1568/0/17 ignored, strict Clippy, fmt,
+build, decoder, fingerprints and docs pass; Python bridge-plugin suite 13 errors
+(environmental, also on the unchanged base). Not committed, installed or pushed.
+Apple Terminal, real clipboard, touch and UX-01 before/after timing re-measure
+remain open; see docs/progress/SESSION.md.
 
 CI repair in isolated checkout (2026-10-27): run40511639904 failed a pane-list
 handshake; the reproduced post-accept deadline race now retains one dequeued

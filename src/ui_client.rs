@@ -36,3 +36,13 @@ pub(crate) fn run_workspace(
 ) -> i32 {
     host::run_workspace(directory, context_dir, app_root, index, current)
 }
+
+/// Run the client-only empty workspace (no visible tabs, no server).
+pub(crate) fn run_workspace_empty(
+    directory: PathBuf,
+    context_dir: PathBuf,
+    app_root: PathBuf,
+    snapshot: panelink::workspace_index::TabPresentationSnapshot,
+) -> i32 {
+    host::run_workspace_empty(directory, context_dir, app_root, snapshot)
+}

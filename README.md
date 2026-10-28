@@ -24,7 +24,7 @@ panelink
 
 That's it. The first run starts your workspace with one shell. Later runs
 reattach to it. The client version appears in the bottom-right pane margin
-(`v0.1.4` in this local build), matching `panelink --version`.
+(`v0.1.5` in this local build), matching `panelink --version`.
 Use `panelink build-info --json` for the client revision/source fingerprint and
 `panelink server-info --json` for the running server's identity and negotiated
 capabilities. An older server reports identity unsupported; the client version
@@ -38,17 +38,17 @@ does not identify that server.
 | Shortcut help | Ctrl-B, then `?`; Esc or `?` closes help |
 | ...then split | `r` right, `l` left, `u` up, `d` down (also `%` and `"`), or `s` for the menu |
 | ...then switch pane | Arrow keys, Tab or `o` (stays in NAV mode so you can keep moving) |
-| ...then close focused pane | `x`, then `y` to confirm; the last pane ends the workspace |
+| ...then close focused pane | `x`, then `y` or click `[Close]` to confirm; `[Cancel]` dismisses; the last pane ends the workspace |
 | ...then leave NAV mode | Esc (or wait 4 seconds); Ctrl-X detaches |
 | Focus a pane | Click it |
-| Scroll a pane | Wheel over it, click the right-margin track to page, or drag its thumb and release to seek normal history; typing returns to live output |
+| Scroll a pane | Wheel over it, click the right-margin track to page, or drag its thumb to seek normal history continuously; bottom margin shows History / New output / History truncated plus `[Back to live]`; typing returns to live output |
 | Scroll with keys | Ctrl-B then PageUp/PageDown to page, Home for oldest retained output, End for live output |
 | Copy text | Drag across pane content and release; copying requires negotiated row-wrap metadata |
 | Keyboard copy mode | Ctrl-B then `c`; move with arrows or `h`/`j`/`k`/`l`, press Space to set/clear an anchor, then Enter or `y` to copy a non-empty range |
 | Zoom a pane | Ctrl-B then `z`; the selected pane's PTY resizes to fill the current workspace view |
 | Swap pane locations | Ctrl-B then `m`; choose another pane with arrows or `h`/`j`/`k`/`l`, then Enter; Esc cancels |
 | Resize panes | Drag the divider and release; or Menu → Resize divider → `[-]`/`[+]` → Apply. Ctrl-B then `e` supports keyboard adjustment |
-| Close a pane | Click its `[x]`, then `[Close]` or `y` to confirm; `[Cancel]` dismisses |
+| Close a pane | Click its `[x]`, then `[Close]` (Cancel is selected by default; `y` also confirms); `[Cancel]`, `n` or Esc dismisses |
 | List/close panes from a shell | `panelink panes`; `panelink close 1` (or `2`) |
 | Detach (shells keep running) | Ctrl-X |
 | Reattach to the legacy Default/Main workspace | `panelink` |
@@ -135,12 +135,17 @@ Workspace state lives in `~/Library/Application Support/Panelink` (private,
 mode 0700). Set `PANELINK_HOME` to use a different directory. The background
 server's output goes to `server.log` there.
 
-Projects can group separately running workspace tabs through the opt-in CLI:
+Projects group separately running workspace tabs. The interactive client
+(plain `panelink` on a TTY) shows a top project/tab row and supports in-client
+create, rename, close and switch. With no visible tabs it shows an empty state
+(New tab / Detach) and starts no process. On a non-TTY it prints a notice.
 
 ```sh
 panelink workspace list
 panelink workspace project create Editors Main
 panelink workspace tab create 2 Review
+panelink workspace tab rename 2 4 "New name"
+panelink workspace tab close 2 4
 panelink workspace select 2 4
 panelink workspace open 2 4
 panelink workspace stop 2 4
@@ -151,19 +156,27 @@ Use the IDs printed by `workspace list`; the example assumes a fresh registry.
 `workspace open` without IDs uses the saved selection. Explicit IDs open that
 exact workspace. Each workspace has its own server, panes, history and client
 contexts; detaching leaves its processes running. Remove requires a stopped
-workspace and removes its registry entry while retaining saved files. Plain
-`panelink` and existing commands such as `stop`, `panes` and `history` keep
-addressing the original Default/Main workspace. Registry initialization adds
-that workspace in place; its entry cannot be removed while legacy commands
-remain supported. Projects are named groups; no project-root discovery
-is included. The opt-in `workspace open` client has a persistent project/tab
-row at the top: click the project control to open its chooser, click a tab to
-request it, or press Ctrl-B then `w` for the chooser,
-`n`/`p` for next/previous tab, and `[`/`]` for previous/next project. The
-chooser reads a bounded registry snapshot; refresh keeps the active snapshot
-visible if its route was removed. This UI does not create, remove, or stop
-projects or tabs. Plain `panelink` and raw attach remain on the legacy
-headerless route. See the [routing result](docs/progress/P5-WORKSPACE-ROUTING-RESULT-2026-10-25.md)
+workspace and removes its registry entry while retaining saved files. Legacy
+commands such as `stop`, `panes` and `history` keep addressing Default/Main.
+Registry initialization adds that workspace in place; its entry cannot be
+removed while legacy commands remain supported. Projects are named groups;
+no project-root discovery is included.
+
+Tab controls in the interactive client:
+- `+` or `Ctrl-B +` creates a managed "Shell N" tab and switches to it.
+- `Ctrl-B t` opens tab actions (Rename / Close) for the active tab.
+- `Ctrl-B w` opens the searchable All tabs chooser.
+- `Ctrl-B n/p` switches next/previous tab; `[`/`]` switches project.
+- At most eight tabs per project; overflow uses `<>` and All controls.
+- Rename uses a text field with Save/Cancel (Enter/Esc).
+- Close asks confirmation with Cancel as the default; closing the last tab
+  returns to the empty state.
+- Closing a tab requires it to be the active route; inactive tabs show
+  "open this tab first to close it".
+
+Plain `panelink` and raw `attach` both use the workspace system; plain
+`panelink` attaches with the tab strip, while raw `attach` remains headerless.
+See the [routing result](docs/progress/P5-WORKSPACE-ROUTING-RESULT-2026-10-25.md)
 and [tab integration evidence](docs/progress/P5-TAB-INTEGRATION-2026-10-25.md).
 
 Drag copying freezes the source at mouse press, preserving it while output
@@ -451,7 +464,8 @@ In Terminal B, using the same three paths:
   working directory and environment, minus `PANELINK_*`. The new pane gets
   focus.
 - The pane's `[x]`, menu Close action and Ctrl-B then `x` require a separate
-  `[Close]` click or `y` confirmation.
+  `[Close]` click, Enter with Close selected, or `y` confirmation; Cancel is
+  the default selection and the opening click/key cannot confirm.
   Closing sends HUP to that pane's process group, then KILL after a bounded
   wait if needed. If its sibling remains, the sibling fills the workspace;
   the last shell exiting ends the workspace. `panelink panes` lists the

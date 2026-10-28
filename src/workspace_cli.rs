@@ -24,6 +24,15 @@ pub(crate) fn run(args: Vec<OsString>) -> i32 {
                 || fail("invalid workspace id"),
                 |p| mutate_create_tab(p, name),
             ),
+        [group, action, project, tab, name] if group == "tab" && action == "rename" => {
+            ids(project, tab).map_or_else(
+                || fail("invalid workspace id"),
+                |(p, t)| rename_tab(p, t, name),
+            )
+        }
+        [group, action, project, tab] if group == "tab" && action == "close" => {
+            ids(project, tab).map_or_else(|| fail("invalid workspace id"), |(p, t)| close_tab(p, t))
+        }
         [action, project, tab] if action == "select" => ids(project, tab).map_or_else(
             || fail("invalid workspace id"),
             |(p, t)| mutate_select(p, t),
@@ -224,19 +233,76 @@ fn mutate_create_project(name: &str, tabname: &str) -> i32 {
 }
 fn mutate_create_tab(p: u64, name: &str) -> i32 {
     let result = (|| {
-        let s = open_store()?;
-        let old = s.load().map_err(|_| ERROR)?.ok_or(ERROR)?;
-        let mut i = old.index().clone();
-        let t = old.next_id();
-        i.add_tab(
+        let root = prepare_app()?;
+        crate::workspace_lifecycle::register_named_tab(
+            &root,
             ProjectId::new(p).map_err(|_| ERROR)?,
-            WorkspaceTabId::new(t).map_err(|_| ERROR)?,
             name,
         )
-        .map_err(|_| ERROR)?;
-        save(s, old, i, t.checked_add(1).ok_or(ERROR)?)
+        .map_err(|error| match error {
+            crate::workspace_lifecycle::LifecycleError::TabLimitReached => {
+                "project already has eight tabs"
+            }
+            crate::workspace_lifecycle::LifecycleError::InvalidName => "tab name is invalid",
+            _ => ERROR,
+        })?;
+        Ok(())
     })();
     result.map_or_else(fail, |_| 0)
+}
+
+fn rename_tab(p: u64, t: u64, name: &str) -> i32 {
+    let root = match prepare_app() {
+        Ok(root) => root,
+        Err(error) => return fail(error),
+    };
+    let route = match (ProjectId::new(p), WorkspaceTabId::new(t)) {
+        (Ok(project), Ok(tab)) => panelink::workspace_tabs::WorkspaceRouteId { project, tab },
+        _ => return fail("invalid workspace id"),
+    };
+    let revision = match open_store()
+        .and_then(|store| store.load().map_err(|_| ERROR))
+        .and_then(|record| record.map(|record| record.revision()).ok_or(ERROR))
+    {
+        Ok(revision) => revision,
+        Err(error) => return fail(error),
+    };
+    match crate::workspace_lifecycle::rename_tab(&root, route, name, revision) {
+        Ok(crate::workspace_lifecycle::RenameOutcome::Saved { revision }) => {
+            println!("panelink: tab renamed (revision {revision})");
+            0
+        }
+        Ok(crate::workspace_lifecycle::RenameOutcome::Conflict { .. }) => {
+            fail("workspace metadata revision conflict")
+        }
+        Err(error) => fail(&error.to_string()),
+    }
+}
+
+fn close_tab(p: u64, t: u64) -> i32 {
+    let root = match prepare_app() {
+        Ok(root) => root,
+        Err(error) => return fail(error),
+    };
+    let route = match (ProjectId::new(p), WorkspaceTabId::new(t)) {
+        (Ok(project), Ok(tab)) => panelink::workspace_tabs::WorkspaceRouteId { project, tab },
+        _ => return fail("invalid workspace id"),
+    };
+    match crate::workspace_lifecycle::close_tab(
+        &root,
+        route,
+        &crate::workspace_lifecycle::ExpectedRuntimeIdentity {
+            route,
+            generation: None,
+        },
+    ) {
+        crate::workspace_lifecycle::CloseOutcome::Stopped => {
+            println!("panelink: tab closed");
+            0
+        }
+        crate::workspace_lifecycle::CloseOutcome::Partial { reason }
+        | crate::workspace_lifecycle::CloseOutcome::Unknown { reason } => fail(reason),
+    }
 }
 fn mutate_select(p: u64, t: u64) -> i32 {
     let result = (|| {

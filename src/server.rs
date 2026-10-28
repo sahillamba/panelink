@@ -778,6 +778,7 @@ impl GlobalAuthority {
         let pane_metadata = capability_mask & crate::handshake_protocol::CAPABILITY_PANE_METADATA;
         let screen_row_wraps =
             capability_mask & crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS;
+        let history_cursor = capability_mask & crate::handshake_protocol::CAPABILITY_HISTORY_CURSOR;
         let pane_operations =
             capability_mask & crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS;
         let agent_observation =
@@ -786,6 +787,7 @@ impl GlobalAuthority {
             | workspace
             | pane_metadata
             | screen_row_wraps
+            | history_cursor
             | pane_operations
             | agent_observation
             | (capability_mask & crate::handshake_protocol::CAPABILITY_BUILD_IDENTITY))
@@ -3419,11 +3421,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_single_session_owner_does_not_offer_multi_session_wrap_capability() {
-        use crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS;
+    fn legacy_single_session_owner_does_not_offer_multi_session_ui_extensions() {
+        use crate::handshake_protocol::{CAPABILITY_HISTORY_CURSOR, CAPABILITY_SCREEN_ROW_WRAPS};
 
         let mut owner = state();
-        let requested = hello(CAPABILITY_READ, CAPABILITY_SCREEN_ROW_WRAPS);
+        let requested = hello(
+            CAPABILITY_READ,
+            CAPABILITY_SCREEN_ROW_WRAPS | CAPABILITY_HISTORY_CURSOR,
+        );
         let (connection, welcome) = owner.connect(&requested, 1).unwrap();
         assert_eq!(welcome.selected_capabilities, CAPABILITY_READ);
         assert_eq!(connection.selected_capabilities(), CAPABILITY_READ);

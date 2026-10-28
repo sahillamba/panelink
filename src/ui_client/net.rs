@@ -19,10 +19,10 @@ use panelink::response_protocol::{decode_response_payload, ResponseBody};
 use panelink::split_protocol::{decode_split_result, encode_split_request, SplitRequest};
 use panelink::terminal::Key;
 use panelink::ui_protocol::{
-    decode_history_reply_with_wraps, decode_layout_reply, decode_resize_reply,
-    decode_screen_reply_with_wraps, encode_history_query, encode_layout_query, encode_root_resize,
-    encode_screen_query, HistoryReplyView, LayoutReply, RootResize, MAX_HISTORY_OFFSET_ROWS,
-    MAX_HISTORY_REPLY_BYTES,
+    decode_history_reply_with_metadata, decode_layout_reply, decode_resize_reply,
+    decode_screen_reply_with_metadata, encode_history_query, encode_layout_query,
+    encode_root_resize, encode_screen_query, HistoryReplyView, LayoutReply, RootResize,
+    WireHistoryCursor, MAX_HISTORY_OFFSET_ROWS, MAX_HISTORY_REPLY_BYTES,
 };
 
 use super::conn::{
@@ -69,6 +69,8 @@ pub(crate) struct ScreenUpdate {
     pub revision: u64,
     pub checkpoint: Vec<u8>,
     pub row_wraps: Option<Vec<bool>>,
+    #[allow(dead_code)] // Read by the follow-up UI-state history-anchor slice.
+    pub(crate) history_cursor: Option<WireHistoryCursor>,
 }
 
 /// Result of one wheel action. History checkpoints remain independent of the
@@ -87,6 +89,8 @@ pub(crate) enum ScrollResult {
         extent_known: bool,
         checkpoint: Vec<u8>,
         row_wraps: Option<Vec<bool>>,
+        #[allow(dead_code)] // Read by the follow-up UI-state history-anchor slice.
+        history_cursor: Option<WireHistoryCursor>,
     },
     MouseDelivered,
     AlternateScreenNoMouse,
@@ -280,8 +284,12 @@ impl Net {
                 Reply::Error(label) => return Err(label),
                 Reply::Response(_) => return Err("history reply invalid"),
             };
-            let view = decode_history_reply_with_wraps(&bytes, pane.screen_row_wraps)
-                .map_err(|_| "history reply invalid")?;
+            let view = decode_history_reply_with_metadata(
+                &bytes,
+                pane.screen_row_wraps,
+                pane.history_cursor,
+            )
+            .map_err(|_| "history reply invalid")?;
             if view.target() != target {
                 return Err("history reply invalid");
             }
@@ -308,8 +316,12 @@ impl Net {
                             Reply::Error(label) => return Err(label),
                             Reply::Response(_) => return Err("history reply invalid"),
                         };
-                        let retry = decode_history_reply_with_wraps(&retry, pane.screen_row_wraps)
-                            .map_err(|_| "history reply invalid")?;
+                        let retry = decode_history_reply_with_metadata(
+                            &retry,
+                            pane.screen_row_wraps,
+                            pane.history_cursor,
+                        )
+                        .map_err(|_| "history reply invalid")?;
                         if retry.target() != target {
                             return Err("history reply invalid");
                         }
@@ -881,8 +893,12 @@ fn history_result(
                 Reply::Error(label) => return Err(label),
                 Reply::Response(_) => return Err("history reply invalid"),
             };
-            let oldest = decode_history_reply_with_wraps(&bytes, pane.screen_row_wraps)
-                .map_err(|_| "history reply invalid")?;
+            let oldest = decode_history_reply_with_metadata(
+                &bytes,
+                pane.screen_row_wraps,
+                pane.history_cursor,
+            )
+            .map_err(|_| "history reply invalid")?;
             validate_history_checkpoint(&oldest)?;
             if oldest.target() != view.target()
                 || oldest.screen_revision() != view.screen_revision()
@@ -905,6 +921,7 @@ fn history_result(
         extent_known,
         checkpoint: view.checkpoint().to_vec(),
         row_wraps,
+        history_cursor: view.history_cursor(),
     })
 }
 
@@ -969,8 +986,9 @@ fn fetch_screen(
         Reply::Error(label) => return Err(label),
         Reply::Response(_) => return Err("screen reply invalid"),
     };
-    let view = decode_screen_reply_with_wraps(&bytes, pane.screen_row_wraps)
-        .map_err(|_| "screen reply invalid")?;
+    let view =
+        decode_screen_reply_with_metadata(&bytes, pane.screen_row_wraps, pane.history_cursor)
+            .map_err(|_| "screen reply invalid")?;
     if view.target() != target {
         return Err("screen reply invalid");
     }
@@ -987,6 +1005,7 @@ fn fetch_screen(
         revision: view.screen_revision(),
         checkpoint: view.checkpoint().to_vec(),
         row_wraps,
+        history_cursor: view.history_cursor(),
     }))
 }
 
@@ -1374,13 +1393,15 @@ mod tests {
 
     #[test]
     fn wheel_history_uses_one_read_and_explicit_seek_refreshes_extent_read_only() {
-        use panelink::handshake_protocol::{Welcome, CAPABILITY_READ};
+        use panelink::handshake_protocol::{Welcome, CAPABILITY_HISTORY_CURSOR, CAPABILITY_READ};
         use panelink::protocol_wire::{Frame, MessageKind};
         use panelink::screen_checkpoint::{encode, CheckpointMetadata};
         use panelink::terminal::{ScreenSnapshot, TerminalSize};
         use panelink::transport::AuthenticatedStream;
         use panelink::ui_protocol::{
-            decode_ui_request, prefix_history_reply, UiRequest, MAX_HISTORY_OFFSET_ROWS,
+            decode_ui_request, prefix_history_reply_with_metadata,
+            prefix_screen_reply_with_metadata, UiRequest, WireHistoryCursor,
+            MAX_HISTORY_OFFSET_ROWS,
         };
         use std::os::unix::{fs::DirBuilderExt, net::UnixStream};
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -1417,7 +1438,7 @@ mod tests {
                     nonce: 1,
                     generation: 7,
                     lease: 10,
-                    selected_capabilities: CAPABILITY_READ,
+                    selected_capabilities: CAPABILITY_READ | CAPABILITY_HISTORY_CURSOR,
                     ttl_seconds: 1800,
                 },
                 used: 0,
@@ -1444,6 +1465,31 @@ mod tests {
             let peer = scope.spawn(move || {
                 let mut peer = AuthenticatedStream::new(server).unwrap();
                 peer.enable_snapshot_writes().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let frame = peer.read_frame(deadline).unwrap();
+                assert_eq!(frame.kind(), MessageKind::Request);
+                assert_eq!(
+                    decode_ui_request(frame.payload()).unwrap(),
+                    UiRequest::ScreenQuery { target }
+                );
+                let snapshot = ScreenSnapshot::try_new(TerminalSize::new(22, 78).unwrap()).unwrap();
+                let record = encode(
+                    &snapshot,
+                    &CheckpointMetadata::new(target, 0, 1, 6).unwrap(),
+                )
+                .unwrap();
+                let screen_cursor = WireHistoryCursor {
+                    epoch: 3,
+                    ordinal: 777,
+                };
+                let bytes =
+                    prefix_screen_reply_with_metadata(target, 6, record, None, Some(screen_cursor))
+                        .unwrap();
+                peer.write_frame(
+                    &Frame::new(MessageKind::Snapshot, frame.request_id(), &bytes).unwrap(),
+                    deadline,
+                )
+                .unwrap();
                 // Each wheel, including cache misses and revision changes,
                 // receives exactly its requested read. Explicit seeks may make
                 // one bounded MAX-offset read to refresh the read-only extent.
@@ -1494,9 +1540,21 @@ mod tests {
                     if alternate {
                         record[80] = 1;
                     }
-                    let bytes =
-                        prefix_history_reply(target, revision, offset, alternate, mouse, record)
-                            .unwrap();
+                    let history_cursor = (!alternate).then_some(WireHistoryCursor {
+                        epoch: 1,
+                        ordinal: revision * 10,
+                    });
+                    let bytes = prefix_history_reply_with_metadata(
+                        target,
+                        revision,
+                        offset,
+                        alternate,
+                        mouse,
+                        record,
+                        None,
+                        history_cursor,
+                    )
+                    .unwrap();
                     peer.write_frame(
                         &Frame::new(MessageKind::Snapshot, frame.request_id(), &bytes).unwrap(),
                         deadline,
@@ -1504,16 +1562,35 @@ mod tests {
                     .unwrap();
                 }
             });
+            let screen = fetch_screen(&mut net.panes[0], target, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                screen.history_cursor,
+                Some(WireHistoryCursor {
+                    epoch: 3,
+                    ordinal: 777,
+                })
+            );
             let assert_history = |update: ScrollUpdate, expected_offset, expected_total| {
                 let ScrollResult::History {
+                    revision,
                     offset_rows,
                     total_rows,
+                    history_cursor,
                     ..
                 } = update.result
                 else {
                     panic!("history unavailable");
                 };
                 assert_eq!((offset_rows, total_rows), (expected_offset, expected_total));
+                assert_eq!(
+                    history_cursor,
+                    Some(WireHistoryCursor {
+                        epoch: 1,
+                        ordinal: revision * 10,
+                    })
+                );
             };
 
             assert_history(net.scroll(target, 1, 3, 0, 0, true), 3, 3);

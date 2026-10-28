@@ -12,9 +12,9 @@ Status: first user answers and security review objective recorded; focused follo
   chrome, copy feedback, mouse/keyboard tab create/switch/rename/close, managed
   new shell tabs, button confirmations and last-tab empty state. Four panes are
   enough; whole-pane drag, zoom expansion and permanent sidebar are excluded.
-  See [the interview record](design/UI-UX-INTERVIEW.md). Consolidated scope awaits
-  final shared-understanding confirmation; these are future requirements, not
-  claims that the redesigned interactions are implemented.
+  See [the interview record](design/UI-UX-INTERVIEW.md). The consolidated scope was
+  confirmed on 2026-10-27 and implementation started; these remain requirements,
+  not claims that the redesigned interactions are implemented.
 
 - Name: Panelink.
 - Run inside existing terminal apps. Panelink is a terminal multiplexer/workspace runtime, with Herdr and tmux as behavior references.

@@ -44,9 +44,11 @@ calling agent remains responsible for delegation, model choice and task success.
    context throughout an operation.
 3. For an existing workspace, start with `pane list --json`, then a bounded
    read of the intended pane. Read commands can create private caller-context
-   metadata, but do not start a workspace. A bare `panelink` opens an interactive
-   client and may start a server; use it when workspace startup/attachment is
-   part of the task and an interactive terminal is available.
+   metadata, but do not start a workspace. A bare `panelink` on a TTY opens the
+   interactive client with a project/tab strip and may start a server; on a
+   non-TTY with no visible tabs it prints a notice and exits. Use it when
+   workspace startup/attachment is part of the task and an interactive terminal
+   is available.
 4. Choose a distinct stable caller name per concurrent automation client with
    `--as NAME` or `PANELINK_AGENT`; reuse it for claim/input/release. Names use
    ASCII letters, digits, hyphens or underscores (at most 64 bytes).

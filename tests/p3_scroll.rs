@@ -4,7 +4,9 @@
 //! screen wheel admission, authorization and operation-key deduplication.
 
 use panelink::control_protocol::TargetRef;
-use panelink::handshake_protocol::{Hello, CAPABILITY_INPUT, CAPABILITY_READ};
+use panelink::handshake_protocol::{
+    Hello, CAPABILITY_HISTORY_CURSOR, CAPABILITY_INPUT, CAPABILITY_READ,
+};
 use panelink::managed_launch_prepare::{prepare_launch, PreparedLaunch};
 use panelink::managed_launch_protocol::{encode_launch_request, EnvironmentEntry, LaunchRequest};
 use panelink::protocol::{Ledger, OperationKey, OperationStatus, Outcome};
@@ -14,9 +16,11 @@ use panelink::server::{Connection, SessionReply};
 use panelink::server_pty::PtyEffects;
 use panelink::server_storage::ServerStorage;
 use panelink::session_protocol::{SessionHello, SessionRequest};
+use panelink::terminal::Key;
 use panelink::ui_protocol::{
-    decode_history_reply, encode_history_query, encode_mouse_wheel_input, prefix_history_reply,
-    MouseWheelInput,
+    decode_history_reply, decode_history_reply_with_metadata, decode_ui_request,
+    encode_history_query, encode_key_input, encode_mouse_wheel_input,
+    prefix_history_reply_with_metadata, KeyInput, MouseWheelInput, UiRequest, WireHistoryCursor,
 };
 use std::fs;
 use std::io;
@@ -157,14 +161,17 @@ fn connect(
                 hello: Hello {
                     nonce,
                     required_capabilities: capabilities,
-                    optional_capabilities: 0,
+                    optional_capabilities: CAPABILITY_HISTORY_CURSOR,
                 },
                 resume: None,
             },
             NOW,
         )
         .expect("connect target-pinned client");
-    assert_eq!(welcome.selected_capabilities, capabilities);
+    assert_eq!(
+        welcome.selected_capabilities,
+        capabilities | CAPABILITY_HISTORY_CURSOR
+    );
     Client {
         connection,
         sequence: 0,
@@ -224,13 +231,23 @@ fn history_payload(
                 panelink::screen_checkpoint::CheckpointMetadata::new(client.target, 0, 1, revision)
                     .unwrap();
             let checkpoint = panelink::screen_checkpoint::encode(&snapshot, &metadata).unwrap();
-            prefix_history_reply(
+            let history_cursor =
+                (client.connection.selected_capabilities() & CAPABILITY_HISTORY_CURSOR != 0)
+                    .then(|| effects.history_cursor())
+                    .flatten()
+                    .map(|cursor| WireHistoryCursor {
+                        epoch: cursor.epoch,
+                        ordinal: cursor.ordinal,
+                    });
+            prefix_history_reply_with_metadata(
                 client.target,
                 revision,
                 effective,
                 effects.alternate_screen_active(),
                 effects.mouse_reporting_enabled(),
                 checkpoint,
+                None,
+                history_cursor,
             )
             .unwrap()
         })
@@ -249,7 +266,7 @@ fn normal_buffer_history_scrolls_back_for_a_read_only_connection() {
     let reply = loop {
         owner.poll(NOW).expect("poll retained PTY output");
         let reply = history_payload(&mut owner, &client, 3);
-        let view = decode_history_reply(&reply).unwrap();
+        let view = decode_history_reply_with_metadata(&reply, false, true).unwrap();
         if view.offset_rows() > 0 {
             break reply;
         }
@@ -259,11 +276,109 @@ fn normal_buffer_history_scrolls_back_for_a_read_only_connection() {
         );
         thread::sleep(Duration::from_millis(5));
     };
-    let view = decode_history_reply(&reply).unwrap();
+    let view = decode_history_reply_with_metadata(&reply, false, true).unwrap();
     assert!(!view.alternate_screen());
     assert!(!view.mouse_reporting());
     assert!(view.offset_rows() > 0);
     assert!(!view.checkpoint().is_empty());
+}
+
+#[test]
+fn selected_history_cursor_tracks_exact_new_normal_history_rows() {
+    let fixture = Fixture::new().expect("private fixture");
+    let script = b"i=0; while [ $i -lt 50 ]; do printf 'P3CURSOR-BASE-%s\\n' $i; i=$((i+1)); done; stty -echo; printf 'P3CURSOR-READY\\n'; IFS= read -r trigger; printf 'P3CURSOR-ADD-1\\nP3CURSOR-ADD-2\\nP3CURSOR-ADD-3\\n'; exec /bin/sleep 60";
+    let (_storage, mut owner, target) = launch_owner(&fixture, script);
+    let read_client = connect(&mut owner, target, 4403, false);
+    assert_ne!(
+        read_client.connection.selected_capabilities() & CAPABILITY_HISTORY_CURSOR,
+        0
+    );
+    let deadline = Instant::now() + WAIT;
+    let baseline = loop {
+        owner.poll(NOW).expect("poll retained PTY output");
+        let (ready, cursor) = owner
+            .observe_target(&read_client.connection, target, NOW, |effects| {
+                let visible =
+                    effects
+                        .screen()
+                        .cells()
+                        .iter()
+                        .fold(String::new(), |mut text, cell| {
+                            text.push_str(cell.text());
+                            text
+                        });
+                (visible.contains("P3CURSOR-READY"), effects.history_cursor())
+            })
+            .expect("read current cursor and screen");
+        if ready {
+            break cursor.expect("normal history exposes its cursor");
+        }
+        assert!(Instant::now() < deadline, "shell reaches its input barrier");
+        thread::sleep(Duration::from_millis(5));
+    };
+
+    let mut input_client = connect(&mut owner, target, 4404, true);
+    let expected_owner_revision = claim(&mut owner, &mut input_client);
+    let key = input_client.key();
+    let keys = [Key::Enter];
+    let input = KeyInput {
+        key,
+        target,
+        expected_owner_revision,
+        keys: &keys,
+    };
+    let payload = encode_key_input(&input).expect("encode barrier release");
+    let UiRequest::KeyInput(view) = decode_ui_request(&payload).expect("decode input") else {
+        panic!("encoded request is typed input");
+    };
+    let response = owner
+        .handle_key_input(
+            &input_client.connection,
+            &view,
+            &payload,
+            NOW,
+            PtyEffects::validate_keys,
+            |effects| effects.keys(view.keys()),
+        )
+        .expect("release child input barrier");
+    assert_eq!(
+        decode_response_payload(&response).unwrap().body,
+        ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+    );
+
+    let expected = baseline.ordinal + 3;
+    let after = loop {
+        owner.poll(NOW).expect("poll additional PTY output");
+        let cursor = owner
+            .observe_target(
+                &read_client.connection,
+                target,
+                NOW,
+                PtyEffects::history_cursor,
+            )
+            .expect("read updated history cursor");
+        if cursor.is_some_and(|cursor| cursor.ordinal >= expected) {
+            break cursor.unwrap();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child emits three additional rows"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(after.epoch, baseline.epoch);
+    assert_eq!(after.ordinal - baseline.ordinal, 3);
+
+    let reply = history_payload(&mut owner, &read_client, 3);
+    let history = decode_history_reply_with_metadata(&reply, false, true)
+        .expect("decode cursor-bearing history reply");
+    assert_eq!(
+        history.history_cursor(),
+        Some(WireHistoryCursor {
+            epoch: after.epoch,
+            ordinal: after.ordinal,
+        })
+    );
 }
 
 #[test]

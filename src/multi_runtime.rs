@@ -60,8 +60,8 @@ use crate::session_registry::SessionState;
 use crate::split_protocol::{decode_split_request, decode_split_result};
 use crate::transport::{AuthenticatedStream, OwnedFrame};
 use crate::ui_protocol::{
-    decode_attach_target, decode_history_reply_with_wraps, decode_layout_reply,
-    decode_resize_reply, decode_screen_reply_with_wraps, decode_ui_request, UiRequest,
+    decode_attach_target, decode_history_reply_with_metadata, decode_layout_reply,
+    decode_resize_reply, decode_screen_reply_with_metadata, decode_ui_request, UiRequest,
     ATTACH_TARGET_BYTES,
 };
 use crate::watch_protocol::WatchStatus;
@@ -2102,8 +2102,21 @@ fn dispatch_ui(
                     != 0)
                     .then(|| effects.screen().row_wraps())
                     .flatten();
-                crate::ui_protocol::prefix_screen_reply_with_wraps(
-                    target, revision, checkpoint, wraps,
+                let history_cursor = (connection.selected_capabilities()
+                    & crate::handshake_protocol::CAPABILITY_HISTORY_CURSOR
+                    != 0)
+                    .then(|| effects.history_cursor())
+                    .flatten()
+                    .map(|cursor| crate::ui_protocol::WireHistoryCursor {
+                        epoch: cursor.epoch,
+                        ordinal: cursor.ordinal,
+                    });
+                crate::ui_protocol::prefix_screen_reply_with_metadata(
+                    target,
+                    revision,
+                    checkpoint,
+                    wraps,
+                    history_cursor,
                 )
                 .map_err(|_| "invalid_screen")
             });
@@ -2134,7 +2147,16 @@ fn dispatch_ui(
                     != 0)
                     .then(|| snapshot.row_wraps())
                     .flatten();
-                crate::ui_protocol::prefix_history_reply_with_wraps(
+                let history_cursor = (connection.selected_capabilities()
+                    & crate::handshake_protocol::CAPABILITY_HISTORY_CURSOR
+                    != 0)
+                    .then(|| effects.history_cursor())
+                    .flatten()
+                    .map(|cursor| crate::ui_protocol::WireHistoryCursor {
+                        epoch: cursor.epoch,
+                        ordinal: cursor.ordinal,
+                    });
+                crate::ui_protocol::prefix_history_reply_with_metadata(
                     target,
                     revision,
                     offset_rows,
@@ -2142,6 +2164,7 @@ fn dispatch_ui(
                     effects.mouse_reporting_enabled(),
                     checkpoint,
                     wraps,
+                    history_cursor,
                 )
                 .map_err(|_| "invalid_history")
             });
@@ -2656,11 +2679,26 @@ fn response_matches(schema: RequestSchema, payload: &[u8]) -> bool {
     }
 }
 
-fn snapshot_matches(schema: RequestSchema, payload: &[u8], wraps_negotiated: bool) -> bool {
+fn snapshot_matches(
+    schema: RequestSchema,
+    payload: &[u8],
+    wraps_negotiated: bool,
+    history_cursor_negotiated: bool,
+) -> bool {
     matches!(schema, RequestSchema::UiScreen(target)
-        if decode_screen_reply_with_wraps(payload, wraps_negotiated).is_ok_and(|view| view.target() == target))
+        if decode_screen_reply_with_metadata(
+            payload,
+            wraps_negotiated,
+            history_cursor_negotiated,
+        )
+        .is_ok_and(|view| view.target() == target))
         || matches!(schema, RequestSchema::UiHistory(target)
-            if decode_history_reply_with_wraps(payload, wraps_negotiated).is_ok_and(|view| view.target() == target))
+            if decode_history_reply_with_metadata(
+                payload,
+                wraps_negotiated,
+                history_cursor_negotiated,
+            )
+            .is_ok_and(|view| view.target() == target))
 }
 
 fn workspace_response_matches(request: workspace_watch::Request, payload: &[u8]) -> bool {
@@ -2885,6 +2923,9 @@ fn run_worker(
                     &payload,
                     connection.selected_capabilities()
                         & crate::handshake_protocol::CAPABILITY_SCREEN_ROW_WRAPS
+                        != 0,
+                    connection.selected_capabilities()
+                        & crate::handshake_protocol::CAPABILITY_HISTORY_CURSOR
                         != 0,
                 ) =>
             {
@@ -3228,9 +3269,10 @@ mod tests {
                 ),
             ];
             for (schema, bytes) in replies {
-                assert!(snapshot_matches(schema, &bytes, negotiated));
+                assert!(snapshot_matches(schema, &bytes, negotiated, false));
+                assert!(snapshot_matches(schema, &bytes, negotiated, true));
                 if negotiated {
-                    assert!(!snapshot_matches(schema, &bytes, false));
+                    assert!(!snapshot_matches(schema, &bytes, false, false));
                 }
                 let other = TargetRef {
                     session: 99,
@@ -3239,15 +3281,59 @@ mod tests {
                 assert!(!snapshot_matches(
                     RequestSchema::UiScreen(other),
                     &bytes,
+                    true,
                     true
                 ));
                 assert!(!snapshot_matches(
                     RequestSchema::UiHistory(other),
                     &bytes,
+                    true,
                     true
                 ));
-                assert!(!snapshot_matches(RequestSchema::UiLayout, &bytes, true));
+                assert!(!snapshot_matches(
+                    RequestSchema::UiLayout,
+                    &bytes,
+                    true,
+                    true
+                ));
             }
+        }
+        // History-cursor trailers are accepted only on connections that
+        // negotiated them; a missing guard here drops every reply on the wire.
+        let cursor = Some(crate::ui_protocol::WireHistoryCursor {
+            epoch: 3,
+            ordinal: 41,
+        });
+        let replies = [
+            (
+                RequestSchema::UiScreen(TARGET),
+                crate::ui_protocol::prefix_screen_reply_with_metadata(
+                    TARGET,
+                    1,
+                    checkpoint.clone(),
+                    None,
+                    cursor,
+                )
+                .unwrap(),
+            ),
+            (
+                RequestSchema::UiHistory(TARGET),
+                crate::ui_protocol::prefix_history_reply_with_metadata(
+                    TARGET,
+                    1,
+                    1,
+                    false,
+                    false,
+                    checkpoint.clone(),
+                    None,
+                    cursor,
+                )
+                .unwrap(),
+            ),
+        ];
+        for (schema, bytes) in replies {
+            assert!(snapshot_matches(schema, &bytes, false, true));
+            assert!(!snapshot_matches(schema, &bytes, false, false));
         }
     }
 
