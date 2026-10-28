@@ -1668,9 +1668,9 @@ fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
             .contents()
             .lines()
             .next()
-            .is_some_and(|header| header.trim_end().ends_with('+'))
+            .is_some_and(|header| header.trim_end().ends_with("[+ New]"))
     });
-    client.click_text("+");
+    client.click_text("[+ New]");
     client.wait_header("Editors", "Shell 1");
     let shell = fixture.tab_id("Editors", "Shell 1");
     fixture.own_route(project, shell);

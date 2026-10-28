@@ -5,6 +5,19 @@
 All eight packets are implemented on `t3/panelink-ui-ux-plan`. After UX-08 the
 user asked to commit and to build/install locally (one commit; no push).
 
+Header polish 0.1.6 (user feedback on the 0.1.5 screenshot: cramped, "All+"
+not recognisable as a tab button): tab row now has a one-cell margin, two-cell
+gaps, and labelled right controls `[<] [>]  [All tabs]  [+ New]` on hosts >= 60
+columns (compact `[All]`/`[+]`/`+` below); pane header has a gap between
+`[Menu]`, the focus marker and the label, and before `[x]`; the scrollbar column
+stays blank until history exists (no full-height `#` column). Checks: lib
+921/0/4, bin 309/0, compose 43/0, workspace_tabs 10/0, strict Clippy, fmt,
+docs; serial integration p3_attach_four 2/0, p3_scroll 3/0, p3a_attach_host
+5/0, p3a_default_open 7/0/1, p3a_runtime 1/0, p5_recovery_chooser 7/0,
+p5_workspace_tabs 5/0. Installed the same way as 0.1.5: target/debug SHA-256
+bf95c34a7e38d7955ca99c31902e906391af4bd6cca8af18cdf89a5a613e1cdf; previous
+binary at `~/.local/bin/panelink-debug.before-0.1.6-20261028-132246`.
+
 Local install 2026-10-28: package bumped to 0.1.5 (client badge `v0.1.5`).
 Existing development-launcher install kept: `~/.local/bin/panelink` ->
 this checkout's `bin/panelink` -> `target/debug/panelink` (locked/offline debug

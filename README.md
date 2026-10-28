@@ -24,7 +24,7 @@ panelink
 
 That's it. The first run starts your workspace with one shell. Later runs
 reattach to it. The client version appears in the bottom-right pane margin
-(`v0.1.5` in this local build), matching `panelink --version`.
+(`v0.1.6` in this local build), matching `panelink --version`.
 Use `panelink build-info --json` for the client revision/source fingerprint and
 `panelink server-info --json` for the running server's identity and negotiated
 capabilities. An older server reports identity unsupported; the client version
@@ -167,7 +167,7 @@ Tab controls in the interactive client:
 - `Ctrl-B t` opens tab actions (Rename / Close) for the active tab.
 - `Ctrl-B w` opens the searchable All tabs chooser.
 - `Ctrl-B n/p` switches next/previous tab; `[`/`]` switches project.
-- At most eight tabs per project; overflow uses `<>` and All controls.
+- At most eight tabs per project; the tab row ends with `[<] [>]`, `[All tabs]` and `[+ New]` (compact forms on narrow hosts).
 - Rename uses a text field with Save/Cancel (Enter/Esc).
 - Close asks confirmation with Cancel as the default; closing the last tab
   returns to the empty state.

@@ -1233,9 +1233,9 @@ fn keyboard_copy_caret_respects_the_workspace_header_offset() {
     let mut parser = vt100::Parser::new(24, 81, 0);
     parser.process(&bytes);
     assert!(parser.screen().cell(2, 1).unwrap().inverse());
-    // The project control is inverse even outside copy mode. Its blank cell
-    // must stay in the header while the copy caret highlights pane content.
-    assert_eq!(parser.screen().cell(0, 1).unwrap().contents(), " ");
+    // The project control starts after a one-cell header margin. Its blank
+    // cell must stay in the header while the copy caret highlights content.
+    assert_eq!(parser.screen().cell(0, 2).unwrap().contents(), " ");
 }
 
 #[test]
@@ -5771,13 +5771,18 @@ fn empty_workspace_header_plus_requests_one_default_project_tab() {
         .unwrap();
     let mut parser = vt100::Parser::new(24, 81, 0);
     parser.process(&bytes);
-    assert_eq!(parser.screen().cell(0, 80).unwrap().contents(), "+");
+    // Roomy header: "[+ New]" ends one cell before the right edge.
+    let header: String = (0..81)
+        .map(|column| parser.screen().cell(0, column).unwrap().contents())
+        .map(|text| if text.is_empty() { " " } else { text })
+        .collect();
+    assert!(header.ends_with("[+ New] "), "{header:?}");
 
     assert_eq!(
         app.handle_empty_workspace_event(
             &Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
-                column: 80,
+                column: 76,
                 row: 0,
                 modifiers: KeyModifiers::NONE,
             }),

@@ -198,7 +198,9 @@ pub fn pane_controls(rect: Rect) -> Option<PaneControls> {
         rows: 1,
         columns: 3,
     };
-    let marker_x = menu.x.checked_add(menu.columns)?;
+    // One blank cell separates [Menu] from the focus marker, and one more
+    // separates the marker from the label.
+    let marker_x = menu.x.checked_add(menu.columns)?.checked_add(1)?;
     let label_x = marker_x.checked_add(2)?;
     Some(PaneControls {
         menu,
@@ -213,7 +215,8 @@ pub fn pane_controls(rect: Rect) -> Option<PaneControls> {
             x: label_x,
             y: rect.y,
             rows: 1,
-            columns: close.x.checked_sub(label_x)?,
+            // Keep one blank cell between the label and the close control.
+            columns: close.x.checked_sub(label_x)?.saturating_sub(1),
         },
     })
 }
@@ -1443,7 +1446,7 @@ impl Compositor {
             if excluded(self.pending_meta.overlay, row, geometry.track.x) {
                 continue;
             }
-            if meta.scrollbar.is_some() {
+            if meta.scrollbar.is_some_and(|bar| bar.total_rows > 0) {
                 let thumb = geometry.thumb.contains(geometry.track.x, row);
                 output.write_all(if thumb { b"\x1b[0;1m" } else { b"\x1b[0;2m" })?;
                 write_ascii_run(
@@ -2638,8 +2641,9 @@ mod tests {
             ],
         );
         let parser = screen(&no_history, &frame);
+        // Without retained history the scrollbar column stays blank.
         for row in 1..=5 {
-            assert_eq!(cell_text(&parser, row, 21), "#");
+            assert_blank(&parser, row, 21);
         }
     }
 
@@ -4318,8 +4322,13 @@ mod tests {
             ">"
         );
         assert_eq!(
-            label_at(&parser, controls.label.y, controls.label.x, 9),
-            "界界界lo~"
+            label_at(
+                &parser,
+                controls.label.y,
+                controls.label.x,
+                controls.label.columns
+            ),
+            "界界界~"
         );
         assert_eq!(
             label_at(&parser, controls.menu.y, controls.menu.x, 6),
@@ -4329,7 +4338,10 @@ mod tests {
             label_at(&parser, controls.close.y, controls.close.x, 3),
             "[x]"
         );
-        assert_eq!(controls.label.x + controls.label.columns, controls.close.x);
+        assert_eq!(
+            controls.label.x + controls.label.columns + 1,
+            controls.close.x
+        );
         let marker = parser
             .screen()
             .cell(controls.focus_marker.y, controls.focus_marker.x)

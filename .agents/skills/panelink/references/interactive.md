@@ -11,7 +11,7 @@ short batch lock does not protect a human's unfinished draft between keystrokes.
 Legacy retained CLI claims still block other writers. See the
 [CLI ownership workflow](cli.md#authorized-input).
 
-The client version (for example `v0.1.5`) is shown in the bottom-right pane
+The client version (for example `v0.1.6`) is shown in the bottom-right pane
 margin, matching `--version`; it does not identify the running server. The
 render area is bounded to 80 rows by 240 columns, so host size and child PTY
 size can differ; discover pane dimensions through the matching executable's CLI.
@@ -71,9 +71,10 @@ item selects it and shows its reason.
 `panelink` with no arguments opens the **selected visible tab** with the project/tab row at the top.
 
 - **Zero visible tabs** shows an interactive **empty state** with clickable `[ New tab (N) ]` and `[ Detach (Ctrl-X) ]`. No process is started. On a non-TTY it prints a notice and exits.
-- **`+`** (header button or Ctrl-B `+`) creates one managed **"Shell N"** tab and switches to it.
+- **`[+ New]`** (right end of the tab row; `[+]` or `+` on narrow hosts) or Ctrl-B `+` creates one managed **"Shell N"** tab and switches to it.
 - **Capacity**: eight tabs per project.
-- **Overflow**: if tabs do not fit, `<>` previous/next controls and an **All** button open a searchable chooser. Active tab and `+` remain reachable.
+- **Tab row**: `[ Project ]  [Tab]  [Tab] ... [<] [>]  [All tabs]  [+ New]` with a one-cell margin on hosts at least 60 columns wide; narrower hosts use `<` `>`, `[All]`/`All` and `[+]`/`+`. `[<] [>]` appear with more than one tab; `[All tabs]` opens a searchable chooser. Active tab and create stay reachable.
+- **Scrollbar**: the right-margin column stays blank until the pane has retained history; then a dim track and `#` thumb appear.
 - **Rename**: right-click or Ctrl-B `t` → Rename opens a text field with Save/Cancel. Enter saves, Esc cancels. On conflict the edit is preserved and an error is shown.
 - **Close tab**: confirmation with **Cancel** as the default. Close ends the tab's processes. The last tab closed returns to the empty state.
 - Closing a tab requires it to be **open** (the active route). An inactive tab shows: "open this tab first to close it".
