@@ -157,6 +157,15 @@ marker that the prompt does not contain literally (for example describe it as
 `wait --change`, then make one blocking `wait --text MARKER --timeout N`. A
 marker never prints while an agent waits on an approval screen, so choose a
 bounded timeout and read the pane when it expires.
+
+Finite pane `wait` pins the full target and original pane index, then reuses
+one authenticated event connection for screen reconciliation and layout
+checks. Geometry-only layout revisions keep the wait alive; a renumbered index
+or replacement occupant is stale. Event gaps are explicit, timeouts stay
+finite, and connection failures do not reconnect or replay anything. Initial
+index resolution, post-error exit discovery and exit-status retrieval still
+use separate inventory connections.
+
 Events are bounded metadata observations, including negotiated layout events.
 `events --pane N` pins the initial full target rather than following a replacement
 at that index. After a gap, expiry or restart, obtain fresh authoritative state.
