@@ -1,13 +1,13 @@
 # Code health execution state
 
 ```text
-current-phase: 08 combined verification
+current-phase: complete
 last-updated: 2026-10-30
 base: a1134ec4bc69e8a97b27ba2b0b61f2e446257440
 branch: refactor/code-health-20261030
-last-verified: fresh repaired canonical8/8; original baseline failure preserved
-next-action: fresh canonical verification of combined committed source, then final evidence/commit
-blocked-on: none for01,02,06,07; UI chain remains serial
+last-verified: combined canonical8/8 on2b72e81; root1596/0/20ignored, decoder39/0, Python233run/1skip
+next-action: none for this local implementation; push/install require separate user authorization
+blocked-on: none for maintenance plan; separate product acceptance gates remain open
 ```
 
 ## Authorization and scope
@@ -26,9 +26,9 @@ User authorized implementing the [plan](README.md) in this new worktree with par
 | 05 rendering | DONE; parent review and focused checks pass | state/render.rs and immutable owner presentation methods |
 | 06 positive fixture barrier | DONE; parent implemented and verified | p3_attach_four.rs |
 | 07 server test layout | DONE; committed15369d5 | multi_session.rs and private child test files |
-| 08 integration/docs | source review/navigation complete; canonical pending | parent; canonical worker report-only lease |
+| 08 integration/docs | DONE; parent reviewed combined canonical8/8 and final docs | all leases released |
 
-Active worker leases are disjoint and recorded below. Parent holds the UI-state design and split-fixture lease. UI source changes are serial. Keep exact target, input nonreplayability, scoped-wheel negotiation/FIFO, metadata, modal, geometry, output commit and host restoration contracts from [SPEC.md](SPEC.md).
+All leases are released; no active delegates. Entries below retain the historical dispatch and evidence record. UI changes were serialized. Keep exact target, input nonreplayability, scoped-wheel negotiation/FIFO, metadata, modal, geometry, output commit and host restoration contracts from [SPEC.md](SPEC.md).
 
 ## Environment and evidence
 
@@ -130,3 +130,17 @@ Packet03 committed8ba6672. Parent implemented CopyState/Interaction owners; see 
 Packet04 accepted by parent after completing [transition review](INTERACTION-REVIEW.md). Delegated review was incomplete and is not counted as independent approval. Existing final checks pass; source unchanged since those checks. No active delegates.05 starts after04 commit.
 
 Packet05 accepted: [evidence](PACKET05.md), immutable renderer and owner presentation methods. Binary323/0, compositor43/0, private PTY7/0, strict Clippy/fmt/diff/docs pass. Source test assertions unchanged. Parent combined interface review finds no whole-App helpers, mutable render state, protocol/storage/manifest/lock changes, or altered public command semantics. Canonical gate remains pending; do not mark08 complete.
+
+## Combined gate assigned — 2026-10-30
+
+Source committed2b72e81831c9912d12a5cff878b5e34dacaeda03; [combined inventory/review](INVENTORY.md). All implementation source frozen. Luna/high runs the canonical gate once, with serial tests, jobs2 and isolated baseline target; report-only lease INTEGRATION.md. Parent edits only this durable dispatch entry, then ends turn. No builds remain from05.
+
+- Task ID: `node:delegated-task:command%3Amcp%3Af067c71d-36bf-4d78-89a0-8588f6bc1c27%3Adelegate-task%3Acode-health-20261030-combined-08`.
+- Client request: `code-health-20261030-combined-08`; Codex/gpt-6-luna/high. This dispatch has a new tool-instance prefix; retain the exact ID above.
+- Log `/private/tmp/panelink-code-health-20261030-combined.log`. Completion wakes parent; do not poll. Parent reviews the actual report/log, diagnoses any failure without erasing it, or finalizes08 docs/ticket/commit if green. Do not mark08 done before that review. No push/install authorized.
+
+## Plan complete — 2026-10-30
+
+Parent independently parsed the full combined log and confirmed all8 gate results,84 Cargo groups totaling1596 passed/0 failed/20 ignored, decoder39/0, Python233run/1skip and component fingerprints. See [canonical evidence](INTEGRATION.md), [inventory/review](INVENTORY.md) and [navigation](NAVIGATION.md). Source remains2b72e81831c9912d12a5cff878b5e34dacaeda03; final edits are documentation only. All00–08 acceptance checklists are complete for the authorized local maintainability scope. Historical failures and incomplete delegated reviews remain explicitly recorded. All agents/leases released.
+
+No protocol/storage/dependency/public-command change, install, live-pane operation, push or tracker publication. Native host, provider, reboot, real clipboard, performance and hosted CI acceptance remain open; this completion does not relabel product phase gates. Final docs/link and diff validation precede the parent completion-evidence commit.

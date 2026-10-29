@@ -1,5 +1,7 @@
 # Execution reference and exclusive ownership
 
+Current source ownership is mapped in [NAVIGATION.md](NAVIGATION.md). The source anchors below describe the original baseline; retain them as execution history. All packets are complete; see [PROGRESS.md](PROGRESS.md) before starting new work.
+
 ## Starting procedure
 
 The parent first completes ticket 00. Every worker then reads the repository's applicable AGENTS instructions, README, SPEC, DISCOVERY, PREBUILD, ROADMAP and current SESSION, plus the current Panelink usage skill when its scope touches user/agent behavior. Read the relevant Rust skill if available and record its pinned revision; do not claim a missing skill is installed.
