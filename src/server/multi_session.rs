@@ -1675,6 +1675,11 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 | crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS
                 | crate::handshake_protocol::CAPABILITY_AGENT_OBSERVATION
                 | crate::handshake_protocol::CAPABILITY_BUILD_IDENTITY
+                | if self.global.allow_input {
+                    crate::handshake_protocol::CAPABILITY_SCOPED_MOUSE_WHEEL
+                } else {
+                    0
+                }
                 | workspace_capability,
         )
     }
@@ -2652,6 +2657,114 @@ impl<E: EffectSink> MultiSessionOwner<E> {
     /// A disabled mouse mode is rejected by `validate` before ledger
     /// admission, allowing the attach client to fall back to a read-only
     /// history query. Admitted events are never retried or replayed.
+    pub fn handle_scoped_mouse_wheel<V, A>(
+        &mut self,
+        connection: &Connection,
+        request: &crate::ui_protocol::ScopedMouseWheelInput,
+        payload: &[u8],
+        now_secs: u64,
+        validate: V,
+        apply: A,
+    ) -> Result<Vec<u8>, ServerError>
+    where
+        V: FnOnce(&E) -> Result<(), RejectionCode>,
+        A: FnOnce(&mut E) -> Outcome,
+    {
+        let key = request.key;
+        self.global.require_live_connection(connection, now_secs)?;
+        let required = CAPABILITY_INPUT | crate::handshake_protocol::CAPABILITY_SCOPED_MOUSE_WHEEL;
+        if key.lease != connection.lease
+            || key.generation != self.global.generation
+            || connection.selected_capabilities & required != required
+        {
+            return rejected_reply(key, RejectionCode::Unauthorized);
+        }
+        if let Some(reply) = known_reply(&self.global, key, payload, now_secs)? {
+            return Ok(reply);
+        }
+        if self
+            .global
+            .require_target_scope(connection, request.target)
+            .is_err()
+        {
+            return rejected_reply(key, RejectionCode::Unauthorized);
+        }
+        let session = match self.launches.session_mut(request.target) {
+            Ok(session) => session,
+            Err(RegistryError::InvalidTarget | RegistryError::EffectsUnavailable) => {
+                return rejected_reply(key, RejectionCode::StaleTarget)
+            }
+            Err(_) => return Err(ServerError::Internal),
+        };
+        let mut handler = SessionHandler::new(&mut self.global, session);
+        let result = (|| {
+            // Validate mode before touching ownership, including when another
+            // caller holds a no-mouse pane.
+            if let Err(code) = validate(&handler.session.effects) {
+                return rejected_reply(key, code);
+            }
+            let current = handler.session.input_owner.snapshot();
+            if current.holder.is_some() || current.pending.is_some() {
+                return rejected_reply(key, RejectionCode::InputBusy);
+            }
+            let mut pinned = handler.session.input_owner.clone();
+            let claimed = match pinned.claim(
+                Owner::Client(key.lease),
+                current.revision,
+                crate::input_owner::MAX_OWNER_TTL_SECS,
+                now_secs,
+            ) {
+                Ok(value) => value,
+                Err(error) => return rejected_reply(key, owner_rejection(error)),
+            };
+            if let Err(error) =
+                pinned.begin_input(Owner::Client(key.lease), claimed.revision, key, now_secs)
+            {
+                return rejected_reply(key, owner_rejection(error));
+            }
+            let mut completed = pinned.clone();
+            if let Err(error) = completed.finish_input(key) {
+                return rejected_reply(key, owner_rejection(error));
+            }
+            let retained = completed.clone();
+            let mut released = completed;
+            if let Err(error) = released.release(Owner::Client(key.lease), claimed.revision) {
+                return rejected_reply(key, owner_rejection(error));
+            }
+            let applied = status_reply(key, OperationStatus::Completed(Outcome::Applied))?;
+            let failed = status_reply(key, OperationStatus::Completed(Outcome::Failed))?;
+            let partial = status_reply(key, OperationStatus::Completed(Outcome::Partial))?;
+            let unknown = status_reply(key, OperationStatus::Completed(Outcome::Unknown))?;
+            match handler.global.ledger.admit(key, payload, now_secs) {
+                Ok(Admission::Execute) => {}
+                Ok(Admission::InProgress) => return status_reply(key, OperationStatus::InProgress),
+                Ok(Admission::Completed(outcome)) => {
+                    return status_reply(key, OperationStatus::Completed(outcome))
+                }
+                Err(error) if is_capacity_error(&error) => {
+                    return rejected_reply(key, RejectionCode::Capacity)
+                }
+                Err(error) => return Err(ServerError::Protocol(error)),
+            }
+            handler.session.input_owner = pinned;
+            let outcome = terminal_outcome(apply(&mut handler.session.effects));
+            handler.global.ledger.complete(key, outcome)?;
+            handler.session.input_owner = if outcome == Outcome::Applied {
+                released
+            } else {
+                retained
+            };
+            Ok(match outcome {
+                Outcome::Applied => applied,
+                Outcome::Failed => failed,
+                Outcome::Partial => partial,
+                Outcome::Unknown | Outcome::Accepted => unknown,
+            })
+        })();
+        handler.synchronize_metadata();
+        result
+    }
+
     pub fn handle_mouse_wheel<V, A>(
         &mut self,
         connection: &Connection,
@@ -3927,6 +4040,460 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    fn scoped_wheel_fixture() -> (MultiSessionOwner<Sink>, TargetRef, Connection) {
+        let mut owner = owner();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut journal = Journal::new(&events);
+        let target = launch(&mut owner, 1, &mut journal, &events)
+            .unwrap()
+            .target
+            .unwrap();
+        let mut greeting = hello();
+        greeting.hello.optional_capabilities |=
+            crate::handshake_protocol::CAPABILITY_SCOPED_MOUSE_WHEEL;
+        let (connection, welcome) = owner.connect(target, &greeting, 4).unwrap();
+        assert_ne!(
+            welcome.selected_capabilities
+                & crate::handshake_protocol::CAPABILITY_SCOPED_MOUSE_WHEEL,
+            0
+        );
+        (owner, target, connection)
+    }
+
+    fn scoped_wheel_request(
+        connection: Connection,
+        target: TargetRef,
+        sequence: u64,
+    ) -> (crate::ui_protocol::ScopedMouseWheelInput, Vec<u8>) {
+        let request = crate::ui_protocol::ScopedMouseWheelInput {
+            key: key(connection.lease(), sequence),
+            target,
+            column: 3,
+            row: 4,
+            up: true,
+        };
+        let bytes = crate::ui_protocol::encode_scoped_mouse_wheel_input(&request)
+            .unwrap()
+            .to_vec();
+        (request, bytes)
+    }
+
+    #[test]
+    fn scoped_mouse_wheel_applied_releases_and_duplicate_preserves_later_owner() {
+        let (mut owner, target, connection) = scoped_wheel_fixture();
+        let (request, bytes) = scoped_wheel_request(connection, target, 1);
+        let result = owner
+            .handle_scoped_mouse_wheel(
+                &connection,
+                &request,
+                &bytes,
+                5,
+                |_| Ok(()),
+                |sink| {
+                    sink.inputs += 1;
+                    Outcome::Applied
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            response(&result).body,
+            ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+        );
+        let snapshot = owner
+            .launches
+            .session_mut(target)
+            .unwrap()
+            .input_owner
+            .snapshot();
+        assert_eq!(
+            (snapshot.holder, snapshot.pending, snapshot.revision),
+            (None, None, 3)
+        );
+        let retained = owner
+            .launches
+            .session_mut(target)
+            .unwrap()
+            .input_owner
+            .claim(crate::input_owner::Owner::Human(99), 3, 30, 6)
+            .unwrap();
+        let duplicate = owner
+            .handle_scoped_mouse_wheel(
+                &connection,
+                &request,
+                &bytes,
+                6,
+                |_| panic!("duplicate revalidated mode"),
+                |_| panic!("duplicate resent wheel"),
+            )
+            .unwrap();
+        assert_eq!(duplicate, result);
+        assert!(
+            owner
+                .launches
+                .session_mut(target)
+                .unwrap()
+                .input_owner
+                .snapshot()
+                == retained
+        );
+        assert_eq!(owner.launches.effects(target).unwrap().effects.inputs, 1);
+        let mut changed = request;
+        changed.up = false;
+        let changed_bytes = crate::ui_protocol::encode_scoped_mouse_wheel_input(&changed).unwrap();
+        assert!(owner
+            .handle_scoped_mouse_wheel(
+                &connection,
+                &changed,
+                &changed_bytes,
+                6,
+                |_| panic!("conflict revalidated"),
+                |_| panic!("conflict resent")
+            )
+            .is_err());
+        assert!(
+            owner
+                .launches
+                .session_mut(target)
+                .unwrap()
+                .input_owner
+                .snapshot()
+                == retained
+        );
+    }
+
+    #[test]
+    fn scoped_mouse_wheel_non_applied_retains_scope_without_replaying() {
+        for outcome in [
+            Outcome::Failed,
+            Outcome::Partial,
+            Outcome::Unknown,
+            Outcome::Accepted,
+        ] {
+            let (mut owner, target, connection) = scoped_wheel_fixture();
+            let (request, bytes) = scoped_wheel_request(connection, target, 1);
+            let result = owner
+                .handle_scoped_mouse_wheel(
+                    &connection,
+                    &request,
+                    &bytes,
+                    5,
+                    |_| Ok(()),
+                    |sink| {
+                        sink.inputs += 1;
+                        outcome
+                    },
+                )
+                .unwrap();
+            let expected = if outcome == Outcome::Accepted {
+                Outcome::Unknown
+            } else {
+                outcome
+            };
+            assert_eq!(
+                response(&result).body,
+                ResponseBody::Status(OperationStatus::Completed(expected))
+            );
+            let snapshot = owner
+                .launches
+                .session_mut(target)
+                .unwrap()
+                .input_owner
+                .snapshot();
+            assert_eq!(
+                snapshot.holder,
+                Some(crate::input_owner::Owner::Client(connection.lease()))
+            );
+            assert_eq!(
+                (snapshot.revision, snapshot.expires_secs, snapshot.pending),
+                (2, 35, None)
+            );
+            let duplicate = owner
+                .handle_scoped_mouse_wheel(
+                    &connection,
+                    &request,
+                    &bytes,
+                    6,
+                    |_| panic!("duplicate validated"),
+                    |_| panic!("duplicate effect"),
+                )
+                .unwrap();
+            assert_eq!(duplicate, result);
+            let (next, next_bytes) = scoped_wheel_request(connection, target, 2);
+            let busy = owner
+                .handle_scoped_mouse_wheel(
+                    &connection,
+                    &next,
+                    &next_bytes,
+                    6,
+                    |_| Ok(()),
+                    |_| panic!("same caller stole retained scope"),
+                )
+                .unwrap();
+            assert_eq!(
+                response(&busy).body,
+                ResponseBody::Rejected(RejectionCode::InputBusy)
+            );
+            assert!(
+                owner
+                    .launches
+                    .session_mut(target)
+                    .unwrap()
+                    .input_owner
+                    .snapshot()
+                    == snapshot
+            );
+            assert_eq!(owner.launches.effects(target).unwrap().effects.inputs, 1);
+            assert_eq!(
+                owner.global.ledger.status(next.key, 6).unwrap(),
+                OperationStatus::NotAdmitted
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_mouse_wheel_mode_rejection_precedes_retained_ownership() {
+        for same_caller in [false, true] {
+            let (mut owner, target, connection) = scoped_wheel_fixture();
+            let holder = if same_caller {
+                crate::input_owner::Owner::Client(connection.lease())
+            } else {
+                crate::input_owner::Owner::Human(55)
+            };
+            let snapshot = owner
+                .launches
+                .session_mut(target)
+                .unwrap()
+                .input_owner
+                .claim(holder, 1, 30, 5)
+                .unwrap();
+            let (request, bytes) = scoped_wheel_request(connection, target, 1);
+            let result = owner
+                .handle_scoped_mouse_wheel(
+                    &connection,
+                    &request,
+                    &bytes,
+                    6,
+                    |_| Err(RejectionCode::Unsupported),
+                    |_| panic!("unsupported wheel delivered"),
+                )
+                .unwrap();
+            assert_eq!(
+                response(&result).body,
+                ResponseBody::Rejected(RejectionCode::Unsupported)
+            );
+            assert!(
+                owner
+                    .launches
+                    .session_mut(target)
+                    .unwrap()
+                    .input_owner
+                    .snapshot()
+                    == snapshot
+            );
+            assert_eq!(
+                owner.global.ledger.status(request.key, 6).unwrap(),
+                OperationStatus::NotAdmitted
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_mouse_wheel_busy_owners_and_pending_are_never_stolen() {
+        for case in 0..4 {
+            let (mut owner, target, connection) = scoped_wheel_fixture();
+            let session = owner.launches.session_mut(target).unwrap();
+            let holder = if case == 0 {
+                crate::input_owner::Owner::Client(connection.lease())
+            } else {
+                crate::input_owner::Owner::Human(77)
+            };
+            let claimed = session.input_owner.claim(holder, 1, 1, 5).unwrap();
+            if case == 2 {
+                session
+                    .input_owner
+                    .begin_input(holder, claimed.revision, key(connection.lease(), 99), 5)
+                    .unwrap();
+            }
+            let before = session.input_owner.snapshot();
+            let (request, bytes) = scoped_wheel_request(connection, target, 1);
+            let now = if case == 3 { 7 } else { 5 };
+            let result = owner
+                .handle_scoped_mouse_wheel(
+                    &connection,
+                    &request,
+                    &bytes,
+                    now,
+                    |_| Ok(()),
+                    |_| panic!("busy input delivered"),
+                )
+                .unwrap();
+            assert_eq!(
+                response(&result).body,
+                ResponseBody::Rejected(RejectionCode::InputBusy)
+            );
+            assert!(
+                owner
+                    .launches
+                    .session_mut(target)
+                    .unwrap()
+                    .input_owner
+                    .snapshot()
+                    == before
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_mouse_wheel_missing_capabilities_and_full_ledger_have_no_effect() {
+        for missing in [
+            crate::handshake_protocol::CAPABILITY_INPUT,
+            crate::handshake_protocol::CAPABILITY_SCOPED_MOUSE_WHEEL,
+        ] {
+            let (mut owner, target, mut connection) = scoped_wheel_fixture();
+            connection.selected_capabilities &= !missing;
+            let (request, bytes) = scoped_wheel_request(connection, target, 1);
+            let result = owner
+                .handle_scoped_mouse_wheel(
+                    &connection,
+                    &request,
+                    &bytes,
+                    5,
+                    |_| panic!("unauthorized validation"),
+                    |_| panic!("unauthorized effect"),
+                )
+                .unwrap();
+            assert_eq!(
+                response(&result).body,
+                ResponseBody::Rejected(RejectionCode::Unauthorized)
+            );
+            assert_eq!(
+                owner
+                    .launches
+                    .session_mut(target)
+                    .unwrap()
+                    .input_owner
+                    .snapshot()
+                    .revision,
+                1
+            );
+        }
+        let (mut owner, target, connection) = scoped_wheel_fixture();
+        for sequence in 1..=crate::protocol::MAX_UNRECEIPTED_OPERATIONS as u64 {
+            let key = key(connection.lease(), sequence);
+            owner.global.ledger.admit(key, b"fixture", 5).unwrap();
+            owner.global.ledger.complete(key, Outcome::Applied).unwrap();
+        }
+        let (request, bytes) = scoped_wheel_request(
+            connection,
+            target,
+            crate::protocol::MAX_UNRECEIPTED_OPERATIONS as u64 + 1,
+        );
+        let result = owner
+            .handle_scoped_mouse_wheel(
+                &connection,
+                &request,
+                &bytes,
+                5,
+                |_| Ok(()),
+                |_| panic!("capacity effect"),
+            )
+            .unwrap();
+        assert_eq!(
+            response(&result).body,
+            ResponseBody::Rejected(RejectionCode::Capacity)
+        );
+        let snapshot = owner
+            .launches
+            .session_mut(target)
+            .unwrap()
+            .input_owner
+            .snapshot();
+        assert_eq!(
+            (snapshot.revision, snapshot.holder, snapshot.pending),
+            (1, None, None)
+        );
+    }
+
+    #[test]
+    fn scoped_mouse_wheel_revision_release_capacity_is_prepared_before_delivery() {
+        for revision in [u64::MAX - 2, u64::MAX - 1, u64::MAX] {
+            let (mut owner, target, connection) = scoped_wheel_fixture();
+            owner.launches.session_mut(target).unwrap().input_owner =
+                crate::input_owner::InputOwner::vacant_at_revision_for_test(revision);
+            let (request, bytes) = scoped_wheel_request(connection, target, 1);
+            let calls = Cell::new(0);
+            let result = owner
+                .handle_scoped_mouse_wheel(
+                    &connection,
+                    &request,
+                    &bytes,
+                    5,
+                    |_| Ok(()),
+                    |_| {
+                        calls.set(calls.get() + 1);
+                        Outcome::Applied
+                    },
+                )
+                .unwrap();
+            let snapshot = owner
+                .launches
+                .session_mut(target)
+                .unwrap()
+                .input_owner
+                .snapshot();
+            assert_eq!((snapshot.holder, snapshot.pending), (None, None));
+            if revision == u64::MAX - 2 {
+                assert_eq!(
+                    response(&result).body,
+                    ResponseBody::Status(OperationStatus::Completed(Outcome::Applied))
+                );
+                assert_eq!((snapshot.revision, calls.get()), (u64::MAX, 1));
+            } else {
+                assert_eq!(
+                    response(&result).body,
+                    ResponseBody::Rejected(RejectionCode::InvalidRequest)
+                );
+                assert_eq!((snapshot.revision, calls.get()), (revision, 0));
+                assert_eq!(
+                    owner.global.ledger.status(request.key, 5).unwrap(),
+                    OperationStatus::NotAdmitted
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scoped_mouse_wheel_grants_require_input_and_resume_never_widens() {
+        let (mut owner, target, scoped) = scoped_wheel_fixture();
+        let bit = crate::handshake_protocol::CAPABILITY_SCOPED_MOUSE_WHEEL;
+        let mut greeting = hello();
+        let (old, old_welcome) = owner.connect(target, &greeting, 5).unwrap();
+        assert_eq!(old_welcome.selected_capabilities & bit, 0);
+        greeting.hello.optional_capabilities |= bit;
+        greeting.resume = Some(crate::session_protocol::LeaseRef {
+            generation: GENERATION,
+            lease: old.lease(),
+        });
+        let (_, resumed) = owner.connect(target, &greeting, 6).unwrap();
+        assert_eq!(resumed.selected_capabilities & bit, 0);
+        greeting.resume = Some(crate::session_protocol::LeaseRef {
+            generation: GENERATION,
+            lease: scoped.lease(),
+        });
+        let (_, resumed) = owner.connect(target, &greeting, 6).unwrap();
+        assert_ne!(resumed.selected_capabilities & bit, 0);
+        greeting.resume = None;
+        let session = owner.launches.session_mut(target).unwrap();
+        let (_, single) = owner.global.connect(session, &greeting, 6).unwrap();
+        assert_eq!(single.selected_capabilities & bit, 0);
+        owner.global.allow_input = false;
+        let (_, denied) = owner.connect(target, &greeting, 6).unwrap();
+        assert_eq!(
+            denied.selected_capabilities & (bit | crate::handshake_protocol::CAPABILITY_INPUT),
+            0
+        );
     }
 
     fn owner() -> MultiSessionOwner<Sink> {

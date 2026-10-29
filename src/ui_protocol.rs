@@ -15,6 +15,7 @@
 //! | 4 | RootResize | 40 | AbsoluteResize |
 //! | 6 | HistoryQuery | 56 | Query |
 //! | 7 | MouseWheelInput | 88 | Input |
+//! | 8 | ScopedMouseWheelInput | 80 | Input |
 //!
 //! LayoutQuery: `0 schema 8 | 2 kind 1 | 4 reserved u32 zero`.
 //!
@@ -29,6 +30,11 @@
 //! 80 direction u16 (1 up, 2 down) | 82 reserved 6 zero`. It is a
 //! non-replayable input operation and uses the normal input ownership and
 //! exact-payload deduplication path.
+//!
+//! ScopedMouseWheelInput: `0 schema | 2 kind 8 | 4 operation key (24) | 28
+//! target (40) | 68 column u16 | 70 row u16 | 72 direction u16 (1 up, 2 down)
+//! | 74 reserved 6 zero`. It is non-replayable input and requires the
+//! separately negotiated scoped-wheel and input capabilities.
 //!
 //! KeyInput:
 //!
@@ -130,6 +136,8 @@ pub const LAYOUT_QUERY_BYTES: usize = 8;
 pub const SCREEN_QUERY_BYTES: usize = 48;
 /// Exact size of a HistoryQuery request.
 pub const HISTORY_QUERY_BYTES: usize = 56;
+/// Exact size of a scoped mouse-wheel input request.
+pub const SCOPED_MOUSE_WHEEL_INPUT_BYTES: usize = 80;
 /// Maximum retained-history offset accepted by a HistoryQuery.
 pub const MAX_HISTORY_OFFSET_ROWS: u16 = 8_192;
 /// Fixed KeyInput prefix before the key entries.
@@ -162,6 +170,7 @@ const KIND_ROOT_RESIZE: u16 = 4;
 const KIND_ATTACH_TARGET: u16 = 5;
 const KIND_HISTORY_QUERY: u16 = 6;
 const KIND_MOUSE_WHEEL_INPUT: u16 = 7;
+const KIND_SCOPED_MOUSE_WHEEL_INPUT: u16 = 8;
 const KIND_LAYOUT_REPLY: u16 = 0x8001;
 const KIND_SCREEN_REPLY: u16 = 0x8002;
 const KIND_RESIZE_REPLY: u16 = 0x8003;
@@ -369,6 +378,48 @@ impl fmt::Debug for MouseWheelInput {
     }
 }
 
+/// One non-replayable wheel event that may proceed only while ownership is vacant.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ScopedMouseWheelInput {
+    /// Operation key; never replayed (`OperationClass::Input`).
+    pub key: OperationKey,
+    /// Complete target identity receiving the event.
+    pub target: TargetRef,
+    /// Zero-based content column.
+    pub column: u16,
+    /// Zero-based content row.
+    pub row: u16,
+    /// `true` scrolls up; `false` scrolls down.
+    pub up: bool,
+}
+
+impl ScopedMouseWheelInput {
+    /// Classify as non-replayable input.
+    pub const fn operation_class(&self) -> OperationClass {
+        OperationClass::Input
+    }
+
+    fn validate(&self) -> Result<(), UiCodecError> {
+        validate_key(self.key)?;
+        validate_target(self.target)?;
+        if self.target.generation != self.key.generation {
+            return Err(UiCodecError::GenerationMismatch);
+        }
+        if self.column >= MAX_PANE_COLUMNS || self.row >= MAX_PANE_ROWS {
+            return Err(UiCodecError::InvalidDimensions);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for ScopedMouseWheelInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScopedMouseWheelInput")
+            .field("direction", &if self.up { "up" } else { "down" })
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a> KeyInputView<'a> {
     /// Validated operation key.
     pub const fn key(&self) -> OperationKey {
@@ -462,6 +513,8 @@ pub enum UiRequest<'a> {
     KeyInput(KeyInputView<'a>),
     /// Deliver one scroll-wheel event as non-replayable input.
     MouseWheelInput(MouseWheelInput),
+    /// Deliver one scoped wheel event as non-replayable input.
+    ScopedMouseWheelInput(ScopedMouseWheelInput),
     /// Resize the layout root.
     RootResize(RootResize),
 }
@@ -473,7 +526,9 @@ impl UiRequest<'_> {
             Self::LayoutQuery | Self::ScreenQuery { .. } | Self::HistoryQuery(_) => {
                 OperationClass::Query
             }
-            Self::KeyInput(_) | Self::MouseWheelInput(_) => OperationClass::Input,
+            Self::KeyInput(_) | Self::MouseWheelInput(_) | Self::ScopedMouseWheelInput(_) => {
+                OperationClass::Input
+            }
             Self::RootResize(_) => OperationClass::AbsoluteResize,
         }
     }
@@ -487,6 +542,7 @@ impl fmt::Debug for UiRequest<'_> {
             Self::HistoryQuery(_) => f.write_str("HistoryQuery { <redacted> }"),
             Self::KeyInput(view) => view.fmt(f),
             Self::MouseWheelInput(input) => input.fmt(f),
+            Self::ScopedMouseWheelInput(input) => input.fmt(f),
             Self::RootResize(resize) => resize.fmt(f),
         }
     }
@@ -845,6 +901,21 @@ pub fn encode_root_resize(request: &RootResize) -> Result<[u8; ROOT_RESIZE_BYTES
     Ok(bytes)
 }
 
+/// Validate and encode one scoped wheel event.
+pub fn encode_scoped_mouse_wheel_input(
+    request: &ScopedMouseWheelInput,
+) -> Result<[u8; SCOPED_MOUSE_WHEEL_INPUT_BYTES], UiCodecError> {
+    request.validate()?;
+    let mut bytes = [0_u8; SCOPED_MOUSE_WHEEL_INPUT_BYTES];
+    put_header(&mut bytes, KIND_SCOPED_MOUSE_WHEEL_INPUT);
+    put_key(&mut bytes, 4, request.key);
+    put_target(&mut bytes, 28, request.target);
+    put_u16(&mut bytes, 68, request.column);
+    put_u16(&mut bytes, 70, request.row);
+    put_u16(&mut bytes, 72, if request.up { 1 } else { 2 });
+    Ok(bytes)
+}
+
 /// Decode and fully validate one schema-8 request.
 ///
 /// The size is checked against the kind's bound before any field is parsed.
@@ -884,6 +955,9 @@ pub fn decode_ui_request(bytes: &[u8]) -> Result<UiRequest<'_>, UiCodecError> {
         }
         KIND_KEY_INPUT => decode_key_input(bytes).map(UiRequest::KeyInput),
         KIND_MOUSE_WHEEL_INPUT => decode_mouse_wheel_input(bytes).map(UiRequest::MouseWheelInput),
+        KIND_SCOPED_MOUSE_WHEEL_INPUT => {
+            decode_scoped_mouse_wheel_input(bytes).map(UiRequest::ScopedMouseWheelInput)
+        }
         KIND_ROOT_RESIZE => {
             exact_size(bytes, ROOT_RESIZE_BYTES)?;
             let request = RootResize {
@@ -897,6 +971,25 @@ pub fn decode_ui_request(bytes: &[u8]) -> Result<UiRequest<'_>, UiCodecError> {
         }
         _ => Err(UiCodecError::UnknownKind),
     }
+}
+
+fn decode_scoped_mouse_wheel_input(bytes: &[u8]) -> Result<ScopedMouseWheelInput, UiCodecError> {
+    exact_size(bytes, SCOPED_MOUSE_WHEEL_INPUT_BYTES)?;
+    let direction = read_u16(bytes, 72);
+    let request = ScopedMouseWheelInput {
+        key: read_key(bytes, 4),
+        target: read_target(bytes, 28),
+        column: read_u16(bytes, 68),
+        row: read_u16(bytes, 70),
+        up: match direction {
+            1 => true,
+            2 => false,
+            _ => return Err(UiCodecError::InvalidMouseDirection),
+        },
+    };
+    zero(&bytes[74..])?;
+    request.validate()?;
+    Ok(request)
 }
 
 fn decode_key_input(bytes: &[u8]) -> Result<KeyInputView<'_>, UiCodecError> {
@@ -2034,6 +2127,98 @@ mod tests {
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn scoped_mouse_wheel_has_fixed_golden_and_strict_validation() {
+        let request = ScopedMouseWheelInput {
+            key: KEY,
+            target: TARGET,
+            column: 23,
+            row: 17,
+            up: true,
+        };
+        let encoded = encode_scoped_mouse_wheel_input(&request).unwrap();
+        let expected: [u8; 80] = [
+            0, 8, 0, 8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0,
+            0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0,
+            0, 6, 0, 0, 0, 0, 0, 0, 0, 7, 0, 23, 0, 17, 0, 1, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(encoded, expected);
+        assert_eq!(
+            decode_ui_request(&encoded),
+            Ok(UiRequest::ScopedMouseWheelInput(request))
+        );
+        assert_eq!(request.operation_class(), OperationClass::Input);
+        assert_eq!(
+            request.operation_class().retry_disposition(),
+            crate::protocol::RetryDisposition::Never
+        );
+        for up in [true, false] {
+            let value = ScopedMouseWheelInput { up, ..request };
+            assert_eq!(
+                decode_ui_request(&encode_scoped_mouse_wheel_input(&value).unwrap()),
+                Ok(UiRequest::ScopedMouseWheelInput(value))
+            );
+        }
+        for length in 0..encoded.len() {
+            assert_eq!(
+                decode_ui_request(&encoded[..length]),
+                Err(UiCodecError::Truncated)
+            );
+        }
+        for suffix in [vec![0], vec![0; 64]] {
+            let mut long = encoded.to_vec();
+            long.extend(suffix);
+            assert_eq!(decode_ui_request(&long), Err(UiCodecError::TrailingBytes));
+        }
+        for offset in 74..80 {
+            let mut bad = encoded;
+            bad[offset] = 1;
+            assert_eq!(decode_ui_request(&bad), Err(UiCodecError::NonzeroReserved));
+        }
+        for direction in [0, 3, u16::MAX] {
+            let mut bad = encoded;
+            put_u16(&mut bad, 72, direction);
+            assert_eq!(
+                decode_ui_request(&bad),
+                Err(UiCodecError::InvalidMouseDirection)
+            );
+        }
+        for offset in [11, 19, 27] {
+            let mut bad = encoded;
+            bad[offset] = 0;
+            assert_eq!(decode_ui_request(&bad), Err(UiCodecError::ZeroKeyComponent));
+        }
+        for offset in [35, 43, 51, 59, 67] {
+            let mut bad = encoded;
+            bad[offset] = 0;
+            assert_eq!(decode_ui_request(&bad), Err(UiCodecError::InvalidTarget));
+        }
+        let mut bad = encoded;
+        bad[35] = 2;
+        assert_eq!(
+            decode_ui_request(&bad),
+            Err(UiCodecError::GenerationMismatch)
+        );
+        let mut bad = encoded;
+        put_u16(&mut bad, 68, MAX_PANE_COLUMNS);
+        assert_eq!(
+            decode_ui_request(&bad),
+            Err(UiCodecError::InvalidDimensions)
+        );
+        let mut bad = encoded;
+        put_u16(&mut bad, 70, MAX_PANE_ROWS);
+        assert_eq!(
+            decode_ui_request(&bad),
+            Err(UiCodecError::InvalidDimensions)
+        );
+        let edge = ScopedMouseWheelInput {
+            column: MAX_PANE_COLUMNS - 1,
+            row: MAX_PANE_ROWS - 1,
+            ..request
+        };
+        assert!(encode_scoped_mouse_wheel_input(&edge).is_ok());
     }
 
     fn two_pane_layout() -> LayoutReply {

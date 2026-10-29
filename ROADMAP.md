@@ -1,5 +1,23 @@
 # Panelink implementation roadmap
 
+Scoped wheel follow-up (2026-10-29): source0.1.8 implements optional capability1024
+for one keyed vacancy-scoped wheel operation. Parent codec/handshake/server/client
+focused tests pass. Controlled private receiver observes final20-event count at
+233.4ms on the new server; first-response improvement is not established. Full
+verifier passes8/8 (rootRust1595/0/20ignored) and Astra review has no material
+findings. Client/server0.1.8 activated after explicit restart approval; new
+generation15642535525154316810 advertises scoped capability1024 (mask2047).
+Two fresh shell panes restored; user Codex scrolling acceptance remains open. See
+[result and limits](docs/progress/SCOPED-WHEEL-RESULT-2026-10-29.md).
+
+Codex wheel repair (2026-10-29): bounded fresh alternate-screen wheel FIFO and
+direct typed delivery are implemented on `t3/improve-codex-mouse-scroll-speed`.
+Parent binary317/0, strict all-target Clippy and scoped docs checks pass; corrected
+private-PTY fixture now requires and observes paced20/20 and burst20/20. Canonical
+verification passes8/8 (Rust1580/0/18ignored; decoder39; Python233run/1skip;
+docs407/0). User-authorized client0.1.7 is installed; detach/reattach to load it.
+Server unchanged; real Codex/host acceptance remains open. See [plan and evidence](docs/progress/CODEX-WHEEL-2026-10-29.md).
+
 UI/UX planning (2026-10-27): six interview rounds confirm smooth history scrolling,
 continuous scrollbar updates, reliable dividers, full tab controls, button-only
 confirmations and stronger focus chrome. Four panes; no whole-pane drag, sidebar

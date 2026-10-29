@@ -7,11 +7,13 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
+#[derive(Debug, PartialEq)]
 enum GateCommand {
     Keys(usize),
     Paste(usize),
     PaneOperation,
     Scroll(u64),
+    AlternateWheel(TargetRef, u64, u16, u16, bool),
     Seek(u16),
     Poll,
 }
@@ -55,6 +57,23 @@ impl Backend for SlowBackend {
                     target,
                     epoch,
                     result: ScrollResult::AlternateScreenNoMouse,
+                })
+            }
+            Command::AlternateWheel {
+                target,
+                epoch,
+                column,
+                row,
+                up,
+            } => {
+                let _ = self
+                    .entered
+                    .send(GateCommand::AlternateWheel(target, epoch, column, row, up));
+                let _ = self.release.recv();
+                ClientResult::Scroll(ScrollUpdate {
+                    target,
+                    epoch,
+                    result: ScrollResult::MouseDelivered,
                 })
             }
             Command::Poll(_) => {
@@ -423,13 +442,13 @@ impl Backend for SocketBackend {
                 ClientResult::Keys(Ok(()))
             }
             Command::Paste { .. } => ClientResult::Paste(Ok(())),
-            Command::Scroll { target, epoch, .. } | Command::SeekHistory { target, epoch, .. } => {
-                ClientResult::Scroll(ScrollUpdate {
-                    target,
-                    epoch,
-                    result: ScrollResult::Failed("test scroll"),
-                })
-            }
+            Command::Scroll { target, epoch, .. }
+            | Command::SeekHistory { target, epoch, .. }
+            | Command::AlternateWheel { target, epoch, .. } => ClientResult::Scroll(ScrollUpdate {
+                target,
+                epoch,
+                result: ScrollResult::Failed("test scroll"),
+            }),
             Command::Split {
                 id,
                 focus_generation,
@@ -556,4 +575,34 @@ fn pending_scroll_suppresses_poll_before_coalesced_followup() {
     ));
     assert!(matches!(entered.try_recv(), Err(mpsc::TryRecvError::Empty)));
     release.send(()).unwrap();
+}
+
+#[test]
+fn alternate_wheel_is_dedicated_gated_and_allows_screen_poll() {
+    let (mut worker, entered, release, _) = slow_worker();
+    let target = target();
+    worker.alternate_wheel(target, 71, 8, 9, false).unwrap();
+    assert_eq!(
+        entered.recv_timeout(Duration::from_secs(1)).unwrap(),
+        GateCommand::AlternateWheel(target, 71, 8, 9, false)
+    );
+    assert!(worker.scroll_pending);
+    assert!(worker.alternate_wheel(target, 72, 1, 2, true).is_err());
+    worker.poll(NetView::default());
+    assert!(worker.poll_pending);
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut received = false;
+    while Instant::now() < deadline {
+        if let Some(envelope) = worker.try_result() {
+            assert!(
+                matches!(worker.release_result(envelope), ClientResult::Scroll(ScrollUpdate { target: t, epoch: 71, result: ScrollResult::MouseDelivered }) if t == target)
+            );
+            received = true;
+            break;
+        }
+        thread::yield_now();
+    }
+    assert!(received);
+    assert!(!worker.scroll_pending);
 }

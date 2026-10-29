@@ -168,6 +168,15 @@ impl InputOwner {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn vacant_at_revision_for_test(revision: u64) -> Self {
+        assert_ne!(revision, 0);
+        Self {
+            revision,
+            ..Self::new()
+        }
+    }
+
     /// Return the current state without changing it.
     pub const fn snapshot(&self) -> OwnerSnapshot {
         OwnerSnapshot {

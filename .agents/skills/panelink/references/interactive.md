@@ -37,6 +37,23 @@ size can differ; discover pane dimensions through the matching executable's CLI.
   thumb uses a conservative extent (no oldest-row probe before every wheel read).
 - Normal-buffer history is separate from saved history/recovery and from
   alternate-screen application scrolling, which keeps its mode/ownership checks.
+- For a known alternate-screen view, wheel events go through a direct typed
+  server request, with no preliminary history read. While one is in flight,
+  up to 32 fresh unsent events per pane are kept FIFO for at most one second;
+  direction and coordinates are preserved, and overflow drops new events.
+  Typing/paste, non-wheel mouse input, navigation/overlays, resize, target,
+  layout or mode changes, disconnect, and failed/stale results cancel unsent
+  events. The server rechecks target, mode and ownership on every delivery.
+  When capability1024 (`scoped_mouse_wheel`) is negotiated, every admitted
+  event uses one durable keyed vacancy-scoped operation. Applied confirms PTY
+  delivery and scoped release; other outcomes do not confirm release. A retained
+  same-caller claim is refused too. Old servers use a fresh mode query and a
+  vacancy-only claim/send/release sequence; no-mouse views do not claim. New
+  server support is required for the fast path; a client update alone is not
+  enough. Server restart is separate because it terminates existing panes. Unknown, partial or
+  uncertain delivery is never retried, and an uncertain claim is not released.
+  A delivered PTY event does not prove the application acted on it. Screen polls
+  may continue during these events; normal-history poll suppression is unchanged.
 
 ## Shared pane menu
 

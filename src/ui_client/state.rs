@@ -56,13 +56,15 @@ const MIN_ROOT_ROWS: u16 = panelink::pane_layout::MIN_PANE_ROWS;
 const MIN_ROOT_COLUMNS: u16 = panelink::pane_layout::MIN_PANE_COLUMNS;
 const STATUS_TTL: Duration = Duration::from_secs(3);
 const COPY_FEEDBACK_TTL: Duration = Duration::from_millis(1_500);
+// Claim/send/release and screen refreshes can take ~40 ms per report in a
+// debug build. Bound retained gestures without expiring an ordinary wheel burst.
+const ALT_WHEEL_TTL: Duration = Duration::from_secs(1);
+const ALT_WHEEL_CAPACITY: usize = 32;
 /// Navigation mode ends by itself after this long without a key.
 const NAV_TIMEOUT: Duration = Duration::from_secs(4);
 /// Bottom banner shown while navigation mode (after Ctrl-B) is active.
-pub(crate) const NAV_BANNER: &str =
-    " NAV  ? help | s menu | c copy | z zoom | m swap | e divider | v saved | l r u d split | arrows/o focus | x close | ^X detach | Esc ";
-const WORKSPACE_NAV_BANNER: &str =
-    " NAV  ? help | c copy | z zoom | m swap | e divider | w workspaces | n/p tabs | [/] projects | s menu | v saved | l r u d split | arrows/o focus | x close | ^X detach | Esc ";
+pub(crate) const NAV_BANNER: &str = " NAV  ? help | s menu | c copy | z zoom | m swap | e divider | v saved | l r u d split | arrows/o focus | x close | ^X detach | Esc ";
+const WORKSPACE_NAV_BANNER: &str = " NAV  ? help | c copy | z zoom | m swap | e divider | w workspaces | n/p tabs | [/] projects | s menu | v saved | l r u d split | arrows/o focus | x close | ^X detach | Esc ";
 const TOO_SMALL: &str = "Panelink: terminal too small for the pane layout; enlarge it";
 const EMPTY_MESSAGE: &str = "No open tabs.";
 const EMPTY_ACTIONS: &str = "[ New tab (N) ]   [ Detach (Ctrl-X) ]";
@@ -228,6 +230,18 @@ pub(crate) trait Effects {
         row: u16,
         up: bool,
     ) -> Result<(), &'static str>;
+    /// Deliver fresh child input with authoritative server-side mode checks.
+    /// This path does not fetch history and must never retry an uncertain send.
+    fn alternate_wheel(
+        &mut self,
+        _target: TargetRef,
+        _epoch: u64,
+        _column: u16,
+        _row: u16,
+        _up: bool,
+    ) -> Result<(), &'static str> {
+        Err("alternate wheel unavailable")
+    }
     /// Read-only history seek. Unlike wheel scrolling, this must never route
     /// a pointer event into the child when alternate-screen state changes.
     fn seek_history(
@@ -390,7 +404,19 @@ struct ScreenSlot {
     history_truncated: bool,
     /// Bounded accumulated normal-history motion; never queued child input.
     queued_scroll: Option<(i16, u16, u16)>,
+    /// Fresh, unsent gestures only; expiry and view changes discard them.
+    queued_alternate_wheel: std::collections::VecDeque<AlternateWheelIntent>,
     queued_seek: Option<u16>,
+}
+
+#[derive(Clone, Copy)]
+struct AlternateWheelIntent {
+    target: TargetRef,
+    epoch: u64,
+    column: u16,
+    row: u16,
+    up: bool,
+    captured: Instant,
 }
 
 /// Client presentation state; PTYs and sessions stay server-owned.
@@ -488,6 +514,7 @@ impl App {
                 new_output: false,
                 history_truncated: false,
                 queued_scroll: None,
+                queued_alternate_wheel: std::collections::VecDeque::new(),
                 queued_seek: None,
             })
         };
@@ -1161,6 +1188,7 @@ impl App {
         self.copied_feedback = [None; crate::pane_layout::MAX_PANES];
         for slot in &mut self.screens {
             slot.queued_scroll = None;
+            slot.queued_alternate_wheel.clear();
             slot.queued_seek = None;
             slot.history_pending = false;
             slot.view_epoch = slot.view_epoch.wrapping_add(1);
@@ -1693,6 +1721,7 @@ impl App {
             for slot in &mut self.screens {
                 slot.history_pending = false;
                 slot.queued_scroll = None;
+                slot.queued_alternate_wheel.clear();
                 slot.queued_seek = None;
                 slot.view_epoch = slot.view_epoch.wrapping_add(1);
             }
@@ -1949,6 +1978,7 @@ impl App {
                         slot.view_epoch = slot.view_epoch.wrapping_add(1);
                         slot.history_pending = false;
                         slot.queued_scroll = None;
+                        slot.queued_alternate_wheel.clear();
                         slot.queued_seek = None;
                         slot.history_pending = false;
                     }
@@ -1965,6 +1995,7 @@ impl App {
                     slot.view_epoch = slot.view_epoch.wrapping_add(1);
                     slot.history_pending = false;
                     slot.queued_scroll = None;
+                    slot.queued_alternate_wheel.clear();
                     slot.queued_seek = None;
                     slot.history_pending = false;
                 }
@@ -2230,6 +2261,9 @@ impl App {
             update.server_present && (update.layout.is_some() || update.pane_operations.is_some());
         if !update.server_present {
             self.server_present = false;
+            for slot in &mut self.screens {
+                slot.queued_alternate_wheel.clear();
+            }
             if self.pending_len > 0 {
                 self.abandon_pending_keys();
             }
@@ -2336,13 +2370,21 @@ impl App {
         {
             self.cancel_selection();
         }
-        let Some(slot) = self
+        let Some(slot_index) = self
             .screens
             .iter_mut()
-            .find(|slot| slot.target == Some(update.target) && slot.view_epoch == update.epoch)
+            .position(|slot| slot.target == Some(update.target) && slot.view_epoch == update.epoch)
         else {
+            if let Some(slot) = self
+                .screens
+                .iter_mut()
+                .find(|slot| slot.target == Some(update.target))
+            {
+                slot.queued_alternate_wheel.clear();
+            }
             return;
         };
+        let slot = &mut self.screens[slot_index];
         slot.history_pending = false;
         match update.result {
             ScrollResult::History {
@@ -2354,6 +2396,7 @@ impl App {
                 row_wraps,
                 history_cursor,
             } => {
+                slot.queued_alternate_wheel.clear();
                 slot.history_total = total_rows;
                 slot.history_extent_known = extent_known;
                 let requested_offset = slot.history_inflight_offset;
@@ -2394,6 +2437,7 @@ impl App {
                                 if slot.history.apply_row_wraps(wraps).is_err() {
                                     slot.history.clear_row_wraps();
                                     slot.queued_scroll = None;
+                                    slot.queued_alternate_wheel.clear();
                                     slot.queued_seek = None;
                                     self.set_status("history snapshot invalid", now);
                                     return;
@@ -2405,6 +2449,7 @@ impl App {
                             self.dirty = true;
                         } else if !superseded {
                             slot.queued_scroll = None;
+                            slot.queued_alternate_wheel.clear();
                             slot.queued_seek = None;
                             self.set_status("history snapshot invalid", now);
                         }
@@ -2423,12 +2468,16 @@ impl App {
                     }
                     Err(_) => {
                         slot.queued_scroll = None;
+                        slot.queued_alternate_wheel.clear();
                         slot.queued_seek = None;
                         self.set_status("history snapshot invalid", now);
                     }
                 }
             }
             ScrollResult::MouseDelivered => {
+                for intent in &mut slot.queued_alternate_wheel {
+                    intent.epoch = slot.view_epoch;
+                }
                 slot.queued_scroll = None;
                 slot.queued_seek = None;
                 slot.history_total = 0;
@@ -2444,6 +2493,7 @@ impl App {
             }
             ScrollResult::AlternateScreenNoMouse => {
                 slot.queued_scroll = None;
+                slot.queued_alternate_wheel.clear();
                 slot.queued_seek = None;
                 slot.history_total = 0;
                 slot.history_extent_known = false;
@@ -2459,6 +2509,7 @@ impl App {
             }
             ScrollResult::Failed(label) => {
                 slot.queued_scroll = None;
+                slot.queued_alternate_wheel.clear();
                 slot.queued_seek = None;
                 slot.history_requested = slot.history_offset;
                 self.set_status(label, now);
@@ -2591,6 +2642,7 @@ impl App {
             slot.history_requested = 0;
             slot.history_inflight_offset = 0;
             slot.queued_scroll = None;
+            slot.queued_alternate_wheel.clear();
             slot.queued_seek = None;
             slot.view_epoch = slot.view_epoch.wrapping_add(1);
             self.dirty = true;
@@ -2670,6 +2722,7 @@ impl App {
         slot.history_requested = offset;
         slot.history_inflight_offset = offset;
         slot.queued_scroll = None;
+        slot.queued_alternate_wheel.clear();
         match effects.seek_history(target, epoch, offset) {
             Ok(()) => slot.view_epoch = epoch,
             Err(label) => {
@@ -2714,6 +2767,7 @@ impl App {
         };
         let slot = &mut self.screens[slot_index];
         if slot.target != Some(target) {
+            slot.queued_alternate_wheel.clear();
             slot.target = Some(target);
             slot.revision = 0;
             slot.history_offset = 0;
@@ -2725,6 +2779,33 @@ impl App {
             slot.history_truncated = false;
             slot.history_requested = 0;
             slot.history_inflight_offset = 0;
+        }
+        if slot.revision > 0 && slot.snapshot.alternate_screen() {
+            if slot.history_pending || !slot.queued_alternate_wheel.is_empty() {
+                if slot.queued_alternate_wheel.len() < ALT_WHEEL_CAPACITY {
+                    slot.queued_alternate_wheel.push_back(AlternateWheelIntent {
+                        target,
+                        epoch: slot.view_epoch,
+                        column,
+                        row,
+                        up,
+                        captured: now,
+                    });
+                }
+                return;
+            }
+            let epoch = slot.view_epoch.wrapping_add(1);
+            match effects.alternate_wheel(target, epoch, column, row, up) {
+                Ok(()) => {
+                    slot.view_epoch = epoch;
+                    slot.history_pending = true;
+                }
+                Err(label) => {
+                    slot.queued_alternate_wheel.clear();
+                    self.set_status(label, now);
+                }
+            }
+            return;
         }
         // Preserve the in-flight epoch and combine only known normal-buffer
         // gestures. Alternate-screen wheel delivery is nonreplayable child input.
@@ -2756,18 +2837,63 @@ impl App {
             Err(label) => {
                 slot.history_pending = false;
                 slot.queued_scroll = None;
+                slot.queued_alternate_wheel.clear();
                 self.set_status(label, now);
             }
         }
     }
 
-    /// Admit accumulated normal-buffer wheel motion after the previous worker
-    /// result has been released. Queued gestures are discarded on view changes.
+    /// Admit fresh alternate-screen gestures or accumulated normal-history
+    /// motion after the previous result. Never reinsert admitted child input.
     pub(crate) fn flush_scroll(&mut self, now: Instant, effects: &mut impl Effects) {
         if self.route_switching
             || self.copy_mode
+            || !self.server_present
+            || self.help_open
+            || self.confirm.is_open()
+            || self.menu.is_open()
+            || self.tab_dialog.is_some()
+            || self.picker_open
+            || self.pane_mutations_blocked()
             || self.screens.iter().any(|slot| slot.history_pending)
         {
+            return;
+        }
+        if let Some(index) = self
+            .screens
+            .iter()
+            .position(|slot| !slot.queued_alternate_wheel.is_empty())
+        {
+            let slot = &mut self.screens[index];
+            while slot.queued_alternate_wheel.front().is_some_and(|intent| {
+                now.saturating_duration_since(intent.captured) > ALT_WHEEL_TTL
+                    || slot.target != Some(intent.target)
+                    || slot.view_epoch != intent.epoch
+                    || !slot.snapshot.alternate_screen()
+                    || slot.revision == 0
+            }) {
+                slot.queued_alternate_wheel.pop_front();
+            }
+            let Some(intent) = slot.queued_alternate_wheel.pop_front() else {
+                return;
+            };
+            let epoch = slot.view_epoch.wrapping_add(1);
+            match effects.alternate_wheel(
+                intent.target,
+                epoch,
+                intent.column,
+                intent.row,
+                intent.up,
+            ) {
+                Ok(()) => {
+                    slot.view_epoch = epoch;
+                    slot.history_pending = true;
+                }
+                Err(label) => {
+                    slot.queued_alternate_wheel.clear();
+                    self.set_status(label, now);
+                }
+            }
             return;
         }
         if let Some(index) = self
@@ -2909,6 +3035,7 @@ impl App {
                 slot.history_truncated = false;
                 slot.history_pending = false;
                 slot.queued_scroll = None;
+                slot.queued_alternate_wheel.clear();
                 slot.queued_seek = None;
                 slot.view_epoch = slot.view_epoch.wrapping_add(1);
             } else if slot.history_offset > 0 {
@@ -3335,6 +3462,22 @@ impl App {
         recovery_availability: Availability,
         effects: &mut impl Effects,
     ) -> Flow {
+        let is_wheel = matches!(event, Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown));
+        if !is_wheel
+            || self.help_open
+            || self.confirm.is_open()
+            || self.menu.is_open()
+            || self.copy_mode
+            || self.route_switching
+            || self.tab_dialog.is_some()
+            || self.picker_open
+            || self.pane_mode.is_some()
+            || self.prefix.is_some()
+        {
+            for slot in &mut self.screens {
+                slot.queued_alternate_wheel.clear();
+            }
+        }
         if let (Some(button), Event::Mouse(mouse)) = (self.menu_release_latch, event) {
             if mouse.kind == MouseEventKind::Up(button) {
                 self.menu_release_latch = None;
@@ -6860,7 +7003,10 @@ impl App {
                         DividerOrientation::Horizontal => "left/right",
                         DividerOrientation::Vertical => "up/down",
                     });
-                pane_mode_text[0] = format!("Divider {} ({axis}) span {first_cells}; Tab changes ancestor, Enter applies, Esc cancels", index + 1);
+                pane_mode_text[0] = format!(
+                    "Divider {} ({axis}) span {first_cells}; Tab changes ancestor, Enter applies, Esc cancels",
+                    index + 1
+                );
                 let mut count = 1;
                 for (candidate, divider_index) in indices
                     .iter()
