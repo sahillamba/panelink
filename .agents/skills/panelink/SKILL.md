@@ -210,3 +210,14 @@ preserve pending acceptance limits. Check the actual source/help and affected
 evidence; do not advertise a planned feature or an unrun check as working.
 Validate the skill and Markdown links after edits. Record remaining verification
 gaps in the normal repository handoff, rather than accumulating test totals here.
+
+Tab action, rename and tab-close dialogs are centered and capped at 28, 56
+and 44 terminal columns respectively. All tabs is capped at 64 columns and
+12 rows (including its search header); keyboard navigation scrolls the list.
+Pane-close confirmation is capped at 48 columns at the bottom of the view.
+Widths shrink to fit smaller viewports. Pointer targets follow the visible
+dialog bounds; clicks beside a dialog do not activate its actions.
+
+Tab actions has two columns of inner padding, blank rows around its content,
+a separate heading and a keyboard hint footer. Small viewports use the compact
+four-row layout.

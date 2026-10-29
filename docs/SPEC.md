@@ -1249,3 +1249,14 @@ User choices still pending: exact agent-control access scope/defaults and autono
 Core dependency pins and the PTY API are selected only for the bounded prototype. Release-level dependency/capability choices, host input, viewport/delta schema, minimum macOS, data format/retention limits, input ownership, mouse pass-through gesture, OpenCode adapter/version matrix, and representative numeric quality budgets remain open.
 
 Every future task must identify owned modules, required protocol changes, observable behavior, failure handling, and documentation updates. Do not turn pending options or prototype assumptions into confirmed user requirements. On 2026-10-17 the user authorized implementation and model delegation with durable progress tracking. `../ROADMAP.md` records the first bounded foundation tasks and explicit prototype assumptions; resolve further choices before implementing the affected features.
+
+Tab action, rename and tab-close dialogs are centered and capped at 28, 56
+and 44 terminal columns respectively. All tabs is capped at 64 columns and
+12 rows (including its search header); keyboard navigation scrolls the list.
+Pane-close confirmation is capped at 48 columns at the bottom of the view.
+Widths shrink to fit smaller viewports. Pointer targets follow the visible
+dialog bounds; clicks beside a dialog do not activate its actions.
+
+Tab actions has two columns of inner padding, blank rows around its content,
+a separate heading and a keyboard hint footer. Small viewports use the compact
+four-row layout.

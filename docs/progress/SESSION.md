@@ -1,3 +1,74 @@
+## PR #13 CI fixture repair — 2026-10-29
+
+Confirmed clean PR branch/head `t3/compact-modal-layouts` / `7a91f45`;
+GitHub returned no review threads, reviews or comments. Hosted run40884497931
+failed only cargo_test: `workspace_events_pin_filtered_pane_across_same_generation_replacement`
+reported layout_changed, pane_closed and quiet, without output.
+
+The original fixture allowed only 100 ms between output and pane close, while
+the observer can wait 200 ms on workspace changes before polling pane events.
+Closing removes that pane's cursor on topology reconciliation. A disposable
+SIGSTOP/SIGCONT observer-delay experiment reproduced the exact hosted failure;
+the unmodified focused test passed, establishing timing dependence rather than
+a modal regression. Experiment-only signals were removed from the final tree.
+
+The test now captures observer JSONL in a private file and waits boundedly for
+an output event before closing the pane. A single submitted shell loop emits
+synthetic output until a private stop-file is created, so observer startup needs
+no fixed sleep. ObserverGuard bounds exit and cleans up on panic. The concurrent
+observer has its own private context directory: an initial no-startup-sleep run
+exposed context_directory_unavailable from shared-directory creation. No product
+code, timeout contracts, live panes or installed executable changed.
+
+Focused repaired test passes; strict Clippy for p3_agent_cli, fmt and diff checks
+pass. Full serial p3_agent_cli: 8 passed/0 failed/0 ignored in 51.85 seconds.
+Documentation check: 412 Markdown files/0 findings.
+Local logs: /private/tmp/panelink-pr13-observer-delay-red.log and
+/private/tmp/panelink-pr13-agent-cli-fixed.log. Fresh hosted CI remains required.
+
+## PR #13 base-branch conflict resolution — 2026-10-29
+
+Confirmed clean `t3/compact-modal-layouts` at `8a81dcf` matches PR #13.
+Merged `origin/main` at `96e2a1c`, following existing merge-commit history.
+The sole conflict was concurrent test additions in `src/ui_client/state_tests.rs`;
+retained the compact/padded modal test and all incoming alternate-wheel fixtures
+and tests. Modal geometry and main's scoped wheel delivery both remain intact.
+
+Isolated CARGO_TARGET_DIR=/private/tmp/panelink-layout-client-target with
+RUST_TEST_THREADS=1: canonical scripts/verify_non_ui.py passes all 8 checks
+(root Rust, decoder, component fingerprints, fmt, strict all-target Clippy,
+build, Python and docs). Python 233 tests/1 skip; docs 412 files/0 findings.
+Ignored Rust and host/provider acceptance remain separate; no live install or
+server restart performed for this merge. Verification log is local at
+/private/tmp/panelink-pr13-merge-verification.log.
+
+## Tab actions padding — 2026-10-29
+
+Added two-column inner padding, blank top/bottom rows and heading separation,
+a distinct Tab actions heading and keyboard footer. Uses nine rows when the
+viewport fits; retains the four-row compact fallback. Pointer activation excludes
+padding and uses the new action row offsets. Client suite 209/0, final focused
+modal test 1/0, strict binary Clippy, build, formatting and docs (405/0) passed.
+Skill frontmatter and local links checked. Installed the hash-verified debug
+client at ~/.local/bin/panelink with a timestamped backup; no running client or
+server restarted. Prior compact-modal install was also completed in this session.
+No commit or push. Native visual acceptance remains open.
+
+## Compact modal layouts — 2026-10-29
+
+On `t3/compact-modal-layouts`, narrowed and centered tab actions (28 columns),
+rename (56), tab close (44), All tabs (64, at most 12 rows), and bottom pane-close
+confirmation (48). Shared dialog geometry drives rendering and pointer offsets;
+chooser clicks outside its horizontal bounds cannot switch tabs. Existing pane
+menu, help, swap and divider overlays already have bounded widths. Updated
+README, SPEC and runtime skill. No live executable replaced, panes operated,
+commit or push performed; native-host visual acceptance remains open.
+
+Verification: isolated CARGO_TARGET_DIR=/private/tmp/panelink-layout-client-target;
+client tests 209 passed/0 failed; strict binary Clippy, fmt and diff checks pass;
+Markdown checker 405 files/0 findings. Skill quick_validate could not run because
+Python lacks PyYAML; frontmatter and local Markdown links checked separately.
+
 # Implementation session checkpoint — 2026-10-17
 
 ## Server0.1.8 activated — 2026-10-29 (current)

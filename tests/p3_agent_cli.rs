@@ -782,31 +782,44 @@ fn workspace_events_pin_filtered_pane_across_same_generation_replacement() {
         "create replacement pane",
     );
     assert_eq!(field(&split, "outcome"), Some("applied"), "{split}");
+    let output_path = fixture.root.join("pinned-events.jsonl");
+    let output_file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&output_path)
+        .expect("create private pinned event output");
+    let stop_output = fixture.home.join("stop-output");
+    let command = format!(
+        "while [ ! -f '{}' ]; do printf 'LAYOUT_KEEPALIVE\\n'; /bin/sleep 0.05; done",
+        stop_output.display()
+    );
+    // Give concurrent observer/sender processes distinct private context roots.
+    let observer_context = fixture.root.join("pinned-observer-context");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&observer_context)
+        .unwrap();
     let observer = fixture
         .command()
+        .env("PANELINK_AGENT_CONTEXT_DIR", &observer_context)
         .args([
             "events",
             "--pane",
             "1",
             "--timeout",
-            "2",
+            "8",
             "--json",
             "--as",
             "pinned-layout-observer",
         ])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(output_file))
         .spawn()
         .expect("spawn pinned layout event stream");
-    thread::sleep(Duration::from_millis(300));
+    let mut observer = ObserverGuard(Some(observer));
     let output_event = Fixture::assert_ok(
         &fixture.agent(&[
-            "pane",
-            "send",
-            "1",
-            "printf 'LAYOUT_KEEPALIVE\\n'",
-            "--enter",
-            "--claim",
-            "--json",
+            "pane", "send", "1", &command, "--enter", "--claim", "--json",
         ]),
         "send output without changing topology",
     );
@@ -815,17 +828,31 @@ fn workspace_events_pin_filtered_pane_across_same_generation_replacement() {
         Some("applied"),
         "{output_event}"
     );
-    thread::sleep(Duration::from_millis(100));
+    // Applied input is not proof that the observer has consumed an output
+    // event. Keep generating harmless fixture output until that exact stream
+    // reports it, then close the pane. This also establishes observer readiness
+    // without relying on process startup or workspace-watch timing.
+    let deadline = deadline_after(Duration::from_secs(5));
+    loop {
+        let lines = fs::read_to_string(&output_path).expect("read live pinned events");
+        if lines.contains("\"event\":\"output\"") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "observer missed pane output: {lines}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(&stop_output, b"stop").expect("stop fixture output");
     let closed = Fixture::assert_ok(
         &fixture.agent(&["pane", "close", "1", "--json", "--as", "close-pinned-pane"]),
         "close initially selected pane",
     );
     assert_eq!(field(&closed, "action"), Some("pane_close"), "{closed}");
-    let output = observer
-        .wait_with_output()
-        .expect("wait for pinned event stream");
-    assert!(output.status.success(), "events: {output:?}");
-    let lines = String::from_utf8_lossy(&output.stdout);
+    let status = observer.wait_until(deadline_after(Duration::from_secs(10)));
+    let lines = fs::read_to_string(&output_path).expect("read final pinned events");
+    assert!(status.success(), "events: {status}; {lines}");
     assert!(
         lines
             .lines()

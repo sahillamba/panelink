@@ -2621,7 +2621,7 @@ fn pane_close_confirmation_mouse_buttons_capture_target_and_ignore_opening_relea
             &mut app,
             &mut fake,
             MouseEventKind::Down(MouseButton::Left),
-            button,
+            geometry.overlay.x + button,
             geometry.close.y,
         );
         assert!(!app.confirm_open());
@@ -3895,7 +3895,7 @@ fn close_confirmation_mouse_buttons_are_explicit_and_consumed() {
     );
     let cancel = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: 10,
+        column: 26,
         row: 23,
         modifiers: KeyModifiers::NONE,
     });
@@ -3911,7 +3911,7 @@ fn close_confirmation_mouse_buttons_are_explicit_and_consumed() {
     feed(&mut app, &mut fake, b"\x02x");
     let close = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: 2,
+        column: 18,
         row: 23,
         modifiers: KeyModifiers::NONE,
     });
@@ -5477,7 +5477,7 @@ fn rename_enter_saves_once_and_mouse_cancel_discards_the_draft() {
         &mut mouse_save,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
-        2,
+        geometry.x + 2,
         geometry.y + 4,
     );
     assert!(matches!(
@@ -5494,7 +5494,7 @@ fn rename_enter_saves_once_and_mouse_cancel_discards_the_draft() {
         &mut cancel,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
-        10,
+        geometry.x + 10,
         geometry.y + 4,
     );
     assert_eq!(cancel.tab_dialog, None);
@@ -5591,7 +5591,7 @@ fn close_tab_defaults_to_cancel_and_confirmation_captures_one_exact_route() {
         &mut app,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
-        15,
+        geometry.x + 15,
         geometry.y + 3,
     );
     assert_eq!(app.tab_dialog, None);
@@ -5864,6 +5864,54 @@ fn late_rename_success_does_not_close_a_newer_dialog() {
     );
     assert!(applied);
     assert!(matches!(app.tab_dialog, Some(TabDialog::Actions { .. })));
+}
+
+#[test]
+fn tab_modals_stay_compact_and_ignore_clicks_outside_their_bounds() {
+    let (index, current, _) = workspace_catalog();
+    let mut app = App::new(60, 240).unwrap();
+    let mut fake = Fake::default();
+    app.install_workspace_index(index, current);
+    app.set_workspace_revision(5);
+    feed(&mut app, &mut fake, b"\x02t");
+    let bounds = app.tab_dialog_geometry().unwrap();
+    assert_eq!(bounds.columns, 28);
+    assert_eq!(bounds.x, 106);
+    assert_eq!(bounds.rows, 9);
+    let rendered = screen_text(&app);
+    assert!(rendered.contains("  Tab actions"));
+    assert!(rendered.contains("  Enter: select  Esc: close"));
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        0,
+        bounds.y + 2,
+    );
+    assert!(matches!(app.tab_dialog, Some(TabDialog::Actions { .. })));
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        bounds.x + 2,
+        bounds.y + 5,
+    );
+    assert!(matches!(app.tab_dialog, Some(TabDialog::Rename { .. })));
+    assert_eq!(app.tab_dialog_geometry().unwrap().columns, 56);
+    feed(&mut app, &mut fake, b"\x1b");
+    feed(&mut app, &mut fake, b"\x02w");
+    assert_eq!(app.picker_horizontal_bounds().len(), 64);
+    assert!(app.picker_visible_route_count() <= 11);
+    let (top, _) = app.picker_screen_geometry().unwrap();
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        0,
+        top + 2,
+    );
+    assert!(app.take_route_request().is_none());
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty());
 }
 
 fn alternate_fixture() -> (App, Fake) {
