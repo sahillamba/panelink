@@ -1,6 +1,7 @@
 //! Agent-facing pane operations over the default workspace's existing control
 //! client. This module does not open a server, own a PTY, or persist input.
 
+mod pane_observation;
 mod pane_run;
 mod recognized;
 mod scoped;
@@ -1333,11 +1334,27 @@ fn run_wait(args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
         return Err(CliError::usage());
     }
     let workspace = workspace(options.caller)?;
-    let (target, revision, _) = resolve_index(&workspace, index)?;
-    let result = wait_loop(
-        &workspace, options, index, target, revision, condition, text, regex, quiet, timeout,
-    );
+    let (target, _, _) = resolve_index(&workspace, index)?;
+    let wait_condition = match condition {
+        "text" => pane_observation::WaitCondition::Text {
+            pattern: text.ok_or_else(CliError::usage)?,
+            regex,
+        },
+        "quiet" => pane_observation::WaitCondition::Quiet(Duration::from_secs(
+            quiet.ok_or_else(CliError::usage)?,
+        )),
+        "exit" => pane_observation::WaitCondition::Exit,
+        "change" => pane_observation::WaitCondition::Change,
+        _ => return Err(CliError::usage()),
+    };
+    let result = pane_observation::wait(&workspace, index, target, wait_condition, timeout);
     match result {
+        Ok(pane_observation::WaitOutcome::Matched) => {
+            finish_wait(&workspace, options, index, target, condition, true, false)
+        }
+        Ok(pane_observation::WaitOutcome::TimedOut) => {
+            finish_wait(&workspace, options, index, target, condition, false, true)
+        }
         // An exited child's pane collapses, so the exit can surface as a
         // layout change or a vanished target before the exit event is read.
         // The pinned target leaving the layout entirely means its session
@@ -1349,7 +1366,7 @@ fn run_wait(args: &[&str], options: Options<'_>) -> Result<i32, CliError> {
         {
             finish_wait(&workspace, options, index, target, condition, true, false)
         }
-        other => other,
+        Err(error) => Err(error),
     }
 }
 
@@ -1361,152 +1378,14 @@ fn target_present(workspace: &Workspace, target: TargetRef) -> Result<bool, CliE
         .any(|entry| entry.target == target))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn wait_loop(
-    workspace: &Workspace,
-    options: Options<'_>,
-    index: usize,
-    target: TargetRef,
-    revision: u64,
-    condition: &str,
-    text: Option<&str>,
-    regex: bool,
-    quiet: Option<u64>,
-    timeout: u64,
-) -> Result<i32, CliError> {
-    let mut link = workspace.pane_events_link(target)?;
-    let initial = link.reconcile_target(target).map_err(link_error)?;
-    let _initial_truncated = initial.truncated;
-    if link.panes().map_err(link_error)?.layout_revision != revision {
-        return Err(stale_target());
-    }
-    let deadline = Instant::now() + Duration::from_secs(timeout);
-    let mut cursor = initial.cursor;
-    let initial_revision = initial.screen_revision;
-    let mut screen_revision = initial.screen_revision;
-    let mut quiet_since = Instant::now();
-    if condition_matches(
-        condition,
-        text,
-        regex,
-        quiet,
-        &initial,
-        screen_revision,
-        quiet_since,
-    )? {
-        return finish_wait(workspace, options, index, target, condition, true, false);
-    }
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            return finish_wait(workspace, options, index, target, condition, false, true);
-        }
-        let before = all_panes(workspace)?;
-        let before_revision = before.layout_revision;
-        let before_target = before
-            .panes
-            .iter()
-            .flatten()
-            .nth(index - 1)
-            .map(|entry| entry.target);
-        if before_revision != revision || before_target != Some(target) {
-            return Err(stale_target());
-        }
-        let wait_ms = deadline
-            .saturating_duration_since(now)
-            .as_millis()
-            .min(u128::from(POLL_WAIT_MS)) as u16;
-        let (events, end) = link
-            .watch_target(
-                target,
-                cursor,
-                MAX_WATCH_EVENTS,
-                wait_ms.min(MAX_WATCH_WAIT_MS),
-            )
-            .map_err(link_error)?;
-        if end.status == WatchStatus::ResyncRequired {
-            return Err(CliError::new(
-                "resync_required",
-                "pane events expired; re-run the wait against a fresh pane state",
-            ));
-        }
-        cursor = end.cursor;
-        for event in events {
-            match event.body {
-                EventBody::ScreenChanged { revision: observed } if observed != screen_revision => {
-                    screen_revision = observed;
-                    quiet_since = Instant::now();
-                }
-                EventBody::ChildExited if condition == "exit" => {
-                    return finish_wait(workspace, options, index, target, condition, true, false);
-                }
-                _ => {}
-            }
-        }
-        let current = link.reconcile_target(target).map_err(link_error)?;
-        if current.info.target != target {
-            return Err(stale_target());
-        }
-        if condition == "exit" && current.info.child_exited {
-            return finish_wait(workspace, options, index, target, condition, true, false);
-        }
-        if current.screen_revision != screen_revision {
-            screen_revision = current.screen_revision;
-            quiet_since = Instant::now();
-        }
-        let after = all_panes(workspace)?;
-        let after_target = after
-            .panes
-            .iter()
-            .flatten()
-            .nth(index - 1)
-            .map(|entry| entry.target);
-        if after.layout_revision != revision || after_target != Some(target) {
-            return Err(stale_target());
-        }
-        if condition == "change" && current.screen_revision != initial_revision {
-            return finish_wait(workspace, options, index, target, condition, true, false);
-        }
-        if condition_matches(
-            condition,
-            text,
-            regex,
-            quiet,
-            &current,
-            screen_revision,
-            quiet_since,
-        )? {
-            return finish_wait(workspace, options, index, target, condition, true, false);
-        }
-    }
-}
-
-fn condition_matches(
-    condition: &str,
-    text: Option<&str>,
-    regex: bool,
-    quiet: Option<u64>,
-    state: &AgentReconciliation,
-    screen_revision: u64,
-    quiet_since: Instant,
-) -> Result<bool, CliError> {
-    Ok(match condition {
-        "text" => {
-            let needle = text.ok_or_else(CliError::usage)?;
-            if regex {
-                regex_matches(needle, &state.text)?
-            } else {
-                state.text.contains(needle)
-            }
-        }
-        "quiet" => {
-            let _ = screen_revision;
-            quiet_since.elapsed() >= Duration::from_secs(quiet.ok_or_else(CliError::usage)?)
-        }
-        "exit" => state.info.child_exited,
-        "change" => false,
-        _ => false,
-    })
+/// The target currently displayed at a 1-based spatial index, if any.
+fn target_at_index(panes: &PaneReply, index: usize) -> Option<TargetRef> {
+    panes
+        .panes
+        .iter()
+        .flatten()
+        .nth(index - 1)
+        .map(|entry| entry.target)
 }
 
 fn finish_wait(

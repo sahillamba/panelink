@@ -1114,6 +1114,154 @@ fn pane_metadata_tracks_managed_child_cd_and_exec_without_arguments_or_environme
     fixture.wait_for_server_stop();
 }
 
+/// Connect a raw session client that can apply root resizes, as an attached UI
+/// would when its host terminal changes size.
+fn raw_resize_client(fixture: &Fixture) -> (AuthenticatedStream, u64, u64, u64) {
+    let mut stream = AuthenticatedStream::connect(
+        &fixture.state.join("server"),
+        deadline_after(Duration::from_secs(5)),
+    )
+    .expect("connect raw resize client to private server");
+    let hello = SessionHello {
+        hello: Hello {
+            nonce: 0x5741_4954_5245_535a,
+            required_capabilities: CAPABILITY_READ | CAPABILITY_INPUT,
+            optional_capabilities: 0,
+        },
+        resume: None,
+    };
+    let payload = encode_session_hello(&hello).expect("encode read/input Hello");
+    let frame = Frame::new(MessageKind::Hello, 0, &payload).expect("Hello frame");
+    stream
+        .write_frame(&frame, deadline_after(Duration::from_secs(2)))
+        .expect("write raw Hello");
+    let welcome_frame = stream
+        .read_frame(deadline_after(Duration::from_secs(2)))
+        .expect("read raw Welcome");
+    assert_eq!(welcome_frame.kind(), MessageKind::Welcome);
+    let welcome = panelink::handshake_protocol::decode_welcome(welcome_frame.payload())
+        .expect("decode raw Welcome");
+    let layout = raw_request(&mut stream, 1, &encode_layout_query());
+    let revision = decode_layout_reply(layout.payload())
+        .expect("decode initial layout")
+        .revision;
+    (stream, welcome.generation, welcome.lease, revision)
+}
+
+#[test]
+fn wait_text_survives_resizes_and_matches_rows_below_the_first_24() {
+    let mut fixture = Fixture::new();
+    let startup = fixture.start();
+    assert_eq!(field(&startup, "state"), Some("running"), "{startup}");
+    let (mut stream, generation, lease, mut revision) = raw_resize_client(&fixture);
+    let mut request_id = 2;
+    let mut sequence = 1;
+    revision = raw_resize(
+        &mut stream,
+        &mut request_id,
+        generation,
+        lease,
+        &mut sequence,
+        revision,
+        (40, 100),
+    );
+
+    let waiter = fixture
+        .command()
+        .args([
+            "wait",
+            "1",
+            "--text",
+            "LOW_ROW_MARKER",
+            "--timeout",
+            "15",
+            "--json",
+            "--as",
+            "resize-waiter",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn text wait");
+    let mut waiter = ObserverGuard(Some(waiter));
+    thread::sleep(Duration::from_millis(400));
+
+    // Geometry-only layout changes while the wait is pinned to pane 1. The
+    // last resize restores 40 rows so the marker is printed below row 24.
+    for dimensions in [(39, 100), (40, 101), (39, 101), (40, 100)] {
+        revision = raw_resize(
+            &mut stream,
+            &mut request_id,
+            generation,
+            lease,
+            &mut sequence,
+            revision,
+            dimensions,
+        );
+        thread::sleep(Duration::from_millis(250));
+    }
+    let child = waiter.0.as_mut().expect("text waiter");
+    assert!(
+        child.try_wait().expect("poll text waiter").is_none(),
+        "wait ended on a geometry-only layout change"
+    );
+
+    // The echoed command contains 'LOW_%s', never the joined marker text.
+    Fixture::assert_ok(
+        &fixture.agent(&[
+            "pane",
+            "submit",
+            "1",
+            "clear; i=0; while [ $i -lt 30 ]; do echo; i=$((i+1)); done; printf 'LOW_%s\\n' ROW_MARKER",
+            "--json",
+        ]),
+        "print marker below row 24",
+    );
+    let output = waiter
+        .0
+        .take()
+        .expect("text waiter")
+        .wait_with_output()
+        .expect("collect text wait");
+    let result = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "text wait failed: {result} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(field(&result, "matched"), Some("true"), "{result}");
+    assert_eq!(field(&result, "condition"), Some("text"), "{result}");
+
+    let screen = Fixture::assert_ok(
+        &fixture.agent(&["pane", "read", "1", "--lines", "1024", "--json"]),
+        "read full screen",
+    );
+    let text_start = screen.find("\"text\":\"").expect("screen text") + 8;
+    let marker_row = screen[text_start..]
+        .split("\\n")
+        .position(|row| row.contains("LOW_ROW_MARKER"))
+        .expect("marker visible on screen");
+    assert!(
+        marker_row >= 24,
+        "marker must exercise rows past the old 24-row budget: row {marker_row}"
+    );
+
+    // An already-visible marker below row 24 matches at once.
+    let immediate = Fixture::assert_ok(
+        &fixture.agent(&[
+            "wait",
+            "1",
+            "--text",
+            "LOW_ROW_MARKER",
+            "--timeout",
+            "2",
+            "--json",
+        ]),
+        "immediate low-row text wait",
+    );
+    assert_eq!(field(&immediate, "matched"), Some("true"), "{immediate}");
+}
+
 #[test]
 fn pane_read_scrollback_returns_live_history_separately_from_screen() {
     let mut fixture = Fixture::new();

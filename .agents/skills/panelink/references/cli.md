@@ -139,11 +139,33 @@ readiness guarantee. An older server reports this optional feature unsupported.
 "$panelink_cli" events --pane 1 --timeout 10 --as worker-a --json
 ```
 
-Waits pin the target resolved at their start. Text matching uses the visible
-sanitized screen, not scrollback or a provider API. `--regex` is a bounded subset,
-not a general regex engine. Quiet measures unchanged screen revisions and does
-not mean the process is idle or finished. Timeout is nonzero. Exit may report
-an unavailable status when the pane disappeared before its status was read.
+Waits pin the full target resolved at their start. A geometry-only layout
+change (host resize, divider move) that keeps that target at the same index does
+not end the wait. A replaced occupant, closed pane or renumbered index returns
+`stale_target`; run `pane list`, compare the target and re-issue deliberately.
+Text matching uses the whole visible sanitized screen (bounded by 64 KiB/1,024
+rows), not scrollback or a provider API. `--regex` is a bounded subset, not a
+general regex engine. Quiet measures unchanged screen revisions and does not
+mean the process is idle or finished. Timeout is nonzero. Exit may report an
+unavailable status when the pane disappeared before its status was read.
+Builds before this change matched only the top 24 rows and ended every wait on
+any layout revision; check the executable you are using.
+
+To detect completion of a long task in an unrecognized pane, ask it to print a
+marker that the prompt does not contain literally (for example describe it as
+"DONE followed by a hyphen and 7Q4"), confirm start with a short
+`wait --change`, then make one blocking `wait --text MARKER --timeout N`. A
+marker never prints while an agent waits on an approval screen, so choose a
+bounded timeout and read the pane when it expires.
+
+Finite pane `wait` pins the full target and original pane index, then reuses
+one authenticated event connection for screen reconciliation and layout
+checks. Geometry-only layout revisions keep the wait alive; a renumbered index
+or replacement occupant is stale. Event gaps are explicit, timeouts stay
+finite, and connection failures do not reconnect or replay anything. Initial
+index resolution, post-error exit discovery and exit-status retrieval still
+use separate inventory connections.
+
 Events are bounded metadata observations, including negotiated layout events.
 `events --pane N` pins the initially resolved full target rather than following a
 replacement at that index. After a gap, expiry or restart, obtain fresh authoritative state.

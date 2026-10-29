@@ -274,7 +274,7 @@ mod tests {
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            session.pump().unwrap();
+            let progress = session.pump().unwrap();
             let snapshot = session.snapshot();
             let mut visible_text = String::new();
             for cell in snapshot.cells() {
@@ -282,7 +282,9 @@ mod tests {
             }
             let contains_output = visible_text.contains("Ask Codex to do anything")
                 || visible_text.contains("Type a draft");
-            if contains_output {
+            // A matching text prefix can arrive before the final cursor move.
+            // This fixture's finite printf child must finish and drain first.
+            if contains_output && progress.child_exited && progress.pty_eof {
                 let mut copy = ScreenSnapshot::try_new(TerminalSize::new(12, 80).unwrap()).unwrap();
                 copy.copy_from(snapshot);
                 return copy;

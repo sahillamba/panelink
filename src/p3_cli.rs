@@ -2865,7 +2865,9 @@ impl WorkspaceLink {
         }
     }
 
-    /// Current layout panes in spatial order.
+    /// Current layout panes in spatial order on this authenticated link.
+    /// Finite pane observation keeps its target-pinned link and uses this
+    /// query for index checks instead of opening an inventory connection.
     pub(crate) fn panes(&mut self) -> Result<PaneReply, &'static str> {
         diagnostic_phase("pane_query");
         let id = self.request_id();
@@ -3195,12 +3197,35 @@ impl WorkspaceLink {
         &mut self,
         target: TargetRef,
     ) -> Result<AgentReconciliation, &'static str> {
+        self.reconcile_target_with_budget(target, SERVER_READ_BYTES, SERVER_READ_LINES)
+    }
+
+    /// Reconcile with the largest protocol budget so text conditions can see
+    /// every visible row, not only the default 24-row/4 KiB prefix. The
+    /// existing protocol limits apply, so older servers accept the request.
+    pub(crate) fn reconcile_target_full_screen(
+        &mut self,
+        target: TargetRef,
+    ) -> Result<AgentReconciliation, &'static str> {
+        self.reconcile_target_with_budget(
+            target,
+            panelink::watch_protocol::MAX_RECONCILIATION_BYTES as u32,
+            panelink::watch_protocol::MAX_RECONCILIATION_LINES,
+        )
+    }
+
+    fn reconcile_target_with_budget(
+        &mut self,
+        target: TargetRef,
+        max_bytes: u32,
+        max_lines: u16,
+    ) -> Result<AgentReconciliation, &'static str> {
         diagnostic_phase("screen_reconciliation");
         self.ensure_target(target)?;
         let request = WatchRequest::Reconcile {
             target,
-            max_bytes: SERVER_READ_BYTES,
-            max_lines: SERVER_READ_LINES,
+            max_bytes,
+            max_lines,
         };
         let payload = encode_watch_request(&request).map_err(|_| "request_invalid")?;
         let id = self.request_id();
@@ -4209,6 +4234,53 @@ mod tests {
             last_operation_key: None,
             last_operation_status: None,
         }
+    }
+
+    #[test]
+    fn repeated_pane_queries_use_one_existing_connection_without_another_hello() {
+        let (directory, _, context) = test_context(false);
+        let (client_socket, mut server_socket) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || {
+            for request_id in 4..=5 {
+                let (header, _) = read_test_frame(&mut server_socket);
+                assert_eq!(header.kind(), MessageKind::Request);
+                assert_eq!(header.request_id(), request_id);
+                let panes = PaneReply {
+                    layout_revision: 1,
+                    rows: 24,
+                    columns: 80,
+                    panes: std::array::from_fn(|index| {
+                        (index == 0).then_some(panelink::multi_runtime::PaneEntry {
+                            target: test_target(),
+                            rect: panelink::pane_layout::Rect {
+                                x: 0,
+                                y: 0,
+                                rows: 24,
+                                columns: 80,
+                            },
+                            state: panelink::session_registry::SessionState::Applied,
+                            live: true,
+                            resize_pending: false,
+                            exit: None,
+                        })
+                    }),
+                };
+                let payload = panelink::multi_runtime::encode_pane_reply(&panes).unwrap();
+                write_test_frame(
+                    &mut server_socket,
+                    MessageKind::Response,
+                    request_id,
+                    &payload,
+                );
+            }
+        });
+        let mut link = observer_link(context, AuthenticatedStream::new(client_socket).unwrap());
+
+        link.panes().unwrap();
+        link.panes().unwrap();
+        server.join().unwrap();
+        drop(link);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

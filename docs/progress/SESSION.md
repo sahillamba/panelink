@@ -193,6 +193,57 @@ strict Clippy, fmt, client 164/0.
 No commit to `t3/panelink-ui-ux-plan`, no install, no live pane use, no push.
 Next: UX-05c (client empty state + tab metadata worker), then UX-03/04/06/07/08.
 
+## PR 7 CI detach capture repair — 2026-10-27/28
+
+User requested checkout and repair on `fix/wait-resize-full-screen` in
+`/Users/sahillamba/panelink`, based on head `1c14aa8`. Hosted run40541338517
+failed `p3a_default_open` at the `mouse disabled` assertion. The detach helper
+now waits within its existing bound for the independently drained outer-PTY
+capture to contain the restore bytes after attach exits. Exit-code and termios
+checks remain. A temporary 300 ms delay before capturing those bytes reproduced
+the original assertion failure; the corrected helper passed with the same delay.
+The temporary delay was removed. Application behavior is unchanged.
+
+The first local canonical verifier passed seven checks but stopped Rust testing
+at `multi_startup::tests::opt_in_bridge_environment_reaches_only_the_started_child`:
+shell redirection had created an empty file before printf wrote it. That test
+now waits for the expected contents within its existing two-second bound.
+The next run exposed another incomplete-output observation in the
+agent-detection snapshot fixture: the prompt text could be parsed before the
+final cursor move. The fixture now waits for child exit and PTY EOF before
+copying its snapshot. Default-open tests pass7/0/1ignored after the detach fix.
+Final canonical verifier passes8/8: root Rust1481/0/16ignored, decoder39/0,
+Python233run/1skip, fmt, strict all-target Clippy, build, source fingerprints
+and docs398/0. Agent-detection11/0 and bridge-environment1/0 also pass focused
+checks. Full log: `/private/tmp/panelink-pr7-verification-complete.log`.
+Builds use `/private/tmp/panelink-pr7-target` and Python3.11; no live binary
+activation, commit, push, hosted rerun or phase completion.
+
+## Wait reliability fixes — 2026-10-27 (current)
+
+User asked for waits that detect a long agent task finishing without endless
+polling. A live marker wait on a tescode/OpenCode pane exposed two client bugs;
+see [P3-AGENT-CLI.md](P3-AGENT-CLI.md#wait-reliability-fixes--2026-10-27).
+`wait` no longer ends on geometry-only layout changes of its pinned target, and
+`wait --text` searches the whole visible screen instead of the top 24 rows.
+Client-only change; the running server needs no restart.
+
+Live: with installed fingerprint d993350e8c254fa7 a visible marker on row 28 and
+footer text both timed out and resize waits returned stale_target. After the
+rebuild (fingerprint 418efd9a5f476fc6, dirty) row-28 and row-37 text matched at
+once against the same running server. `~/.local/bin/panelink` resolves to the
+debug launcher, so `cargo build` replaced the PATH CLI. A live host resize during
+a wait was not repeated; the new integration test covers it.
+
+Checks: new regression test fails on old code for each bug and passes; fmt,
+strict Clippy, build, docs and component checks pass. Full Rust suite with
+--no-fail-fast: 1478 passed, 2 failed (`control_unavailable` handshake during
+pane close/pane run, the known intermittent issue); both binaries passed 3/3
+reruns, as did an intermittent `p3_inflight_client` failure. Python unittest
+has 13 `test_opencode_bridge_plugin` socket-accept errors that reproduce on the
+unmodified baseline with local Python 3.15 (CI pins 3.11). Tescode-launched
+OpenCode stays unrecognized (PTY-proxy wrapper); recognition is a separate
+proposal. No commit or push.
 ## Pane UI/UX plan — 2026-10-27
 
 User requested a detailed plan and then invoked grill-with-docs. All six rounds
