@@ -1,6 +1,6 @@
 # 03: Own workspace tab presentation and completions
 
-**Status:** authorized; pending blockers and parent assignment
+**Status:** complete; parent checks and independent review pass; see [evidence](../PACKET03.md)
 
 **Lane:** UI state
 
@@ -12,12 +12,12 @@ Read the [specification](../SPEC.md) and [execution reference](../EXECUTION.md),
 
 ## Acceptance criteria
 
-- [ ] The workspace presentation module owns picker/dialog/filter state and pending create/rename/close metadata identity. Existing route and metadata workers remain the I/O adapters.
-- [ ] Produce intents and consume completions through a small interface that includes source route, request ID and expected revision. Keep a single authoritative current-route relationship.
-- [ ] Preserve empty workspace New/Detach, tab catalog/navigation/filtering, compact dialog behavior and inactive-tab close restrictions.
-- [ ] Late or mismatched metadata results cannot change a replacement route/dialog. Unknown create reconciliation uses the same intent only on explicit user action. Unknown/partial close retains the current visibility behavior.
-- [ ] Route switches freeze/discard exactly the same unsent actions and retain local resize/detach. Existing tab, lifecycle and recovery tests pass.
-- [ ] Remove duplicate root tab/picker/pending-metadata fields and forwarding scaffolding. Rendering consumes an immutable bounded view.
+- [x] The workspace presentation module owns picker/dialog/filter state and pending create/rename/close metadata identity. Existing route and metadata workers remain the I/O adapters.
+- [x] Produce intents and consume completions through a small interface that includes source route, request ID and expected revision. Keep a single authoritative current-route relationship.
+- [x] Preserve empty workspace New/Detach, tab catalog/navigation/filtering, compact dialog behavior and inactive-tab close restrictions.
+- [x] Late or mismatched metadata results cannot change a replacement route/dialog. Unknown create reconciliation uses the same intent only on explicit user action. Unknown/partial close retains the current visibility behavior.
+- [x] Route switches freeze/discard exactly the same unsent actions and retain local resize/detach. Existing tab, lifecycle and recovery tests pass.
+- [x] Remove duplicate root tab/picker/pending-metadata fields and forwarding scaffolding. Rendering consumes an immutable bounded view.
 
 ## Completion
 

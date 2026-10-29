@@ -1,12 +1,12 @@
 # Code health execution state
 
 ```text
-current-phase: 03 workspace presentation
+current-phase: 04 pane interaction
 last-updated: 2026-10-30
 base: a1134ec4bc69e8a97b27ba2b0b61f2e446257440
 branch: refactor/code-health-20261030
 last-verified: fresh repaired canonical8/8; original baseline failure preserved
-next-action: commit02 and implement03 workspace ownership;04-05 remain serial
+next-action: implement04 interaction ownership;05 remains serial
 blocked-on: none for01,02,06,07; UI chain remains serial
 ```
 
@@ -21,8 +21,8 @@ User authorized implementing the [plan](README.md) in this new worktree with par
 | 00 baseline | DONE; parent reviewed canonical8/8 | Luna reads source; writes only BASELINE.md; parent owns this progress file and other planning docs |
 | 01 host dispatch | DONE; parent integrated and verified | host.rs |
 | 02 pane viewport | DONE; parent implementation/review/checks | state.rs, state_tests.rs and private viewport child |
-| 03 workspace presentation | blocked on 02 | same UI lease transferred after review |
-| 04 pane interaction | blocked on 03 | same UI lease transferred after review |
+| 03 workspace presentation | DONE; parent checks and independent review clear | state.rs, state_tests.rs and private workspace child |
+| 04 pane interaction | parent implementation | state.rs, state_tests.rs and private interaction child |
 | 05 rendering | blocked on 04 | same UI lease plus compose.rs |
 | 06 positive fixture barrier | DONE; parent implemented and verified | p3_attach_four.rs |
 | 07 server test layout | DONE; committed15369d5 | multi_session.rs and private child test files |
@@ -108,3 +108,13 @@ Parent implemented Viewports in private state/viewport.rs: owns fixed slots, com
 Viewport review task client request `code-health-20261030-viewport-review` on the recorded common T3 prefix; Luna/high read-only shared source, sole VIEWPORT-REVIEW.md lease. Completion wakes parent. Parent diagnostic command may still be running in isolated baseline target; inspect its result once on continuation.
 
 Packet02 complete: [evidence](PACKET02.md). Reviewer found no material transition regression; binary323/0, protocol3/0, all-target Clippy and corrected workspace target5/0 pass. First PTY failure retained with explicit limits. Parent addressed observed header-only/old-modal readiness gap via cursor restoration barriers.03 can start after02 commit.
+
+## Packet03 review pending — 2026-10-30
+
+Packet02 committed71d07e4. Parent implemented workspace ownership in state/workspace.rs; see [packet03 evidence](PACKET03.md). Full binary323/0, tabs5/0, lifecycle10/0, recovery chooser7/0 and strict all-target Clippy/fmt/diff pass. Parent holds exclusive state.rs/state_tests.rs/workspace.rs lease, frozen during review; no overlapping UI work starts until reviewed.
+
+- Review task ID: `node:delegated-task:command%3Amcp%3A8e059d00-13c9-44fb-82e1-801a62303382%3Adelegate-task%3Acode-health-20261030-workspace-review`.
+- Client request: `code-health-20261030-workspace-review`; Codex/gpt-6-luna/high, shared source read-only; sole write lease WORKSPACE-REVIEW.md. No builds or nested agents.
+- Completion wakes parent automatically; no polling. Review then accept/commit03 if clear, continue04/05 serially and08 combined gate. No additional user permission needed within authorized local scope.
+
+Packet03 accepted: independent [workspace review](WORKSPACE-REVIEW.md) has no material findings. Parent reviewed feedback ordering and immutable root access; checks above pass. Transfer UI lease to04 after03 commit. No active delegates.

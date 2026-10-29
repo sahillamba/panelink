@@ -5,9 +5,11 @@
 //! can be tested with a recording fake. No host IO happens here.
 
 mod viewport;
+mod workspace;
 use viewport::{ScreenSlot, Viewports};
 #[cfg(test)]
 use viewport::{ALT_WHEEL_CAPACITY, ALT_WHEEL_TTL};
+use workspace::{TabDialog, WorkspaceState};
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -32,11 +34,8 @@ use panelink::terminal::compose::{
 use panelink::terminal::{Key, ScreenSnapshot, TerminalError};
 use panelink::terminal_selection::{Point, SelectionError, ViewIdentity};
 use panelink::ui_protocol::{planned_split_size, LayoutReply, WireHistoryCursor, MAX_KEYS};
-use panelink::workspace_index::{
-    ProjectId, TabPresentationSnapshot, WorkspaceIndex, MAX_DISPLAY_NAME_BYTES,
-    MAX_TABS_PER_PROJECT,
-};
-use panelink::workspace_tabs::{self, TabAction, TabNavigation, TabsLayout, WorkspaceRouteId};
+use panelink::workspace_index::{ProjectId, TabPresentationSnapshot, WorkspaceIndex};
+use panelink::workspace_tabs::{TabAction, TabNavigation, TabsLayout, WorkspaceRouteId};
 
 use super::clipboard::ClipboardStatus;
 use super::keys::{
@@ -50,12 +49,11 @@ use super::net::{NetUpdate, ScrollUpdate};
 use super::pane_operations::PaneAction;
 use super::routes::{MetadataRequestId, MetadataResult};
 use super::selection::{capture, reanchor, FrozenDrag};
-use crate::workspace_lifecycle::{
-    CreateIntentId, CreateShellTab, CreateStatus, ExpectedRuntimeIdentity, LifecycleError,
-    RenameOutcome,
-};
+use crate::workspace_lifecycle::{CreateIntentId, ExpectedRuntimeIdentity};
 #[cfg(test)]
 use panelink::terminal::TerminalSize;
+#[cfg(test)]
+use panelink::workspace_index::MAX_DISPLAY_NAME_BYTES;
 
 /// Largest root the client requests (terminal-core and compositor bound).
 pub(crate) const MAX_ROOT_ROWS: u16 = 80;
@@ -94,27 +92,6 @@ const WORKSPACE_HELP_LINES: [&str; 8] = [
     "Rename Enter saves/Esc cancels | Close ends processes; Cancel default",
     "Click [Menu]/[x], drag divider/scrollbar | Ctrl-B x pane | Ctrl-X detach",
 ];
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum TabDialog {
-    Actions {
-        route: WorkspaceRouteId,
-        selected: usize,
-    },
-    Rename {
-        route: WorkspaceRouteId,
-        expected_revision: u64,
-        draft: String,
-        error: Option<&'static str>,
-        saving: bool,
-    },
-    Close {
-        expected: ExpectedRuntimeIdentity,
-        expected_revision: u64,
-        close_selected: bool,
-        pending: bool,
-    },
-}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum WorkspaceMetadataMutation {
@@ -191,26 +168,6 @@ struct EmptyWorkspaceGeometry {
     overlay: Rect,
     new_tab: Rect,
     detach: Rect,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PendingCreate {
-    project: ProjectId,
-    source_route: Option<WorkspaceRouteId>,
-    request_id: Option<MetadataRequestId>,
-    intent_id: Option<CreateIntentId>,
-    dispatched: bool,
-    /// Outcome unknown: the intent is kept, and only an explicit New tab
-    /// re-dispatches it (same intent ID) for reconciliation.
-    awaiting_reconcile: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PendingMetadata {
-    request_id: MetadataRequestId,
-    route: WorkspaceRouteId,
-    source_route: Option<WorkspaceRouteId>,
-    expected_revision: u64,
 }
 
 /// Network effects requested by input routing.
@@ -437,27 +394,38 @@ pub(crate) struct App {
     next_copy_id: u64,
     latest_copy_attempt: [Option<(TargetRef, u64)>; crate::pane_layout::MAX_PANES],
     copied_feedback: [Option<(TargetRef, Instant)>; crate::pane_layout::MAX_PANES],
-    workspace_index: Option<WorkspaceIndex>,
-    current_route: Option<WorkspaceRouteId>,
-    tab_dialog: Option<TabDialog>,
-    pending_tab_mutation: Option<WorkspaceMetadataMutation>,
-    picker_selection: Option<WorkspaceRouteId>,
-    picker_open: bool,
-    picker_filter: String,
-    catalog_refresh_requested: bool,
-    route_request: Option<WorkspaceRouteId>,
-    route_switching: bool,
-    route_switch_notice: Option<&'static str>,
-    workspace_revision: Option<u64>,
-    pending_create: Option<PendingCreate>,
-    /// A partial/unknown tab close keeps this client open on server end.
-    keep_tab_visible_on_server_end: bool,
-    pending_metadata: Option<PendingMetadata>,
+    workspace: WorkspaceState,
     preferred_focus: Option<TargetRef>,
     dirty: bool,
 }
 
 impl App {
+    fn apply_workspace_feedback(&mut self) {
+        let feedback = self.workspace.take_feedback();
+        self.dirty |= feedback.dirty;
+        if feedback.cancel_selection {
+            self.cancel_selection();
+        }
+        if feedback.clear_prefix {
+            self.prefix = None;
+        }
+        if feedback.clear_actions {
+            self.actions_menu = None;
+        }
+        if feedback.clear_applying {
+            self.clear_applying_status();
+        }
+        if let Some((label, now)) = feedback.persistent {
+            self.set_persistent_status(label, now);
+        }
+        if let Some((label, now)) = feedback.status {
+            self.set_status(label, now);
+        }
+        if let Some(now) = feedback.begin_switch {
+            self.begin_route_switch(now);
+        }
+    }
+
     /// Preallocate both screen caches for the largest supported pane.
     pub(crate) fn new(host_rows: u16, host_columns: u16) -> Result<Self, TerminalError> {
         let screens = Viewports::new()?;
@@ -505,21 +473,7 @@ impl App {
             next_copy_id: 1,
             latest_copy_attempt: [None; crate::pane_layout::MAX_PANES],
             copied_feedback: [None; crate::pane_layout::MAX_PANES],
-            workspace_index: None,
-            current_route: None,
-            tab_dialog: None,
-            pending_tab_mutation: None,
-            picker_selection: None,
-            picker_open: false,
-            picker_filter: String::new(),
-            catalog_refresh_requested: false,
-            route_request: None,
-            route_switching: false,
-            route_switch_notice: None,
-            workspace_revision: None,
-            pending_create: None,
-            keep_tab_visible_on_server_end: false,
-            pending_metadata: None,
+            workspace: WorkspaceState::default(),
             preferred_focus: None,
             dirty: true,
         })
@@ -542,31 +496,9 @@ impl App {
         snapshot: TabPresentationSnapshot,
         current: Option<WorkspaceRouteId>,
     ) -> bool {
-        let Some(index) = presentation_index(&snapshot, current) else {
-            return false;
-        };
-        if current.is_some_and(|route| workspace_tabs::layout(&index, route, 0, 0).is_err()) {
-            return false;
-        }
-        if self.current_route != current {
-            self.cancel_selection();
-        }
-        self.workspace_index = Some(index);
-        self.current_route = current;
-        self.tab_dialog = None;
-        self.pending_tab_mutation = None;
-        self.picker_selection = None;
-        self.picker_open = false;
-        self.picker_filter.clear();
-        self.actions_menu = None;
-        self.route_request = None;
-        self.route_switching = false;
-        self.route_switch_notice = None;
-        self.pending_create = None;
-        self.pending_metadata = None;
-        self.keep_tab_visible_on_server_end = false;
-        self.dirty = true;
-        true
+        let result = self.workspace.install_workspace_tabs(snapshot, current);
+        self.apply_workspace_feedback();
+        result
     }
 
     /// Compatibility helper for route callers that still hold the v1 catalog.
@@ -575,8 +507,8 @@ impl App {
         index: WorkspaceIndex,
         current: WorkspaceRouteId,
     ) {
-        let snapshot = TabPresentationSnapshot::new(&index, false);
-        let _ = self.install_workspace_tabs(snapshot, Some(current));
+        self.workspace.install_workspace_index(index, current);
+        self.apply_workspace_feedback();
     }
 
     /// Build a client-only state for a validated snapshot with no visible
@@ -596,7 +528,7 @@ impl App {
     }
 
     pub(crate) fn current_route(&self) -> Option<WorkspaceRouteId> {
-        self.current_route
+        self.workspace.view().current_route
     }
 
     pub(crate) fn focused_target(&self) -> Option<TargetRef> {
@@ -623,7 +555,8 @@ impl App {
     }
 
     pub(crate) fn set_workspace_revision(&mut self, revision: u64) {
-        self.workspace_revision = Some(revision);
+        self.workspace.set_workspace_revision(revision);
+        self.apply_workspace_feedback();
     }
 
     /// Record the expected route and revision for one future rename/close
@@ -634,58 +567,37 @@ impl App {
         route: WorkspaceRouteId,
         expected_revision: u64,
     ) {
-        self.pending_metadata = Some(PendingMetadata {
-            request_id,
-            route,
-            source_route: self.current_route,
-            expected_revision,
-        });
+        self.workspace
+            .track_metadata_request(request_id, route, expected_revision);
+        self.apply_workspace_feedback();
     }
 
     pub(crate) fn take_workspace_metadata_mutation(&mut self) -> Option<WorkspaceMetadataMutation> {
-        self.pending_tab_mutation.take()
+        let result = self.workspace.take_workspace_metadata_mutation();
+        self.apply_workspace_feedback();
+        result
     }
 
     pub(crate) fn reject_workspace_metadata_mutation(&mut self, label: &'static str, now: Instant) {
-        self.pending_metadata = None;
-        self.clear_applying_status();
-        match self.tab_dialog.as_mut() {
-            Some(TabDialog::Rename { error, saving, .. }) => {
-                *error = Some(label);
-                *saving = false;
-            }
-            Some(TabDialog::Close { pending, .. }) => *pending = false,
-            _ => {}
-        }
-        self.set_status(label, now);
-        self.dirty = true;
+        self.workspace
+            .reject_workspace_metadata_mutation(label, now);
+        self.apply_workspace_feedback();
     }
 
     /// Accept only a result for the exact admitted request, route and current
     /// catalog revision. A stale result never changes the active presentation.
+    #[cfg(test)]
     pub(crate) fn accept_metadata_result(
         &mut self,
         request_id: MetadataRequestId,
         route: WorkspaceRouteId,
         observed_revision: u64,
     ) -> bool {
-        let Some(pending) = self.pending_metadata else {
-            return false;
-        };
-        if pending.request_id != request_id
-            || pending.route != route
-            || self.current_route != pending.source_route
-            || observed_revision < pending.expected_revision
-            || self
-                .workspace_revision
-                .is_some_and(|revision| observed_revision < revision)
-            || self.route_switching
-        {
-            return false;
-        }
-        self.pending_metadata = None;
-        self.workspace_revision = Some(observed_revision);
-        true
+        let result = self
+            .workspace
+            .accept_metadata_result(request_id, route, observed_revision);
+        self.apply_workspace_feedback();
+        result
     }
 
     pub(crate) fn complete_rename_metadata(
@@ -693,90 +605,9 @@ impl App {
         metadata: MetadataResult,
         now: Instant,
     ) -> bool {
-        let MetadataResult::Renamed {
-            request_id,
-            route,
-            expected_revision,
-            result,
-            observed_revision,
-            snapshot,
-        } = metadata
-        else {
-            return false;
-        };
-        if expected_revision == 0
-            || self
-                .pending_metadata
-                .is_none_or(|pending| pending.expected_revision != expected_revision)
-            || !self.take_metadata_result(request_id, route, observed_revision)
-        {
-            return false;
-        }
-        let result_revision = match &result {
-            Ok(RenameOutcome::Saved { revision })
-            | Ok(RenameOutcome::Conflict { revision, .. }) => Some(*revision),
-            Err(_) => None,
-        };
-        let current_revision = observed_revision.or(result_revision);
-        if let Some(revision) = current_revision {
-            self.workspace_revision = Some(revision);
-        }
-        if let (Some(snapshot), Some(revision), Some(source_route)) =
-            (snapshot, observed_revision, self.current_route)
-        {
-            self.update_workspace_presentation(Some(source_route), snapshot, revision);
-        }
-        match result {
-            Ok(RenameOutcome::Saved { .. }) => {
-                // Close only the rename dialog that is still awaiting this
-                // save; a newer dialog opened after Esc stays open.
-                if matches!(
-                    self.tab_dialog,
-                    Some(TabDialog::Rename {
-                        route: editing_route,
-                        saving: true,
-                        ..
-                    }) if editing_route == route
-                ) {
-                    self.tab_dialog = None;
-                }
-                self.set_status("tab renamed", now);
-            }
-            Ok(RenameOutcome::Conflict { revision, .. }) => {
-                if let Some(TabDialog::Rename {
-                    route: editing_route,
-                    expected_revision,
-                    error,
-                    saving,
-                    ..
-                }) = self.tab_dialog.as_mut()
-                {
-                    if *editing_route == route {
-                        *expected_revision = observed_revision.unwrap_or(revision);
-                        *error = Some("tab changed elsewhere; your edit is preserved");
-                        *saving = false;
-                    }
-                }
-                self.set_status("workspace metadata changed; edit preserved", now);
-            }
-            Err(error) => {
-                if let Some(TabDialog::Rename {
-                    route: editing_route,
-                    error: edit_error,
-                    saving,
-                    ..
-                }) = self.tab_dialog.as_mut()
-                {
-                    if *editing_route == route {
-                        *edit_error = Some(lifecycle_error_label(error));
-                        *saving = false;
-                    }
-                }
-                self.set_status(lifecycle_error_label(error), now);
-            }
-        }
-        self.dirty = true;
-        true
+        let result = self.workspace.complete_rename_metadata(metadata, now);
+        self.apply_workspace_feedback();
+        result
     }
 
     pub(crate) fn complete_close_metadata(
@@ -784,98 +615,17 @@ impl App {
         metadata: MetadataResult,
         now: Instant,
     ) -> bool {
-        let MetadataResult::Closed {
-            request_id,
-            route,
-            expected,
-            outcome,
-            observed_revision,
-            snapshot,
-        } = metadata
-        else {
-            return false;
-        };
-        if expected.route != route
-            || !self.take_metadata_result(request_id, route, observed_revision)
-        {
-            return false;
-        }
-        if let Some(revision) = observed_revision {
-            self.workspace_revision = Some(revision);
-        }
-        self.tab_dialog = None;
-        match outcome {
-            crate::workspace_lifecycle::CloseOutcome::Stopped => {
-                self.keep_tab_visible_on_server_end = false;
-                self.clear_applying_status();
-                if self.current_route != Some(route) {
-                    if let (Some(snapshot), Some(revision), Some(source_route)) =
-                        (snapshot, observed_revision, self.current_route)
-                    {
-                        self.update_workspace_presentation(Some(source_route), snapshot, revision);
-                    }
-                } else if snapshot.is_none() || observed_revision.is_none() {
-                    self.set_status("tab stopped; workspace metadata unavailable", now);
-                }
-            }
-            crate::workspace_lifecycle::CloseOutcome::Partial { reason }
-            | crate::workspace_lifecycle::CloseOutcome::Unknown { reason } => {
-                self.keep_tab_visible_on_server_end = true;
-                self.set_persistent_status("Outcome unknown", now);
-                if let (Some(snapshot), Some(revision), Some(source_route)) =
-                    (snapshot, observed_revision, self.current_route)
-                {
-                    self.update_workspace_presentation(Some(source_route), snapshot, revision);
-                }
-                self.set_status(reason, now);
-            }
-        }
-        self.dirty = true;
-        true
-    }
-
-    fn take_metadata_result(
-        &mut self,
-        request_id: MetadataRequestId,
-        route: WorkspaceRouteId,
-        observed_revision: Option<u64>,
-    ) -> bool {
-        if let Some(revision) = observed_revision {
-            return self.accept_metadata_result(request_id, route, revision);
-        }
-        let Some(pending) = self.pending_metadata else {
-            return false;
-        };
-        if pending.request_id != request_id
-            || pending.route != route
-            || self.current_route != pending.source_route
-            || self.route_switching
-        {
-            return false;
-        }
-        self.pending_metadata = None;
-        true
+        let result = self.workspace.complete_close_metadata(metadata, now);
+        self.apply_workspace_feedback();
+        result
     }
 
     /// Next create dispatch: the project plus a prior intent to reuse when this
     /// is an explicit reconciliation of an unknown outcome.
     pub(crate) fn take_create_request(&mut self) -> Option<(ProjectId, Option<CreateIntentId>)> {
-        let pending = self.pending_create.as_mut()?;
-        if pending.dispatched || pending.awaiting_reconcile {
-            return None;
-        }
-        pending.dispatched = true;
-        Some((pending.project, pending.intent_id))
-    }
-
-    /// Keep an uncertain intent for explicit reconciliation; never success.
-    fn hold_uncertain_create(&mut self, now: Instant) {
-        if let Some(pending) = self.pending_create.as_mut() {
-            pending.dispatched = false;
-            pending.request_id = None;
-            pending.awaiting_reconcile = true;
-        }
-        self.set_status("tab creation outcome unknown; New tab rechecks it", now);
+        let result = self.workspace.take_create_request();
+        self.apply_workspace_feedback();
+        result
     }
 
     pub(crate) fn record_create_request(
@@ -883,20 +633,14 @@ impl App {
         request_id: MetadataRequestId,
         intent_id: CreateIntentId,
     ) -> bool {
-        let Some(pending) = self.pending_create.as_mut() else {
-            return false;
-        };
-        if !pending.dispatched || pending.source_route != self.current_route {
-            return false;
-        }
-        pending.request_id = Some(request_id);
-        pending.intent_id = Some(intent_id);
-        true
+        let result = self.workspace.record_create_request(request_id, intent_id);
+        self.apply_workspace_feedback();
+        result
     }
 
     pub(crate) fn reject_create_request(&mut self, label: &'static str, now: Instant) {
-        self.pending_create = None;
-        self.set_status(label, now);
+        self.workspace.reject_create_request(label, now);
+        self.apply_workspace_feedback();
     }
 
     pub(crate) fn complete_create_result(
@@ -904,76 +648,9 @@ impl App {
         metadata: MetadataResult,
         now: Instant,
     ) -> Option<WorkspaceRouteId> {
-        let MetadataResult::Created {
-            request_id,
-            intent_id,
-            project,
-            result,
-            observed_revision,
-            snapshot,
-        } = metadata
-        else {
-            return None;
-        };
-        let pending = self.pending_create?;
-        if pending.request_id != Some(request_id)
-            || pending.intent_id != Some(intent_id)
-            || pending.project != project
-            || pending.source_route != self.current_route
-        {
-            return None;
-        }
-        if result
-            .as_ref()
-            .is_ok_and(|created| created.route.project != pending.project)
-        {
-            return None;
-        }
-        match result {
-            Ok(created) if created.status == CreateStatus::Ready => {
-                let current_revision = self.workspace_revision;
-                let revision_is_fresh = observed_revision.is_some_and(|revision| {
-                    revision > 0 && current_revision.is_none_or(|current| revision >= current)
-                });
-                let route_is_visible = snapshot.is_some_and(|snapshot| {
-                    snapshot.projects.iter().any(|project| {
-                        project.id == created.route.project
-                            && project.tabs.iter().any(|tab| tab.route == created.route)
-                    })
-                });
-                if !revision_is_fresh || !route_is_visible {
-                    self.hold_uncertain_create(now);
-                    return None;
-                }
-                self.workspace_revision = observed_revision;
-                self.pending_create = None;
-                self.dirty = true;
-                Some(created.route)
-            }
-            Ok(CreateShellTab {
-                status: CreateStatus::Unknown,
-                ..
-            }) => {
-                // Preserve the admitted intent: a later explicit reconciliation
-                // must reuse it rather than allocating a fresh route.
-                self.hold_uncertain_create(now);
-                None
-            }
-            Ok(_) => {
-                self.pending_create = None;
-                self.set_status("tab metadata changed; refresh and try again", now);
-                None
-            }
-            Err(LifecycleError::IntentUncertain) => {
-                self.hold_uncertain_create(now);
-                None
-            }
-            Err(error) => {
-                self.pending_create = None;
-                self.set_status(lifecycle_error_label(error), now);
-                None
-            }
-        }
+        let result = self.workspace.complete_create_result(metadata, now);
+        self.apply_workspace_feedback();
+        result
     }
 
     /// Replace the immutable catalog without disturbing an in-flight route
@@ -981,22 +658,9 @@ impl App {
     /// valid snapshot and chooser untouched.
     #[allow(dead_code)] // Retained for state-level legacy catalog scenarios.
     pub(crate) fn update_workspace_catalog(&mut self, index: WorkspaceIndex) -> bool {
-        let (Some(current), Some(_)) = (self.current_route, self.workspace_index.as_ref()) else {
-            return false;
-        };
-        if workspace_tabs::layout(&index, current, 0, 0).is_err() {
-            return false;
-        }
-        self.workspace_index = Some(index);
-        if (self.picker_open || self.picker_selection.is_some())
-            && self
-                .picker_selection
-                .is_none_or(|selection| !self.picker_routes().contains(&selection))
-        {
-            self.picker_selection = self.picker_routes().first().copied();
-        }
-        self.dirty = true;
-        true
+        let result = self.workspace.update_workspace_catalog(index);
+        self.apply_workspace_feedback();
+        result
     }
 
     pub(crate) fn update_workspace_presentation(
@@ -1005,83 +669,40 @@ impl App {
         snapshot: TabPresentationSnapshot,
         observed_revision: u64,
     ) -> bool {
-        if self.route_switching
-            || self.current_route != source_route
-            || self
-                .workspace_revision
-                .is_some_and(|revision| observed_revision < revision)
-        {
-            return false;
-        }
-        if source_route.is_some_and(|route| {
-            !snapshot.projects.iter().any(|project| {
-                project.id == route.project && project.tabs.iter().any(|tab| tab.route == route)
-            })
-        }) || (source_route.is_none()
-            && (snapshot.active_route.is_some()
-                || snapshot
-                    .projects
-                    .iter()
-                    .any(|project| !project.tabs.is_empty())))
-        {
-            return false;
-        }
-        let Some(index) = presentation_index(&snapshot, source_route) else {
-            return false;
-        };
-        self.workspace_index = Some(index);
-        if (self.picker_open || self.picker_selection.is_some())
-            && self
-                .picker_selection
-                .is_none_or(|selection| !self.picker_routes().contains(&selection))
-        {
-            self.picker_selection = self
-                .current_route
-                .filter(|route| self.route_matches_filter(*route))
-                .or_else(|| self.picker_routes().first().copied());
-        }
-        self.dirty = true;
-        self.workspace_revision = Some(observed_revision);
-        true
+        let result =
+            self.workspace
+                .update_workspace_presentation(source_route, snapshot, observed_revision);
+        self.apply_workspace_feedback();
+        result
     }
 
     /// Take the coalesced request to refresh metadata after the chooser opens.
     pub(crate) fn take_catalog_refresh_request(&mut self) -> bool {
-        std::mem::replace(&mut self.catalog_refresh_requested, false)
+        let result = self.workspace.take_catalog_refresh_request();
+        self.apply_workspace_feedback();
+        result
     }
 
-    #[allow(dead_code)] // Used by the compatibility catalog updater above.
+    #[cfg(test)]
     fn route_exists(&self, route: WorkspaceRouteId) -> bool {
-        self.workspace_index
-            .as_ref()
-            .and_then(|index| index.project(route.project).ok())
-            .is_some_and(|project| project.tabs().any(|tab| tab.id == route.tab))
+        self.workspace.route_exists(route)
     }
 
     fn open_workspace_picker(&mut self) {
-        self.cancel_selection();
-        self.picker_open = true;
-        self.picker_filter.clear();
-        let routes = self.picker_routes();
-        self.picker_selection = routes
-            .iter()
-            .copied()
-            .find(|route| Some(*route) == self.current_route)
-            .or_else(|| routes.first().copied());
-        self.tab_dialog = None;
-        self.prefix = None;
-        self.catalog_refresh_requested = true;
-        self.dirty = true;
+        self.workspace.open_workspace_picker();
+        self.apply_workspace_feedback();
     }
 
     /// Take the one typed destination selected by the user, if any.
     pub(crate) fn take_route_request(&mut self) -> Option<WorkspaceRouteId> {
-        self.route_request.take()
+        let result = self.workspace.take_route_request();
+        self.apply_workspace_feedback();
+        result
     }
 
     /// Whether the host must keep resize and child-bound work local.
     pub(crate) const fn route_switching(&self) -> bool {
-        self.route_switching
+        self.workspace.view().route_switching
     }
 
     pub(crate) const fn pane_mutations_blocked(&self) -> bool {
@@ -1089,19 +710,16 @@ impl App {
     }
 
     pub(crate) fn tab_close_pending(&self) -> bool {
-        matches!(
-            self.tab_dialog,
-            Some(TabDialog::Close { pending: true, .. })
-        )
+        self.workspace.tab_close_pending()
     }
 
     pub(crate) const fn keep_tab_visible_on_server_end(&self) -> bool {
-        self.keep_tab_visible_on_server_end
+        self.workspace.view().keep_tab_visible_on_server_end
     }
 
     /// Freeze child effects while the host prepares a fresh route attachment.
     pub(crate) fn begin_route_switch(&mut self, now: Instant) {
-        if self.route_switching {
+        if self.workspace.view().route_switching {
             return;
         }
         self.deferred_thumb_release = None;
@@ -1117,12 +735,7 @@ impl App {
         self.help_open = false;
         self.pending_pane_operation = None;
         self.pane_operations = None;
-        self.route_switching = true;
         self.prefix = None;
-        self.picker_selection = None;
-        self.picker_open = false;
-        self.picker_filter.clear();
-        self.tab_dialog = None;
         self.cancel_selection();
         self.pending_copy = None;
         self.pending_copy_target = None;
@@ -1136,24 +749,15 @@ impl App {
         } else {
             "workspace switch preparing"
         };
-        self.route_switch_notice = Some(notice);
+        self.workspace.freeze(notice);
         self.set_status(notice, now);
         self.dirty = true;
     }
 
     /// Resume the active App after preparation failure or successful install.
     pub(crate) fn finish_route_switch(&mut self, failed: bool, now: Instant) {
-        self.route_switching = false;
-        self.route_switch_notice = None;
-        self.route_request = None;
-        self.picker_selection = None;
-        self.picker_open = false;
-        self.picker_filter.clear();
-        self.prefix = None;
-        if failed {
-            self.set_status("workspace switch failed", now);
-        }
-        self.dirty = true;
+        self.workspace.finish_route_switch(failed, now);
+        self.apply_workspace_feedback();
     }
 
     #[cfg(test)]
@@ -1178,7 +782,9 @@ impl App {
                                     .rect
                                     .y
                                     .saturating_add(page.action_row as u16)
-                                    .saturating_add(u16::from(self.workspace_index.is_some()))
+                                    .saturating_add(u16::from(
+                                        self.workspace.view().workspace_index.is_some(),
+                                    ))
                                     .saturating_add((9 - page.start) as u16)
                             && mouse.column >= page.rect.x
                             && mouse.column < page.rect.x.saturating_add(page.rect.columns)
@@ -1188,13 +794,13 @@ impl App {
             };
         }
         if self.copy_mode
-            || self.route_switching
+            || self.workspace.view().route_switching
             || self.pane_mode.is_some()
             || self.pending_pane_operation.is_some()
             || self.help_open
-            || self.picker_open
-            || self.tab_dialog.is_some()
-            || (self.workspace_index.is_some()
+            || self.workspace.view().picker_open
+            || self.workspace.view().tab_dialog.is_some()
+            || (self.workspace.view().workspace_index.is_some()
                 && matches!(event, Event::Mouse(mouse) if mouse.row == 0))
             || self.confirm.is_open()
             || self.menu.is_open()
@@ -1238,7 +844,7 @@ impl App {
         if let Some(layout) = self.tabs_layout() {
             let root = layout.pane_root();
             (root.rows, root.columns)
-        } else if self.workspace_index.is_some() {
+        } else if self.workspace.view().workspace_index.is_some() {
             let (rows, columns) = self.screen_viewport();
             (rows.saturating_sub(if rows > 0 { 1 } else { 0 }), columns)
         } else {
@@ -1256,7 +862,7 @@ impl App {
         let overlay_rows = rows.min(2);
         let top = rows.saturating_sub(overlay_rows);
         let button_y = top.saturating_add(overlay_rows.saturating_sub(1));
-        let header_offset = u16::from(self.workspace_index.is_some());
+        let header_offset = u16::from(self.workspace.view().workspace_index.is_some());
         Some(ConfirmUiGeometry {
             overlay: Rect {
                 x: left,
@@ -1293,286 +899,44 @@ impl App {
     }
 
     fn tabs_layout(&self) -> Option<TabsLayout> {
-        let (rows, columns) = self.screen_viewport();
-        let index = self.workspace_index.as_ref()?;
-        match self.current_route {
-            Some(route) => workspace_tabs::layout(index, route, rows, columns).ok(),
-            None if self.is_empty_workspace() => Some(workspace_tabs::empty_layout(rows, columns)),
-            None => None,
-        }
+        self.workspace.tabs_layout(self.screen_viewport())
     }
 
     fn is_empty_workspace(&self) -> bool {
-        self.workspace_index.is_some() && self.current_route.is_none()
+        self.workspace.is_empty_workspace()
     }
 
     fn empty_action_geometry(&self) -> Option<EmptyWorkspaceGeometry> {
-        if !self.is_empty_workspace() {
-            return None;
-        }
-        let (rows, columns) = self.viewport();
-        if rows < 2 || columns == 0 {
-            return None;
-        }
-        let action_width = u16::try_from(EMPTY_ACTIONS.len()).ok()?;
-        let new_tab_width = u16::try_from("[ New tab (N) ]".len()).ok()?;
-        let separator_width = 3_u16;
-        let detach_width = u16::try_from("[ Detach (Ctrl-X) ]".len()).ok()?;
-        let action_start = columns.saturating_sub(action_width) / 2;
-        let top = rows.saturating_sub(2) / 2;
-        let button_row = top
-            .saturating_add(1)
-            .saturating_add(u16::from(self.workspace_index.is_some()));
-        Some(EmptyWorkspaceGeometry {
-            overlay: Rect {
-                x: 0,
-                y: top,
-                rows: 2,
-                columns,
-            },
-            new_tab: Rect {
-                x: action_start,
-                y: button_row,
-                rows: 1,
-                columns: new_tab_width,
-            },
-            detach: Rect {
-                x: action_start
-                    .saturating_add(new_tab_width)
-                    .saturating_add(separator_width),
-                y: button_row,
-                rows: 1,
-                columns: detach_width,
-            },
-        })
+        self.workspace.empty_action_geometry(self.viewport())
     }
 
     fn request_empty_create(&mut self, now: Instant) {
-        self.request_tab_create(
-            ProjectId::new(1).expect("Default project ID is nonzero"),
-            now,
-        );
+        self.workspace.request_empty_create(now);
+        self.apply_workspace_feedback();
     }
 
     fn request_tab_create(&mut self, project: ProjectId, now: Instant) {
-        self.prefix = None;
-        if let Some(pending) = self.pending_create.as_mut() {
-            // Explicit New tab after an unknown outcome reconciles the same
-            // intent; any other pending create ignores the repeat.
-            if pending.awaiting_reconcile {
-                pending.awaiting_reconcile = false;
-                self.dirty = true;
-            }
-            return;
-        }
-        if self.pending_metadata.is_some() || self.pending_tab_mutation.is_some() {
-            self.set_status("workspace metadata busy", now);
-            return;
-        }
-        if self
-            .workspace_index
-            .as_ref()
-            .and_then(|index| index.project(project).ok())
-            .is_some_and(|project| project.tabs().len() >= MAX_TABS_PER_PROJECT)
-        {
-            self.set_status("project tab limit reached (8)", now);
-            return;
-        }
-        self.pending_create = Some(PendingCreate {
-            project,
-            source_route: self.current_route,
-            request_id: None,
-            intent_id: None,
-            dispatched: false,
-            awaiting_reconcile: false,
-        });
-        self.dirty = true;
+        self.workspace.request_tab_create(project, now);
+        self.apply_workspace_feedback();
     }
 
     fn open_tab_actions(&mut self, route: WorkspaceRouteId) {
-        if !self.route_exists(route) {
-            return;
-        }
-        self.cancel_selection();
-        self.picker_open = false;
-        self.picker_selection = None;
-        self.tab_dialog = Some(TabDialog::Actions { route, selected: 0 });
-        self.prefix = None;
-        self.dirty = true;
+        self.workspace.open_tab_actions(route);
+        self.apply_workspace_feedback();
     }
 
-    fn begin_tab_rename(&mut self, route: WorkspaceRouteId) {
-        let Some(expected_revision) = self.workspace_revision else {
-            self.set_status("workspace metadata is still loading", Instant::now());
-            return;
-        };
-        let Some(name) = self
-            .workspace_index
-            .as_ref()
-            .and_then(|index| index.project(route.project).ok())
-            .and_then(|project| project.tabs().find(|tab| tab.id == route.tab))
-            .map(|tab| tab.display_name.to_owned())
-        else {
-            self.set_status("workspace tab unavailable", Instant::now());
-            return;
-        };
-        self.tab_dialog = Some(TabDialog::Rename {
-            route,
-            expected_revision,
-            draft: name,
-            error: None,
-            saving: false,
-        });
-        self.dirty = true;
-    }
-
+    #[cfg(test)]
     fn begin_tab_close(&mut self, route: WorkspaceRouteId) {
-        if !self.route_exists(route) {
-            self.set_status("workspace tab unavailable", Instant::now());
-            return;
-        }
-        let Some(expected_revision) = self.workspace_revision else {
-            self.set_status("workspace metadata is still loading", Instant::now());
-            return;
-        };
-        // Close must bind the exact runtime generation so a confirmation can
-        // never stop a replacement server. Only the attached route's generation
-        // is known here; an inactive tab must be opened first.
-        if self.current_route != Some(route) {
-            self.set_status("open this tab first to close it", Instant::now());
-            return;
-        }
-        let Some(generation) = self.layout.and_then(|layout| {
+        let generation = self.layout.and_then(|layout| {
             layout
                 .panes
                 .iter()
                 .flatten()
                 .next()
                 .map(|pane| pane.target.generation)
-        }) else {
-            self.set_status("tab is still loading; try again", Instant::now());
-            return;
-        };
-        self.tab_dialog = Some(TabDialog::Close {
-            expected: ExpectedRuntimeIdentity {
-                route,
-                generation: Some(generation),
-            },
-            expected_revision,
-            close_selected: false,
-            pending: false,
         });
-        self.dirty = true;
-    }
-
-    fn submit_tab_rename(&mut self, now: Instant) {
-        let Some(TabDialog::Rename {
-            route,
-            expected_revision,
-            draft,
-            saving,
-            error,
-        }) = self.tab_dialog.as_mut()
-        else {
-            return;
-        };
-        if *saving {
-            return;
-        }
-        if *error == Some("Tab names are limited to 64 UTF-8 bytes") {
-            self.dirty = true;
-            return;
-        }
-        if !valid_tab_name(draft) {
-            *error = Some("Name must be 1–64 bytes, trimmed, and control-free");
-            self.dirty = true;
-            return;
-        }
-        if self.pending_metadata.is_some() || self.pending_tab_mutation.is_some() {
-            *error = Some("workspace metadata busy");
-            self.dirty = true;
-            return;
-        }
-        self.pending_tab_mutation = Some(WorkspaceMetadataMutation::Rename {
-            route: *route,
-            name: draft.clone(),
-            expected_revision: *expected_revision,
-        });
-        *error = None;
-        *saving = true;
-        let _ = now;
-        self.dirty = true;
-    }
-
-    fn confirm_tab_close(&mut self, now: Instant) {
-        let Some(TabDialog::Close {
-            expected,
-            expected_revision,
-            pending,
-            ..
-        }) = self.tab_dialog.as_mut()
-        else {
-            return;
-        };
-        if *pending {
-            return;
-        }
-        if self.pending_metadata.is_some() || self.pending_tab_mutation.is_some() {
-            self.set_status("workspace metadata busy", now);
-            return;
-        }
-        self.pending_tab_mutation = Some(WorkspaceMetadataMutation::Close {
-            route: expected.route,
-            expected: *expected,
-            expected_revision: *expected_revision,
-        });
-        *pending = true;
-        self.set_persistent_status("Applying…", now);
-        self.dirty = true;
-    }
-
-    fn append_rename_text(&mut self, text: &str) {
-        let Some(TabDialog::Rename {
-            draft,
-            error,
-            saving,
-            ..
-        }) = self.tab_dialog.as_mut()
-        else {
-            return;
-        };
-        if *saving {
-            return;
-        }
-        *error = None;
-        for character in text.chars().filter(|character| !character.is_control()) {
-            if draft.len().saturating_add(character.len_utf8()) > MAX_DISPLAY_NAME_BYTES {
-                *error = Some("Tab names are limited to 64 UTF-8 bytes");
-                break;
-            }
-            draft.push(character);
-        }
-        self.dirty = true;
-    }
-
-    fn update_picker_filter(&mut self, text: &str) {
-        let mut changed = false;
-        for character in text.chars().filter(|character| !character.is_control()) {
-            if self
-                .picker_filter
-                .len()
-                .saturating_add(character.len_utf8())
-                > TAB_FILTER_MAX_BYTES
-            {
-                break;
-            }
-            self.picker_filter.push(character);
-            changed = true;
-        }
-        if changed {
-            self.picker_selection = self.picker_routes().first().copied();
-            self.dirty = true;
-        }
+        self.workspace.begin_tab_close(route, generation);
+        self.apply_workspace_feedback();
     }
 
     /// Empty clients have no Net worker. Keep their complete input path local
@@ -1616,30 +980,13 @@ impl App {
     }
 
     fn request_route(&mut self, route: WorkspaceRouteId, now: Instant) {
-        if self.route_switching {
-            return;
-        }
-        self.cancel_selection();
-        self.tab_dialog = None;
-        self.picker_open = false;
-        self.picker_filter.clear();
-        self.picker_selection = None;
-        self.prefix = None;
-        self.dirty = true;
-        if self.current_route == Some(route) {
-            return;
-        }
-        self.route_request = Some(route);
-        self.begin_route_switch(now);
+        self.workspace.request_route(route, now);
+        self.apply_workspace_feedback();
     }
 
     fn navigate_workspace(&mut self, action: TabNavigation, now: Instant) {
-        let (Some(index), Some(current)) = (&self.workspace_index, self.current_route) else {
-            return;
-        };
-        if let Ok(route) = workspace_tabs::navigate(index, current, action) {
-            self.request_route(route, now);
-        }
+        self.workspace.navigate_workspace(action, now);
+        self.apply_workspace_feedback();
     }
 
     /// Root size to request from the server, or `None` below the minimum.
@@ -1903,8 +1250,8 @@ impl App {
                 .flatten()
                 .any(|pane| pane.target == target);
             if generation != self.focus_generation
-                || self.route_switching
-                || self.current_route != route
+                || self.workspace.view().route_switching
+                || self.workspace.view().current_route != route
             {
                 self.pending_split_focus = None;
             } else if present {
@@ -1959,8 +1306,8 @@ impl App {
         match result {
             Ok(new_target) => {
                 if self.focus_generation == focus_generation
-                    && !self.route_switching
-                    && self.current_route == route
+                    && !self.workspace.view().route_switching
+                    && self.workspace.view().current_route == route
                 {
                     self.pending_split_focus = Some((focus_generation, new_target, route));
                     if self.layout.is_some_and(|layout| {
@@ -2292,7 +1639,10 @@ impl App {
             return;
         }
         drag.total_rows = slot.history_total.max(slot.history_offset);
-        let rect = shifted_rect(drag.pane_rect, u16::from(self.workspace_index.is_some()));
+        let rect = shifted_rect(
+            drag.pane_rect,
+            u16::from(self.workspace.view().workspace_index.is_some()),
+        );
         let Some(geometry) = scrollbar_geometry(
             rect,
             Scrollbar {
@@ -2330,7 +1680,10 @@ impl App {
             return;
         }
         let total_rows = slot.history_total.max(slot.history_offset);
-        let rect = shifted_rect(drag.pane_rect, u16::from(self.workspace_index.is_some()));
+        let rect = shifted_rect(
+            drag.pane_rect,
+            u16::from(self.workspace.view().workspace_index.is_some()),
+        );
         let Some(geometry) = scrollbar_geometry(
             rect,
             Scrollbar {
@@ -2431,7 +1784,10 @@ impl App {
         let Some(content) = panelink::pane_layout::content_rect(pane.rect) else {
             return;
         };
-        let content = shifted_rect(content, u16::from(self.workspace_index.is_some()));
+        let content = shifted_rect(
+            content,
+            u16::from(self.workspace.view().workspace_index.is_some()),
+        );
         let point = pointer_content_point(content, screen_x, screen_y);
         let (column, row) = (point.column, point.row);
         if let Some(label) = self.screens.wheel(target, column, row, up, now, effects) {
@@ -2442,14 +1798,14 @@ impl App {
     /// Admit fresh alternate-screen gestures or accumulated normal-history
     /// motion after the previous result. Never reinsert admitted child input.
     pub(crate) fn flush_scroll(&mut self, now: Instant, effects: &mut impl Effects) {
-        if self.route_switching
+        if self.workspace.view().route_switching
             || self.copy_mode
             || !self.server_present
             || self.help_open
             || self.confirm.is_open()
             || self.menu.is_open()
-            || self.tab_dialog.is_some()
-            || self.picker_open
+            || self.workspace.view().tab_dialog.is_some()
+            || self.workspace.view().picker_open
             || self.pane_mutations_blocked()
         {
             return;
@@ -2900,9 +2256,9 @@ impl App {
             || self.confirm.is_open()
             || self.menu.is_open()
             || self.copy_mode
-            || self.route_switching
-            || self.tab_dialog.is_some()
-            || self.picker_open
+            || self.workspace.view().route_switching
+            || self.workspace.view().tab_dialog.is_some()
+            || self.workspace.view().picker_open
             || self.pane_mode.is_some()
             || self.prefix.is_some()
         {
@@ -2958,8 +2314,8 @@ impl App {
         if self.help_open
             || self.confirm.is_open()
             || self.menu.is_open()
-            || self.tab_dialog.is_some()
-            || self.picker_open
+            || self.workspace.view().tab_dialog.is_some()
+            || self.workspace.view().picker_open
         {
             self.cancel_selection();
         }
@@ -2983,14 +2339,14 @@ impl App {
                 self.cancel_selection();
                 self.help_open = false;
                 self.prefix = None;
-                if self.route_switching {
+                if self.workspace.view().route_switching {
                     return Flow::Quit;
                 }
                 self.flush(now, effects);
                 return Flow::Quit;
             }
         }
-        if self.route_switching {
+        if self.workspace.view().route_switching {
             // Host resize and repaint remain local while a destination is
             // prepared. Every other event is consumed without child effects.
             if matches!(event, Event::Resize(_, _)) {
@@ -2998,7 +2354,7 @@ impl App {
             }
             return Flow::Continue;
         }
-        if self.tab_dialog.is_some() {
+        if self.workspace.view().tab_dialog.is_some() {
             self.handle_tab_dialog_event(event, now);
             return Flow::Continue;
         }
@@ -3026,8 +2382,8 @@ impl App {
                 let height = rows.min(HELP_LINES.len() as u16);
                 let width = columns.min(72);
                 let left = columns.saturating_sub(width) / 2;
-                let top =
-                    rows.saturating_sub(height) / 2 + u16::from(self.workspace_index.is_some());
+                let top = rows.saturating_sub(height) / 2
+                    + u16::from(self.workspace.view().workspace_index.is_some());
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                     && mouse.row == top
                     && mouse.column >= left
@@ -3138,14 +2494,14 @@ impl App {
                     self.menu_release_latch = Some(button);
                 }
             }
-            let mut input = if self.workspace_index.is_some()
+            let mut input = if self.workspace.view().workspace_index.is_some()
                 && matches!(event, Event::Mouse(mouse) if mouse.row == 0)
             {
                 panelink::split_menu::MenuInput::Other
             } else {
                 menu_input(event)
             };
-            if self.workspace_index.is_some() {
+            if self.workspace.view().workspace_index.is_some() {
                 match &mut input {
                     panelink::split_menu::MenuInput::MousePress { y, .. }
                     | panelink::split_menu::MenuInput::MouseRelease { y, .. } => {
@@ -3179,7 +2535,7 @@ impl App {
             }
             return Flow::Continue;
         }
-        if self.picker_open || self.picker_selection.is_some() {
+        if self.workspace.view().picker_open || self.workspace.view().picker_selection.is_some() {
             self.handle_workspace_picker_event(event, now);
             return Flow::Continue;
         }
@@ -3366,15 +2722,20 @@ impl App {
     ) -> Flow {
         self.dirty = true;
         let plain = modifiers.is_empty() || modifiers == KeyModifiers::SHIFT;
-        if self.workspace_index.is_some() && plain && matches!(code, KeyCode::Char('w' | 'W')) {
+        if self.workspace.view().workspace_index.is_some()
+            && plain
+            && matches!(code, KeyCode::Char('w' | 'W'))
+        {
             self.open_workspace_picker();
             return Flow::Continue;
         }
-        if self.workspace_index.is_some() {
+        if self.workspace.view().workspace_index.is_some() {
             if let Some(command) = workspace_tab_command(code, modifiers) {
                 match command {
                     WorkspaceTabCommand::Create => {
                         let project = self
+                            .workspace
+                            .view()
                             .current_route
                             .map(|route| route.project)
                             .unwrap_or_else(|| {
@@ -3383,7 +2744,7 @@ impl App {
                         self.request_tab_create(project, now);
                     }
                     WorkspaceTabCommand::Actions => {
-                        if let Some(route) = self.current_route {
+                        if let Some(route) = self.workspace.view().current_route {
                             self.open_tab_actions(route);
                         }
                     }
@@ -3970,7 +3331,7 @@ impl App {
         }
         let left = view_columns.saturating_sub(columns) / 2;
         let top = view_rows.saturating_sub(rows) / 2;
-        let offset = u16::from(self.workspace_index.is_some());
+        let offset = u16::from(self.workspace.view().workspace_index.is_some());
         if x < left || x >= left.saturating_add(columns) || y < top.saturating_add(offset) {
             return;
         }
@@ -4089,7 +3450,7 @@ impl App {
     }
 
     fn handle_header_event(&mut self, event: &Event, now: Instant) -> bool {
-        if self.workspace_index.is_some() {
+        if self.workspace.view().workspace_index.is_some() {
             let (rows, columns) = self.screen_viewport();
             if rows == 0 || columns == 0 {
                 return matches!(event, Event::Mouse(_));
@@ -4117,7 +3478,7 @@ impl App {
                     self.open_workspace_picker();
                 }
                 (MouseEventKind::Down(MouseButton::Left), Some(TabAction::Select(route)))
-                    if self.current_route == Some(route) =>
+                    if self.workspace.view().current_route == Some(route) =>
                 {
                     self.open_tab_actions(route);
                 }
@@ -4127,6 +3488,8 @@ impl App {
                 (_, Some(TabAction::TabActions(route))) => self.open_tab_actions(route),
                 (MouseEventKind::Down(MouseButton::Left), Some(TabAction::Create)) => {
                     let project = self
+                        .workspace
+                        .view()
                         .current_route
                         .map(|route| route.project)
                         .unwrap_or_else(|| {
@@ -4151,397 +3514,64 @@ impl App {
     }
 
     fn padded_tab_actions(&self) -> bool {
-        let (rows, columns) = self.viewport();
-        rows >= 9 && columns >= 28
+        self.workspace.padded_tab_actions(self.viewport())
     }
 
     fn tab_dialog_geometry(&self) -> Option<Rect> {
-        let dialog = self.tab_dialog.as_ref()?;
-        let (rows, columns) = self.viewport();
-        let (overlay_rows, preferred_columns) = match dialog {
-            TabDialog::Actions { .. } if self.padded_tab_actions() => (9, 28),
-            TabDialog::Actions { .. } => (4, 28),
-            TabDialog::Rename { .. } => (4, 56),
-            TabDialog::Close { .. } => (3, 44),
-        };
-        if rows < overlay_rows || columns == 0 {
-            return None;
-        }
-        let width = columns.min(preferred_columns);
-        Some(Rect {
-            x: columns.saturating_sub(width) / 2,
-            y: rows.saturating_sub(overlay_rows) / 2,
-            rows: overlay_rows,
-            columns: width,
-        })
-    }
-
-    fn cancel_tab_dialog(&mut self) {
-        self.tab_dialog = None;
-        self.dirty = true;
-    }
-
-    fn activate_tab_action(&mut self, route: WorkspaceRouteId, selected: usize, now: Instant) {
-        match selected {
-            0 => {
-                self.tab_dialog = None;
-                self.request_route(route, now);
-            }
-            1 => self.begin_tab_rename(route),
-            2 => self.begin_tab_close(route),
-            _ => return,
-        }
-        self.dirty = true;
+        self.workspace.tab_dialog_geometry(self.viewport())
     }
 
     fn handle_tab_dialog_event(&mut self, event: &Event, now: Instant) {
-        let Some(dialog) = self.tab_dialog.clone() else {
-            return;
-        };
-        let geometry = self.tab_dialog_geometry();
-        match dialog {
-            TabDialog::Actions {
-                route,
-                mut selected,
-            } => match event {
-                Event::Key(key) if key.is_press() || key.is_repeat() => {
-                    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
-                    match (key.code, plain) {
-                        (KeyCode::Esc, true) => self.cancel_tab_dialog(),
-                        (KeyCode::Up, true) => {
-                            selected = (selected + 2) % 3;
-                            self.tab_dialog = Some(TabDialog::Actions { route, selected });
-                            self.dirty = true;
-                        }
-                        (KeyCode::Down, true) => {
-                            selected = (selected + 1) % 3;
-                            self.tab_dialog = Some(TabDialog::Actions { route, selected });
-                            self.dirty = true;
-                        }
-                        (KeyCode::Enter, true) if key.is_press() => {
-                            self.activate_tab_action(route, selected, now)
-                        }
-                        (KeyCode::Char('s' | 'S'), true) => self.activate_tab_action(route, 0, now),
-                        (KeyCode::Char('r' | 'R'), true) => self.activate_tab_action(route, 1, now),
-                        (KeyCode::Char('x' | 'X'), true) => self.activate_tab_action(route, 2, now),
-                        _ => {}
-                    }
-                }
-                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(rect) = geometry {
-                        let screen_y = rect.y + u16::from(self.workspace_index.is_some());
-                        let row = mouse.row.saturating_sub(screen_y);
-                        let first = if self.padded_tab_actions() { 3 } else { 1 };
-                        let padding = if self.padded_tab_actions() { 2 } else { 0 };
-                        if (first..first + 3).contains(&row)
-                            && (rect.x + padding..rect.x + rect.columns - padding)
-                                .contains(&mouse.column)
-                        {
-                            self.activate_tab_action(route, usize::from(row - first), now);
-                        }
-                    }
-                }
-                Event::Resize(_, _) => self.dirty = true,
-                _ => {}
-            },
-            TabDialog::Rename {
-                route,
-                expected_revision,
-                mut draft,
-                error,
-                saving,
-            } => match event {
-                Event::Key(key) if key.is_press() || key.is_repeat() => {
-                    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
-                    match (key.code, plain) {
-                        (KeyCode::Esc, true) if key.is_press() => self.cancel_tab_dialog(),
-                        (KeyCode::Enter, true) if key.is_press() => self.submit_tab_rename(now),
-                        (KeyCode::Backspace, true) if !saving => {
-                            draft.pop();
-                            self.tab_dialog = Some(TabDialog::Rename {
-                                route,
-                                expected_revision,
-                                draft,
-                                error: None,
-                                saving,
-                            });
-                            self.dirty = true;
-                        }
-                        (KeyCode::Char(character), true) if !saving => {
-                            self.append_rename_text(&character.to_string());
-                        }
-                        _ => {}
-                    }
-                }
-                Event::Paste(text) if !saving => self.append_rename_text(text),
-                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(rect) = geometry {
-                        let save_y = rect
-                            .y
-                            .saturating_add(3 + u16::from(self.workspace_index.is_some()));
-                        if mouse.row == save_y
-                            && (rect.x..rect.x + rect.columns.min(6)).contains(&mouse.column)
-                        {
-                            self.submit_tab_rename(now);
-                        } else if mouse.row == save_y
-                            && (rect.x + 7..rect.x + rect.columns.min(15)).contains(&mouse.column)
-                        {
-                            self.cancel_tab_dialog();
-                        }
-                    }
-                }
-                Event::Resize(_, _) => self.dirty = true,
-                _ => {
-                    let _ = error;
-                }
-            },
-            TabDialog::Close {
-                expected,
-                expected_revision,
-                mut close_selected,
-                pending,
-            } => match event {
-                Event::Key(key) if key.is_press() || key.is_repeat() => {
-                    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
-                    match (key.code, plain) {
-                        (KeyCode::Esc, true) if key.is_press() => self.cancel_tab_dialog(),
-                        (KeyCode::Left | KeyCode::Right | KeyCode::Tab, true) if !pending => {
-                            close_selected = !close_selected;
-                            self.tab_dialog = Some(TabDialog::Close {
-                                expected,
-                                expected_revision,
-                                close_selected,
-                                pending,
-                            });
-                            self.dirty = true;
-                        }
-                        (KeyCode::Enter, true) if key.is_press() && !pending => {
-                            if close_selected {
-                                self.confirm_tab_close(now);
-                            } else {
-                                self.cancel_tab_dialog();
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(rect) = geometry {
-                        let button_y = rect
-                            .y
-                            .saturating_add(2 + u16::from(self.workspace_index.is_some()));
-                        if mouse.row == button_y
-                            && (rect.x..rect.x + rect.columns.min(11)).contains(&mouse.column)
-                            && !pending
-                        {
-                            self.confirm_tab_close(now);
-                        } else if mouse.row == button_y
-                            && (rect.x + 12..rect.x + rect.columns.min(20)).contains(&mouse.column)
-                            && !pending
-                        {
-                            self.cancel_tab_dialog();
-                        }
-                    }
-                }
-                Event::Resize(_, _) => self.dirty = true,
-                _ => {}
-            },
-        }
-    }
-
-    fn clear_picker_filter(&mut self) {
-        if !self.picker_filter.is_empty() {
-            self.picker_filter.clear();
-            self.picker_selection = self
-                .current_route
-                .filter(|route| self.route_matches_filter(*route))
-                .or_else(|| self.picker_routes().first().copied());
-            self.dirty = true;
-        }
-    }
-
-    fn route_matches_filter(&self, route: WorkspaceRouteId) -> bool {
-        let Some(index) = self.workspace_index.as_ref() else {
-            return false;
-        };
-        let Some(project) = index.project(route.project).ok() else {
-            return false;
-        };
-        let Some(tab) = project.tabs().find(|tab| tab.id == route.tab) else {
-            return false;
-        };
-        let query = self.picker_filter.to_lowercase();
-        query.is_empty()
-            || project.display_name().to_lowercase().contains(&query)
-            || tab.display_name.to_lowercase().contains(&query)
+        let viewport = self.viewport();
+        let generation = self.layout.and_then(|layout| {
+            layout
+                .panes
+                .iter()
+                .flatten()
+                .next()
+                .map(|pane| pane.target.generation)
+        });
+        self.workspace
+            .handle_tab_dialog_event(event, now, viewport, generation);
+        self.apply_workspace_feedback();
     }
 
     fn handle_workspace_picker_event(&mut self, event: &Event, now: Instant) {
-        match event {
-            Event::Key(key) if key.is_press() || key.is_repeat() => {
-                let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
-                match (key.code, plain) {
-                    (KeyCode::Esc, true) => {
-                        self.picker_open = false;
-                        self.picker_filter.clear();
-                        self.picker_selection = None;
-                        self.dirty = true;
-                    }
-                    (KeyCode::Enter, true) => {
-                        if let Some(route) = self.picker_selection {
-                            self.request_route(route, now);
-                        }
-                    }
-                    (KeyCode::Up, true) => self.move_picker_selection(-1),
-                    (KeyCode::Down, true) => self.move_picker_selection(1),
-                    (KeyCode::Left, true) => self.move_picker_project(-1),
-                    (KeyCode::Right, true) => self.move_picker_project(1),
-                    (KeyCode::Backspace, true) => {
-                        self.picker_filter.pop();
-                        self.picker_selection = self.picker_routes().first().copied();
-                        self.dirty = true;
-                    }
-                    _ if key.modifiers == KeyModifiers::CONTROL
-                        && key.code == KeyCode::Char('u') =>
-                    {
-                        self.clear_picker_filter();
-                    }
-                    (KeyCode::Char(character), true) => {
-                        self.update_picker_filter(&character.to_string());
-                    }
-                    _ => {}
-                }
-            }
-            Event::Paste(text) => self.update_picker_filter(text),
-            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                if let Some((top, rows)) = self.picker_screen_geometry() {
-                    if self
-                        .picker_clear_rect()
-                        .is_some_and(|rect| rect.contains(mouse.column, mouse.row))
-                    {
-                        self.clear_picker_filter();
-                    } else if self.picker_horizontal_bounds().contains(&mouse.column)
-                        && mouse.row > top
-                        && mouse.row < top.saturating_add(rows)
-                    {
-                        if let Some(route) = self.picker_route_at_row(mouse.row - top - 1) {
-                            self.request_route(route, now);
-                        }
-                    }
-                }
-            }
-            Event::Resize(_, _) => self.dirty = true,
-            _ => {}
-        }
+        let viewport = self.viewport();
+        self.workspace
+            .handle_workspace_picker_event(event, now, viewport);
+        self.apply_workspace_feedback();
     }
 
     fn picker_routes(&self) -> Vec<WorkspaceRouteId> {
-        self.workspace_index
-            .as_ref()
-            .into_iter()
-            .flat_map(|index| index.projects())
-            .flat_map(|project| {
-                project.tabs().map(move |tab| WorkspaceRouteId {
-                    project: project.id(),
-                    tab: tab.id,
-                })
-            })
-            .filter(|route| self.route_matches_filter(*route))
-            .collect()
+        self.workspace.picker_routes()
     }
 
     fn picker_horizontal_bounds(&self) -> std::ops::Range<u16> {
-        let (_, columns) = self.viewport();
-        let width = columns.min(64);
-        let left = columns.saturating_sub(width) / 2;
-        left..left + width
+        self.workspace.picker_horizontal_bounds(self.viewport())
     }
 
+    #[cfg(test)]
     fn picker_clear_rect(&self) -> Option<Rect> {
-        let (top, _) = self.picker_screen_geometry()?;
-        let bounds = self.picker_horizontal_bounds();
-        (bounds.len() >= 8).then_some(Rect {
-            x: bounds.start,
-            y: top,
-            rows: 1,
-            columns: 7,
-        })
+        self.workspace.picker_clear_rect(self.viewport())
     }
 
+    #[cfg(test)]
     fn picker_route_at_row(&self, row: u16) -> Option<WorkspaceRouteId> {
-        let offset = self.picker_scroll_offset()?;
-        let routes = self.picker_routes();
-        routes.get(offset.checked_add(usize::from(row))?).copied()
+        self.workspace.picker_route_at_row(row, self.viewport())
     }
 
     fn picker_screen_geometry(&self) -> Option<(u16, u16)> {
-        let offset = self.picker_scroll_offset()?;
-        let routes = self.picker_routes();
-        let (view_rows, columns) = self.viewport();
-        if view_rows == 0 || columns == 0 {
-            return None;
-        }
-        let rows = if routes.is_empty() {
-            2.min(view_rows)
-        } else {
-            let visible_routes = routes
-                .len()
-                .saturating_sub(offset)
-                .min(self.picker_visible_route_count());
-            (visible_routes + 1).min(usize::from(view_rows)) as u16
-        };
-        Some((1 + view_rows.saturating_sub(rows) / 2, rows))
+        self.workspace.picker_screen_geometry(self.viewport())
     }
 
+    #[cfg(test)]
     fn picker_visible_route_count(&self) -> usize {
-        let (view_rows, _) = self.viewport();
-        usize::from(view_rows)
-            .min(12)
-            .min(panelink::split_menu::MAX_OVERLAY_ROWS)
-            .saturating_sub(1)
+        self.workspace.picker_visible_route_count(self.viewport())
     }
 
     fn picker_scroll_offset(&self) -> Option<usize> {
-        let routes = self.picker_routes();
-        if routes.is_empty() {
-            return Some(0);
-        }
-        let Some(selection) = self.picker_selection else {
-            return Some(0);
-        };
-        let selected = routes.iter().position(|route| *route == selection)?;
-        let visible = self.picker_visible_route_count();
-        Some(selected.saturating_sub(visible.saturating_sub(1)))
-    }
-
-    fn move_picker_selection(&mut self, delta: isize) {
-        let routes = self.picker_routes();
-        if routes.is_empty() {
-            return;
-        }
-        let current = self
-            .picker_selection
-            .and_then(|selection| routes.iter().position(|route| *route == selection))
-            .unwrap_or(0);
-        let next = (isize::try_from(current).unwrap_or(0) + delta)
-            .rem_euclid(isize::try_from(routes.len()).unwrap_or(1));
-        self.picker_selection = routes.get(usize::try_from(next).unwrap_or(0)).copied();
-        self.dirty = true;
-    }
-
-    fn move_picker_project(&mut self, delta: isize) {
-        let (Some(index), Some(selection)) = (&self.workspace_index, self.picker_selection) else {
-            return;
-        };
-        let action = if delta < 0 {
-            TabNavigation::PreviousProject
-        } else {
-            TabNavigation::NextProject
-        };
-        if let Ok(route) = workspace_tabs::navigate(index, selection, action) {
-            self.picker_selection = Some(route);
-            self.dirty = true;
-        }
+        self.workspace.picker_scroll_offset(self.viewport())
     }
 
     /// Split the focused pane directly in `direction` (same checks and
@@ -4799,7 +3829,7 @@ impl App {
 
     /// Send any batched keys to the pane they were typed into.
     pub(crate) fn flush(&mut self, now: Instant, effects: &mut impl Effects) {
-        if self.route_switching {
+        if self.workspace.view().route_switching {
             self.abandon_pending_keys();
             return;
         }
@@ -4858,7 +3888,7 @@ impl App {
         if !self.fits() {
             return None;
         }
-        let header_offset = u16::from(self.workspace_index.is_some());
+        let header_offset = u16::from(self.workspace.view().workspace_index.is_some());
         let layout = self.display_layout()?;
         layout.panes.iter().flatten().find_map(|pane| {
             let slot = self
@@ -4904,7 +3934,7 @@ impl App {
             return None;
         }
         let (host_rows, host_columns) = self.screen_viewport();
-        let header_offset = u16::from(self.workspace_index.is_some());
+        let header_offset = u16::from(self.workspace.view().workspace_index.is_some());
         self.display_layout()?
             .panes
             .iter()
@@ -4957,7 +3987,12 @@ impl App {
                 .iter()
                 .flatten()
                 .find(|pane| pane.target == target)
-                .map(|pane| shifted_rect(pane.rect, u16::from(self.workspace_index.is_some())))
+                .map(|pane| {
+                    shifted_rect(
+                        pane.rect,
+                        u16::from(self.workspace.view().workspace_index.is_some()),
+                    )
+                })
         });
         let Some(rect) = rect else { return true };
 
@@ -5224,7 +4259,8 @@ impl App {
         let layout = self.display_layout()?;
         let local = self.local.as_ref()?;
         let revision = self.layout?.revision;
-        let root_y = screen_y.checked_sub(u16::from(self.workspace_index.is_some()))?;
+        let root_y =
+            screen_y.checked_sub(u16::from(self.workspace.view().workspace_index.is_some()))?;
         let (index, _) = divider_at(layout.dividers, x, root_y)?;
         for pane in layout.panes.iter().flatten() {
             if let Ok(info) = local.divider_info(pane.target, revision, index as u8) {
@@ -5257,7 +4293,8 @@ impl App {
             self.pane_mode = None;
             return;
         }
-        let root_y = screen_y.saturating_sub(u16::from(self.workspace_index.is_some()));
+        let root_y =
+            screen_y.saturating_sub(u16::from(self.workspace.view().workspace_index.is_some()));
         let requested = match capture.orientation {
             DividerOrientation::Horizontal => x.saturating_sub(capture.region.x),
             DividerOrientation::Vertical => root_y.saturating_sub(capture.region.y),
@@ -5341,7 +4378,7 @@ impl App {
         if !self.fits() {
             return None;
         }
-        let header_offset = u16::from(self.workspace_index.is_some());
+        let header_offset = u16::from(self.workspace.view().workspace_index.is_some());
         self.display_layout()?
             .panes
             .iter()
@@ -5361,7 +4398,7 @@ impl App {
     }
 
     fn pane_row(&self, screen_row: u16) -> Option<u16> {
-        if self.workspace_index.is_some() {
+        if self.workspace.view().workspace_index.is_some() {
             screen_row.checked_sub(1)
         } else {
             Some(screen_row)
@@ -5890,7 +4927,7 @@ impl App {
             {
                 if let Some(page) = self.actions_page_geometry(menu) {
                     let rect = page.rect;
-                    let offset = u16::from(self.workspace_index.is_some());
+                    let offset = u16::from(self.workspace.view().workspace_index.is_some());
                     let inside = mouse.column >= rect.x
                         && mouse.column < rect.x.saturating_add(rect.columns)
                         && mouse.row >= rect.y.saturating_add(offset)
@@ -6090,7 +5127,7 @@ impl App {
         };
         let request_id = self.next_request_id();
         let focus_generation = self.focus_generation;
-        let route = self.current_route;
+        let route = self.workspace.view().current_route;
         self.pending_split = Some((request_id, focus_generation, plan.target, route));
         match effects.split(plan, request_id, focus_generation) {
             Ok(Some(new_target)) => {
@@ -6121,7 +5158,7 @@ impl App {
         now: Instant,
     ) -> io::Result<()> {
         let tabs_layout = self.tabs_layout();
-        let header_enabled = self.workspace_index.is_some();
+        let header_enabled = self.workspace.view().workspace_index.is_some();
         let header_offset = if header_enabled { 1 } else { 0 };
         // Both legacy attach and workspace tabs use the bounded render area,
         // even when the physical terminal is larger than the screen caches.
@@ -6311,7 +5348,7 @@ impl App {
         };
         let mut picker_text: [String; panelink::split_menu::MAX_OVERLAY_ROWS] =
             std::array::from_fn(|_| String::new());
-        let picker_count = if self.picker_open {
+        let picker_count = if self.workspace.view().picker_open {
             self.picker_overlay_text(&mut picker_text)
         } else {
             0
@@ -6324,7 +5361,7 @@ impl App {
                 } else if self
                     .picker_routes()
                     .get(self.picker_scroll_offset().unwrap_or(0) + index.saturating_sub(1))
-                    .is_some_and(|route| Some(*route) == self.picker_selection)
+                    .is_some_and(|route| Some(*route) == self.workspace.view().picker_selection)
                 {
                     OverlayStyle::Selected
                 } else {
@@ -6334,7 +5371,7 @@ impl App {
         }
         let mut tab_dialog_text: [String; 9] = std::array::from_fn(|_| String::new());
         let mut tab_dialog_selected = [false; 9];
-        let tab_dialog_count = match self.tab_dialog.as_ref() {
+        let tab_dialog_count = match self.workspace.view().tab_dialog.as_ref() {
             Some(TabDialog::Actions { selected, .. }) => {
                 let padded = self.padded_tab_actions();
                 let first = if padded { 3 } else { 1 };
@@ -6631,8 +5668,10 @@ impl App {
                 style: OverlayStyle::Normal,
             };
             Some((geometry.overlay, usize::from(geometry.overlay.rows)))
-        } else if let (Some((top, rows)), true) = (self.picker_screen_geometry(), self.picker_open)
-        {
+        } else if let (Some((top, rows)), true) = (
+            self.picker_screen_geometry(),
+            self.workspace.view().picker_open,
+        ) {
             Some((
                 Rect {
                     x: self.picker_horizontal_bounds().start,
@@ -6645,7 +5684,7 @@ impl App {
         } else if self.is_empty_workspace() {
             empty_geometry.map(|geometry| {
                 empty_text[0] = centered_ascii(
-                    if let Some(pending) = self.pending_create {
+                    if let Some(pending) = self.workspace.view().pending_create {
                         if pending.awaiting_reconcile {
                             "Create outcome unknown; New tab rechecks it"
                         } else {
@@ -6674,13 +5713,15 @@ impl App {
                 Some((label, view_rows.saturating_sub(1)))
             } else if self.copy_mode {
                 None
-            } else if self.route_switching {
+            } else if self.workspace.view().route_switching {
                 Some((
-                    self.route_switch_notice
+                    self.workspace
+                        .view()
+                        .route_switch_notice
                         .unwrap_or("workspace switch preparing"),
                     view_rows.saturating_sub(1),
                 ))
-            } else if let Some(pending) = self.pending_create {
+            } else if let Some(pending) = self.workspace.view().pending_create {
                 Some((
                     if pending.awaiting_reconcile {
                         "Create outcome unknown; press + to reconcile"
@@ -6791,46 +5832,7 @@ impl App {
         &self,
         lines: &mut [String; panelink::split_menu::MAX_OVERLAY_ROWS],
     ) -> usize {
-        let routes = self.picker_routes();
-        let Some(offset) = self.picker_scroll_offset() else {
-            return 0;
-        };
-        let Some(index) = self.workspace_index.as_ref() else {
-            return 0;
-        };
-        lines[0] = format!("[Clear] All tabs: {} (Esc closes)", self.picker_filter);
-        if routes.is_empty() {
-            lines[1] = "No tabs match your search.".into();
-            return 2;
-        }
-        let visible = self
-            .picker_visible_route_count()
-            .min(lines.len().saturating_sub(1));
-        let mut count = 1;
-        for route in routes.iter().skip(offset).take(visible) {
-            let Some(project) = index.project(route.project).ok() else {
-                continue;
-            };
-            let Some(tab) = project.tabs().find(|tab| tab.id == route.tab) else {
-                continue;
-            };
-            let active = self.current_route == Some(*route);
-            let selected = self.picker_selection == Some(*route);
-            lines[count] = format!(
-                "{}{} / {}",
-                if selected {
-                    "> "
-                } else if active {
-                    "* "
-                } else {
-                    "  "
-                },
-                project.display_name(),
-                tab.display_name
-            );
-            count += 1;
-        }
-        count
+        self.workspace.picker_overlay_text(lines, self.viewport())
     }
 }
 
@@ -6911,78 +5913,9 @@ fn split_menu_direction(direction: SplitDirection) -> &'static str {
     }
 }
 
-fn presentation_index(
-    snapshot: &TabPresentationSnapshot,
-    current: Option<WorkspaceRouteId>,
-) -> Option<WorkspaceIndex> {
-    let has_routes = snapshot
-        .projects
-        .iter()
-        .any(|project| !project.tabs.is_empty());
-    match current {
-        Some(route)
-            if !snapshot.projects.iter().any(|project| {
-                project.id == route.project && project.tabs.iter().any(|tab| tab.route == route)
-            }) =>
-        {
-            return None;
-        }
-        None if has_routes || snapshot.active_route.is_some() => return None,
-        _ => {}
-    }
-
-    let mut index = WorkspaceIndex::new();
-    for project in &snapshot.projects {
-        let first = project.tabs.first()?;
-        if first.route.project != project.id {
-            return None;
-        }
-        index
-            .add_project(
-                project.id,
-                &project.display_name,
-                first.route.tab,
-                &first.display_name,
-            )
-            .ok()?;
-        for tab in project.tabs.iter().skip(1) {
-            if tab.route.project != project.id {
-                return None;
-            }
-            index
-                .add_tab(project.id, tab.route.tab, &tab.display_name)
-                .ok()?;
-        }
-    }
-    if let Some(route) = current {
-        index.select_tab(route.project, route.tab).ok()?;
-    }
-    Some(index)
-}
-
 fn centered_ascii(text: &str, columns: u16) -> String {
     let padding = usize::from(columns).saturating_sub(text.len()) / 2;
     format!("{}{}", " ".repeat(padding), text)
-}
-
-fn valid_tab_name(name: &str) -> bool {
-    (1..=MAX_DISPLAY_NAME_BYTES).contains(&name.len())
-        && !name.trim().is_empty()
-        && name.trim() == name
-        && !name.chars().any(char::is_control)
-}
-
-fn lifecycle_error_label(error: LifecycleError) -> &'static str {
-    match error {
-        LifecycleError::MetadataUnavailable => "workspace metadata unavailable",
-        LifecycleError::InvalidRoute => "workspace tab unavailable",
-        LifecycleError::InvalidName => "tab name is invalid",
-        LifecycleError::TabLimitReached => "project tab limit reached",
-        LifecycleError::RevisionConflict => "workspace metadata changed; refresh and retry",
-        LifecycleError::IntentConflict => "tab creation intent conflict",
-        LifecycleError::IntentUncertain => "tab creation outcome unknown",
-        LifecycleError::LaunchContextInvalid => "launch context unavailable",
-    }
 }
 
 /// Rebuild a local geometry mirror (for menu hit-testing and feasibility)

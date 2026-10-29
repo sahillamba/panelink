@@ -1,4 +1,5 @@
 use super::*;
+use crate::workspace_lifecycle::{CreateShellTab, CreateStatus, LifecycleError, RenameOutcome};
 use crossterm_input::Decoder;
 use crossterm_input::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -2118,20 +2119,20 @@ fn workspace_header_picker_and_root_rows_stay_local_and_aligned() {
     // Header click opens the chooser and never focuses a pane or sends keys.
     feed(&mut app, &mut fake, b"\x1b[<0;2;1M\x1b[<0;2;1m");
     assert_eq!(app.focus(), Some(target(1)));
-    assert!(app.picker_selection.is_some());
+    assert!(app.workspace.picker_selection.is_some());
     assert!(fake.keys.is_empty());
     assert!(fake.pastes.is_empty());
 
     // Picker rows are local and Enter requests the typed project/tab pair.
     feed(&mut app, &mut fake, b"\x1b[B\r");
     assert_eq!(app.take_route_request(), Some(next));
-    assert!(app.route_switching);
+    assert!(app.workspace.route_switching);
     assert!(fake.keys.is_empty());
     assert!(fake.pastes.is_empty());
 
     // A controller preparation failure keeps the same App usable.
     app.finish_route_switch(true, Instant::now());
-    assert!(!app.route_switching);
+    assert!(!app.workspace.route_switching);
     assert!(!app.nav_active());
     feed(&mut app, &mut fake, b"z");
     app.flush(Instant::now(), &mut fake);
@@ -2167,7 +2168,7 @@ fn route_selection_freezes_unsent_effects_copy_and_allows_local_detach_resize() 
     let click = format!("\x1b[<0;{};1M\x1b[<0;{};1m", column + 1, column + 1);
     feed(&mut app, &mut fake, click.as_bytes());
     assert_eq!(app.take_route_request(), Some(next));
-    assert!(app.route_switching);
+    assert!(app.workspace.route_switching);
     assert_eq!(app.pending_len, 0);
     assert!(app.selection.is_none());
     assert!(app.pending_copy.is_none());
@@ -2200,9 +2201,9 @@ fn choosing_current_route_closes_picker_without_freezing_or_requesting() {
     let mut fake = Fake::default();
     app.install_workspace_index(index, current);
     feed(&mut app, &mut fake, b"\x02w\r");
-    assert!(app.picker_selection.is_none());
+    assert!(app.workspace.picker_selection.is_none());
     assert_eq!(app.take_route_request(), None);
-    assert!(!app.route_switching);
+    assert!(!app.workspace.route_switching);
     assert!(!app.nav_active());
     assert!(fake.keys.is_empty());
 }
@@ -2250,7 +2251,7 @@ fn picker_scroll_tracks_short_viewport_and_hit_rows() {
     app.install_workspace_index(index, current);
     app.set_host(6, 30); // short, narrow host: four route rows below the title
     feed(&mut app, &mut fake, b"\x02w\x1b[B\x1b[B\x1b[B\x1b[B");
-    assert_eq!(app.picker_selection, Some(selected));
+    assert_eq!(app.workspace.picker_selection, Some(selected));
     let (top, rows) = app.picker_screen_geometry().unwrap();
     assert_eq!(rows, 5);
     assert_eq!(app.picker_route_at_row(rows - 2), Some(selected));
@@ -2264,13 +2265,13 @@ fn catalog_refresh_preserves_route_freeze_request_and_valid_chooser() {
     let (index, current, next) = workspace_catalog();
     let mut app = App::new(24, 81).unwrap();
     app.install_workspace_index(index.clone(), current);
-    app.picker_selection = Some(next);
-    app.route_request = Some(next);
-    app.route_switching = true;
+    app.workspace.picker_selection = Some(next);
+    app.workspace.route_request = Some(next);
+    app.workspace.route_switching = true;
 
     assert!(app.update_workspace_catalog(index));
-    assert_eq!(app.picker_selection, Some(next));
-    assert_eq!(app.route_request, Some(next));
+    assert_eq!(app.workspace.picker_selection, Some(next));
+    assert_eq!(app.workspace.route_request, Some(next));
     assert!(app.route_switching());
 
     let mut refreshed = WorkspaceIndex::new();
@@ -2278,9 +2279,9 @@ fn catalog_refresh_preserves_route_freeze_request_and_valid_chooser() {
         .add_project(current.project, "Editors", current.tab, "Main")
         .unwrap();
     assert!(app.update_workspace_catalog(refreshed));
-    assert_eq!(app.current_route, Some(current));
-    assert_eq!(app.picker_selection, Some(current));
-    assert_eq!(app.route_request, Some(next));
+    assert_eq!(app.workspace.current_route, Some(current));
+    assert_eq!(app.workspace.picker_selection, Some(current));
+    assert_eq!(app.workspace.route_request, Some(next));
     assert!(app.route_switching());
 
     // Invalid active-route snapshots do not replace the last valid catalog.
@@ -2337,7 +2338,7 @@ fn recovery_availability_skips_picker_header_help_and_preparing_events() {
     feed(&mut app, &mut fake, b"\x1b[<2;2;1M");
     assert_eq!(fake.recovery_checks, 0);
     feed(&mut app, &mut fake, b"\x1b");
-    app.picker_selection = Some(next);
+    app.workspace.picker_selection = Some(next);
     feed(&mut app, &mut fake, b"\r");
     assert!(app.route_switching());
     feed(&mut app, &mut fake, b"\x1b[<2;2;1M");
@@ -2373,7 +2374,10 @@ fn header_composes_at_screen_row_zero_and_selection_uses_root_coordinates() {
     feed(&mut app, &mut fake, b"\x02?");
     feed(&mut app, &mut fake, b"\x1b[<0;2;1M\x1b[<0;2;1m");
     assert!(app.help_open());
-    assert!(app.picker_selection.is_none(), "help owns header clicks");
+    assert!(
+        app.workspace.picker_selection.is_none(),
+        "help owns header clicks"
+    );
     let rendered = screen_text(&app);
     let lines: Vec<_> = rendered.lines().collect();
     assert!(lines[0].contains("Editors"), "{}", lines[0]);
@@ -4771,8 +4775,8 @@ fn metadata_result_for_another_route_is_ignored() {
 
     assert!(!app.accept_metadata_result(request_id, other, 5));
     assert_eq!(app.current_route(), Some(current));
-    assert_eq!(app.workspace_revision, Some(4));
-    assert!(app.pending_metadata.is_some());
+    assert_eq!(app.workspace.workspace_revision, Some(4));
+    assert!(app.workspace.pending_metadata.is_some());
 }
 
 #[test]
@@ -5337,7 +5341,7 @@ fn plus_creates_one_intent_and_returns_the_exact_ready_route() {
     let project = current.project;
     assert_eq!(app.take_create_request(), Some((project, None)));
     assert!(app.take_create_request().is_none());
-    assert!(app.pending_create.is_some());
+    assert!(app.workspace.pending_create.is_some());
 
     let ready_route = WorkspaceRouteId {
         project,
@@ -5407,7 +5411,7 @@ fn plus_explains_eight_tab_capacity_without_admitting_a_create() {
 
     feed(&mut app, &mut fake, b"\x02+");
 
-    assert_eq!(app.pending_create, None);
+    assert_eq!(app.workspace.pending_create, None);
     assert_eq!(
         app.status.map(|(message, _)| message),
         Some("project tab limit reached (8)")
@@ -5436,13 +5440,17 @@ fn active_tab_click_and_keyboard_menu_open_rename_and_close_actions() {
         column,
         0,
     );
-    assert!(matches!(app.tab_dialog, Some(TabDialog::Actions { route, .. }) if route == current));
+    assert!(
+        matches!(app.workspace.tab_dialog, Some(TabDialog::Actions { route, .. }) if route == current)
+    );
     assert!(fake.keys.is_empty());
 
     feed(&mut app, &mut fake, b"r");
-    assert!(matches!(app.tab_dialog, Some(TabDialog::Rename { route, .. }) if route == current));
+    assert!(
+        matches!(app.workspace.tab_dialog, Some(TabDialog::Rename { route, .. }) if route == current)
+    );
     feed(&mut app, &mut fake, b"\x1b");
-    assert_eq!(app.tab_dialog, None);
+    assert_eq!(app.workspace.tab_dialog, None);
 }
 
 #[test]
@@ -5463,7 +5471,7 @@ fn rename_enter_saves_once_and_mouse_cancel_discards_the_draft() {
         }) if route == current && name == "MainReview"
     ));
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Rename { saving: true, .. })
     ));
     assert!(app.take_workspace_metadata_mutation().is_none());
@@ -5497,7 +5505,7 @@ fn rename_enter_saves_once_and_mouse_cancel_discards_the_draft() {
         geometry.x + 10,
         geometry.y + 4,
     );
-    assert_eq!(cancel.tab_dialog, None);
+    assert_eq!(cancel.workspace.tab_dialog, None);
     assert!(cancel.take_workspace_metadata_mutation().is_none());
 }
 
@@ -5511,7 +5519,7 @@ fn invalid_and_oversized_rename_drafts_never_queue_metadata() {
     feed(&mut app, &mut fake, b"\x02tr\x7f\x7f\x7f\x7f \r");
     assert!(app.take_workspace_metadata_mutation().is_none());
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Rename { error: Some(_), .. })
     ));
 
@@ -5519,7 +5527,7 @@ fn invalid_and_oversized_rename_drafts_never_queue_metadata() {
     feed(&mut app, &mut fake, b"\r");
     assert!(app.take_workspace_metadata_mutation().is_none());
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Rename {
             draft,
             error: Some("Tab names are limited to 64 UTF-8 bytes"),
@@ -5557,7 +5565,7 @@ fn rename_conflict_keeps_the_edit_and_uses_the_new_revision() {
         Instant::now(),
     ));
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Rename {
             route,
             expected_revision: 6,
@@ -5566,7 +5574,7 @@ fn rename_conflict_keeps_the_edit_and_uses_the_new_revision() {
             ..
         }) if route == current && draft == "MainLocal"
     ));
-    assert_eq!(app.workspace_revision, Some(6));
+    assert_eq!(app.workspace.workspace_revision, Some(6));
 }
 
 #[test]
@@ -5580,7 +5588,7 @@ fn close_tab_defaults_to_cancel_and_confirmation_captures_one_exact_route() {
 
     feed(&mut app, &mut fake, b"\x02tx");
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Close {
             close_selected: false,
             ..
@@ -5594,12 +5602,12 @@ fn close_tab_defaults_to_cancel_and_confirmation_captures_one_exact_route() {
         geometry.x + 15,
         geometry.y + 3,
     );
-    assert_eq!(app.tab_dialog, None);
+    assert_eq!(app.workspace.tab_dialog, None);
     assert!(app.take_workspace_metadata_mutation().is_none());
 
     feed(&mut app, &mut fake, b"\x02tx");
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Close {
             close_selected: false,
             ..
@@ -5607,11 +5615,11 @@ fn close_tab_defaults_to_cancel_and_confirmation_captures_one_exact_route() {
     ));
     feed(&mut app, &mut fake, b"\r");
     assert_eq!(app.take_workspace_metadata_mutation(), None);
-    assert_eq!(app.tab_dialog, None);
+    assert_eq!(app.workspace.tab_dialog, None);
 
     feed(&mut app, &mut fake, b"\x02tx\t");
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Close {
             close_selected: true,
             ..
@@ -5679,7 +5687,7 @@ fn all_tabs_search_reports_empty_results_and_supports_mouse_selection() {
     feed(&mut app, &mut fake, b"\x15");
     assert!(!app.picker_routes().is_empty());
     feed(&mut app, &mut fake, &[b'x'; 100]);
-    assert_eq!(app.picker_filter.len(), TAB_FILTER_MAX_BYTES);
+    assert_eq!(app.workspace.picker_filter.len(), TAB_FILTER_MAX_BYTES);
 
     let (top, _) = app.picker_screen_geometry().unwrap();
     let clear = app.picker_clear_rect().unwrap();
@@ -5690,7 +5698,7 @@ fn all_tabs_search_reports_empty_results_and_supports_mouse_selection() {
         clear.x,
         top,
     );
-    assert!(app.picker_filter.is_empty());
+    assert!(app.workspace.picker_filter.is_empty());
 
     let (top, _) = app.picker_screen_geometry().unwrap();
     gesture(
@@ -5744,7 +5752,7 @@ fn late_rename_result_cannot_change_a_replacement_route() {
         Instant::now(),
     ));
     assert_eq!(app.current_route(), Some(replacement));
-    assert_eq!(app.workspace_revision, Some(5));
+    assert_eq!(app.workspace.workspace_revision, Some(5));
 }
 
 #[test]
@@ -5825,11 +5833,11 @@ fn inactive_tab_close_requires_opening_the_tab_so_generation_is_bound() {
     app.set_workspace_revision(4);
     app.set_layout(one_pane(1));
     app.begin_tab_close(other);
-    assert!(app.tab_dialog.is_none());
+    assert!(app.workspace.tab_dialog.is_none());
     assert_eq!(status(&app), Some("open this tab first to close it"));
 
     app.begin_tab_close(current);
-    match app.tab_dialog {
+    match app.workspace.tab_dialog {
         Some(TabDialog::Close { expected, .. }) => {
             assert_eq!(expected.route, current);
             assert!(expected.generation.is_some());
@@ -5847,7 +5855,7 @@ fn late_rename_success_does_not_close_a_newer_dialog() {
     let request_id = MetadataRequestId(9);
     app.track_metadata_request(request_id, current, 4);
     // The user dismissed the saving rename and opened tab actions instead.
-    app.tab_dialog = Some(TabDialog::Actions {
+    app.workspace.tab_dialog = Some(TabDialog::Actions {
         route: current,
         selected: 0,
     });
@@ -5863,7 +5871,10 @@ fn late_rename_success_does_not_close_a_newer_dialog() {
         Instant::now(),
     );
     assert!(applied);
-    assert!(matches!(app.tab_dialog, Some(TabDialog::Actions { .. })));
+    assert!(matches!(
+        app.workspace.tab_dialog,
+        Some(TabDialog::Actions { .. })
+    ));
 }
 
 #[test]
@@ -5888,7 +5899,10 @@ fn tab_modals_stay_compact_and_ignore_clicks_outside_their_bounds() {
         0,
         bounds.y + 2,
     );
-    assert!(matches!(app.tab_dialog, Some(TabDialog::Actions { .. })));
+    assert!(matches!(
+        app.workspace.tab_dialog,
+        Some(TabDialog::Actions { .. })
+    ));
     gesture(
         &mut app,
         &mut fake,
@@ -5896,7 +5910,10 @@ fn tab_modals_stay_compact_and_ignore_clicks_outside_their_bounds() {
         bounds.x + 2,
         bounds.y + 5,
     );
-    assert!(matches!(app.tab_dialog, Some(TabDialog::Rename { .. })));
+    assert!(matches!(
+        app.workspace.tab_dialog,
+        Some(TabDialog::Rename { .. })
+    ));
     assert_eq!(app.tab_dialog_geometry().unwrap().columns, 56);
     feed(&mut app, &mut fake, b"\x1b");
     feed(&mut app, &mut fake, b"\x02w");

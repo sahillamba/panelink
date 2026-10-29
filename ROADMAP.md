@@ -2,7 +2,7 @@
 
 Code-health maintenance (2026-10-30): user authorized the nine-packet plan in
 isolated `refactor/code-health-20261030`, based on `a1134ec`. Parent orchestration
-uses GPT-6-Luna for bounded tasks. Fresh repaired baseline passes8/8; structural packets are ready.
+uses GPT-6-Luna for bounded tasks. Fresh repaired baseline passes8/8; packets01–03/06/07 are verified;04–05 and combined08 remain.
 Original checkout and installed runtime are untouched. See the
 [execution state](docs/progress/code-health-20261030/PROGRESS.md). Product phase
 gates remain unchanged; no push or install is authorized.
