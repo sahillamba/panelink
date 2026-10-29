@@ -1,12 +1,12 @@
 # Code health execution state
 
 ```text
-current-phase: 04 pane interaction
+current-phase: 05 rendering
 last-updated: 2026-10-30
 base: a1134ec4bc69e8a97b27ba2b0b61f2e446257440
 branch: refactor/code-health-20261030
 last-verified: fresh repaired canonical8/8; original baseline failure preserved
-next-action: implement04 interaction ownership;05 remains serial
+next-action: implement05 immutable rendering, then08 combined verification
 blocked-on: none for01,02,06,07; UI chain remains serial
 ```
 
@@ -22,8 +22,8 @@ User authorized implementing the [plan](README.md) in this new worktree with par
 | 01 host dispatch | DONE; parent integrated and verified | host.rs |
 | 02 pane viewport | DONE; parent implementation/review/checks | state.rs, state_tests.rs and private viewport child |
 | 03 workspace presentation | DONE; parent checks and independent review clear | state.rs, state_tests.rs and private workspace child |
-| 04 pane interaction | parent implementation | state.rs, state_tests.rs and private interaction child |
-| 05 rendering | blocked on 04 | same UI lease plus compose.rs |
+| 04 pane interaction | DONE; parent transition review and checks pass; delegated review incomplete | state.rs, state_tests.rs and private copy/interaction children |
+| 05 rendering | parent implementation | same UI lease plus compose.rs |
 | 06 positive fixture barrier | DONE; parent implemented and verified | p3_attach_four.rs |
 | 07 server test layout | DONE; committed15369d5 | multi_session.rs and private child test files |
 | 08 integration/docs | blocked on 01,05,06,07 | parent; all shared evidence and usage-skill maintenance |
@@ -118,3 +118,13 @@ Packet02 committed71d07e4. Parent implemented workspace ownership in state/works
 - Completion wakes parent automatically; no polling. Review then accept/commit03 if clear, continue04/05 serially and08 combined gate. No additional user permission needed within authorized local scope.
 
 Packet03 accepted: independent [workspace review](WORKSPACE-REVIEW.md) has no material findings. Parent reviewed feedback ordering and immutable root access; checks above pass. Transfer UI lease to04 after03 commit. No active delegates.
+
+## Packet04 review pending — 2026-10-30
+
+Packet03 committed8ba6672. Parent implemented CopyState/Interaction owners; see [packet04 evidence](PACKET04.md), including pre-extraction event priority and remaining coordinator boundaries. Full binary323/0, compositor43/0, four-pane2/0, attach-host6/0, tabs5/0, strict all-target Clippy/fmt/diff and docs434/0 pass. Source lease is frozen during independent review;05 does not start until04 accepted/committed.
+
+- Task ID: `node:delegated-task:command%3Amcp%3A8e059d00-13c9-44fb-82e1-801a62303382%3Adelegate-task%3Acode-health-20261030-interaction-review`.
+- Client request: `code-health-20261030-interaction-review`; Codex/gpt-6-luna/high, shared read-only source; sole write lease INTERACTION-REVIEW.md. No builds or nested agents.
+- Completion wakes parent; no polling. Parent then reviews findings, fixes any material issue, accepts/commits04 and continues05 plus08 without additional setup questions. No push/install authorized.
+
+Packet04 accepted by parent after completing [transition review](INTERACTION-REVIEW.md). Delegated review was incomplete and is not counted as independent approval. Existing final checks pass; source unchanged since those checks. No active delegates.05 starts after04 commit.

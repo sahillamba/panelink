@@ -1,6 +1,6 @@
 # 04: Own pane interaction state and event priority
 
-**Status:** authorized; pending blockers and parent assignment
+**Status:** complete; parent transition review and checks pass; see [evidence](../PACKET04.md)
 
 **Lane:** UI state
 
@@ -12,12 +12,12 @@ Read the [specification](../SPEC.md) and [execution reference](../EXECUTION.md),
 
 ## Acceptance criteria
 
-- [ ] Group pane menus, confirmations, swap/divider interaction and selection/copy state around their captured identity and transitions. First document current modal priority from source and tests.
-- [ ] Preserve that event priority: route freeze, dialogs, pointer capture, pane modes, actions/help/confirmation/menu/picker, copy and ordinary input. Preserve actual source ordering if it differs from this navigation list.
-- [ ] All modal keys/paste/mouse consumption, opening-event and repeat/release latches, cancel-default close behavior and captured-target validation remain identical.
-- [ ] Selection keeps one owner and a frozen viewport identity; route/focus/buffer/size changes invalidate it as before. Copy attempts/results stay source-target/request scoped and preserve Unicode/wrap behavior.
-- [ ] Preserve one-way handoff of commands to existing effects and pending-operation tracking. This is not a wholesale event framework or concurrent command redesign.
-- [ ] Behavioral tests prove exact child effects, default-cancel and stale target cancellation; remove superseded root interaction state. Event routing becomes readable policy rather than duplicated per-mode state mutations.
+- [x] Group pane menus, confirmations, swap/divider interaction and selection/copy state around their captured identity and transitions. First document current modal priority from source and tests.
+- [x] Preserve that event priority: route freeze, dialogs, pointer capture, pane modes, actions/help/confirmation/menu/picker, copy and ordinary input. Preserve actual source ordering if it differs from this navigation list.
+- [x] All modal keys/paste/mouse consumption, opening-event and repeat/release latches, cancel-default close behavior and captured-target validation remain identical.
+- [x] Selection keeps one owner and a frozen viewport identity; route/focus/buffer/size changes invalidate it as before. Copy attempts/results stay source-target/request scoped and preserve Unicode/wrap behavior.
+- [x] Preserve one-way handoff of commands to existing effects and pending-operation tracking. This is not a wholesale event framework or concurrent command redesign.
+- [x] Behavioral tests prove exact child effects, default-cancel and stale target cancellation; remove superseded root interaction state. Event routing becomes readable policy rather than duplicated per-mode state mutations.
 
 ## Completion
 

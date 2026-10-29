@@ -1,3 +1,12 @@
+## Code-health packet04 verified — 2026-10-30
+
+CopyState owns frozen selection and clipboard request/result state; Interaction
+owns pane modes, captured menus, confirmations and local modal consumption.
+Parent completed the transition review after the delegated review stopped incomplete.
+Binary323/0, compositor43/0, private PTY13/0 and strict checks pass. See
+[packet04 evidence](code-health-20261030/PACKET04.md).05 rendering and combined08
+remain; no install, live panes or push.
+
 ## Code-health packet03 verified — 2026-10-30
 
 WorkspaceState owns tab catalog, picker/dialog/filter state and request-scoped
