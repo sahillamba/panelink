@@ -1,3 +1,12 @@
+## Code-health packets01/07 verified — 2026-10-30
+
+Shared host event dispatch preserves handler/effect order; parent host unit6/0
+and workspace PTY5/0 pass. Three embedded multi-session test modules moved to
+private children; parent verified exact rustfmt-normalized bodies, byte-identical
+production prefix and85/0 scoped tests. Test names remain unchanged.
+[Execution state](code-health-20261030/PROGRESS.md) records details and worker
+report discrepancies. Packet02 is parent-owned after a no-edit worker handback.
+
 ## Code-health packet06 verified — 2026-10-30
 
 Parent replaced the four-pane fixture's300ms/negative-status wait with expected

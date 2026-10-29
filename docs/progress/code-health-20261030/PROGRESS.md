@@ -1,12 +1,12 @@
 # Code health execution state
 
 ```text
-current-phase: 01 and07 independent lanes; 02 parent design
+current-phase: 02 parent viewport extraction
 last-updated: 2026-10-30
 base: a1134ec4bc69e8a97b27ba2b0b61f2e446257440
 branch: refactor/code-health-20261030
 last-verified: fresh repaired canonical8/8; original baseline failure preserved
-next-action: commit verified00, assign host/server-test lanes, design02 viewport extraction
+next-action: parent implements02 in transition groups;03-05 remain blocked on review
 blocked-on: none for01,02,06,07; UI chain remains serial
 ```
 
@@ -19,13 +19,13 @@ User authorized implementing the [plan](README.md) in this new worktree with par
 | Packet | State | Owner / exclusive lease |
 | --- | --- | --- |
 | 00 baseline | DONE; parent reviewed canonical8/8 | Luna reads source; writes only BASELINE.md; parent owns this progress file and other planning docs |
-| 01 host dispatch | running; Luna managed worktree | host.rs |
+| 01 host dispatch | DONE; parent integrated and verified | host.rs |
 | 02 pane viewport | parent takeover; worker no edits | state.rs, state_tests.rs and private viewport child |
 | 03 workspace presentation | blocked on 02 | same UI lease transferred after review |
 | 04 pane interaction | blocked on 03 | same UI lease transferred after review |
 | 05 rendering | blocked on 04 | same UI lease plus compose.rs |
 | 06 positive fixture barrier | DONE; parent implemented and verified | p3_attach_four.rs |
-| 07 server test layout | parent verified; ready to commit | multi_session.rs and private child test files |
+| 07 server test layout | DONE; committed15369d5 | multi_session.rs and private child test files |
 | 08 integration/docs | blocked on 01,05,06,07 | parent; all shared evidence and usage-skill maintenance |
 
 Active worker leases are disjoint and recorded below. Parent holds the UI-state design and split-fixture lease. UI source changes are serial. Keep exact target, input nonreplayability, scoped-wheel negotiation/FIFO, metadata, modal, geometry, output commit and host restoration contracts from [SPEC.md](SPEC.md).
@@ -98,3 +98,5 @@ Packet07 bodies match original after rustfmt and production prefix is identical;
 Packet02 worker stopped with no edits or checks; parent takes over in smaller transition groups within the same file lease. This is unfinished, not a failure of the chosen invariants.
 
 Packet01 source diff is a narrow shared host event dispatcher. Its final report claimed stalled workspace tests, but parent read raw completed tool activity: separate workspace targets finished5/0 (36.02s,36.00s,35.45s), with no failure output. Parent keeps the report discrepancy explicit and will verify the integrated result once, rather than treating pending output as failure or retrying to green. No matching worker-test process remains.
+
+Packet01 parent result: [dispatcher review](PACKET01.md), workspace integration5/0 and host unit6/0 pass on integrated source. Packet07 committed15369d5. Packet02 worker completed with zero edits; parent owns state/test/viewport files and will implement the chosen state owner directly. Packet06 remains committed4f58d29. No active delegates.

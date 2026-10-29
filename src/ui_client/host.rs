@@ -671,6 +671,50 @@ fn handle_host_event(
     }
 }
 
+/// Resolve event-specific recovery availability, handle the event, then drain
+/// its queued metadata and navigation intents in their established order.
+fn dispatch_host_event(
+    host: &HostGuard,
+    app: &mut App,
+    event: &crossterm_input::Event,
+    worker_slot: &mut Option<WorkerHandle>,
+    routes: &mut RouteLoopState<'_>,
+    server_dir: Option<&std::path::Path>,
+    now: Instant,
+) -> Result<Flow, HostError> {
+    let needs_check = app.needs_recovery_availability(event) && server_dir.is_some();
+    let availability = if needs_check {
+        server_dir.map_or(
+            Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+            previous_layout_availability,
+        )
+    } else {
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved)
+    };
+    let flow = handle_host_event(app, event, now, availability, worker_slot)?;
+    if flow != Flow::Continue {
+        return Ok(flow);
+    }
+
+    let now = Instant::now();
+    queue_pending_create(app, routes, now);
+    queue_pending_workspace_mutation(app, routes, now);
+    if let Some(destination) = app.take_route_request() {
+        prepare_route_destination(host, app, routes, destination, Instant::now())?;
+    }
+    if app.take_catalog_refresh_request() {
+        if let Some(controller) = routes.controller {
+            if controller
+                .queue_catalog_refresh(app.current_route())
+                .is_err()
+            {
+                app.set_status("workspace catalog busy", Instant::now());
+            }
+        }
+    }
+    Ok(flow)
+}
+
 fn queue_pending_create(app: &mut App, routes: &mut RouteLoopState<'_>, now: Instant) {
     let Some((project, reconcile)) = app.take_create_request() else {
         return;
@@ -884,16 +928,15 @@ fn event_loop(
             };
             if let Some(event) = event {
                 last_key_at = Some(Instant::now());
-                let needs_check = app.needs_recovery_availability(&event) && server_dir.is_some();
-                let availability = if needs_check {
-                    server_dir.as_deref().map_or(
-                        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
-                        previous_layout_availability,
-                    )
-                } else {
-                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved)
-                };
-                match handle_host_event(app, &event, Instant::now(), availability, worker_slot)? {
+                match dispatch_host_event(
+                    host,
+                    app,
+                    &event,
+                    worker_slot,
+                    routes,
+                    server_dir.as_deref(),
+                    Instant::now(),
+                )? {
                     Flow::Quit => {
                         quit = true;
                         break;
@@ -903,21 +946,6 @@ fn event_loop(
                         break;
                     }
                     Flow::Continue => {}
-                }
-                queue_pending_create(app, routes, Instant::now());
-                queue_pending_workspace_mutation(app, routes, Instant::now());
-                if let Some(destination) = app.take_route_request() {
-                    prepare_route_destination(host, app, routes, destination, Instant::now())?;
-                }
-                if app.take_catalog_refresh_request() {
-                    if let Some(controller) = routes.controller {
-                        if controller
-                            .queue_catalog_refresh(app.current_route())
-                            .is_err()
-                        {
-                            app.set_status("workspace catalog busy", Instant::now());
-                        }
-                    }
                 }
             }
             if decoder.pending_bytes() > 0 {
@@ -979,47 +1007,18 @@ fn event_loop(
                 if decoder.pending_bytes() == 1 && last.elapsed() >= ESCAPE_TIMEOUT {
                     match decoder.finish_escape() {
                         Ok(Some(event)) => {
-                            let needs_check =
-                                app.needs_recovery_availability(&event) && server_dir.is_some();
-                            let availability = if needs_check {
-                                server_dir.as_deref().map_or(
-                                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
-                                    previous_layout_availability,
-                                )
-                            } else {
-                                Availability::Disabled(DisabledReason::NoPreviousLayoutSaved)
-                            };
-                            match handle_host_event(
+                            match dispatch_host_event(
+                                host,
                                 app,
                                 &event,
-                                Instant::now(),
-                                availability,
                                 worker_slot,
+                                routes,
+                                server_dir.as_deref(),
+                                Instant::now(),
                             )? {
                                 Flow::Quit => break Ok(0),
                                 // A lone Esc never opens the viewer; ignore.
                                 Flow::Continue | Flow::ViewRecovery => {}
-                            }
-                            queue_pending_create(app, routes, Instant::now());
-                            queue_pending_workspace_mutation(app, routes, Instant::now());
-                            if let Some(destination) = app.take_route_request() {
-                                prepare_route_destination(
-                                    host,
-                                    app,
-                                    routes,
-                                    destination,
-                                    Instant::now(),
-                                )?;
-                            }
-                            if app.take_catalog_refresh_request() {
-                                if let Some(controller) = routes.controller {
-                                    if controller
-                                        .queue_catalog_refresh(app.current_route())
-                                        .is_err()
-                                    {
-                                        app.set_status("workspace catalog busy", Instant::now());
-                                    }
-                                }
                             }
                         }
                         Ok(None) => {}
