@@ -19,16 +19,16 @@ User authorized implementing the [plan](README.md) in this new worktree with par
 | Packet | State | Owner / exclusive lease |
 | --- | --- | --- |
 | 00 baseline | DONE; parent reviewed canonical8/8 | Luna reads source; writes only BASELINE.md; parent owns this progress file and other planning docs |
-| 01 host dispatch | ready for Luna | host.rs |
+| 01 host dispatch | running; Luna managed worktree | host.rs |
 | 02 pane viewport | design ready | parent design/integration; state.rs, state_tests.rs and private viewport child |
 | 03 workspace presentation | blocked on 02 | same UI lease transferred after review |
 | 04 pane interaction | blocked on 03 | same UI lease transferred after review |
 | 05 rendering | blocked on 04 | same UI lease plus compose.rs |
-| 06 positive fixture barrier | ready | unassigned; p3_attach_four.rs |
-| 07 server test layout | ready for Luna | multi_session.rs and private child test files |
+| 06 positive fixture barrier | DONE; parent implemented and verified | p3_attach_four.rs |
+| 07 server test layout | running; Luna managed worktree | multi_session.rs and private child test files |
 | 08 integration/docs | blocked on 01,05,06,07 | parent; all shared evidence and usage-skill maintenance |
 
-No worker has a source-edit lease yet. Independent lanes may start after the baseline is reviewed. UI lease is serial. Keep exact target, input nonreplayability, scoped-wheel negotiation/FIFO, metadata, modal, geometry, output commit and host restoration contracts from [SPEC.md](SPEC.md).
+Active worker leases are disjoint and recorded below. Parent holds the UI-state design and split-fixture lease. UI source changes are serial. Keep exact target, input nonreplayability, scoped-wheel negotiation/FIFO, metadata, modal, geometry, output commit and host restoration contracts from [SPEC.md](SPEC.md).
 
 ## Environment and evidence
 
@@ -66,3 +66,21 @@ Parent affected-target verification: p5_workspace_tabs 5 passed / 0 failed / 0 i
 ## Phase00 complete — 2026-10-30
 
 Parent independently checked original red and new canonical summary: all8 checks pass. See [repair review](BASELINE-REPAIR.md). Full affected integration target5/0 and exact marker/PID semantics reviewed. Original failure remains historical evidence; no acceptance gates closed. File leases for01/07 will be assigned in separate managed worktrees; source conflict sets remain disjoint.
+
+## Wave1 assigned — 2026-10-30
+
+Verified phase00 committed as ce51e02. Canonical rootRust1596/0/20ignored plus decoder39/0 (1635 total Rust passes); Python233run/1skip; all8 checks pass.
+
+Three Luna/high tasks use separate tool-created worktrees based on ce51e02, exclusive disjoint files, no worker commits. Parent source lease: UI state design only until reviewing01/02 interfaces. Each receives its ticket, invariants, test commands and actual-output handback.
+
+- Packet01 client request `code-health-20261030-packet-01`, task suffix `delegate-task%3Acode-health-20261030-packet-01`: host.rs only.
+- Packet06 client request `code-health-20261030-packet-06`, task suffix `delegate-task%3Acode-health-20261030-packet-06`: p3_attach_four.rs only.
+- Packet07 client request `code-health-20261030-packet-07`, task suffix `delegate-task%3Acode-health-20261030-packet-07`: multi_session.rs plus three new test children only.
+
+Task ID prefix for all three: `node:delegated-task:command%3Amcp%3A8e059d00-13c9-44fb-82e1-801a62303382%3A`. Shared target directories are not used. Async completions wake parent; do not poll. Parent reviews, applies owned diffs and updates this state on completion.
+
+## Packet06 parent implementation
+
+Luna stopped with no edits/tests after finding that the generic applied status can be stale. Parent took over the unchanged packet. The fixture now derives the unique new full target from consecutive authoritative layouts, requires Menu/Close controls at every expected pane rectangle and the focus marker only at the new target rectangle, using shared pane_controls geometry. It explicitly rejects each pre-split capture (including prior successful split output) and waits for all three splits, replacing the negative-status predicate and300ms sleep. No product source or timeout changed.
+
+Parent tests: p3_attach_four2/0 in13.65s, log `/private/tmp/panelink-code-health-packet06-parent.log`; fmt and diff checks pass. Strict target Clippy also passes. Packet06 complete as a bounded test-only change; full combined gate remains packet08.

@@ -1,3 +1,11 @@
+## Code-health packet06 verified — 2026-10-30
+
+Parent replaced the four-pane fixture's300ms/negative-status wait with expected
+layout chrome and unique new-target focus checks using shared pane geometry.
+Each previous captured screen is explicitly rejected; all three split completions
+are observed. Private-PTY integration2/0, strict target Clippy, fmt and diff checks
+pass. See [execution state](code-health-20261030/PROGRESS.md). No runtime changes.
+
 ## Code-health baseline verified — 2026-10-30
 
 Fresh canonical verifier passes8/8 after the bounded positive-cancel fixture

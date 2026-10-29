@@ -17,6 +17,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use panelink::pane_layout::Rect;
+use panelink::terminal::compose::pane_controls;
 use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
 use rustix::process::{ioctl_tiocsctty, setsid};
 use rustix::termios::{tcgetattr, LocalModes, Termios, Winsize};
@@ -619,19 +621,54 @@ while [ ! -f "$release_path" ]; do /bin/sleep 0.05; done
 exit 0
 "#;
 
-/// The attach client applies a split asynchronously and refuses another
-/// split while one is pending. The server layout can show the new pane before
-/// the client receives the split reply, so wait until the client's status no
-/// longer reports a pending split before requesting the next one.
-fn wait_split_settled(client: &Client) {
-    // The client focuses the new pane once both the split reply and a layout
-    // containing it are observed; its status line changes accordingly.
-    client.wait_screen("split completion observed by the client", |screen| {
-        let status = screen.lines().last().unwrap_or("");
-        !status.contains("split pending") && !status.contains("waiting for layout")
-    });
-    // One more render tick so the completion is applied before new keys.
-    thread::sleep(Duration::from_millis(300));
+fn split_layout_focused(screen: &str, panes: &[(PaneRect, bool)]) -> bool {
+    panes.iter().all(|(rect, focused)| {
+        let Some(controls) = pane_controls(Rect {
+            x: rect.x,
+            y: rect.y,
+            rows: rect.rows,
+            columns: rect.columns,
+        }) else {
+            return false;
+        };
+        let Some(header) = screen.lines().nth(usize::from(rect.y)) else {
+            return false;
+        };
+        let text_at = |x, length| {
+            header
+                .chars()
+                .skip(usize::from(x))
+                .take(length)
+                .collect::<String>()
+        };
+        text_at(controls.menu.x, 6) == "[Menu]"
+            && text_at(controls.close.x, 3) == "[x]"
+            && text_at(controls.focus_marker.x, 1) == if *focused { ">" } else { " " }
+    })
+}
+
+/// Server topology alone precedes client completion. Require that exact layout
+/// to be rendered with the uniquely added target focused before sending keys.
+fn wait_split_settled(client: &Client, previous: &str, current: &str, before: &str) {
+    let old_targets = targets(previous);
+    let new_targets = targets(current);
+    let added: Vec<_> = new_targets
+        .iter()
+        .filter(|target| !old_targets.contains(target))
+        .collect();
+    assert_eq!(added.len(), 1, "one target added by this split: {current}");
+    let panes: Vec<_> = new_targets
+        .iter()
+        .map(|target| (rect_for(current, target), target == added[0]))
+        .collect();
+    assert!(
+        !split_layout_focused(before, &panes),
+        "the pre-split screen must not acknowledge the new layout"
+    );
+    client.wait_screen(
+        "new split layout rendered and new target focused",
+        |screen| split_layout_focused(screen, &panes),
+    );
 }
 
 fn wait_control(what: &str, mut check: impl FnMut() -> Option<String>) -> String {
@@ -743,7 +780,7 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
     client.wait_screen("initial pane readiness", |screen| {
         screen.contains("PANE1-READY")
     });
-    wait_control("100-column outer layout", || {
+    let one = wait_control("100-column outer layout", || {
         let layout = fixture.layout("pane-0.ctx");
         (field(&layout, "columns") == Some("100") && field(&layout, "pane_count") == Some("1"))
             .then_some(layout)
@@ -754,16 +791,20 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
     // Splits complete asynchronously in the client worker; the client refuses
     // a second split while one is pending ("split already pending"), so wait
     // for the client to observe each completion before the next request.
+    let before = client.screen();
     client.write(b"\x02r");
     let two = fixture.wait_layout("pane-0.ctx", 2);
     assert_eq!(targets(&two).len(), 2, "{two}");
-    wait_split_settled(&client);
+    wait_split_settled(&client, &one, &two, &before);
+    let before = client.screen();
     client.write(b"\x02\x1b[Dd");
     let three = fixture.wait_layout("pane-0.ctx", 3);
     assert_eq!(targets(&three).len(), 3, "{three}");
-    wait_split_settled(&client);
+    wait_split_settled(&client, &two, &three, &before);
+    let before = client.screen();
     client.write(b"\x02\x1b[Cd");
     let four = fixture.wait_layout("pane-0.ctx", 4);
+    wait_split_settled(&client, &three, &four, &before);
     let pane_targets = targets(&four);
     assert_eq!(pane_targets.len(), 4, "{four}");
     assert!(
