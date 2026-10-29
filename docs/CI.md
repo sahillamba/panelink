@@ -80,3 +80,24 @@ wide-terminal attach test with connection loss. Local green evidence did not
 establish a hosted pass. The scoped repair replaces timer-based socket waiting
 with descriptor readiness while retaining existing deadlines; see
 [the diagnosis, counterfactual and verification](progress/PR3-CI-SOCKET-READINESS-2026-10-27.md).
+
+## Final-pane event observation
+
+Run [40621974603](https://github.com/sahillamba/panelink/actions/runs/40621974603)
+failed because the broad agent CLI test required a polling event observer to
+report the last pane closing while that same close shut down the server.
+The observer could be between requests when the server retired; its next
+workspace-watch write then failed. A fixed startup sleep cannot synchronize
+that shutdown boundary.
+
+The test now checks the successful close receipt, server exit/socket removal,
+and subsequent `no_workspace` result. The separate
+`close_event_and_stale_index_remain_scoped_to_current_layout` test retains
+close-event delivery coverage with a sibling pane keeping the server alive.
+No test is ignored or deleted and no transport error is converted into success.
+
+The local repair verifier also exposed a provider fixture race in
+`failed_control_reply_latches_source_unavailable_without_reconnect`: receiving
+the failure reply precedes the worker's completion notification. Its immediate
+channel probe now uses a two-second bounded receive, preserving the failure,
+unavailable-state and no-reconnect assertions. Production behavior is unchanged.
