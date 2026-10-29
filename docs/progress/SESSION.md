@@ -1,5 +1,198 @@
 # Implementation session checkpoint — 2026-10-17
 
+## UI/UX UX-07 and UX-08 — 2026-10-28 (current, read first)
+
+All eight packets are implemented on `t3/panelink-ui-ux-plan`. After UX-08 the
+user asked to commit and to build/install locally (one commit; no push).
+
+Header polish 0.1.6 (user feedback on the 0.1.5 screenshot: cramped, "All+"
+not recognisable as a tab button): tab row now has a one-cell margin, two-cell
+gaps, and labelled right controls `[<] [>]  [All tabs]  [+ New]` on hosts >= 60
+columns (compact `[All]`/`[+]`/`+` below); pane header has a gap between
+`[Menu]`, the focus marker and the label, and before `[x]`; the scrollbar column
+stays blank until history exists (no full-height `#` column). Checks: lib
+921/0/4, bin 309/0, compose 43/0, workspace_tabs 10/0, strict Clippy, fmt,
+docs; serial integration p3_attach_four 2/0, p3_scroll 3/0, p3a_attach_host
+5/0, p3a_default_open 7/0/1, p3a_runtime 1/0, p5_recovery_chooser 7/0,
+p5_workspace_tabs 5/0. Installed the same way as 0.1.5: target/debug SHA-256
+bf95c34a7e38d7955ca99c31902e906391af4bd6cca8af18cdf89a5a613e1cdf; previous
+binary at `~/.local/bin/panelink-debug.before-0.1.6-20261028-132246`.
+
+Local install 2026-10-28: package bumped to 0.1.5 (client badge `v0.1.5`).
+Existing development-launcher install kept: `~/.local/bin/panelink` ->
+this checkout's `bin/panelink` -> `target/debug/panelink` (locked/offline debug
+build), SHA-256 a20a4f5d1c3ec021e6a8cc93adf3347514f63a7b04399b530a79e2a90c137856;
+`panelink --version` reports 0.1.5. Previous 0.1.4 binary saved as
+`~/.local/bin/panelink-debug.before-0.1.5-20261028-130854`. After the bump: lib
+920/0/4 ignored, bin 309/0. The user's already-running server (pid 23083) and
+attached clients keep the old code until the user detaches/reattaches (client)
+and restarts the workspace (server); no restart, live-pane input or push done.
+
+- UX-07 (Luna, resumed from the cancelled worker's partial edits in
+  /private/tmp/panelink-wt-ux02a `ux/07-feedback`; 3-way merged against
+  `ux/snap-after-06`): per-attempt clipboard results; source-pane `Copied` for
+  1.5 s only after confirmed success, truthful failure labels, no copied text;
+  pane-close confirmation with captured pane, "Ends this process", `[Close]`
+  `[Cancel]`, Cancel default, Left/Right/Tab, Enter activates selection, `y`/`n`,
+  opening event/repeat safe, stale target cancels; tab close also Cancel default;
+  four direct split rows with reasons and paging; both UX-04 review findings
+  fixed (disabled-item selection/reason; `[More]` hit column); persistent
+  `Applying…` / `Outcome unknown` / `Disconnected` with mutations disabled.
+- Parent integration fixes found by the full serial suite: UX-07 had dropped the
+  host's confirmed-server-end exit (p3a_default_open 2 failures: "attach did not
+  exit") and the partial/unknown tab-close keep-visible guard — both restored
+  (`host.rs` server_ended exit; `keep_tab_visible_on_server_end`). Updated
+  `p3a_attach_host` keyboard-menu step: Enter on the first row now splits
+  directly, so the test checks the four rows and Esc instead.
+- Docs: skill (`SKILL.md`, `references/cli.md`, `references/interactive.md`),
+  README, SPEC updated (Kimi K2.6 draft, parent-corrected: restored dropped
+  version-badge/80x240/input-ownership/extent/`Ctrl-B e` notes; UX-07 section
+  describes implemented behaviour; README close rows). check_docs 402 files /0.
+
+UX-08 automated verification (CARGO_TARGET_DIR=/private/tmp/panelink-ux-target,
+host load from other sessions present):
+- Canonical `RUST_TEST_THREADS=1 python3 scripts/verify_non_ui.py` run 1 failed
+  cargo_test at `p3a_attach_host` (real regressions above, then fixed); run 2
+  failed cargo_test at `p3a_attach_host::reattach_after_server_restart_replaces_dead_contexts`
+  (2 context files instead of 1; passed 3/3 alone and 5/5 full-binary reruns —
+  load-sensitive, NOT counted as a pass) and python_unittest (13
+  `test_opencode_bridge_plugin` accept() timeouts, the same environmental
+  failure recorded on the unchanged base; host Python 3.15 vs CI 3.11). Decoder,
+  component sources, fmt, strict Clippy, build and docs passed both runs.
+- Full locked/offline serial no-fail-fast Rust after the fixes: 1568 passed /
+  0 failed / 17 ignored.
+- Not done (open gates): Apple Terminal/native host, real clipboard, touch,
+  UX-01 before/after timing re-measure with event/read/paint breakdown, any
+  install or live-pane use. Python bridge-plugin suite needs a CI (3.11) or
+  clean-host rerun. Snapshot branches `ux/snap-after-03`, `ux/snap-after-06` and
+  worker branches `ux/03-focus-geometry`, `ux/04-menus`, `ux/06-tabs`,
+  `ux/07-feedback` are local scratch (not for merge); worktrees under
+  /private/tmp/panelink-wt-* and targets /private/tmp/panelink-ux*-target can be
+  deleted once the user is satisfied.
+
+## UI/UX implementation resumed — 2026-10-28
+
+User moved orchestration to a new parent session (same checkout, branch
+`t3/panelink-ui-ux-plan`), asked to leave everything uncommitted (no checkpoint
+commit, no push) and allowed worktrees plus parallel cheap workers (GPT-6-Luna,
+Claude Haiku 5.5, Kimi K2.6) via T3 `delegate_task` on the tescode ACP provider.
+A live user server runs from this checkout's `target/debug/panelink`, so every
+build uses a separate `CARGO_TARGET_DIR` under /private/tmp; no live panes used.
+
+- UX-05c (Luna, main checkout): bounded client metadata worker
+  (`RouteController::queue_create|queue_rename|queue_close`), `PreparedWorkspace`
+  with exact request-id install, `App::new_workspace_empty` empty state with New
+  tab / Detach (no Net worker, no spawn). Parent wired no-argument startup with
+  zero visible tabs to the client empty state on a TTY (notice otherwise), and
+  fixed a review finding: an unknown create outcome is held and only an explicit
+  New tab re-dispatches the same intent ID (no auto-retry, no fresh intent).
+  Parent also serialized `tests/p5_workspace_lifecycle.rs` fixtures (process-global
+  fake runtime raced under the default parallel runner: 5/10 failed; now 10/0 x3).
+- UX-03 (Luna, worktree /private/tmp/panelink-wt-int, branch ux/03-focus-geometry,
+  merged by parent into the main working tree via 3-way file merge): shared
+  pane-control/scrollbar/divider/content-point geometry in `terminal/compose.rs`;
+  focused pane gets bold/cyan header, ASCII `>` marker and contrasting padding
+  rail; child cells unchanged; wheel/scrollbar/divider keep typing focus.
+- Combined check after both: strict Clippy, fmt, bin 275/0, compose 43/0,
+  p5_workspace_tabs 4/0, p3_scroll 3/0, p5_workspace_lifecycle 10/0. One bin run
+  had `clipboard::process_fixture_early_exit_is_a_redacted_write_failure` fail
+  (passed 3 further full runs and alone) — load-sensitive, not counted as a pass.
+- Parallel snapshot branch `ux/snap-after-03` (commit-tree of the working tree;
+  not for merge) seeds worktrees: UX-04 in /private/tmp/panelink-wt-ux05a
+  (`ux/04-menus`), UX-06 in /private/tmp/panelink-wt-ux05b (`ux/06-tabs`).
+  UX-04/UX-07 research brief: /private/tmp/panelink-ux04-07-brief.md.
+- UX-04 (Luna, `ux/04-menus`) merged: shared `PaneActionModel` for Menu /
+  right-click / Ctrl-B s, divider clamp/cancel/release, split focus fenced by
+  route. Parent updated two legacy tests to the new menu order. Review findings
+  still OPEN: (M) clicking a disabled item does not persist selection/reason
+  (`handle_actions_menu_event` -> `activate_local_action` disabled branch);
+  (L) `[More]` hit region starts one column after its label.
+- UX-06 (Luna, `ux/06-tabs`) merged: header +, overflow, All tabs search,
+  rename/close dialogs, Ctrl-B + / t / w, per-route focus memory, private-root
+  create/rename/close journey. Parent fixed review findings: inactive-tab close no
+  longer sends `generation: None` (must open the tab first so the exact runtime
+  generation is bound — deviation from "close inactive tab" in one step), and a
+  late rename success only closes the matching saving rename dialog.
+- Checks after UX-04+UX-06+fixes: strict Clippy, fmt, bin 297/0, workspace_tabs
+  lib 9/0, p5_workspace_tabs 5/0 (serial; parallel 5/0 x2), lifecycle 10/0,
+  tab_state 7/0, p3_scroll 3/0, p3_attach_four 2/0. Second snapshot branch
+  `ux/snap-after-06` (before the UX-06 review fixes) seeds UX-07.
+- RESUMED and finished 2026-10-28 (see "UX-07 and UX-08" below).
+- (historical) PAUSED by user 2026-10-28 during UX-07. The UX-07 worker (worktree
+  /private/tmp/panelink-wt-ux02a, branch `ux/07-feedback`, target
+  /private/tmp/panelink-ux07-target) was cancelled mid-task; its partial,
+  unverified edits (split_menu, clipboard, host, keys, state) remain uncommitted
+  there. Resume: finish or restart UX-07 from those edits, 3-way merge into the
+  main tree against `ux/snap-after-06`, fix the two open UX-04 findings, then
+  UX-08 (full serial verifier, docs/skill/ROADMAP).
+
+## UI/UX implementation — 2026-10-27
+
+User confirmed the shared understanding and requested implementation with parent
+orchestration using GPT-6-Luna and Claude Haiku 5.5 subagents (launcher:
+`~/.opencode/bin/opencode run -m tesco-litellm/<model>`). Work proceeds in
+UX-01..UX-08 order on `t3/panelink-ui-ux-plan`. The `tescode workflow custom
+run` path failed with a LiteLLM virtual-key 401, so (per user choice) workers ran
+via plain `opencode run -m tesco-litellm/gpt-6-luna` (Haiku 5.5 only for one
+read-only audit; it hit a step-limit prefill error once). Writers used separate
+git worktrees under /private/tmp with exclusive files; the parent reviewed,
+fixed and merged them on local branch `ux/integration`
+(/private/tmp/panelink-wt-int). User then asked not to start new agents; the
+remaining packets are not started.
+
+Status (2026-10-27, evening):
+- UX-01 done as a baseline: `tests/ux01_history_latency.rs` (ignored benchmark)
+  and [UX-01 baseline](UX-01-BASELINE-2026-10-27.md). Debug synthetic private PTY:
+  wheel first change p95 about 20-36 ms; thumb seeks only on release; wheel and
+  thumb on another pane stole focus. No event/read/paint breakdown yet.
+- UX-02 implemented (02a protocol + 02b client), not yet accepted: optional
+  capability 512 `history_cursor` carries the vt100 normal-history cursor on
+  screen/history replies; the client keeps the reading position by cursor delta,
+  shows History/New output/History truncated with a pane-local `[Back to live]`,
+  never moves focus on wheel/scrollbar, drags continuously (one read in flight,
+  latest wins) and discovers unknown extent at the current offset. Parent fixed
+  two worker defects: the server's outgoing snapshot guard rejected cursor
+  trailers (every UI reply dropped -> "connection lost"), and a thumb release
+  before extent discovery was silently lost (now deferred and applied once).
+  `p5_workspace_tabs` pointer step now waits for real oldest content.
+- UX-05 a/b implemented, client half (05c) pending: approved
+  [lifecycle design](../design/UX-05-TAB-LIFECYCLE.md); 32-byte
+  `workspace-tabs.v1` sidecar hides only reserved (1,1); adapter
+  create/rename/close with verified stop before metadata change; new CLI
+  `workspace tab rename|close`; bare `panelink` opens the selected visible tab
+  with the tab strip, or prints a notice and starts nothing when none remain.
+- Not started: UX-03, UX-04, UX-05c, UX-06, UX-07, UX-08.
+
+Integration verification (ux/integration, target /private/tmp/panelink-ux02b-target):
+focused client 165/0, lib 912/0/4 ignored, p5_workspace_tabs 4/0, lifecycle 10/0,
+strict Clippy, fmt, build, decoder, fingerprints and docs pass. Canonical verifier
+run 1 failed: lib `shutdown_reports_kill_escalation_only_when_hup_was_ignored`
+(passes 3/3 alone; load-sensitive) and 13 Python `test_opencode_bridge_plugin`
+timeouts that also fail 13/14 on the unchanged base checkout (environmental).
+`p3_detach interrupt_delivers_sigint_after_a_ready_marker` fails intermittently
+on the unchanged base too (1 of 6).
+
+The first full no-fail-fast run also exposed a real UX-05b regression: plain
+startup created `lifecycle.lock`/registry files before the recovery chooser, so
+quitting it was no longer side-effect free (`p5_recovery_chooser`). Parent fix
+(commit 318b202 on ux/integration): route choice is read-only (bounded lock wait,
+first run -> Default/Main); v1/sidecar initialization moved after the chooser
+under the legacy lifecycle lock. p3a_default_open 7/0 (3 runs),
+p5_recovery_chooser 7/0 (3 runs), lifecycle 10/0, routing 6/0, tabs 4/0.
+
+Final full no-fail-fast Rust on ux/integration: 1507 passed / 8 failed / 17
+ignored. All 8 are PTY HUP/shutdown-timing tests (kill escalation, p3_detach
+SIGINT, p3b_close x2, layout_lifecycle drop, live_history_driver drop,
+screen_checkpoint HUP, w2_server_shutdown); each passes when rerun alone. The
+unchanged base on the same host in the same session: 1471 / 9 failed / 16
+ignored with the same family plus one routing test, so these are treated as
+host-load/environment failures, not regressions. They are not counted as passes.
+The integrated changes are now staged (squash, uncommitted) in this checkout;
+untracked: UX-01 test/evidence and the UX-05 design. Main-checkout recheck:
+strict Clippy, fmt, client 164/0.
+No commit to `t3/panelink-ui-ux-plan`, no install, no live pane use, no push.
+Next: UX-05c (client empty state + tab metadata worker), then UX-03/04/06/07/08.
+
 ## PR 7 CI detach capture repair — 2026-10-27/28
 
 User requested checkout and repair on `fix/wait-resize-full-screen` in

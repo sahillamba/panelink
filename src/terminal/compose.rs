@@ -21,7 +21,9 @@ pub const MAX_RECT_COLUMNS: u16 = 240;
 const MAX_ROWS: usize = MAX_RECT_ROWS as usize;
 const MAX_COLUMNS: usize = MAX_RECT_COLUMNS as usize;
 const MAX_OVERLAY_CELLS: usize = MAX_ROWS * MAX_COLUMNS;
+const MAX_PANE_LABEL_BYTES: usize = MAX_COLUMNS * 4;
 const VERSION_LABEL: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+const PANE_LABELS: [&str; crate::pane_layout::MAX_PANES] = ["Pane 1", "Pane 2", "Pane 3", "Pane 4"];
 
 /// One sanitized cell in the persistent, fixed top row.
 ///
@@ -143,6 +145,28 @@ pub struct Scrollbar {
     pub total_rows: u16,
 }
 
+/// Per-pane chrome rendered outside PTY content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneChrome<'a> {
+    /// Optional normal-history scrollbar for each stable pane slot.
+    pub scrollbars: [Option<Scrollbar>; crate::pane_layout::MAX_PANES],
+    /// Optional normal-history state and Back to live control for each slot.
+    pub history: [Option<HistoryLabelKind>; crate::pane_layout::MAX_PANES],
+    /// Optional concise pane labels. Missing labels use safe `Pane N` labels.
+    pub labels: [Option<&'a str>; crate::pane_layout::MAX_PANES],
+}
+
+impl PaneChrome<'_> {
+    /// No supplemental pane chrome.
+    pub const fn empty() -> Self {
+        Self {
+            scrollbars: [None; crate::pane_layout::MAX_PANES],
+            history: [None; crate::pane_layout::MAX_PANES],
+            labels: [None; crate::pane_layout::MAX_PANES],
+        }
+    }
+}
+
 /// Hitboxes for the always-visible controls in a padded pane's top margin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PaneControls {
@@ -150,6 +174,10 @@ pub struct PaneControls {
     pub menu: Rect,
     /// Three-cell `[x]` hitbox.
     pub close: Rect,
+    /// One-cell focus marker, immediately after the Menu control.
+    pub focus_marker: Rect,
+    /// Label area between the focus marker and close control.
+    pub label: Rect,
 }
 
 /// Returns the menu and close hitboxes for a valid padded pane rectangle.
@@ -158,19 +186,164 @@ pub struct PaneControls {
 /// geometry. Unpadded recovery panes should not expose controls.
 pub fn pane_controls(rect: Rect) -> Option<PaneControls> {
     content_rect(rect)?;
+    let menu = Rect {
+        x: rect.x.checked_add(1)?,
+        y: rect.y,
+        rows: 1,
+        columns: 6,
+    };
+    let close = Rect {
+        x: rect.x.checked_add(rect.columns.checked_sub(4)?)?,
+        y: rect.y,
+        rows: 1,
+        columns: 3,
+    };
+    // One blank cell separates [Menu] from the focus marker, and one more
+    // separates the marker from the label.
+    let marker_x = menu.x.checked_add(menu.columns)?.checked_add(1)?;
+    let label_x = marker_x.checked_add(2)?;
     Some(PaneControls {
-        menu: Rect {
-            x: rect.x.checked_add(1)?,
+        menu,
+        close,
+        focus_marker: Rect {
+            x: marker_x,
             y: rect.y,
             rows: 1,
-            columns: 6,
+            columns: 1,
         },
-        close: Rect {
-            x: rect.x.checked_add(rect.columns.checked_sub(4)?)?,
+        label: Rect {
+            x: label_x,
             y: rect.y,
             rows: 1,
-            columns: 3,
+            // Keep one blank cell between the label and the close control.
+            columns: close.x.checked_sub(label_x)?.saturating_sub(1),
         },
+    })
+}
+
+/// Returns the index and exact rectangle of the divider containing a pointer.
+/// Divider rectangles are the same half-open rectangles rendered by the compositor.
+pub fn divider_at(
+    dividers: [Option<Rect>; crate::pane_layout::MAX_PANES - 1],
+    x: u16,
+    y: u16,
+) -> Option<(usize, Rect)> {
+    dividers.into_iter().enumerate().find_map(|(index, rect)| {
+        rect.filter(|rect| rect.contains(x, y))
+            .map(|rect| (index, rect))
+    })
+}
+
+/// Map a host pointer position to a clamped cell in one pane's content.
+///
+/// The content rectangle must already include any host-row offset, such as the
+/// optional workspace tab strip. Pointer hits in pane padding clamp to the
+/// nearest content edge; callers decide whether padding is a valid gesture area.
+pub fn pointer_content_point(content: Rect, x: u16, y: u16) -> Point {
+    Point {
+        row: y
+            .saturating_sub(content.y)
+            .min(content.rows.saturating_sub(1)),
+        column: x
+            .saturating_sub(content.x)
+            .min(content.columns.saturating_sub(1)),
+    }
+}
+
+/// Short history state shown in a pane's bottom padding row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HistoryLabelKind {
+    History,
+    NewOutput,
+    Truncated,
+}
+
+impl HistoryLabelKind {
+    const fn text(self) -> &'static [u8] {
+        match self {
+            Self::History => b"History",
+            Self::NewOutput => b"New output",
+            Self::Truncated => b"History truncated",
+        }
+    }
+}
+
+/// Shared hit/render geometry for the history label and return-to-live button.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HistoryControls {
+    /// Clipped history-state label area; zero width means the label is omitted.
+    pub label: Rect,
+    /// Clickable return-to-live button.
+    pub back: Rect,
+    /// Button wording selected for the available width.
+    pub back_text: &'static [u8],
+}
+
+/// The client version badge's cells, when this pane owns the bottom-right
+/// viewport corner. Keeping this geometry shared prevents history controls
+/// from painting or accepting clicks over the badge.
+pub fn pane_version_badge(rect: Rect, host_rows: u16, host_columns: u16) -> Option<Rect> {
+    if rect.x.checked_add(rect.columns)? != host_columns
+        || rect.y.checked_add(rect.rows)? != host_rows
+        || VERSION_LABEL.len() >= usize::from(rect.columns)
+    {
+        return None;
+    }
+    Some(Rect {
+        x: rect
+            .x
+            .checked_add(rect.columns.checked_sub(1 + VERSION_LABEL.len() as u16)?)?,
+        y: rect.y.checked_add(rect.rows.checked_sub(1)?)?,
+        rows: 1,
+        columns: VERSION_LABEL.len() as u16,
+    })
+}
+
+/// Compute one padded pane's bottom-row history-control geometry. The button
+/// remains available at the minimum pane width; the state label is clipped or
+/// omitted before the button is reduced to its compact `[Live]` wording.
+pub fn pane_history_controls(
+    rect: Rect,
+    kind: HistoryLabelKind,
+    version_badge: Option<Rect>,
+) -> Option<HistoryControls> {
+    content_rect(rect)?;
+    let row = rect.y.checked_add(rect.rows.checked_sub(1)?)?;
+    let start = rect.x.checked_add(1)?;
+    let right = rect.x.checked_add(rect.columns.checked_sub(1)?)?;
+    let end = version_badge
+        .filter(|badge| badge.y == row)
+        .map_or(right, |badge| badge.x.saturating_sub(1).min(right));
+    let compact = b"[Live]".as_slice();
+    let expanded = b"[Back to live]".as_slice();
+    let expanded_width = u16::try_from(expanded.len()).ok()?;
+    let compact_width = u16::try_from(compact.len()).ok()?;
+    let width = end.saturating_sub(start);
+    let (back_text, back_width) = if width >= expanded_width {
+        (expanded, expanded_width)
+    } else if width >= compact_width {
+        (compact, compact_width)
+    } else {
+        return None;
+    };
+    let back = Rect {
+        x: end.checked_sub(back_width)?,
+        y: row,
+        rows: 1,
+        columns: back_width,
+    };
+    Some(HistoryControls {
+        label: Rect {
+            x: start,
+            y: row,
+            rows: 1,
+            columns: back
+                .x
+                .saturating_sub(start)
+                .min(u16::try_from(kind.text().len()).ok()?),
+        },
+        back,
+        back_text,
     })
 }
 
@@ -304,8 +477,12 @@ struct SlotMeta {
     rect: Option<Rect>,
     kind: SlotKind,
     scrollbar: Option<Scrollbar>,
+    history: Option<HistoryLabelKind>,
     placeholder: [u8; MAX_COLUMNS],
     placeholder_len: u16,
+    label: [u8; MAX_PANE_LABEL_BYTES],
+    label_len: u16,
+    label_truncated: bool,
 }
 
 impl SlotMeta {
@@ -313,8 +490,12 @@ impl SlotMeta {
         rect: None,
         kind: SlotKind::Empty,
         scrollbar: None,
+        history: None,
         placeholder: [0; MAX_COLUMNS],
         placeholder_len: 0,
+        label: [0; MAX_PANE_LABEL_BYTES],
+        label_len: 0,
+        label_truncated: false,
     };
 
     fn placeholder_text(&self) -> &[u8] {
@@ -337,6 +518,7 @@ struct FrameMeta {
     dividers: [Option<Rect>; crate::pane_layout::MAX_PANES - 1],
     overlay: Option<Rect>,
     header_present: bool,
+    focused: Option<usize>,
     overlay_styles: [OverlayStyle; MAX_ROWS],
     cursor: CursorState,
 }
@@ -350,6 +532,7 @@ impl FrameMeta {
         dividers: [None; crate::pane_layout::MAX_PANES - 1],
         overlay: None,
         header_present: false,
+        focused: None,
         overlay_styles: [OverlayStyle::Normal; MAX_ROWS],
         cursor: CursorState::Hidden,
     };
@@ -471,14 +654,7 @@ impl Compositor {
         header: Option<&[HeaderCell]>,
         output: &mut W,
     ) -> io::Result<()> {
-        self.render_inner(
-            frame,
-            selection,
-            None,
-            header,
-            [None; crate::pane_layout::MAX_PANES],
-            output,
-        )
+        self.render_inner(frame, selection, None, header, PaneChrome::empty(), output)
     }
 
     /// Validate and render a frame with an optional frozen-cell selection.
@@ -493,14 +669,7 @@ impl Compositor {
         selection: Option<SelectionOverlay<'_>>,
         output: &mut W,
     ) -> io::Result<()> {
-        self.render_inner(
-            frame,
-            selection,
-            None,
-            None,
-            [None; crate::pane_layout::MAX_PANES],
-            output,
-        )
+        self.render_inner(frame, selection, None, None, PaneChrome::empty(), output)
     }
 
     /// Render frozen selection and a local copy caret, optionally below a
@@ -518,7 +687,7 @@ impl Compositor {
             selection,
             Some(caret),
             header,
-            [None; crate::pane_layout::MAX_PANES],
+            PaneChrome::empty(),
             output,
         )
     }
@@ -535,7 +704,33 @@ impl Compositor {
         scrollbars: [Option<Scrollbar>; crate::pane_layout::MAX_PANES],
         output: &mut W,
     ) -> io::Result<()> {
-        self.render_inner(frame, selection, caret, header, scrollbars, output)
+        self.render_with_history_controls(
+            frame,
+            selection,
+            caret,
+            header,
+            PaneChrome {
+                scrollbars,
+                history: [None; crate::pane_layout::MAX_PANES],
+                labels: [None; crate::pane_layout::MAX_PANES],
+            },
+            output,
+        )
+    }
+
+    /// Render pane chrome including history labels and clickable Back to live
+    /// controls. Geometry for both presentation and hit-testing comes from
+    /// [`pane_history_controls`].
+    pub fn render_with_history_controls<W: Write>(
+        &mut self,
+        frame: &ComposeFrame<'_>,
+        selection: Option<SelectionOverlay<'_>>,
+        caret: Option<CopyCaretOverlay<'_>>,
+        header: Option<&[HeaderCell]>,
+        chrome: PaneChrome<'_>,
+        output: &mut W,
+    ) -> io::Result<()> {
+        self.render_inner(frame, selection, caret, header, chrome, output)
     }
 
     fn render_inner<W: Write>(
@@ -544,7 +739,7 @@ impl Compositor {
         selection: Option<SelectionOverlay<'_>>,
         caret: Option<CopyCaretOverlay<'_>>,
         header: Option<&[HeaderCell]>,
-        scrollbars: [Option<Scrollbar>; crate::pane_layout::MAX_PANES],
+        chrome: PaneChrome<'_>,
         output: &mut W,
     ) -> io::Result<()> {
         self.pending_ready = false;
@@ -552,7 +747,7 @@ impl Compositor {
         if let Some(header) = header {
             validate_header(header, frame.host_columns)?;
         }
-        validate_scrollbars(frame, self.padded, scrollbars)?;
+        validate_scrollbars(frame, self.padded, chrome.scrollbars)?;
         let selection = if frame.overlay.is_some() {
             None
         } else {
@@ -566,7 +761,7 @@ impl Compositor {
             validate_copy_caret(frame, caret)?;
         }
         let selection = selection.filter(|selection| selection.anchor != selection.end);
-        self.stage(frame, selection, caret, header, scrollbars);
+        self.stage(frame, selection, caret, header, chrome);
         match self.write_frame(output) {
             Ok(()) => {
                 self.pending_ready = true;
@@ -585,11 +780,12 @@ impl Compositor {
         selection: Option<SelectionOverlay<'_>>,
         caret: Option<CopyCaretOverlay<'_>>,
         header: Option<&[HeaderCell]>,
-        scrollbars: [Option<Scrollbar>; crate::pane_layout::MAX_PANES],
+        chrome: PaneChrome<'_>,
     ) {
         let mut meta = FrameMeta::EMPTY;
         meta.host_rows = frame.host_rows;
         meta.host_columns = frame.host_columns;
+        meta.focused = frame.focused;
         meta.divider = frame.divider;
         meta.dividers = if frame.dividers.iter().any(Option::is_some) {
             frame.dividers
@@ -605,7 +801,10 @@ impl Compositor {
             };
             let slot_meta = &mut meta.slots[slot];
             slot_meta.rect = Some(pane.rect);
-            slot_meta.scrollbar = scrollbars[slot];
+            slot_meta.scrollbar = chrome.scrollbars[slot];
+            slot_meta.history = chrome.history[slot];
+            let label = chrome.labels[slot].unwrap_or(PANE_LABELS[slot]);
+            store_pane_label(slot_meta, label);
             match pane.content {
                 PaneContent::Snapshot(snapshot) => {
                     slot_meta.kind = SlotKind::Snapshot;
@@ -778,18 +977,32 @@ impl Compositor {
         };
         let work: [PaneWork; crate::pane_layout::MAX_PANES] =
             std::array::from_fn(|slot| self.pane_work(slot, overlay_moved));
-        let controls_repaint: [bool; crate::pane_layout::MAX_PANES] =
-            std::array::from_fn(|slot| work[slot] == PaneWork::Full);
         let scrollbar_changed: [bool; crate::pane_layout::MAX_PANES] =
             std::array::from_fn(|slot| {
                 pending.slots[slot].scrollbar != displayed.slots[slot].scrollbar
             });
+        let history_changed: [bool; crate::pane_layout::MAX_PANES] = std::array::from_fn(|slot| {
+            pending.slots[slot].history != displayed.slots[slot].history
+        });
+        let label_changed: [bool; crate::pane_layout::MAX_PANES] = std::array::from_fn(|slot| {
+            !same_pane_label(&pending.slots[slot], &displayed.slots[slot])
+        });
+        let focus_changed = pending.focused != displayed.focused;
+        let controls_repaint: [bool; crate::pane_layout::MAX_PANES] = std::array::from_fn(|slot| {
+            work[slot] == PaneWork::Full
+                || label_changed[slot]
+                || (focus_changed
+                    && (pending.focused == Some(slot) || displayed.focused == Some(slot)))
+        });
 
         let header_changed = !self.header_unchanged();
         if !overlay_changed
             && !header_changed
+            && !focus_changed
             && work.iter().all(|work| *work == PaneWork::None)
             && !scrollbar_changed.iter().any(|changed| *changed)
+            && !history_changed.iter().any(|changed| *changed)
+            && !label_changed.iter().any(|changed| *changed)
         {
             return write_cursor_update(output, displayed.cursor, pending.cursor);
         }
@@ -811,6 +1024,14 @@ impl Compositor {
             self.paint_divider(output, Some(old))?;
             self.paint_exposed_exterior(output, old)?;
         }
+        if focus_changed || overlay_moved {
+            for slot in 0..crate::pane_layout::MAX_PANES {
+                let focused = pending.focused == Some(slot);
+                if focused || (focus_changed && displayed.focused == Some(slot)) {
+                    self.paint_focus_border(output, slot, focused)?;
+                }
+            }
+        }
         for (slot, changed) in scrollbar_changed.into_iter().enumerate() {
             if changed || overlay_moved {
                 self.paint_scrollbar(
@@ -822,11 +1043,12 @@ impl Compositor {
             }
         }
         for (slot, repaint_all) in controls_repaint.into_iter().enumerate() {
-            if repaint_all || overlay_moved {
+            if repaint_all || overlay_moved || history_changed[slot] {
                 self.paint_pane_controls(
                     output,
                     slot,
                     repaint_all,
+                    history_changed[slot],
                     if overlay_moved { damage } else { [None, None] },
                 )?;
             }
@@ -850,10 +1072,15 @@ impl Compositor {
         }
         self.paint_divider(output, None)?;
         for slot in 0..crate::pane_layout::MAX_PANES {
+            if self.pending_meta.focused == Some(slot) {
+                self.paint_focus_border(output, slot, true)?;
+            }
+        }
+        for slot in 0..crate::pane_layout::MAX_PANES {
             self.paint_scrollbar(output, slot, true, [None, None])?;
         }
         for slot in 0..crate::pane_layout::MAX_PANES {
-            self.paint_pane_controls(output, slot, true, [None, None])?;
+            self.paint_pane_controls(output, slot, true, true, [None, None])?;
         }
         self.paint_overlay(output)?;
         if self.pending_meta.header_present {
@@ -999,6 +1226,7 @@ impl Compositor {
         output: &mut W,
         slot: usize,
         repaint_all: bool,
+        history_changed: bool,
         damage: [Option<Rect>; 2],
     ) -> io::Result<()> {
         if !self.padded {
@@ -1011,17 +1239,18 @@ impl Compositor {
         let Some(controls) = pane_controls(rect) else {
             return Ok(());
         };
+        let focused = self.pending_meta.focused == Some(slot);
         let damaged = |row: u16, column: u16| {
             damage
                 .iter()
                 .flatten()
                 .any(|rect| rect.contains(column, row))
         };
-        output.write_all(b"\x1b[0m")?;
         for (hitbox, label) in [
             (controls.menu, b"[Menu]".as_slice()),
             (controls.close, b"[x]".as_slice()),
         ] {
+            output.write_all(if focused { b"\x1b[1;36m" } else { b"\x1b[0m" })?;
             write_ascii_run(
                 output,
                 hitbox.y,
@@ -1034,29 +1263,147 @@ impl Compositor {
                 |offset| label[usize::from(offset)],
             )?;
         }
+        output.write_all(if focused { b"\x1b[1;36m" } else { b"\x1b[0m" })?;
+        write_ascii_run(
+            output,
+            controls.focus_marker.y,
+            controls.focus_marker.x,
+            controls.focus_marker.columns,
+            |column| {
+                (!repaint_all && !damaged(controls.focus_marker.y, column))
+                    || excluded(self.pending_meta.overlay, controls.focus_marker.y, column)
+            },
+            |_| if focused { b'>' } else { b' ' },
+        )?;
+        paint_pane_label(
+            output,
+            controls.label,
+            meta,
+            focused,
+            repaint_all,
+            damage,
+            self.pending_meta.overlay,
+        )?;
+        output.write_all(b"\x1b[0m")?;
         // Only the pane touching the viewport's bottom-right corner owns the
         // badge. Its bottom margin is outside the child PTY and all hitboxes.
-        let label = VERSION_LABEL.as_bytes();
-        if rect.x + rect.columns == self.pending_meta.host_columns
-            && rect.y + rect.rows == self.pending_meta.host_rows
-            && label.len() < usize::from(rect.columns)
-        {
-            let row = rect.y + rect.rows - 1;
-            let column = rect.x + rect.columns - 1 - label.len() as u16;
+        if let Some(badge) = pane_version_badge(
+            rect,
+            self.pending_meta.host_rows,
+            self.pending_meta.host_columns,
+        ) {
             output.write_all(b"\x1b[0;2m")?;
             write_ascii_run(
                 output,
-                row,
-                column,
-                label.len() as u16,
+                badge.y,
+                badge.x,
+                badge.columns,
                 |column| {
-                    (!repaint_all && !damaged(row, column))
-                        || excluded(self.pending_meta.overlay, row, column)
+                    (!repaint_all && !damaged(badge.y, column))
+                        || excluded(self.pending_meta.overlay, badge.y, column)
                 },
-                |offset| label[usize::from(offset)],
+                |offset| VERSION_LABEL.as_bytes()[usize::from(offset)],
             )?;
         }
+        self.paint_history_controls(output, slot, rect, repaint_all, history_changed, damage)?;
         output.write_all(b"\x1b[0m")
+    }
+
+    /// Emphasize the focused pane's left padding rail without repainting or
+    /// changing any terminal content cells.
+    fn paint_focus_border<W: Write>(
+        &self,
+        output: &mut W,
+        slot: usize,
+        focused: bool,
+    ) -> io::Result<()> {
+        if !self.padded {
+            return Ok(());
+        }
+        let meta = &self.pending_meta.slots[slot];
+        let Some(rect) = meta.rect.filter(|_| meta.kind != SlotKind::Empty) else {
+            return Ok(());
+        };
+        let Some(content) = content_rect(rect) else {
+            return Ok(());
+        };
+        let exclude = self.pending_meta.overlay;
+        for row in content.y..content.y + content.rows {
+            if excluded(exclude, row, rect.x) {
+                continue;
+            }
+            output.write_all(if focused { b"\x1b[1;46m" } else { b"\x1b[0m" })?;
+            write_ascii_run(output, row, rect.x, 1, |_| false, |_| b' ')?;
+        }
+        output.write_all(b"\x1b[0m")
+    }
+
+    fn paint_history_controls<W: Write>(
+        &self,
+        output: &mut W,
+        slot: usize,
+        rect: Rect,
+        repaint_all: bool,
+        history_changed: bool,
+        damage: [Option<Rect>; 2],
+    ) -> io::Result<()> {
+        if !repaint_all && !history_changed && damage.iter().all(Option::is_none) {
+            return Ok(());
+        }
+        let row = rect.y + rect.rows - 1;
+        let start = rect.x + 1;
+        let badge = pane_version_badge(
+            rect,
+            self.pending_meta.host_rows,
+            self.pending_meta.host_columns,
+        );
+        let end = badge.map_or(rect.x + rect.columns - 1, |badge| badge.x.saturating_sub(1));
+        let width = end.saturating_sub(start);
+        if self.pending_meta.slots[slot].history.is_none()
+            && self.displayed_meta.slots[slot].history.is_none()
+        {
+            return Ok(());
+        }
+        if width == 0 {
+            return Ok(());
+        }
+        let controls = self.pending_meta.slots[slot]
+            .history
+            .and_then(|kind| pane_history_controls(rect, kind, badge));
+        let changed_cells = |column: u16| {
+            damage
+                .iter()
+                .flatten()
+                .any(|area| area.contains(column, row))
+        };
+        write_ascii_run(
+            output,
+            row,
+            start,
+            width,
+            |column| {
+                (!repaint_all && !history_changed && !changed_cells(column))
+                    || excluded(self.pending_meta.overlay, row, column)
+            },
+            |offset| {
+                let column = start + offset;
+                let Some(controls) = controls else {
+                    return b' ';
+                };
+                if controls.label.contains(column, row) {
+                    let offset = usize::from(column - controls.label.x);
+                    self.pending_meta.slots[slot]
+                        .history
+                        .map(HistoryLabelKind::text)
+                        .and_then(|label| label.get(offset).copied())
+                        .unwrap_or(b' ')
+                } else if controls.back.contains(column, row) {
+                    controls.back_text[usize::from(column - controls.back.x)]
+                } else {
+                    b' '
+                }
+            },
+        )
     }
 
     /// Paint a scrollbar in the right interior padding cell of one snapshot
@@ -1099,7 +1446,7 @@ impl Compositor {
             if excluded(self.pending_meta.overlay, row, geometry.track.x) {
                 continue;
             }
-            if meta.scrollbar.is_some() {
+            if meta.scrollbar.is_some_and(|bar| bar.total_rows > 0) {
                 let thumb = geometry.thumb.contains(geometry.track.x, row);
                 output.write_all(if thumb { b"\x1b[0;1m" } else { b"\x1b[0;2m" })?;
                 write_ascii_run(
@@ -1422,6 +1769,123 @@ fn style_sgr(style: OverlayStyle) -> &'static [u8] {
         OverlayStyle::Disabled => b"\x1b[0;2m",
         OverlayStyle::Status => b"\x1b[0;1m",
     }
+}
+
+fn safe_pane_label_character(character: char) -> char {
+    let width = UnicodeWidthChar::width(character).unwrap_or(0);
+    if character.is_control()
+        || width == 0
+        || matches!(
+            character,
+            '\u{2028}'
+                | '\u{2029}'
+                | '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{206f}'
+        )
+    {
+        '?'
+    } else {
+        character
+    }
+}
+
+fn pane_label_character_width(character: char) -> u16 {
+    u16::try_from(UnicodeWidthChar::width(character).unwrap_or(1).max(1)).unwrap_or(2)
+}
+
+fn store_pane_label(slot: &mut SlotMeta, label: &str) {
+    slot.label.fill(0);
+    let mut len = 0_usize;
+    slot.label_truncated = false;
+    for character in label.chars().map(safe_pane_label_character) {
+        let mut encoded = [0; 4];
+        let bytes = character.encode_utf8(&mut encoded).as_bytes();
+        let Some(end) = len.checked_add(bytes.len()) else {
+            slot.label_truncated = true;
+            break;
+        };
+        if end > slot.label.len() {
+            slot.label_truncated = true;
+            break;
+        }
+        slot.label[len..end].copy_from_slice(bytes);
+        len = end;
+    }
+    slot.label_len = u16::try_from(len).unwrap_or(0);
+}
+
+fn same_pane_label(left: &SlotMeta, right: &SlotMeta) -> bool {
+    left.label_len == right.label_len
+        && left.label_truncated == right.label_truncated
+        && left.label[..usize::from(left.label_len)] == right.label[..usize::from(right.label_len)]
+}
+
+fn paint_pane_label<W: Write>(
+    output: &mut W,
+    rect: Rect,
+    meta: &SlotMeta,
+    focused: bool,
+    repaint_all: bool,
+    damage: [Option<Rect>; 2],
+    overlay: Option<Rect>,
+) -> io::Result<()> {
+    let label = std::str::from_utf8(&meta.label[..usize::from(meta.label_len)])
+        .expect("stored pane labels are valid UTF-8");
+    let damaged = |column| {
+        damage
+            .iter()
+            .flatten()
+            .any(|area| area.contains(column, rect.y))
+    };
+    output.write_all(b"\x1b[0m")?;
+    write_ascii_run(
+        output,
+        rect.y,
+        rect.x,
+        rect.columns,
+        |column| (!repaint_all && !damaged(column)) || excluded(overlay, rect.y, column),
+        |_| b' ',
+    )?;
+
+    let total_width = label
+        .chars()
+        .map(pane_label_character_width)
+        .fold(0_u16, u16::saturating_add);
+    let truncated = meta.label_truncated || total_width > rect.columns;
+    let text_limit = if truncated {
+        rect.columns.saturating_sub(1)
+    } else {
+        rect.columns
+    };
+    let mut used = 0_u16;
+    output.write_all(if focused { b"\x1b[1;36m" } else { b"\x1b[0m" })?;
+    for character in label.chars() {
+        let width = pane_label_character_width(character);
+        if used.saturating_add(width) > text_limit {
+            break;
+        }
+        let needs_paint =
+            repaint_all || (used..used + width).any(|offset| damaged(rect.x + offset));
+        let covered = (used..used + width).any(|offset| excluded(overlay, rect.y, rect.x + offset));
+        if needs_paint && !covered {
+            write_position(output, rect.y, rect.x + used)?;
+            let mut encoded = [0; 4];
+            output.write_all(character.encode_utf8(&mut encoded).as_bytes())?;
+        }
+        used += width;
+    }
+    if truncated && rect.columns > 0 {
+        let offset = rect.columns - 1;
+        if (repaint_all || damaged(rect.x + offset)) && !excluded(overlay, rect.y, rect.x + offset)
+        {
+            write_position(output, rect.y, rect.x + offset)?;
+            output.write_all(b"~")?;
+        }
+    }
+    output.write_all(b"\x1b[0m")
 }
 
 fn excluded(rect: Option<Rect>, row: u16, column: u16) -> bool {
@@ -1772,6 +2236,30 @@ mod tests {
         let mut bytes = Vec::new();
         compositor
             .render_with_chrome(frame, None, None, header, scrollbars, &mut bytes)
+            .unwrap();
+        assert!(compositor.commit());
+        bytes
+    }
+
+    fn history_rendered_committed(
+        compositor: &mut Compositor,
+        frame: &ComposeFrame<'_>,
+        history: [Option<HistoryLabelKind>; crate::pane_layout::MAX_PANES],
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        compositor
+            .render_with_history_controls(
+                frame,
+                None,
+                None,
+                None,
+                PaneChrome {
+                    scrollbars: [None; crate::pane_layout::MAX_PANES],
+                    history,
+                    labels: [None; crate::pane_layout::MAX_PANES],
+                },
+                &mut bytes,
+            )
             .unwrap();
         assert!(compositor.commit());
         bytes
@@ -2153,8 +2641,9 @@ mod tests {
             ],
         );
         let parser = screen(&no_history, &frame);
+        // Without retained history the scrollbar column stays blank.
         for row in 1..=5 {
-            assert_eq!(cell_text(&parser, row, 21), "#");
+            assert_blank(&parser, row, 21);
         }
     }
 
@@ -2300,6 +2789,142 @@ mod tests {
                 VERSION_LABEL.len() as u16
             ),
             ""
+        );
+    }
+
+    #[test]
+    fn history_controls_share_render_and_hit_geometry_and_avoid_version_badge() {
+        let narrow = rect(0, 0, 24, 22);
+        let badge = pane_version_badge(narrow, 24, 22).unwrap();
+        let controls =
+            pane_history_controls(narrow, HistoryLabelKind::Truncated, Some(badge)).unwrap();
+        assert_eq!(controls.back_text, b"[Live]");
+        assert!(controls.label.x + controls.label.columns <= controls.back.x);
+        assert!(controls.back.x + controls.back.columns < badge.x);
+
+        let wide = rect(0, 0, 24, 82);
+        let wide_badge = pane_version_badge(wide, 24, 82).unwrap();
+        let wide_controls =
+            pane_history_controls(wide, HistoryLabelKind::NewOutput, Some(wide_badge)).unwrap();
+        assert_eq!(wide_controls.back_text, b"[Back to live]");
+        assert!(wide_controls.back.x + wide_controls.back.columns < wide_badge.x);
+
+        let pane = snapshot_from("HISTORY", 22, 80);
+        let frame = single_pane(&pane);
+        let bytes = history_rendered_committed(
+            &mut Compositor::try_new().unwrap(),
+            &frame,
+            [Some(HistoryLabelKind::History), None, None, None],
+        );
+        let rendered = screen(&bytes, &frame);
+        let rendered_controls = pane_history_controls(
+            frame.panes[0].unwrap().rect,
+            HistoryLabelKind::History,
+            pane_version_badge(
+                frame.panes[0].unwrap().rect,
+                frame.host_rows,
+                frame.host_columns,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            label_at(
+                &rendered,
+                rendered_controls.back.y,
+                rendered_controls.back.x,
+                rendered_controls.back.columns,
+            ),
+            "[Back to live]"
+        );
+        assert_eq!(
+            label_at(
+                &rendered,
+                rendered_controls.label.y,
+                rendered_controls.label.x,
+                7
+            ),
+            "History"
+        );
+    }
+
+    #[test]
+    fn history_label_damage_repaints_and_restores_after_overlay() {
+        let pane = snapshot_from("HISTORY", 22, 80);
+        let base = single_pane(&pane);
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut stream = history_rendered_committed(
+            &mut compositor,
+            &base,
+            [Some(HistoryLabelKind::History), None, None, None],
+        );
+        let controls = pane_history_controls(
+            base.panes[0].unwrap().rect,
+            HistoryLabelKind::History,
+            pane_version_badge(
+                base.panes[0].unwrap().rect,
+                base.host_rows,
+                base.host_columns,
+            ),
+        )
+        .unwrap();
+        let repaint = history_rendered_committed(
+            &mut compositor,
+            &base,
+            [Some(HistoryLabelKind::NewOutput), None, None, None],
+        );
+        assert!(!repaint.windows(7).any(|window| window == b"History"));
+        stream.extend(repaint);
+        let changed = screen(&stream, &base);
+        assert_eq!(
+            label_at(&changed, controls.label.y, controls.label.x, 10),
+            "New output"
+        );
+        let modal = [OverlayLine {
+            text: "MODAL",
+            style: OverlayStyle::Selected,
+        }];
+        let mut covered = base;
+        covered.overlay = Some(OverlayView {
+            rect: rect(23, 0, 1, base.host_columns),
+            lines: &modal,
+        });
+        let mut overlay_bytes = Vec::new();
+        compositor
+            .render_with_history_controls(
+                &covered,
+                None,
+                None,
+                None,
+                PaneChrome {
+                    scrollbars: [None; crate::pane_layout::MAX_PANES],
+                    history: [Some(HistoryLabelKind::NewOutput), None, None, None],
+                    labels: [None; crate::pane_layout::MAX_PANES],
+                },
+                &mut overlay_bytes,
+            )
+            .unwrap();
+        assert!(compositor.commit());
+        stream.extend(overlay_bytes);
+        assert_eq!(label_at(&screen(&stream, &base), 23, 0, 5), "MODAL");
+
+        stream.extend(history_rendered_committed(
+            &mut compositor,
+            &base,
+            [Some(HistoryLabelKind::NewOutput), None, None, None],
+        ));
+        let restored = screen(&stream, &base);
+        assert_eq!(
+            label_at(&restored, controls.label.y, controls.label.x, 10),
+            "New output"
+        );
+        assert_eq!(
+            label_at(
+                &restored,
+                controls.back.y,
+                controls.back.x,
+                controls.back.columns
+            ),
+            "[Back to live]"
         );
     }
 
@@ -3587,5 +4212,207 @@ mod tests {
             "a partial write invalidates the baseline"
         );
         assert!(compositor.commit());
+    }
+
+    #[test]
+    fn shared_pointer_geometry_uses_exact_half_open_control_thumb_and_divider_edges() {
+        let pane = rect(4, 7, 24, 40);
+        let controls = pane_controls(pane).unwrap();
+        for hitbox in [controls.menu, controls.close] {
+            assert!(hitbox.contains(hitbox.x, hitbox.y));
+            assert!(hitbox.contains(hitbox.x + hitbox.columns - 1, hitbox.y));
+            assert!(!hitbox.contains(hitbox.x - 1, hitbox.y));
+            assert!(!hitbox.contains(hitbox.x + hitbox.columns, hitbox.y));
+            assert!(!hitbox.contains(hitbox.x, hitbox.y - 1));
+            assert!(!hitbox.contains(hitbox.x, hitbox.y + hitbox.rows));
+        }
+
+        let scrollbar = scrollbar_geometry(
+            pane,
+            Scrollbar {
+                offset_rows: 50,
+                total_rows: 100,
+            },
+        )
+        .unwrap();
+        for hitbox in [scrollbar.track, scrollbar.thumb] {
+            assert!(hitbox.contains(hitbox.x, hitbox.y));
+            assert!(hitbox.contains(hitbox.x + hitbox.columns - 1, hitbox.y + hitbox.rows - 1));
+            assert!(!hitbox.contains(hitbox.x, hitbox.y - 1));
+            assert!(!hitbox.contains(hitbox.x, hitbox.y + hitbox.rows));
+            assert!(!hitbox.contains(hitbox.x - 1, hitbox.y));
+            assert!(!hitbox.contains(hitbox.x + hitbox.columns, hitbox.y));
+        }
+
+        let divider = rect(2, 30, 8, 1);
+        let dividers = [Some(divider), None, None];
+        assert_eq!(
+            divider_at(dividers, divider.x, divider.y),
+            Some((0, divider))
+        );
+        assert_eq!(
+            divider_at(dividers, divider.x, divider.y + divider.rows - 1),
+            Some((0, divider))
+        );
+        assert!(divider_at(dividers, divider.x - 1, divider.y).is_none());
+        assert!(divider_at(dividers, divider.x + 1, divider.y).is_none());
+        assert!(divider_at(dividers, divider.x, divider.y - 1).is_none());
+        assert!(divider_at(dividers, divider.x, divider.y + divider.rows).is_none());
+
+        let horizontal = rect(12, 5, 1, 8);
+        assert_eq!(
+            divider_at(
+                [Some(horizontal), None, None],
+                horizontal.x + horizontal.columns - 1,
+                horizontal.y
+            ),
+            Some((0, horizontal))
+        );
+        assert!(divider_at(
+            [Some(horizontal), None, None],
+            horizontal.x + horizontal.columns,
+            horizontal.y
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn pointer_content_mapping_uses_inset_geometry_and_clamps_padding() {
+        let pane = rect(9, 4, 24, 40);
+        let content = content_rect(pane).unwrap();
+        assert_eq!(content, rect(10, 5, 22, 38));
+        assert_eq!(
+            pointer_content_point(content, 10, 13),
+            Point { row: 3, column: 5 }
+        );
+        assert_eq!(
+            pointer_content_point(content, pane.x, pane.y),
+            Point { row: 0, column: 0 }
+        );
+        assert_eq!(
+            pointer_content_point(content, pane.x + pane.columns - 1, pane.y + pane.rows - 1),
+            Point {
+                row: content.rows - 1,
+                column: content.columns - 1,
+            }
+        );
+    }
+
+    #[test]
+    fn focused_chrome_uses_ascii_marker_and_truncates_safe_wide_labels_before_controls() {
+        let pane = snapshot_from("content", 5, 20);
+        let mut frame = single_pane(&pane);
+        frame.focused = Some(0);
+        let chrome = PaneChrome {
+            scrollbars: [None; crate::pane_layout::MAX_PANES],
+            history: [None; crate::pane_layout::MAX_PANES],
+            labels: [Some("界界界long"), None, None, None],
+        };
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut bytes = Vec::new();
+        compositor
+            .render_with_history_controls(&frame, None, None, None, chrome, &mut bytes)
+            .unwrap();
+        assert!(compositor.commit());
+
+        let parser = screen(&bytes, &frame);
+        let controls = pane_controls(frame.panes[0].unwrap().rect).unwrap();
+        assert_eq!(
+            cell_text(&parser, controls.focus_marker.y, controls.focus_marker.x),
+            ">"
+        );
+        assert_eq!(
+            label_at(
+                &parser,
+                controls.label.y,
+                controls.label.x,
+                controls.label.columns
+            ),
+            "界界界~"
+        );
+        assert_eq!(
+            label_at(&parser, controls.menu.y, controls.menu.x, 6),
+            "[Menu]"
+        );
+        assert_eq!(
+            label_at(&parser, controls.close.y, controls.close.x, 3),
+            "[x]"
+        );
+        assert_eq!(
+            controls.label.x + controls.label.columns + 1,
+            controls.close.x
+        );
+        let marker = parser
+            .screen()
+            .cell(controls.focus_marker.y, controls.focus_marker.x)
+            .unwrap();
+        assert!(marker.bold());
+        assert_ne!(marker.fgcolor(), vt100::Color::Default);
+        assert!(!marker.inverse());
+        let rail = parser
+            .screen()
+            .cell(1, frame.panes[0].unwrap().rect.x)
+            .unwrap();
+        assert!(rail.bold());
+        assert_ne!(rail.bgcolor(), vt100::Color::Default);
+        assert!(!rail.inverse());
+    }
+
+    #[test]
+    fn focus_changes_only_repaint_chrome_and_preserve_child_cells() {
+        let pane = snapshot_from("child text", 5, 20);
+        let unfocused = single_pane(&pane);
+        let focused = ComposeFrame {
+            focused: Some(0),
+            ..unfocused
+        };
+        let mut compositor = Compositor::try_new().unwrap();
+        let initial = rendered_committed(&mut compositor, &unfocused);
+        let focused_frame = rendered_committed(&mut compositor, &focused);
+        assert!(!contains(&focused_frame, b"\x1b[2J"));
+        assert!(!focused_frame.is_empty());
+        let mut stream = initial.clone();
+        stream.extend_from_slice(&focused_frame);
+
+        let before = screen(&initial, &unfocused);
+        let after = screen(&stream, &focused);
+        for row in 1..=5 {
+            for column in 1..=20 {
+                let old = before.screen().cell(row, column).unwrap();
+                let new = after.screen().cell(row, column).unwrap();
+                assert_eq!(old.contents(), new.contents(), "cell {row},{column}");
+                assert_eq!(old.fgcolor(), new.fgcolor(), "cell {row},{column}");
+                assert_eq!(old.bgcolor(), new.bgcolor(), "cell {row},{column}");
+                assert_eq!(old.bold(), new.bold(), "cell {row},{column}");
+                assert_eq!(old.dim(), new.dim(), "cell {row},{column}");
+                assert_eq!(old.italic(), new.italic(), "cell {row},{column}");
+                assert_eq!(old.underline(), new.underline(), "cell {row},{column}");
+                assert_eq!(old.inverse(), new.inverse(), "cell {row},{column}");
+            }
+        }
+        let controls = pane_controls(focused.panes[0].unwrap().rect).unwrap();
+        assert_eq!(
+            cell_text(&after, controls.focus_marker.y, controls.focus_marker.x),
+            ">"
+        );
+        assert_blank(&after, 1, 0);
+        let rail = after.screen().cell(1, 0).unwrap();
+        assert!(rail.bold());
+        assert_ne!(rail.bgcolor(), vt100::Color::Default);
+        assert!(!rail.inverse());
+        let menu = after
+            .screen()
+            .cell(controls.menu.y, controls.menu.x)
+            .unwrap();
+        assert!(menu.bold());
+        assert_ne!(menu.fgcolor(), vt100::Color::Default);
+        assert!(!menu.inverse());
+        let inactive_menu = before
+            .screen()
+            .cell(controls.menu.y, controls.menu.x)
+            .unwrap();
+        assert!(!inactive_menu.bold());
+        assert_eq!(inactive_menu.fgcolor(), vt100::Color::Default);
+        assert!(!inactive_menu.inverse());
     }
 }

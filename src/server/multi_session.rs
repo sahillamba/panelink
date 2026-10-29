@@ -24,8 +24,9 @@ use crate::control_protocol::{Command, TargetRef};
 use crate::event_journal::{EventCursor, EventJournal};
 use crate::event_protocol::Event;
 use crate::handshake_protocol::{
-    Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT, CAPABILITY_PANE_METADATA, CAPABILITY_READ,
-    CAPABILITY_SCREEN_ROW_WRAPS, CAPABILITY_WORKSPACE_EVENTS,
+    Welcome, CAPABILITY_EVENTS, CAPABILITY_HISTORY_CURSOR, CAPABILITY_INPUT,
+    CAPABILITY_PANE_METADATA, CAPABILITY_READ, CAPABILITY_SCREEN_ROW_WRAPS,
+    CAPABILITY_WORKSPACE_EVENTS,
 };
 use crate::input_owner::{InputOwner, Owner};
 use crate::managed_launch::{LaunchJournalPort, ManagedLaunchCoordinator, ManagedLaunchError};
@@ -1670,6 +1671,7 @@ impl<E: EffectSink> MultiSessionOwner<E> {
                 | CAPABILITY_EVENTS
                 | CAPABILITY_PANE_METADATA
                 | CAPABILITY_SCREEN_ROW_WRAPS
+                | CAPABILITY_HISTORY_CURSOR
                 | crate::handshake_protocol::CAPABILITY_PANE_OPERATIONS
                 | crate::handshake_protocol::CAPABILITY_AGENT_OBSERVATION
                 | crate::handshake_protocol::CAPABILITY_BUILD_IDENTITY
@@ -4408,6 +4410,51 @@ mod tests {
         let (_, resumed_fresh) = owner.connect(target, &fresh_resume, 6).unwrap();
         assert_ne!(
             resumed_fresh.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS,
+            0
+        );
+    }
+
+    #[test]
+    fn history_cursor_capability_is_optional_and_resume_cannot_widen_an_old_grant() {
+        use crate::handshake_protocol::CAPABILITY_HISTORY_CURSOR;
+
+        let mut owner = owner();
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let mut journal = Journal::new(&effects);
+        let target = launch(&mut owner, 1, &mut journal, &effects)
+            .unwrap()
+            .target
+            .unwrap();
+
+        let legacy = owner.connect(target, &hello(), 3).unwrap().0;
+        let mut widened_resume = hello();
+        widened_resume.hello.optional_capabilities |= CAPABILITY_HISTORY_CURSOR;
+        widened_resume.resume = Some(crate::session_protocol::LeaseRef {
+            generation: GENERATION,
+            lease: legacy.lease(),
+        });
+        let (resumed, resumed_welcome) = owner.connect(target, &widened_resume, 4).unwrap();
+        assert_eq!(resumed.lease(), legacy.lease());
+        assert_eq!(
+            resumed_welcome.selected_capabilities & CAPABILITY_HISTORY_CURSOR,
+            0
+        );
+
+        let mut fresh = hello();
+        fresh.hello.optional_capabilities |= CAPABILITY_HISTORY_CURSOR;
+        let (fresh_connection, fresh_welcome) = owner.connect(target, &fresh, 5).unwrap();
+        assert_ne!(
+            fresh_welcome.selected_capabilities & CAPABILITY_HISTORY_CURSOR,
+            0
+        );
+        let mut fresh_resume = fresh;
+        fresh_resume.resume = Some(crate::session_protocol::LeaseRef {
+            generation: GENERATION,
+            lease: fresh_connection.lease(),
+        });
+        let (_, resumed_fresh) = owner.connect(target, &fresh_resume, 6).unwrap();
+        assert_ne!(
+            resumed_fresh.selected_capabilities & CAPABILITY_HISTORY_CURSOR,
             0
         );
     }

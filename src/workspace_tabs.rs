@@ -32,6 +32,12 @@ pub enum TabAction {
     ProjectChooser,
     /// Select this stable project and tab pair.
     Select(WorkspaceRouteId),
+    /// Open the tab actions for this route.
+    TabActions(WorkspaceRouteId),
+    /// Admit one managed shell-tab create intent for the current project.
+    Create,
+    /// Open the searchable all-tabs overlay.
+    AllTabs,
     /// Navigate to the previous tab in the current project.
     PreviousTab,
     /// Navigate to the next tab in the current project.
@@ -222,24 +228,43 @@ pub fn layout(
     }
 
     let mut cells = vec![HeaderCell::blank(false); usize::from(columns)];
-    let mut hits = Vec::with_capacity(11);
+    let mut hits = Vec::with_capacity(16);
+    let screen_width = cells.len();
+
+    // Right-aligned controls keep New tab and All tabs reachable at every
+    // width; roomier bracketed buttons are used when space allows. On small
+    // hosts navigation and All are dropped before the create action.
+    let controls_start = place_right_controls(&mut cells, &mut hits, tabs.len() > 1);
+
     let project_name = project.display_name();
-    let project_label = bracketed_label("[ ", project_name, " v ]", MAX_LABEL_CELLS);
-    let project_width = place_label(&mut cells, 0, &project_label, true, MAX_LABEL_CELLS);
+    let project_cap = MAX_LABEL_CELLS.min((screen_width / 3).max(3));
+    let project_label = bracketed_label("[ ", project_name, " ]", project_cap);
+    // One cell of left margin when the host is wide enough to afford it.
+    let left = usize::from(screen_width >= ROOMY_HEADER_COLUMNS);
+    let project_budget = controls_start.saturating_sub(2 + left);
+    let project_width = place_label(
+        &mut cells,
+        left,
+        &project_label,
+        false,
+        project_budget.min(project_cap),
+    );
     if project_width > 0 {
         hits.push(HitRegion {
-            start: 0,
-            end: project_width as u16,
+            start: left as u16,
+            end: (left + project_width) as u16,
             action: TabAction::ProjectChooser,
         });
     }
 
-    let mut cursor = project_width;
-    if cursor < cells.len() {
-        cursor += 1;
-    }
-    if cursor < cells.len() {
-        let remaining = cells.len() - cursor;
+    let mut cursor = if project_width > 0 {
+        left + project_width + TAB_GAP
+    } else {
+        left
+    };
+    let tab_end = controls_start.saturating_sub(1);
+    if cursor < tab_end {
+        let remaining = tab_end - cursor;
         let labels: Vec<Vec<Glyph>> = tabs
             .iter()
             .map(|tab| bracketed_label("[", tab.display_name, "]", MAX_LABEL_CELLS))
@@ -250,78 +275,38 @@ pub fn layout(
             .ok_or(TabsError::InvalidRoute)?;
         let total_width = labels
             .iter()
-            .map(|label| label_width(label) + 1)
+            .map(|label| label_width(label) + TAB_GAP)
             .sum::<usize>()
-            - 1;
-
-        if total_width <= remaining {
-            let mut at = cursor;
-            for (index, label) in labels.iter().enumerate() {
-                if index != 0 && at < cells.len() {
-                    at += 1;
-                }
-                let allowance = cells.len().saturating_sub(at);
-                let width = place_label(&mut cells, at, label, index == current_index, allowance);
-                if width > 0 {
-                    hits.push(HitRegion {
-                        start: at as u16,
-                        end: (at + width) as u16,
-                        action: TabAction::Select(WorkspaceRouteId {
-                            project: current.project,
-                            tab: tabs[index].id,
-                        }),
-                    });
-                    at += width;
-                }
+            - TAB_GAP;
+        let (start, end) = if total_width <= remaining {
+            (0, labels.len())
+        } else {
+            selected_window(&labels, current_index, remaining)
+        };
+        for index in start..end {
+            if index > start && cursor < tab_end {
+                cursor += TAB_GAP;
             }
-        } else if remaining < 3 {
-            let width = place_label(&mut cells, cursor, &labels[current_index], true, remaining);
+            if cursor >= tab_end {
+                break;
+            }
+            let width = place_label(
+                &mut cells,
+                cursor,
+                &labels[index],
+                index == current_index,
+                tab_end - cursor,
+            );
             if width > 0 {
                 hits.push(HitRegion {
                     start: cursor as u16,
                     end: (cursor + width) as u16,
-                    action: TabAction::Select(current),
+                    action: TabAction::Select(WorkspaceRouteId {
+                        project: current.project,
+                        tab: tabs[index].id,
+                    }),
                 });
-            }
-        } else {
-            let tab_budget = remaining - 2;
-            let (start, end) = selected_window(&labels, current_index, tab_budget);
-            let mut at = cursor;
-            if start > 0 {
-                emit_control(&mut cells, &mut hits, at, '<', TabAction::PreviousTab);
-            }
-            at += 1;
-            let visible_end = at + tab_budget;
-            for index in start..end {
-                if index > start && at < visible_end {
-                    at += 1;
-                }
-                if at >= visible_end {
-                    break;
-                }
-                let allowance = visible_end - at;
-                let width = place_label(
-                    &mut cells,
-                    at,
-                    &labels[index],
-                    index == current_index,
-                    allowance,
-                );
-                if width > 0 {
-                    hits.push(HitRegion {
-                        start: at as u16,
-                        end: (at + width) as u16,
-                        action: TabAction::Select(WorkspaceRouteId {
-                            project: current.project,
-                            tab: tabs[index].id,
-                        }),
-                    });
-                    at += width;
-                }
-            }
-            if end < labels.len() {
-                let right = cells.len() - 1;
-                emit_control(&mut cells, &mut hits, right, '>', TabAction::NextTab);
+                cursor += width;
             }
         }
     }
@@ -338,6 +323,46 @@ pub fn layout(
         },
         hit_regions: hits,
     })
+}
+
+/// Reserve the workspace header row without advertising a route when no tabs
+/// are visible. Empty-state controls are rendered by the attached client below
+/// this header; this layout intentionally has no tab hit regions.
+pub fn empty_layout(host_rows: u16, host_columns: u16) -> TabsLayout {
+    let rows = host_rows.min(MAX_ROWS);
+    let columns = host_columns.min(MAX_COLUMNS);
+    let (mut header_cells, pane_root) = if rows == 0 || columns == 0 {
+        (
+            Vec::new(),
+            Rect {
+                x: 0,
+                y: 0,
+                rows: 0,
+                columns: 0,
+            },
+        )
+    } else {
+        (
+            vec![HeaderCell::blank(false); usize::from(columns)],
+            Rect {
+                x: 0,
+                y: 1,
+                rows: rows.saturating_sub(1),
+                columns,
+            },
+        )
+    };
+    let mut hit_regions = Vec::new();
+    if rows > 0 && columns > 0 {
+        place_create(&mut header_cells, &mut hit_regions);
+    }
+    TabsLayout {
+        rows,
+        columns,
+        header_cells,
+        pane_root,
+        hit_regions,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -464,6 +489,104 @@ fn emit_control(
     }
 }
 
+/// Gap between the project label and tabs, and between neighbouring tabs.
+const TAB_GAP: usize = 2;
+/// Width from which the header uses margins and full button labels.
+const ROOMY_HEADER_COLUMNS: usize = 60;
+const CREATE_LABEL: &str = "[+ New]";
+const ALL_LABEL: &str = "[All tabs]";
+
+/// Place an ASCII button and its hit region; returns its start column.
+fn place_button(
+    cells: &mut [HeaderCell],
+    hits: &mut Vec<HitRegion>,
+    end: usize,
+    text: &str,
+    action: TabAction,
+) -> Option<usize> {
+    let start = end.checked_sub(text.len())?;
+    place_ascii(cells, start, text);
+    hits.push(HitRegion {
+        start: start as u16,
+        end: end as u16,
+        action,
+    });
+    Some(start)
+}
+
+/// The create button, right-aligned with a one-cell margin on roomy hosts.
+/// Returns its first column.
+fn place_create(cells: &mut [HeaderCell], hits: &mut Vec<HitRegion>) -> usize {
+    let width = cells.len();
+    if width >= ROOMY_HEADER_COLUMNS {
+        if let Some(start) = place_button(cells, hits, width - 1, CREATE_LABEL, TabAction::Create) {
+            return start;
+        }
+    }
+    if width >= 12 {
+        if let Some(start) = place_button(cells, hits, width, "[+]", TabAction::Create) {
+            return start;
+        }
+    }
+    emit_control(cells, hits, width - 1, '+', TabAction::Create);
+    width - 1
+}
+
+/// Create, All tabs and previous/next controls from the right edge. Returns
+/// the first column used by the controls.
+fn place_right_controls(
+    cells: &mut [HeaderCell],
+    hits: &mut Vec<HitRegion>,
+    navigation: bool,
+) -> usize {
+    let width = cells.len();
+    let roomy = width >= ROOMY_HEADER_COLUMNS;
+    let gap = if roomy { 2 } else { 1 };
+    let mut start = place_create(cells, hits);
+    if width >= 18 {
+        let label = if roomy {
+            ALL_LABEL
+        } else if width >= 30 {
+            "[All]"
+        } else {
+            "All"
+        };
+        if let Some(next) = start
+            .checked_sub(gap)
+            .and_then(|end| place_button(cells, hits, end, label, TabAction::AllTabs))
+        {
+            start = next;
+        }
+    }
+    if width >= 28 && navigation {
+        let (previous, next) = if roomy { ("[<]", "[>]") } else { ("<", ">") };
+        let inner = usize::from(roomy);
+        if let Some(next_start) = start
+            .checked_sub(gap)
+            .and_then(|end| place_button(cells, hits, end, next, TabAction::NextTab))
+        {
+            start = next_start;
+            if let Some(previous_start) = start
+                .checked_sub(inner)
+                .and_then(|end| place_button(cells, hits, end, previous, TabAction::PreviousTab))
+            {
+                start = previous_start;
+            }
+        }
+    }
+    start
+}
+
+fn place_ascii(cells: &mut [HeaderCell], start: usize, text: &str) {
+    for (offset, character) in text.chars().enumerate() {
+        if let Some(cell) = HeaderCell::glyph(&character.to_string(), false) {
+            if let Some(target) = cells.get_mut(start + offset) {
+                *target = cell;
+            }
+        }
+    }
+}
+
 fn selected_window(labels: &[Vec<Glyph>], selected: usize, budget: usize) -> (usize, usize) {
     let mut start = selected;
     let mut end = selected + 1;
@@ -472,7 +595,7 @@ fn selected_window(labels: &[Vec<Glyph>], selected: usize, budget: usize) -> (us
     loop {
         let mut progressed = false;
         if start > 0 {
-            let cost = 1 + label_width(&labels[start - 1]);
+            let cost = TAB_GAP + label_width(&labels[start - 1]);
             if used + cost <= budget {
                 start -= 1;
                 used += cost;
@@ -658,7 +781,9 @@ mod tests {
     fn hits_are_exact_typed_regions_and_never_cover_pane_rows() {
         let index = index();
         let rendered = super::layout(&index, route(1, 1), 30, 100).expect("layout");
-        assert_eq!(rendered.hit_test(0, 0), Some(TabAction::ProjectChooser));
+        // Roomy hosts keep a one-cell left margin before the project button.
+        assert_eq!(rendered.hit_test(0, 0), None);
+        assert_eq!(rendered.hit_test(1, 0), Some(TabAction::ProjectChooser));
         let tab_region = rendered
             .hit_regions
             .iter()
@@ -790,5 +915,84 @@ mod tests {
             (1..=2).contains(&UnicodeWidthStr::width(glyph.text.as_str()))
                 && glyph.width == UnicodeWidthStr::width(glyph.text.as_str())
         }));
+    }
+
+    #[test]
+    fn narrow_overflow_keeps_active_tab_create_and_navigation_reachable() {
+        let mut index = WorkspaceIndex::new();
+        let project = id(40);
+        let active = tab(47);
+        index
+            .add_project(
+                project,
+                "A very long project label",
+                tab(40),
+                "A very long first tab",
+            )
+            .expect("project");
+        for value in 41..=47 {
+            let name = format!("Long workspace tab name {value}");
+            index
+                .add_tab(project, tab(value), &name)
+                .expect("workspace tab");
+        }
+        let current = route(40, active.get());
+
+        for columns in [40, 80, 120, 240] {
+            let rendered = layout(&index, current, 24, columns).expect("layout");
+            let selected = rendered
+                .hit_regions
+                .iter()
+                .find(|region| region.action == TabAction::Select(current))
+                .expect("active tab remains reachable");
+            assert_eq!(
+                rendered.hit_test(selected.start, 0),
+                Some(TabAction::Select(current))
+            );
+            assert!(rendered.header_cells()[usize::from(selected.start)].selected());
+            // Create is the rightmost control; roomy hosts keep a one-cell
+            // right margin after its button.
+            let create_end = columns - u16::from(usize::from(columns) >= ROOMY_HEADER_COLUMNS);
+            assert_eq!(
+                rendered.hit_test(create_end - 1, 0),
+                Some(TabAction::Create),
+                "create is the rightmost control at width {columns}"
+            );
+            assert_eq!(rendered.hit_test(create_end, 0), None);
+            assert!(rendered
+                .hit_regions
+                .iter()
+                .any(|region| region.action == TabAction::AllTabs));
+            assert!(rendered
+                .hit_regions
+                .iter()
+                .any(|region| region.action == TabAction::PreviousTab));
+            assert!(rendered
+                .hit_regions
+                .iter()
+                .any(|region| region.action == TabAction::NextTab));
+            assert_eq!(rendered.header_cells().len(), usize::from(columns));
+        }
+    }
+
+    #[test]
+    fn roomy_header_uses_labelled_buttons_with_spacing() {
+        let index = index();
+        let rendered = super::layout(&index, route(4, 5), 24, 120).expect("layout");
+        let text: String = rendered
+            .header_cells()
+            .iter()
+            .map(|cell| {
+                if cell.text().is_empty() {
+                    " "
+                } else {
+                    cell.text()
+                }
+            })
+            .collect();
+        assert!(text.ends_with("[+ New] "), "{text:?}");
+        assert!(text.contains("[All tabs]  [+ New]"), "{text:?}");
+        assert!(text.contains("[<] [>]  [All tabs]"), "{text:?}");
+        assert!(text.starts_with(" [ "), "{text:?}");
     }
 }

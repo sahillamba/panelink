@@ -86,7 +86,9 @@ language is resolved; create ADRs only for consequential trade-offs.
 The rewritten [implementation plan](../UI-UX-PLAN.md) incorporates all answers
 and replaces the original seven packets with eight packets centered on history
 responsiveness and full tab lifecycle/UI. No unanswered product question remains
-in the interview tree. Final shared-understanding confirmation is pending.
+in the interview tree. Final shared-understanding confirmation was given by the
+user on 2026-10-27 ("its confirm please start the implementation"), together
+with an implementation request; the plan is now approved build scope.
 Engineering details such as coalescing bounds, exact label durations, colors and
 performance budgets are explicitly proposed for measured/prototype validation.
 

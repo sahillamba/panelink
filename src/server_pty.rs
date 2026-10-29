@@ -1375,6 +1375,20 @@ impl PtyEffects {
             .map_err(|_| Outcome::Failed)
     }
 
+    /// Return the identity cursor for normal-buffer history, if meaningful.
+    ///
+    /// The epoch changes when normal-history identity is reset or invalidated
+    /// (including a terminal RIS reset). Within one epoch, the ordinal advances
+    /// by exactly the number of rows pushed into normal scrollback. Alternate
+    /// screen has no exposed cursor; an exhausted or invalid engine cursor is
+    /// also reported as `None`.
+    pub fn history_cursor(&self) -> Option<vt100::HistoryCursor> {
+        if self.alternate_screen_active() {
+            return None;
+        }
+        self.session.history_screen().history_cursor().ok()
+    }
+
     /// Whether the child has enabled a VT mouse tracking mode.
     pub fn mouse_reporting_enabled(&self) -> bool {
         self.session.mouse_reporting_enabled()

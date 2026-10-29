@@ -536,6 +536,19 @@ impl Client {
         self.write(b"\r");
     }
 
+    fn click_cell(&mut self, column: u16, row: u16) {
+        let column = column + 1;
+        let row = row + 1;
+        let click = format!("\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m");
+        self.write(click.as_bytes());
+    }
+
+    fn click_text(&mut self, label: &str) {
+        let (row, column) = screen_label_position(&self.parser(), label)
+            .unwrap_or_else(|| panic!("missing visible control {label:?}:\n{}", self.screen()));
+        self.click_cell(column, row);
+    }
+
     fn parser(&self) -> vt100::Parser {
         let mut parser = vt100::Parser::new(ROWS, COLUMNS, 0);
         parser.process(&self.capture.lock().unwrap());
@@ -717,6 +730,18 @@ fn pane_cell_text(parser: &vt100::Parser, row: usize, column: usize) -> String {
         .cell(row as u16, column as u16)
         .map(|cell| cell.contents().to_owned())
         .unwrap_or_else(|| " ".to_owned())
+}
+
+fn screen_label_position(parser: &vt100::Parser, label: &str) -> Option<(u16, u16)> {
+    parser
+        .screen()
+        .contents()
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| {
+            let column = line.find(label)?;
+            Some((u16::try_from(row).ok()?, u16::try_from(column).ok()?))
+        })
 }
 
 fn pane_content_rows() -> (usize, usize) {
@@ -1055,9 +1080,8 @@ fn workspace_open_switches_registered_routes_through_nav_and_picker() {
         assert!(fixture.route_context_count(project, tab) > 0);
     }
 
-    // The explicit raw attach entry point and plain no-selector launcher keep
-    // their old single-route presentation. Their pane screen must not inherit
-    // the workspace strip merely because a registry exists.
+    // Raw attach remains headerless; ordinary no-argument startup now presents
+    // the saved catalog route with its workspace strip.
     let mut raw = Client::spawn_raw_attach(&fixture, editors, editors_main);
     raw.wait_raw_mode();
     raw.type_shell("printf 'P5_RAW_'READY'\\n'");
@@ -1071,11 +1095,9 @@ fn workspace_open_switches_registered_routes_through_nav_and_picker() {
 
     let mut plain = Client::spawn_plain_panelink(&fixture);
     plain.wait_raw_mode();
+    plain.wait_header("Editors", "Main");
     plain.type_shell("printf 'P5_PLAIN_'READY'\\n'");
     plain.wait_marker("P5_PLAIN_READY");
-    let plain_screen = plain.screen();
-    let plain_header = plain_screen.lines().next().unwrap_or_default();
-    assert!(!plain_header.contains("Editors") && !plain_header.contains("Tools"));
     plain.write(&[0x18]);
     assert_eq!(plain.wait_exit(STEP), 0, "plain panelink Ctrl-X");
     plain.assert_restored();
@@ -1556,9 +1578,9 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
                 && shell_prompt_is_visible(parser, right)
         })
     });
-    // A fast wheel supplies only a conservative extent. The first scrollbar
-    // press discovers the real extent and seeks oldest; it does not begin a
-    // drag. Wait for actual oldest content before pressing the new thumb.
+    // A fast wheel supplies only a conservative extent. This client defers
+    // a drag until extent discovery completes. Wait for actual oldest content
+    // after the deferred release before starting the next drag.
     pointer_event(&mut client, 64, COLUMNS as usize - 5, 8, false);
     client.wait_screen("normal history thumb", |parser, _| {
         parser.screen().hide_cursor()
@@ -1568,12 +1590,17 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
     let thumb_row = (2..ROWS as usize - 1)
         .find(|&row| pane_cell_text(&client.parser(), row, COLUMNS as usize - 1) == "#")
         .expect("visible right history thumb");
-    click_cell(&mut client, COLUMNS as usize - 1, thumb_row);
-    client.wait_screen("resolved oldest history extent", |parser, _| {
+    pointer_event(&mut client, 0, COLUMNS as usize - 1, thumb_row, false);
+    pointer_event(&mut client, 32, COLUMNS as usize - 1, 2, false);
+    pointer_event(&mut client, 0, COLUMNS as usize - 1, 2, true);
+    // The press began before the real extent was known. The view stays put
+    // until discovery returns, then the deferred release seeks the oldest
+    // rows; wait for that content rather than a conservative thumb frame.
+    client.wait_screen("oldest history through scrollbar drag", |parser, _| {
         pane_cell_text(parser, 2, COLUMNS as usize - 1) == "#"
             && split_pane_cells(parser).is_some_and(|(_, right)| {
-                pane_marker_position(parser, right, "PTR_ROW_001").is_some()
-                    && pane_marker_position(parser, right, "PTR_TAIL").is_none()
+                pane_marker_position(parser, right, "PTR_TAIL").is_none()
+                    && pane_marker_position(parser, right, "PTR_ROW_001").is_some()
             })
     });
     pointer_event(&mut client, 0, COLUMNS as usize - 1, 2, false);
@@ -1618,4 +1645,155 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
     assert!(server_lock_held(
         &fixture.route_root(project, tab).join("server")
     ));
+}
+
+#[test]
+fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
+    let mut fixture = Fixture::new();
+    fixture.create_project("Editors", "Main");
+    let project = fixture.project_id("Editors");
+    let main = fixture.tab_id("Editors", "Main");
+    fixture.own_route(project, main);
+
+    let mut client = Client::spawn_workspace_open(&fixture, project, main);
+    client.wait_raw_mode();
+    client.wait_header("Editors", "Main");
+    client.type_shell("PS1='P5T$ '; printf 'UX06_MAIN_READY\\n'");
+    client.wait_marker("UX06_MAIN_READY");
+
+    // The visible plus is the only create gesture. Ready must select its exact
+    // newly registered Shell route without replacing the existing Main server.
+    client.wait_screen("visible tab create control", |parser, _| {
+        parser
+            .screen()
+            .contents()
+            .lines()
+            .next()
+            .is_some_and(|header| header.trim_end().ends_with("[+ New]"))
+    });
+    client.click_text("[+ New]");
+    client.wait_header("Editors", "Shell 1");
+    let shell = fixture.tab_id("Editors", "Shell 1");
+    fixture.own_route(project, shell);
+    assert!(server_lock_held(
+        &fixture.route_root(project, main).join("server")
+    ));
+    assert!(server_lock_held(
+        &fixture.route_root(project, shell).join("server")
+    ));
+    assert!(fixture.route_context_count(project, shell) > 0);
+
+    client
+        .type_shell("PS1='P5T$ '; printf 'UX06_PID_BEFORE_%d\\n' $$; printf 'UX06_SHELL_READY\\n'");
+    client.wait_marker("UX06_SHELL_READY");
+    let before = client.parser();
+    let shell_pid = pane_shell_pid(&before, whole_root_cells(), "UX06_PID_BEFORE_");
+    let shell_generation = fs::read(fixture.route_root(project, shell).join("server/generation"))
+        .expect("created Shell generation");
+
+    // Rename replaces the bounded draft and commits through the current
+    // workspace revision; the ID, generation, server and child stay in place.
+    client.ctrl_b(b't');
+    client.write(b"r");
+    client.wait_screen("inline tab rename", |_, screen| {
+        screen.contains("Rename tab") && screen.contains("[Save]") && screen.contains("[Cancel]")
+    });
+    client.write(&[0x7f; 7]);
+    client.write(b"Shell Renamed");
+    client.write(&[13]);
+    client.wait_header("Editors", "Shell Renamed");
+    assert_eq!(fixture.tab_id("Editors", "Shell Renamed"), shell);
+    assert_eq!(
+        fs::read(fixture.route_root(project, shell).join("server/generation"),)
+            .expect("same Shell generation after rename"),
+        shell_generation
+    );
+    client.type_shell("printf 'UX06_PID_AFTER_%d\\n' $$; printf 'UX06_RENAME_READY\\n'");
+    client.wait_marker("UX06_RENAME_READY");
+    assert_eq!(
+        pane_shell_pid(&client.parser(), whole_root_cells(), "UX06_PID_AFTER_"),
+        shell_pid
+    );
+
+    // Cancel is a real mouse target and changes no registry or process state.
+    client.ctrl_b(b't');
+    client.write(b"x");
+    client.wait_screen("close tab confirmation", |_, screen| {
+        screen.contains("Ends all tab processes") && screen.contains("[Close tab] [Cancel]")
+    });
+    client.click_text("[Cancel]");
+    assert!(server_lock_held(
+        &fixture.route_root(project, shell).join("server")
+    ));
+    assert_eq!(fixture.tab_id("Editors", "Shell Renamed"), shell);
+
+    // A second, explicit confirmation stops exactly Shell 1. The deterministic
+    // adjacent route is Main; no replacement shell is created.
+    client.ctrl_b(b't');
+    client.write(b"x");
+    client.wait_screen("second close confirmation", |_, screen| {
+        screen.contains("[Close tab] [Cancel]")
+    });
+    client.click_text("[Close tab]");
+    assert!(
+        server_lock_held(&fixture.route_root(project, main).join("server")),
+        "closing Shell 1 must leave Main's server lock held"
+    );
+    client.wait_header("Editors", "Main");
+    let shell_server = fixture.route_root(project, shell).join("server");
+    let registry_after_close = fixture.run(&["workspace", "list"]);
+    assert!(
+        !server_lock_held(&shell_server),
+        "Shell server remains held (pid {:?}) after close; registry:\n{}\nClient screen:\n{}",
+        verified_server_pid(&fixture.route_root(project, shell)),
+        String::from_utf8_lossy(&registry_after_close.stdout),
+        client.screen()
+    );
+    assert!(server_lock_held(
+        &fixture.route_root(project, main).join("server")
+    ));
+    assert!(
+        registry_after_close.status.success(),
+        "list after close: {registry_after_close:?}"
+    );
+    assert!(!String::from_utf8_lossy(&registry_after_close.stdout).contains("Shell Renamed"));
+
+    // Closing Editors/Main deterministically selects the reserved compatibility
+    // route. Closing that final visible route must leave a client-only empty
+    // view, not launch a replacement process.
+    client.ctrl_b(b't');
+    client.write(b"x");
+    client.wait_screen("Editors/Main close confirmation", |_, screen| {
+        screen.contains("[Close tab] [Cancel]")
+    });
+    client.click_text("[Close tab]");
+    client.wait_header("Default", "Main");
+    let default_server = fixture.root.join("server");
+    let default_generation_path = default_server.join("generation");
+    let stopped_generation = fs::read(&default_generation_path)
+        .expect("the deterministic reserved fallback has one generation");
+    assert!(server_lock_held(&default_server));
+
+    client.ctrl_b(b't');
+    client.write(b"x");
+    client.wait_screen("last visible tab close confirmation", |_, screen| {
+        screen.contains("[Close tab] [Cancel]")
+    });
+    client.click_text("[Close tab]");
+    client.wait_screen("empty workspace after last close", |_, screen| {
+        screen.contains("No open tabs.") && screen.contains("New tab") && screen.contains("Detach")
+    });
+    assert!(!server_lock_held(&default_server));
+    assert_eq!(
+        fs::read(&default_generation_path).expect("closed route keeps its generation record"),
+        stopped_generation,
+        "empty-state installation did not spawn a replacement"
+    );
+    assert!(!server_lock_held(
+        &fixture.route_root(project, main).join("server")
+    ));
+
+    client.write(&[0x18]);
+    assert_eq!(client.wait_exit(STEP), 0, "Ctrl-X detach should succeed");
+    client.assert_restored();
 }

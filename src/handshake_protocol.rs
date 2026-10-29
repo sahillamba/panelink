@@ -42,6 +42,10 @@ pub const CAPABILITY_PANE_METADATA: u64 = 16;
 /// Only the multi-session UI path offers this capability.
 pub const CAPABILITY_SCREEN_ROW_WRAPS: u64 = 32;
 
+/// Capability for the current normal-history cursor in UI screen/history replies.
+/// Only the multi-session UI path offers this capability.
+pub const CAPABILITY_HISTORY_CURSOR: u64 = 512;
+
 /// Capability vocabulary for authoritative pane swap, divider and zoom operations.
 /// Runtime paths must not offer it until those operations are implemented.
 pub const CAPABILITY_PANE_OPERATIONS: u64 = 64;
@@ -60,6 +64,7 @@ pub const CAPABILITY_NAMES: &[(u64, &str)] = &[
     (CAPABILITY_WORKSPACE_EVENTS, "workspace_events"),
     (CAPABILITY_PANE_METADATA, "pane_metadata"),
     (CAPABILITY_SCREEN_ROW_WRAPS, "screen_row_wraps"),
+    (CAPABILITY_HISTORY_CURSOR, "history_cursor"),
     (CAPABILITY_PANE_OPERATIONS, "pane_operations"),
     (CAPABILITY_AGENT_OBSERVATION, "agent_observation"),
     (CAPABILITY_BUILD_IDENTITY, "build_identity"),
@@ -72,6 +77,7 @@ pub const KNOWN_CAPABILITIES: u64 = CAPABILITY_READ
     | CAPABILITY_WORKSPACE_EVENTS
     | CAPABILITY_PANE_METADATA
     | CAPABILITY_SCREEN_ROW_WRAPS
+    | CAPABILITY_HISTORY_CURSOR
     | CAPABILITY_PANE_OPERATIONS
     | CAPABILITY_AGENT_OBSERVATION
     | CAPABILITY_BUILD_IDENTITY;

@@ -16,8 +16,13 @@ use std::sync::{Arc, Mutex, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use panelink::workspace_index::WorkspaceIndex;
+use panelink::workspace_index::{ProjectId, TabPresentationSnapshot};
 use panelink::workspace_tabs::WorkspaceRouteId;
+
+use crate::workspace_lifecycle::{
+    CloseOutcome, CreateIntentId, CreateShellTab, ExpectedRuntimeIdentity, LifecycleError,
+    LifecycleSession, ProjectLaunchContext, RenameOutcome,
+};
 
 use super::net::Net;
 use super::state::App;
@@ -55,11 +60,65 @@ enum Command {
 
 enum MetadataCommand {
     Wake,
+    Mutation(MetadataMutation),
+}
+
+enum MetadataMutation {
+    Create {
+        request_id: MetadataRequestId,
+        project: ProjectId,
+        intent_id: CreateIntentId,
+        launch: ProjectLaunchContext,
+    },
+    Rename {
+        request_id: MetadataRequestId,
+        route: WorkspaceRouteId,
+        name: String,
+        expected_revision: u64,
+    },
+    Close {
+        request_id: MetadataRequestId,
+        route: WorkspaceRouteId,
+        expected: ExpectedRuntimeIdentity,
+    },
 }
 
 trait MetadataBackend: Send + 'static {
     fn save_selection(&mut self, route: WorkspaceRouteId) -> Result<(), ()>;
-    fn load_catalog(&mut self) -> Result<Option<WorkspaceIndex>, ()>;
+    fn load_catalog(&mut self) -> Result<Option<(TabPresentationSnapshot, u64)>, ()>;
+
+    fn create_shell_tab(
+        &mut self,
+        _project: ProjectId,
+        _intent: CreateIntentId,
+        _session: &mut LifecycleSession,
+        _launch: &ProjectLaunchContext,
+    ) -> Result<CreateShellTab, LifecycleError> {
+        Err(LifecycleError::MetadataUnavailable)
+    }
+
+    fn rename_tab(
+        &mut self,
+        _route: WorkspaceRouteId,
+        _name: &str,
+        _expected_revision: u64,
+    ) -> Result<RenameOutcome, LifecycleError> {
+        Err(LifecycleError::MetadataUnavailable)
+    }
+
+    fn close_tab(
+        &mut self,
+        _route: WorkspaceRouteId,
+        _expected: &ExpectedRuntimeIdentity,
+    ) -> CloseOutcome {
+        CloseOutcome::Unknown {
+            reason: "workspace metadata unavailable",
+        }
+    }
+
+    fn presentation_snapshot(&mut self) -> Result<(TabPresentationSnapshot, u64), LifecycleError> {
+        Err(LifecycleError::MetadataUnavailable)
+    }
 }
 
 struct StoreMetadataBackend {
@@ -71,15 +130,102 @@ impl MetadataBackend for StoreMetadataBackend {
         crate::default_open::save_workspace_selection(&self.root, route).map_err(|_| ())
     }
 
-    fn load_catalog(&mut self) -> Result<Option<WorkspaceIndex>, ()> {
-        crate::default_open::load_workspace_index_snapshot(&self.root).map_err(|_| ())
+    fn load_catalog(&mut self) -> Result<Option<(TabPresentationSnapshot, u64)>, ()> {
+        let Some(index) =
+            crate::default_open::load_workspace_index_snapshot(&self.root).map_err(|_| ())?
+        else {
+            return Ok(None);
+        };
+        let (snapshot, revision) =
+            crate::workspace_lifecycle::presentation_snapshot(&self.root).map_err(|_| ())?;
+        if snapshot.projects.iter().any(|project| {
+            index.project(project.id).ok().is_none_or(|registered| {
+                project.tabs.iter().any(|tab| {
+                    !registered
+                        .tabs()
+                        .any(|catalog_tab| catalog_tab.id == tab.route.tab)
+                })
+            })
+        }) {
+            return Err(());
+        }
+        Ok(Some((snapshot, revision)))
+    }
+
+    fn create_shell_tab(
+        &mut self,
+        project: ProjectId,
+        intent: CreateIntentId,
+        session: &mut LifecycleSession,
+        launch: &ProjectLaunchContext,
+    ) -> Result<CreateShellTab, LifecycleError> {
+        crate::workspace_lifecycle::create_shell_tab(&self.root, project, intent, session, launch)
+    }
+
+    fn rename_tab(
+        &mut self,
+        route: WorkspaceRouteId,
+        name: &str,
+        expected_revision: u64,
+    ) -> Result<RenameOutcome, LifecycleError> {
+        crate::workspace_lifecycle::rename_tab(&self.root, route, name, expected_revision)
+    }
+
+    fn close_tab(
+        &mut self,
+        route: WorkspaceRouteId,
+        expected: &ExpectedRuntimeIdentity,
+    ) -> CloseOutcome {
+        crate::workspace_lifecycle::close_tab(&self.root, route, expected)
+    }
+
+    fn presentation_snapshot(&mut self) -> Result<(TabPresentationSnapshot, u64), LifecycleError> {
+        crate::workspace_lifecycle::presentation_snapshot(&self.root)
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MetadataRequestId(pub(crate) u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MetadataQueueError {
+    Busy,
+    Unavailable,
+    IdentifierExhausted,
+}
+
 pub(crate) enum MetadataResult {
-    Catalog(WorkspaceIndex),
+    Catalog {
+        source_route: Option<WorkspaceRouteId>,
+        snapshot: TabPresentationSnapshot,
+        observed_revision: u64,
+    },
     CatalogError,
     SaveError(&'static str),
+    Created {
+        request_id: MetadataRequestId,
+        intent_id: CreateIntentId,
+        project: ProjectId,
+        result: Result<CreateShellTab, LifecycleError>,
+        observed_revision: Option<u64>,
+        snapshot: Option<TabPresentationSnapshot>,
+    },
+    Renamed {
+        request_id: MetadataRequestId,
+        route: WorkspaceRouteId,
+        expected_revision: u64,
+        result: Result<RenameOutcome, LifecycleError>,
+        observed_revision: Option<u64>,
+        snapshot: Option<TabPresentationSnapshot>,
+    },
+    Closed {
+        request_id: MetadataRequestId,
+        route: WorkspaceRouteId,
+        expected: ExpectedRuntimeIdentity,
+        outcome: CloseOutcome,
+        observed_revision: Option<u64>,
+        snapshot: Option<TabPresentationSnapshot>,
+    },
 }
 
 pub(crate) struct RouteController {
@@ -93,7 +239,18 @@ pub(crate) struct RouteController {
     save_results: Receiver<MetadataResult>,
     pending_save: Arc<Mutex<Option<WorkspaceRouteId>>>,
     refresh_pending: Arc<AtomicBool>,
+    pending_refresh_route: Arc<Mutex<Option<Option<WorkspaceRouteId>>>>,
     save_busy: Arc<AtomicBool>,
+    mutation_busy: Arc<AtomicBool>,
+    next_metadata_id: AtomicU64,
+}
+
+struct MetadataWorkerSignals {
+    pending_save: Arc<Mutex<Option<WorkspaceRouteId>>>,
+    refresh_pending: Arc<AtomicBool>,
+    pending_refresh_route: Arc<Mutex<Option<Option<WorkspaceRouteId>>>>,
+    save_busy: Arc<AtomicBool>,
+    mutation_busy: Arc<AtomicBool>,
 }
 
 impl RouteController {
@@ -215,8 +372,12 @@ impl RouteController {
         let worker_pending_save = Arc::clone(&pending_save);
         let refresh_pending = Arc::new(AtomicBool::new(false));
         let worker_refresh_pending = Arc::clone(&refresh_pending);
+        let pending_refresh_route = Arc::new(Mutex::new(None));
+        let worker_pending_refresh_route = Arc::clone(&pending_refresh_route);
         let save_busy = Arc::new(AtomicBool::new(false));
         let worker_save_busy = Arc::clone(&save_busy);
+        let mutation_busy = Arc::new(AtomicBool::new(false));
+        let worker_mutation_busy = Arc::clone(&mutation_busy);
         let _ = thread::Builder::new()
             .name("panelink-route-metadata".into())
             .spawn(move || {
@@ -224,9 +385,13 @@ impl RouteController {
                     metadata_backend,
                     save_receiver,
                     save_result_sender,
-                    worker_pending_save,
-                    worker_refresh_pending,
-                    worker_save_busy,
+                    MetadataWorkerSignals {
+                        pending_save: worker_pending_save,
+                        refresh_pending: worker_refresh_pending,
+                        pending_refresh_route: worker_pending_refresh_route,
+                        save_busy: worker_save_busy,
+                        mutation_busy: worker_mutation_busy,
+                    },
                 )
             });
 
@@ -241,7 +406,10 @@ impl RouteController {
             save_results,
             pending_save,
             refresh_pending,
+            pending_refresh_route,
             save_busy,
+            mutation_busy,
+            next_metadata_id: AtomicU64::new(1),
         }
     }
 
@@ -306,10 +474,14 @@ impl RouteController {
 
     /// Request one asynchronous metadata snapshot. Duplicate requests coalesce
     /// in the pending bit while a read is pending or running.
-    pub(crate) fn queue_catalog_refresh(&self) -> Result<(), &'static str> {
+    pub(crate) fn queue_catalog_refresh(
+        &self,
+        source_route: Option<WorkspaceRouteId>,
+    ) -> Result<(), &'static str> {
         let Some(sender) = self.save_commands.as_ref() else {
             return Err("workspace catalog unavailable");
         };
+        *lock_recover(&self.pending_refresh_route) = Some(source_route);
         self.refresh_pending.store(true, Ordering::Release);
         match sender.try_send(MetadataCommand::Wake) {
             Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
@@ -319,6 +491,84 @@ impl RouteController {
 
     pub(crate) fn try_metadata_result(&self) -> Option<MetadataResult> {
         self.save_results.try_recv().ok()
+    }
+
+    pub(crate) fn queue_create(
+        &self,
+        project: ProjectId,
+        intent_id: CreateIntentId,
+        launch: ProjectLaunchContext,
+    ) -> Result<MetadataRequestId, MetadataQueueError> {
+        self.queue_mutation(|request_id| MetadataMutation::Create {
+            request_id,
+            project,
+            intent_id,
+            launch,
+        })
+    }
+
+    pub(crate) fn queue_rename(
+        &self,
+        route: WorkspaceRouteId,
+        name: String,
+        expected_revision: u64,
+    ) -> Result<MetadataRequestId, MetadataQueueError> {
+        self.queue_mutation(|request_id| MetadataMutation::Rename {
+            request_id,
+            route,
+            name,
+            expected_revision,
+        })
+    }
+
+    pub(crate) fn queue_close(
+        &self,
+        route: WorkspaceRouteId,
+        expected: ExpectedRuntimeIdentity,
+    ) -> Result<MetadataRequestId, MetadataQueueError> {
+        self.queue_mutation(|request_id| MetadataMutation::Close {
+            request_id,
+            route,
+            expected,
+        })
+    }
+
+    fn queue_mutation(
+        &self,
+        build: impl FnOnce(MetadataRequestId) -> MetadataMutation,
+    ) -> Result<MetadataRequestId, MetadataQueueError> {
+        let sender = self
+            .save_commands
+            .as_ref()
+            .ok_or(MetadataQueueError::Unavailable)?;
+        if self
+            .mutation_busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(MetadataQueueError::Busy);
+        }
+        let raw_id = self
+            .next_metadata_id
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1));
+        let request_id = match raw_id {
+            Ok(id) => MetadataRequestId(id),
+            Err(_) => {
+                self.mutation_busy.store(false, Ordering::Release);
+                return Err(MetadataQueueError::IdentifierExhausted);
+            }
+        };
+        match sender.try_send(MetadataCommand::Mutation(build(request_id))) {
+            Ok(()) => Ok(request_id),
+            Err(TrySendError::Full(_)) => {
+                self.mutation_busy.store(false, Ordering::Release);
+                Err(MetadataQueueError::Busy)
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.mutation_busy.store(false, Ordering::Release);
+                Err(MetadataQueueError::Unavailable)
+            }
+        }
     }
 }
 
@@ -356,34 +606,125 @@ fn metadata_loop(
     mut backend: Box<dyn MetadataBackend>,
     receiver: Receiver<MetadataCommand>,
     results: SyncSender<MetadataResult>,
-    pending_save: Arc<Mutex<Option<WorkspaceRouteId>>>,
-    refresh_pending: Arc<AtomicBool>,
-    save_busy: Arc<AtomicBool>,
+    signals: MetadataWorkerSignals,
 ) {
-    while receiver.recv().is_ok() {
-        loop {
-            let route = lock_recover(&pending_save).take();
-            if let Some(route) = route {
-                if backend.save_selection(route).is_err() {
-                    let _ = results.send(MetadataResult::SaveError("selection not saved"));
-                }
-                save_busy.store(false, Ordering::Release);
+    let mut lifecycle_session = LifecycleSession::default();
+    while let Ok(command) = receiver.recv() {
+        if let MetadataCommand::Mutation(mutation) = command {
+            let result = execute_metadata_mutation(&mut *backend, &mut lifecycle_session, mutation);
+            let _ = results.send(result);
+            signals.mutation_busy.store(false, Ordering::Release);
+        }
+        process_metadata_wake(&mut *backend, &results, &signals);
+    }
+}
+
+fn process_metadata_wake(
+    backend: &mut dyn MetadataBackend,
+    results: &SyncSender<MetadataResult>,
+    signals: &MetadataWorkerSignals,
+) {
+    loop {
+        let route = lock_recover(&signals.pending_save).take();
+        if let Some(route) = route {
+            if backend.save_selection(route).is_err() {
+                let _ = results.send(MetadataResult::SaveError("selection not saved"));
             }
-            if refresh_pending.swap(false, Ordering::AcqRel) {
-                refresh_catalog(&mut *backend, &results);
-                continue;
+            signals.save_busy.store(false, Ordering::Release);
+        }
+        if signals.refresh_pending.swap(false, Ordering::AcqRel) {
+            let source_route = lock_recover(&signals.pending_refresh_route)
+                .take()
+                .unwrap_or(None);
+            refresh_catalog(backend, results, source_route);
+            continue;
+        }
+        if lock_recover(&signals.pending_save).is_none() {
+            break;
+        }
+    }
+}
+
+fn execute_metadata_mutation(
+    backend: &mut dyn MetadataBackend,
+    lifecycle_session: &mut LifecycleSession,
+    mutation: MetadataMutation,
+) -> MetadataResult {
+    match mutation {
+        MetadataMutation::Create {
+            request_id,
+            project,
+            intent_id,
+            launch,
+        } => {
+            let result = backend.create_shell_tab(project, intent_id, lifecycle_session, &launch);
+            let (snapshot, observed_revision) = observe_presentation(backend);
+            MetadataResult::Created {
+                request_id,
+                intent_id,
+                project,
+                result,
+                observed_revision,
+                snapshot,
             }
-            if lock_recover(&pending_save).is_none() {
-                break;
+        }
+        MetadataMutation::Rename {
+            request_id,
+            route,
+            name,
+            expected_revision,
+        } => {
+            let result = backend.rename_tab(route, &name, expected_revision);
+            let (snapshot, observed_revision) = observe_presentation(backend);
+            MetadataResult::Renamed {
+                request_id,
+                route,
+                expected_revision,
+                result,
+                observed_revision,
+                snapshot,
+            }
+        }
+        MetadataMutation::Close {
+            request_id,
+            route,
+            expected,
+        } => {
+            let outcome = backend.close_tab(route, &expected);
+            let (snapshot, observed_revision) = observe_presentation(backend);
+            MetadataResult::Closed {
+                request_id,
+                route,
+                expected,
+                outcome,
+                observed_revision,
+                snapshot,
             }
         }
     }
 }
 
-fn refresh_catalog(backend: &mut dyn MetadataBackend, results: &SyncSender<MetadataResult>) {
+fn observe_presentation(
+    backend: &mut dyn MetadataBackend,
+) -> (Option<TabPresentationSnapshot>, Option<u64>) {
+    match backend.presentation_snapshot() {
+        Ok((snapshot, revision)) => (Some(snapshot), Some(revision)),
+        Err(_) => (None, None),
+    }
+}
+
+fn refresh_catalog(
+    backend: &mut dyn MetadataBackend,
+    results: &SyncSender<MetadataResult>,
+    source_route: Option<WorkspaceRouteId>,
+) {
     match backend.load_catalog() {
-        Ok(Some(index)) => {
-            let _ = results.send(MetadataResult::Catalog(index));
+        Ok(Some((snapshot, observed_revision))) => {
+            let _ = results.send(MetadataResult::Catalog {
+                source_route,
+                snapshot,
+                observed_revision,
+            });
         }
         Ok(None) | Err(_) => {
             let _ = results.send(MetadataResult::CatalogError);
@@ -423,19 +764,33 @@ fn prepare(
     let checked_route = request.destination;
     let mut app = App::new(request.host_size.0, request.host_size.1)
         .map_err(|_| "terminal frame unavailable")?;
-    app.install_workspace_tabs(catalog.clone(), checked_route);
+    app.install_workspace_index(catalog.clone(), checked_route);
     let net = Net::connect(state.server, state.contexts, &mut app, Instant::now())?;
     if is_canceled(canceled, request.request_id) {
         drop(net);
         return Err("workspace switch canceled");
     }
-    let (catalog, checked_route) = crate::default_open::workspace_catalog_cancellable(
+    let (_, checked_route) = crate::default_open::workspace_catalog_cancellable(
         app_root,
         request.destination.project.get(),
         request.destination.tab.get(),
         || is_canceled(canceled, request.request_id),
     )?;
-    app.install_workspace_tabs(catalog.clone(), checked_route);
+    if is_canceled(canceled, request.request_id) {
+        drop(net);
+        return Err("workspace switch canceled");
+    }
+    let (snapshot, revision) = crate::workspace_lifecycle::presentation_snapshot(app_root)
+        .map_err(|_| "workspace metadata unavailable")?;
+    if is_canceled(canceled, request.request_id) {
+        drop(net);
+        return Err("workspace switch canceled");
+    }
+    if !app.install_workspace_tabs(snapshot, Some(checked_route)) {
+        drop(net);
+        return Err("workspace route unavailable");
+    }
+    app.set_workspace_revision(revision);
     Ok(PreparedAttachment {
         request_id: request.request_id,
         route: checked_route,
@@ -483,7 +838,7 @@ mod tests {
             }
         }
 
-        fn load_catalog(&mut self) -> Result<Option<WorkspaceIndex>, ()> {
+        fn load_catalog(&mut self) -> Result<Option<(TabPresentationSnapshot, u64)>, ()> {
             self.count.fetch_add(1, Ordering::AcqRel);
             let _ = self.calls.send(BackendCall::LoadCatalog);
             let _ = self.release.recv();
@@ -504,6 +859,53 @@ mod tests {
             |_| {},
             Box::new(backend),
         )
+    }
+
+    struct GatedCreateBackend {
+        call: SyncSender<(ProjectId, CreateIntentId)>,
+        release: Receiver<()>,
+    }
+
+    impl MetadataBackend for GatedCreateBackend {
+        fn save_selection(&mut self, _route: WorkspaceRouteId) -> Result<(), ()> {
+            Ok(())
+        }
+
+        fn load_catalog(&mut self) -> Result<Option<(TabPresentationSnapshot, u64)>, ()> {
+            Ok(None)
+        }
+
+        fn create_shell_tab(
+            &mut self,
+            project: ProjectId,
+            intent: CreateIntentId,
+            _session: &mut LifecycleSession,
+            _launch: &ProjectLaunchContext,
+        ) -> Result<CreateShellTab, LifecycleError> {
+            self.call.send((project, intent)).unwrap();
+            self.release.recv().unwrap();
+            Ok(CreateShellTab {
+                route: WorkspaceRouteId {
+                    project,
+                    tab: panelink::workspace_index::WorkspaceTabId::new(77).unwrap(),
+                },
+                name: "Shell 1".to_owned(),
+                status: crate::workspace_lifecycle::CreateStatus::Ready,
+            })
+        }
+    }
+
+    fn project_launch_context() -> ProjectLaunchContext {
+        let cwd = PathBuf::from("/private/tmp/panelink-route-metadata-test");
+        ProjectLaunchContext {
+            cwd: cwd.clone(),
+            context: panelink::launch::LaunchContext {
+                working_directory: cwd,
+                environment: [("PATH".into(), "/usr/bin:/bin".into())]
+                    .into_iter()
+                    .collect::<panelink::launch::Environment>(),
+            },
+        }
     }
 
     fn gated_backend(
@@ -643,15 +1045,56 @@ mod tests {
     }
 
     #[test]
+    fn metadata_worker_admits_one_create_while_lifecycle_adapter_is_running() {
+        let (call_sender, call_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let controller = controller_with_backend(GatedCreateBackend {
+            call: call_sender,
+            release: release_receiver,
+        });
+        let project = panelink::workspace_index::ProjectId::new(3).unwrap();
+        let first_intent = CreateIntentId(1);
+        let request_id = controller
+            .queue_create(project, first_intent, project_launch_context())
+            .unwrap();
+        assert_eq!(call_receiver.recv().unwrap(), (project, first_intent));
+
+        assert_eq!(
+            controller.queue_create(project, CreateIntentId(2), project_launch_context()),
+            Err(MetadataQueueError::Busy)
+        );
+        release_sender.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let result = loop {
+            if let Some(result) = controller.try_metadata_result() {
+                break result;
+            }
+            assert!(Instant::now() < deadline, "create result timed out");
+            thread::yield_now();
+        };
+        assert!(matches!(
+            result,
+            MetadataResult::Created {
+                request_id: found,
+                intent_id: found_intent,
+                project: found_project,
+                result: Ok(CreateShellTab { status: crate::workspace_lifecycle::CreateStatus::Ready, .. }),
+                ..
+            } if found == request_id && found_intent == first_intent && found_project == project
+        ));
+        assert!(call_receiver.try_recv().is_err());
+    }
+
+    #[test]
     fn refreshes_coalesce_and_wake_while_metadata_worker_is_busy() {
         let (release_sender, release_receiver) = mpsc::sync_channel(2);
         let (backend, calls, count) = gated_backend(release_receiver);
         let controller = controller_with_backend(backend);
 
-        assert_eq!(controller.queue_catalog_refresh(), Ok(()));
+        assert_eq!(controller.queue_catalog_refresh(Some(route(1))), Ok(()));
         assert_eq!(calls.recv().unwrap(), BackendCall::LoadCatalog);
         for _ in 0..5 {
-            assert_eq!(controller.queue_catalog_refresh(), Ok(()));
+            assert_eq!(controller.queue_catalog_refresh(Some(route(1))), Ok(()));
         }
         release_sender.send(()).unwrap();
 

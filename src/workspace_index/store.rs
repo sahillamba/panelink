@@ -60,10 +60,10 @@ pub enum SaveOutcome {
 
 /// An exclusive lifetime lock and one exact registry slot under `root`.
 pub struct WorkspaceIndexStore {
-    root: PathBuf,
-    directory: File,
+    pub(super) root: PathBuf,
+    pub(super) directory: File,
     lock: File,
-    disabled: bool,
+    pub(super) disabled: bool,
     #[cfg(test)]
     fault: Option<FaultPoint>,
 }
@@ -100,7 +100,7 @@ fn uid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
-fn private_file(file: &File, allow_empty: bool) -> Result<(), StoreError> {
+pub(super) fn private_file(file: &File, allow_empty: bool) -> Result<(), StoreError> {
     let metadata = file.metadata().map_err(|_| StoreError::Io)?;
     if !metadata.is_file()
         || metadata.uid() != uid()
@@ -146,7 +146,7 @@ fn verify_root(path: &Path, directory: &File) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn open_named(directory: &File, name: &str) -> Result<Option<File>, StoreError> {
+pub(super) fn open_named(directory: &File, name: &str) -> Result<Option<File>, StoreError> {
     match openat(
         directory,
         name,
@@ -235,7 +235,7 @@ impl WorkspaceIndexStore {
         })
     }
 
-    fn verify_identity(&self) -> Result<(), StoreError> {
+    pub(super) fn verify_identity(&self) -> Result<(), StoreError> {
         verify_root(&self.root, &self.directory)?;
         private_file(&self.lock, true)?;
         if self.lock.metadata().map_err(|_| StoreError::Io)?.len() != 0 {
@@ -465,13 +465,19 @@ impl WorkspaceIndexStore {
 }
 
 fn cleanup_owned_temp(directory: &File, identity: (u64, u64)) {
-    let Ok(Some(file)) = open_named(directory, TEMP_NAME) else {
+    cleanup_owned_named_temp(directory, TEMP_NAME, identity);
+}
+
+/// Remove `name` only when it is still the exact private temp created by the
+/// caller (`identity`); never removes a file another writer replaced it with.
+pub(super) fn cleanup_owned_named_temp(directory: &File, name: &str, identity: (u64, u64)) {
+    let Ok(Some(file)) = open_named(directory, name) else {
         return;
     };
     if private_file(&file, true).is_ok() {
         if let Ok(metadata) = file.metadata() {
             if (metadata.dev(), metadata.ino()) == identity {
-                let _ = unlinkat(directory, TEMP_NAME, AtFlags::empty());
+                let _ = unlinkat(directory, name, AtFlags::empty());
             }
         }
     }

@@ -1,6 +1,6 @@
 # Panelink CLI workflows
 
-Baseline: current source in the selected worktree, reviewed 2026-10-27. The
+Baseline: current source in the selected worktree, reviewed 2026-10-28. The
 recognized-agent and scoped-submit interfaces below have bounded private-runtime
 checks, including a local Codex `/status` check; broader provider/host acceptance
 remains open. The client and server must both support
@@ -167,8 +167,8 @@ index resolution, post-error exit discovery and exit-status retrieval still
 use separate inventory connections.
 
 Events are bounded metadata observations, including negotiated layout events.
-`events --pane N` pins the initial full target rather than following a replacement
-at that index. After a gap, expiry or restart, obtain fresh authoritative state.
+`events --pane N` pins the initially resolved full target rather than following a
+replacement at that index. After a gap, expiry or restart, obtain fresh authoritative state.
 
 ## Launch a managed process
 
@@ -189,14 +189,27 @@ unknown launch may have created a child; preserve the context and operation key.
 "$panelink_cli" workspace list
 "$panelink_cli" workspace project create Editors Main
 "$panelink_cli" workspace tab create PROJECT_ID Review
+"$panelink_cli" workspace tab rename PROJECT_ID TAB_ID "New name"
+"$panelink_cli" workspace tab close PROJECT_ID TAB_ID
 "$panelink_cli" workspace open PROJECT_ID TAB_ID
 ```
 
 Use actual IDs from `workspace list`. Creation and opening may start processes
 and require task authorization. Each workspace has its own server, panes and
-contexts. Legacy `pane`, `wait`, `events`, `history` and bare `panelink` commands
-continue to address Default/Main, even while another tab is visible. There is no
-implicit active-tab routing for these commands. For another routed server, use
+contexts. `tab create` registers metadata only; `tab rename` changes the display
+name only (revision-checked, never the route, cwd or processes). `tab close`
+stops that tab's server and processes, verifies the stop, and only then removes
+the tab from the open-tab list; saved history/layout files are kept. Closing the
+reserved Default/Main tab hides it from the tab strip but keeps it registered for
+legacy commands. A partial/unknown stop leaves the tab listed; do not retry with
+a fresh command blindly, re-check `workspace list` first.
+
+Bare `panelink` (no arguments) opens the selected visible tab with the
+project/tab strip. With no visible tabs it shows an interactive empty state
+(New tab / Detach) on a TTY; on a non-TTY it prints a notice and exits.
+`panelink attach` stays headerless. Legacy `pane`, `wait`, `events` and
+`history` commands continue to address Default/Main, even while another tab is
+visible. There is no implicit active-tab routing for these commands. For another routed server, use
 its discovered endpoint with the matching low-level `control` interface; do not
 invent high-level workspace selectors. `workspace stop` ends its processes;
 `workspace remove` requires it stopped and retains its saved files.
@@ -211,7 +224,7 @@ ordinary history reads do not resume conversations.
 
 | Need | Command or action | Meaning |
 | --- | --- | --- |
-| Open/reattach | `panelink` in an interactive terminal | Starts a workspace if needed |
+| Open/reattach | `panelink` in an interactive terminal | Opens the selected visible tab, starting it if needed |
 | Split/focus | Ctrl-B then `r/l/u/d`; arrows or Tab | Fresh shell split; baseline at most four panes |
 | Help/detach | Ctrl-B then `?`; Ctrl-X | Detach leaves server-owned processes running |
 | Inspect saved output | `history list`, `history show TARGET`, `history search TARGET TEXT` | Retained rows and screen checkpoints, separate from live reads |
