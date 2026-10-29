@@ -35,11 +35,19 @@ calling agent remains responsible for delegation, model choice and task success.
    to obtain the client revision, source fingerprint and source-dirty flag;
    `server-info --json` queries the running server separately and reports its
    negotiated capabilities. Old servers return `server_identity_unsupported`;
-   never substitute client identity for an unknown server. As observed on
-   2026-10-27, `~/.local/bin/panelink` links to this checkout's `bin/panelink`
-   launcher, which runs `target/debug/panelink`; a `cargo build` therefore
-   changes the CLI on PATH immediately. Resolve the link before assuming which
-   artifact runs.
+   never substitute client identity for an unknown server. On 2026-10-29,
+   `~/.local/bin/panelink` is an installed standalone 0.1.8 binary, copied from
+   `/private/tmp/panelink-codex-wheel-target/debug/panelink` in this checkout.
+   Building this checkout does not automatically update that installed copy.
+   Resolve the executable before assuming which artifact runs. To load a newly
+   installed client, detach with Ctrl-X and reopen `panelink`; this client wheel
+   FIFO fix works with an existing server, but the scoped-wheel fast path needs
+   negotiated capability1024 on the server. An old running server keeps the
+   legacy path. Restarting a server ends its existing panes and requires
+   separate authorization; a client install does not authorize that restart.
+   The user-approved restart on 2026-10-29 activated server0.1.8 with selected
+   `scoped_mouse_wheel` support. Re-discover server identity/capabilities rather
+   than treating that historical observation as proof for another session.
 2. Confirm the intended state root: `PANELINK_HOME` when set, otherwise
    `~/Library/Application Support/Panelink`. Git worktrees do not isolate this
    state or its running server. Keep the same executable, root and caller
@@ -109,6 +117,20 @@ target of a legacy CLI command.
   claim, whether it came from the UI or CLI. Release only after a known `Applied`
   submission. If release fails after `Applied`, report delivery confirmed and
   release unconfirmed.
+- Attached UI wheel input to a known alternate-screen pane may retain at most 32
+  fresh unsent events per pane for one second, FIFO with original direction and
+  coordinates. This bounded burst buffer is canceled by typing/paste, other
+  pointer input, navigation/overlays, resize or target/layout/mode changes,
+  disconnect, and failed/stale results. Each admitted event still uses a
+  scoped operation when optional capability1024 (`scoped_mouse_wheel`) is
+  negotiated, and the server rechecks target, mode and ownership. Applied for
+  that operation confirms PTY delivery plus scope release; non-Applied outcomes
+  do not confirm release. All retained claims, even the same caller's, block a
+  new scoped operation. Older servers use a read-only mode query followed by a
+  vacancy-only claim/send/release batch. A new client alone cannot enable the
+  fast path on an old server. Never resend an admitted wheel event after an unknown or partial
+  outcome; do not release an uncertain claim. This UI behavior does not add a
+  CLI command or change normal-history scrolling. See [interactive controls](references/interactive.md).
 - `agent list`, `agent get`, `agent read`, `agent prompt`, and `agent wait` are
   implemented for the default workspace when both client and server support
   capability 128 / schema 14. Old servers reject the feature as unsupported;

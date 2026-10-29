@@ -131,12 +131,14 @@ struct Fake {
     keys: Vec<(TargetRef, Vec<Key>)>,
     pastes: Vec<TargetRef>,
     scrolls: Vec<(TargetRef, u64, u16, u16, u16, bool)>,
+    alternate_wheels: Vec<(TargetRef, u64, u16, u16, bool)>,
     seeks: Vec<(TargetRef, u64, u16)>,
     splits: Vec<SplitPlan>,
     split_reply: Option<Result<TargetRef, &'static str>>,
     split_async: bool,
     split_request: Option<(u64, u64)>,
     reject_keys: bool,
+    reject_alternate_wheel: bool,
     closes: Vec<ClosePlan>,
     close_reply: Option<Result<CloseOutcome, &'static str>>,
     recovery_available: bool,
@@ -146,6 +148,20 @@ struct Fake {
 }
 
 impl Effects for Fake {
+    fn alternate_wheel(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<(), &'static str> {
+        if self.reject_alternate_wheel {
+            return Err("wheel admission failed");
+        }
+        self.alternate_wheels.push((target, epoch, column, row, up));
+        Ok(())
+    }
     fn send_keys(&mut self, target: TargetRef, keys: &[Key]) -> Result<(), &'static str> {
         if self.reject_keys {
             return Err("client busy: request queue full");
@@ -3653,24 +3669,27 @@ fn typing_resize_and_failure_discard_queued_scroll_without_replay() {
 }
 
 #[test]
-fn alternate_screen_wheels_are_not_coalesced_or_replayed() {
+fn alternate_screen_wheels_queue_fifo_with_coordinates_and_direction() {
     let (mut app, mut fake) = scroll_fixture();
     let mut bytes = text_checkpoint("alternate app", 1);
     bytes[80] = 1;
     app.load_screen(target(1), 2, &decode(&bytes).unwrap())
         .unwrap();
     wheel(&mut app, &mut fake, true);
-    wheel(&mut app, &mut fake, true);
+    wheel(&mut app, &mut fake, false);
+    assert_eq!(fake.alternate_wheels.len(), 1);
+    assert_eq!(app.screens[0].queued_alternate_wheel.len(), 1);
     app.apply_scroll_update(
         ScrollUpdate {
             target: target(1),
-            epoch: fake.scrolls[0].1,
+            epoch: fake.alternate_wheels[0].1,
             result: ScrollResult::MouseDelivered,
         },
         Instant::now(),
     );
     app.flush_scroll(Instant::now(), &mut fake);
-    assert_eq!(fake.scrolls.len(), 1);
+    assert_eq!(fake.alternate_wheels.len(), 2);
+    assert!(!fake.alternate_wheels[1].4);
     assert!(app.screens[0].queued_scroll.is_none());
     assert!(screen_text(&app).contains("alternate app"));
 }
@@ -5845,4 +5864,169 @@ fn late_rename_success_does_not_close_a_newer_dialog() {
     );
     assert!(applied);
     assert!(matches!(app.tab_dialog, Some(TabDialog::Actions { .. })));
+}
+
+fn alternate_fixture() -> (App, Fake) {
+    let (mut app, fake) = scroll_fixture();
+    let mut bytes = text_checkpoint("alternate app", 1);
+    bytes[80] = 1;
+    app.load_screen(target(1), 2, &decode(&bytes).unwrap())
+        .unwrap();
+    (app, fake)
+}
+
+fn complete_alternate(app: &mut App, fake: &Fake, now: Instant) {
+    app.apply_scroll_update(
+        ScrollUpdate {
+            target: target(1),
+            epoch: fake.alternate_wheels.last().unwrap().1,
+            result: ScrollResult::MouseDelivered,
+        },
+        now,
+    );
+}
+
+#[test]
+fn alternate_wheel_capacity_and_individual_expiry_are_bounded() {
+    let (mut app, mut fake) = alternate_fixture();
+    let now = Instant::now();
+    app.scroll_pane(target(1), 3, 3, true, now, &mut fake);
+    for i in 0..40 {
+        app.scroll_pane(target(1), 4, 5, i % 2 == 0, now, &mut fake);
+    }
+    assert_eq!(
+        app.screens[0].queued_alternate_wheel.len(),
+        ALT_WHEEL_CAPACITY
+    );
+    complete_alternate(&mut app, &fake, now);
+    app.flush_scroll(now + ALT_WHEEL_TTL + Duration::from_millis(1), &mut fake);
+    assert_eq!(fake.alternate_wheels.len(), 1);
+    assert!(app.screens[0].queued_alternate_wheel.is_empty());
+
+    app.scroll_pane(target(1), 3, 3, true, now, &mut fake);
+    app.scroll_pane(target(1), 4, 5, true, now, &mut fake);
+    app.scroll_pane(
+        target(1),
+        7,
+        8,
+        false,
+        now + Duration::from_millis(800),
+        &mut fake,
+    );
+    complete_alternate(&mut app, &fake, now);
+    app.flush_scroll(now + Duration::from_millis(1100), &mut fake);
+    let last = fake.alternate_wheels.last().unwrap();
+    assert_eq!((last.2, last.3, last.4), (6, 7, false));
+}
+
+#[test]
+fn alternate_wheel_queue_cancels_on_input_and_view_changes() {
+    for case in 0..10 {
+        let (mut app, mut fake) = alternate_fixture();
+        let now = Instant::now();
+        wheel(&mut app, &mut fake, true);
+        wheel(&mut app, &mut fake, false);
+        assert_eq!(app.screens[0].queued_alternate_wheel.len(), 1);
+        match case {
+            0 => {
+                feed(&mut app, &mut fake, b"x");
+            }
+            1 => {
+                app.handle_event(
+                    &Event::Paste("x".into()),
+                    now,
+                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                    &mut fake,
+                );
+            }
+            2 => app.set_host(25, 81),
+            3 => {
+                let mut layout = one_pane(2);
+                layout.panes[0].as_mut().unwrap().target.occupant_revision += 1;
+                app.set_layout(layout);
+            }
+            4 => {
+                let bytes = text_checkpoint("shell", 1);
+                app.load_screen(target(1), 3, &decode(&bytes).unwrap())
+                    .unwrap();
+            }
+            5 => app.apply_net_update(
+                NetUpdate {
+                    layout: None,
+                    pane_operations: None,
+                    screens: vec![],
+                    status: None,
+                    server_present: false,
+                },
+                now,
+            ),
+            6 => {
+                app.apply_scroll_update(
+                    ScrollUpdate {
+                        target: target(1),
+                        epoch: fake.alternate_wheels[0].1,
+                        result: ScrollResult::Failed("input outcome unknown"),
+                    },
+                    now,
+                );
+            }
+            7 => {
+                app.apply_scroll_update(
+                    ScrollUpdate {
+                        target: target(1),
+                        epoch: fake.alternate_wheels[0].1.wrapping_sub(1),
+                        result: ScrollResult::MouseDelivered,
+                    },
+                    now,
+                );
+            }
+            8 => {
+                feed(&mut app, &mut fake, b"\x02?");
+            }
+            _ => {
+                let mut layout = one_pane(2);
+                layout.panes[0].as_mut().unwrap().rect.columns -= 1;
+                app.set_layout(layout);
+            }
+        }
+        assert!(
+            app.screens
+                .iter()
+                .all(|s| s.queued_alternate_wheel.is_empty()),
+            "case {case}"
+        );
+        app.flush_scroll(now, &mut fake);
+        assert_eq!(fake.alternate_wheels.len(), 1, "replayed in case {case}");
+    }
+}
+
+#[test]
+fn alternate_output_keeps_fifo_and_failed_admission_is_not_retried() {
+    let (mut app, mut fake) = alternate_fixture();
+    let now = Instant::now();
+    wheel(&mut app, &mut fake, true);
+    app.scroll_pane(target(1), 4, 5, false, now, &mut fake);
+    app.scroll_pane(target(1), 7, 8, true, now, &mut fake);
+    let mut bytes = text_checkpoint("new alternate output", 1);
+    bytes[80] = 1;
+    app.load_screen(target(1), 3, &decode(&bytes).unwrap())
+        .unwrap();
+    assert_eq!(app.screens[0].queued_alternate_wheel.len(), 2);
+    complete_alternate(&mut app, &fake, now);
+    app.flush_scroll(now, &mut fake);
+    assert_eq!(
+        (
+            fake.alternate_wheels[1].2,
+            fake.alternate_wheels[1].3,
+            fake.alternate_wheels[1].4
+        ),
+        (3, 4, false)
+    );
+    complete_alternate(&mut app, &fake, now);
+    fake.reject_alternate_wheel = true;
+    app.flush_scroll(now, &mut fake);
+    fake.reject_alternate_wheel = false;
+    app.flush_scroll(now, &mut fake);
+    assert_eq!(fake.alternate_wheels.len(), 2);
+    assert!(app.screens[0].queued_alternate_wheel.is_empty());
 }
