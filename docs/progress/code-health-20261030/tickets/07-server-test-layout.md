@@ -1,6 +1,6 @@
 # 07: Organize embedded server scenarios
 
-**Status:** authorized; pending blockers and parent assignment
+**Status:** complete; parent body-equivalence and scoped tests verified
 
 **Lane:** Server test layout
 
@@ -12,11 +12,11 @@ Read the [specification](../SPEC.md) and [execution reference](../EXECUTION.md),
 
 ## Acceptance criteria
 
-- [ ] Move the existing multi-session main, split and runtime-helper test modules into named private test files while preserving their assertions, fixtures, ignored reasons and execution behavior.
-- [ ] Production owner fields and authority/lifecycle logic remain unchanged. Keep test-only helpers private through child-module visibility; avoid exposing internals or creating a generic test framework.
-- [ ] Capture the test list before and after; every scenario remains accounted for, allowing documented module-prefix renames. Inspect the diff for pure relocation plus minimal declarations.
-- [ ] Run every relocated scenario. The server core remains a single authority owner; describe this result as navigation improvement, not production decomposition.
-- [ ] Further runtime/compositor test movement is a separately leased follow-up after this small packet succeeds. Do not expand this ticket across all large files.
+- [x] Move the existing multi-session main, split and runtime-helper test modules into named private test files while preserving their assertions, fixtures, ignored reasons and execution behavior.
+- [x] Production owner fields and authority/lifecycle logic remain unchanged. Keep test-only helpers private through child-module visibility; avoid exposing internals or creating a generic test framework.
+- [x] Capture the test list before and after; every scenario remains accounted for, allowing documented module-prefix renames. Inspect the diff for pure relocation plus minimal declarations.
+- [x] Run every relocated scenario. The server core remains a single authority owner; describe this result as navigation improvement, not production decomposition.
+- [x] Further runtime/compositor test movement is a separately leased follow-up after this small packet succeeds. Do not expand this ticket across all large files.
 
 ## Completion
 

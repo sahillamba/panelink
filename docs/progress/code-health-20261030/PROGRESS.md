@@ -20,12 +20,12 @@ User authorized implementing the [plan](README.md) in this new worktree with par
 | --- | --- | --- |
 | 00 baseline | DONE; parent reviewed canonical8/8 | Luna reads source; writes only BASELINE.md; parent owns this progress file and other planning docs |
 | 01 host dispatch | running; Luna managed worktree | host.rs |
-| 02 pane viewport | design ready | parent design/integration; state.rs, state_tests.rs and private viewport child |
+| 02 pane viewport | parent takeover; worker no edits | state.rs, state_tests.rs and private viewport child |
 | 03 workspace presentation | blocked on 02 | same UI lease transferred after review |
 | 04 pane interaction | blocked on 03 | same UI lease transferred after review |
 | 05 rendering | blocked on 04 | same UI lease plus compose.rs |
 | 06 positive fixture barrier | DONE; parent implemented and verified | p3_attach_four.rs |
-| 07 server test layout | running; Luna managed worktree | multi_session.rs and private child test files |
+| 07 server test layout | parent verified; ready to commit | multi_session.rs and private child test files |
 | 08 integration/docs | blocked on 01,05,06,07 | parent; all shared evidence and usage-skill maintenance |
 
 Active worker leases are disjoint and recorded below. Parent holds the UI-state design and split-fixture lease. UI source changes are serial. Keep exact target, input nonreplayability, scoped-wheel negotiation/FIFO, metadata, modal, geometry, output commit and host restoration contracts from [SPEC.md](SPEC.md).
@@ -84,3 +84,17 @@ Task ID prefix for all three: `node:delegated-task:command%3Amcp%3A8e059d00-13c9
 Luna stopped with no edits/tests after finding that the generic applied status can be stale. Parent took over the unchanged packet. The fixture now derives the unique new full target from consecutive authoritative layouts, requires Menu/Close controls at every expected pane rectangle and the focus marker only at the new target rectangle, using shared pane_controls geometry. It explicitly rejects each pre-split capture (including prior successful split output) and waits for all three splits, replacing the negative-status predicate and300ms sleep. No product source or timeout changed.
 
 Parent tests: p3_attach_four2/0 in13.65s, log `/private/tmp/panelink-code-health-packet06-parent.log`; fmt and diff checks pass. Strict target Clippy also passes. Packet06 complete as a bounded test-only change; full combined gate remains packet08.
+
+## Packet02 design and lease
+
+Parent selected a private fixed-capacity Viewports owner for screen/history/request/cursor/queue state, immutable views for callers, named lifecycle/seek/scroll/completion transitions and existing Effects injection. App retains modal/route admission, layout/selection/pointer coordination and notices. No production mutable-slot escape hatch, whole-App forwarding helpers or duplicated caches. Preserve different invalidation scopes and early-return semantics. Parent will review02 before03. Model settings remain Luna/high in a separate managed worktree.
+
+Packet02 task client request `code-health-20261030-packet-02`; task suffix `delegate-task%3Acode-health-20261030-packet-02` on the recorded common task ID prefix. Worker based on4f58d29; isolated viewport target; full parent design included in task. Async completion wakes parent; no polling.
+
+## Wave1 review
+
+Packet07 bodies match original after rustfmt and production prefix is identical; parent scoped tests85/0. See [packet07 evidence](PACKET07.md).
+
+Packet02 worker stopped with no edits or checks; parent takes over in smaller transition groups within the same file lease. This is unfinished, not a failure of the chosen invariants.
+
+Packet01 source diff is a narrow shared host event dispatcher. Its final report claimed stalled workspace tests, but parent read raw completed tool activity: separate workspace targets finished5/0 (36.02s,36.00s,35.45s), with no failure output. Parent keeps the report discrepancy explicit and will verify the integrated result once, rather than treating pending output as failure or retrying to green. No matching worker-test process remains.
