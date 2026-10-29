@@ -1,0 +1,11 @@
+# Packet02: owned pane viewport transitions
+
+Parent implemented the extraction after the original worker stopped without edits. Private state/viewport.rs owns the fixed slots, preallocated live/history snapshots, cursor/request/queue/epoch transitions, seek/wheel admission, global flush priority and lifecycle resets. App supplies content coordinates and modal/route admission, consumes notices/dirty/buffer-change results and coordinates selection/pointer capture. Immutable production iter/index access prevents callers mutating slots; test-only mutable access preserves the existing fixture surface. No root viewport field mutation remains.
+
+Independent [transition review](VIEWPORT-REVIEW.md) found no material behavioral difference from ebbe798, including reset scopes, stale reply side effects, early-return extent capture, cursor/load failure order, FIFO32/1s and global one-in-flight/priority.
+
+Parent evidence: state151/0; full binary323/0; history protocol3/0; strict all-target Clippy pass. Logs `/private/tmp/panelink-viewport-tests.log`, `/private/tmp/panelink-viewport-bin.log`, `/private/tmp/panelink-viewport-clippy.log`. The first broader PTY run was4/1 at a missing tab Close control with a partial frame; retained at `/private/tmp/panelink-viewport-pty.log`. Focused track-caller diagnostic passed1/0, which did not erase that failure.
+
+Parent found a further fixture readiness gap: after a close, wait_header can accept the next route header while the prior modal is still present in a partial frame. The next identical confirmation predicate can then observe the old label. Added shell-cursor/modal-dismissal barriers before reopening confirmations, in addition to the earlier post-Cancel marker/PID barrier. This is test-only synchronization, not a production fix or proof that all timing failures are eliminated. Full workspace PTY suite now5/0 in36.07s; final focused scenario1/0 after adding the Cancel cursor barrier. Strict fixture Clippy passes. Logs `/private/tmp/panelink-viewport-tabs-barrier.log`, `/private/tmp/panelink-tabs-barrier-final.log`, `/private/tmp/panelink-tabs-barrier-clippy.log`. Original failures are retained.
+
+No public command/wire/storage/ownership semantics or installed runtime changed. Tests remain mandatory in the final combined gate; host/provider/reboot/clipboard/performance acceptance stays separate.

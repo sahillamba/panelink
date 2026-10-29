@@ -543,9 +543,11 @@ impl Client {
         self.write(click.as_bytes());
     }
 
+    #[track_caller]
     fn click_text(&mut self, label: &str) {
-        let (row, column) = screen_label_position(&self.parser(), label)
-            .unwrap_or_else(|| panic!("missing visible control {label:?}:\n{}", self.screen()));
+        let Some((row, column)) = screen_label_position(&self.parser(), label) else {
+            panic!("missing visible control {label:?}:\n{}", self.screen());
+        };
         self.click_cell(column, row);
     }
 
@@ -1726,6 +1728,7 @@ fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
     // wait. Fresh child output proves Cancel was consumed before reopening it.
     client.type_shell("printf 'UX06_CANCEL_PID_%d\\n' $$; printf 'UX06_CANCEL_READY\\n'");
     client.wait_marker("UX06_CANCEL_READY");
+    client.wait_normal_prompt("renamed shell restored after Cancel");
     assert_eq!(
         pane_shell_pid(&client.parser(), whole_root_cells(), "UX06_CANCEL_PID_"),
         shell_pid
@@ -1749,6 +1752,10 @@ fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
     );
     client.wait_header("Editors", "Main");
     let shell_server = fixture.route_root(project, shell).join("server");
+    // The new header can arrive before the rest of the route's frame clears
+    // the old confirmation. Wait for the restored shell cursor before another
+    // identical confirmation can satisfy a screen predicate.
+    client.wait_normal_prompt("Main shell restored after Shell tab close");
     let registry_after_close = fixture.run(&["workspace", "list"]);
     assert!(
         !server_lock_held(&shell_server),
@@ -1776,6 +1783,14 @@ fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
     });
     client.click_text("[Close tab]");
     client.wait_header("Default", "Main");
+    client.wait_screen(
+        "fallback shell restored after Editors tab close",
+        |parser, screen| {
+            !parser.screen().hide_cursor()
+                && !screen.contains("[Close tab]")
+                && !screen.contains("Close pending")
+        },
+    );
     let default_server = fixture.root.join("server");
     let default_generation_path = default_server.join("generation");
     let stopped_generation = fs::read(&default_generation_path)

@@ -4,6 +4,11 @@
 //! All network effects go through the [`Effects`] trait so the routing rules
 //! can be tested with a recording fake. No host IO happens here.
 
+mod viewport;
+use viewport::{ScreenSlot, Viewports};
+#[cfg(test)]
+use viewport::{ALT_WHEEL_CAPACITY, ALT_WHEEL_TTL};
+
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -24,7 +29,7 @@ use panelink::terminal::compose::{
     scrollbar_geometry, ComposeFrame, Compositor, CopyCaretOverlay, HistoryLabelKind, OverlayLine,
     OverlayStyle, OverlayView, PaneChrome, PaneContent, PaneView, Scrollbar, SelectionOverlay,
 };
-use panelink::terminal::{Key, ScreenSnapshot, TerminalError, TerminalSize};
+use panelink::terminal::{Key, ScreenSnapshot, TerminalError};
 use panelink::terminal_selection::{Point, SelectionError, ViewIdentity};
 use panelink::ui_protocol::{planned_split_size, LayoutReply, WireHistoryCursor, MAX_KEYS};
 use panelink::workspace_index::{
@@ -39,7 +44,9 @@ use super::keys::{
     pane_operation_key, workspace_navigation, workspace_tab_command, CopyModeKey, KeyAction,
     PaneOperationKey, WorkspaceTabCommand,
 };
-use super::net::{NetUpdate, ScrollResult, ScrollUpdate};
+#[cfg(test)]
+use super::net::ScrollResult;
+use super::net::{NetUpdate, ScrollUpdate};
 use super::pane_operations::PaneAction;
 use super::routes::{MetadataRequestId, MetadataResult};
 use super::selection::{capture, reanchor, FrozenDrag};
@@ -47,6 +54,8 @@ use crate::workspace_lifecycle::{
     CreateIntentId, CreateShellTab, CreateStatus, ExpectedRuntimeIdentity, LifecycleError,
     RenameOutcome,
 };
+#[cfg(test)]
+use panelink::terminal::TerminalSize;
 
 /// Largest root the client requests (terminal-core and compositor bound).
 pub(crate) const MAX_ROOT_ROWS: u16 = 80;
@@ -56,10 +65,6 @@ const MIN_ROOT_ROWS: u16 = panelink::pane_layout::MIN_PANE_ROWS;
 const MIN_ROOT_COLUMNS: u16 = panelink::pane_layout::MIN_PANE_COLUMNS;
 const STATUS_TTL: Duration = Duration::from_secs(3);
 const COPY_FEEDBACK_TTL: Duration = Duration::from_millis(1_500);
-// Claim/send/release and screen refreshes can take ~40 ms per report in a
-// debug build. Bound retained gestures without expiring an ordinary wheel burst.
-const ALT_WHEEL_TTL: Duration = Duration::from_secs(1);
-const ALT_WHEEL_CAPACITY: usize = 32;
 /// Navigation mode ends by itself after this long without a key.
 const NAV_TIMEOUT: Duration = Duration::from_secs(4);
 /// Bottom banner shown while navigation mode (after Ctrl-B) is active.
@@ -123,12 +128,6 @@ pub(crate) enum WorkspaceMetadataMutation {
         expected: ExpectedRuntimeIdentity,
         expected_revision: u64,
     },
-}
-
-fn add_history_rows(offset: u16, delta: u64) -> u16 {
-    u64::from(offset)
-        .saturating_add(delta)
-        .min(u64::from(panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS)) as u16
 }
 
 fn history_label_kind(slot: &ScreenSlot) -> Option<HistoryLabelKind> {
@@ -385,40 +384,6 @@ pub(crate) enum Flow {
     Quit,
 }
 
-struct ScreenSlot {
-    target: Option<TargetRef>,
-    revision: u64,
-    snapshot: ScreenSnapshot,
-    history: ScreenSnapshot,
-    history_revision: u64,
-    history_offset: u16,
-    /// Cursor against which `history_offset` is expressed.
-    history_base: Option<WireHistoryCursor>,
-    view_epoch: u64,
-    history_pending: bool,
-    history_inflight_offset: u16,
-    history_requested: u16,
-    history_total: u16,
-    history_extent_known: bool,
-    new_output: bool,
-    history_truncated: bool,
-    /// Bounded accumulated normal-history motion; never queued child input.
-    queued_scroll: Option<(i16, u16, u16)>,
-    /// Fresh, unsent gestures only; expiry and view changes discard them.
-    queued_alternate_wheel: std::collections::VecDeque<AlternateWheelIntent>,
-    queued_seek: Option<u16>,
-}
-
-#[derive(Clone, Copy)]
-struct AlternateWheelIntent {
-    target: TargetRef,
-    epoch: u64,
-    column: u16,
-    row: u16,
-    up: bool,
-    captured: Instant,
-}
-
 /// Client presentation state; PTYs and sessions stay server-owned.
 pub(crate) struct App {
     layout: Option<LayoutReply>,
@@ -460,7 +425,7 @@ pub(crate) struct App {
     persistent_status: Option<&'static str>,
     server_present: bool,
     host: (u16, u16),
-    screens: [ScreenSlot; crate::pane_layout::MAX_PANES],
+    screens: Viewports,
     selection: Option<FrozenDrag>,
     copy_mode: bool,
     copy_anchor: Option<Point>,
@@ -495,29 +460,7 @@ pub(crate) struct App {
 impl App {
     /// Preallocate both screen caches for the largest supported pane.
     pub(crate) fn new(host_rows: u16, host_columns: u16) -> Result<Self, TerminalError> {
-        let size = TerminalSize::new(MAX_ROOT_ROWS, MAX_ROOT_COLUMNS)?;
-        let slot = || -> Result<ScreenSlot, TerminalError> {
-            Ok(ScreenSlot {
-                target: None,
-                revision: 0,
-                snapshot: ScreenSnapshot::try_new(size)?,
-                history: ScreenSnapshot::try_new(size)?,
-                history_revision: 0,
-                history_offset: 0,
-                history_base: None,
-                view_epoch: 0,
-                history_pending: false,
-                history_inflight_offset: 0,
-                history_requested: 0,
-                history_total: 0,
-                history_extent_known: false,
-                new_output: false,
-                history_truncated: false,
-                queued_scroll: None,
-                queued_alternate_wheel: std::collections::VecDeque::new(),
-                queued_seek: None,
-            })
-        };
+        let screens = Viewports::new()?;
         Ok(Self {
             layout: None,
             pane_operations: None,
@@ -550,7 +493,7 @@ impl App {
             persistent_status: None,
             server_present: true,
             host: (host_rows, host_columns),
-            screens: [slot()?, slot()?, slot()?, slot()?],
+            screens,
             selection: None,
             copy_mode: false,
             copy_anchor: None,
@@ -1186,13 +1129,7 @@ impl App {
         self.pending_copy_id = None;
         self.latest_copy_attempt = [None; crate::pane_layout::MAX_PANES];
         self.copied_feedback = [None; crate::pane_layout::MAX_PANES];
-        for slot in &mut self.screens {
-            slot.queued_scroll = None;
-            slot.queued_alternate_wheel.clear();
-            slot.queued_seek = None;
-            slot.history_pending = false;
-            slot.view_epoch = slot.view_epoch.wrapping_add(1);
-        }
+        self.screens.invalidate_pending();
         let abandoned = self.abandon_pending_keys();
         let notice = if abandoned {
             "workspace switch preparing; queued keys discarded"
@@ -1720,13 +1657,7 @@ impl App {
             self.cancel_pointer_seek();
             self.pointer_divider = None;
             self.cancel_selection();
-            for slot in &mut self.screens {
-                slot.history_pending = false;
-                slot.queued_scroll = None;
-                slot.queued_alternate_wheel.clear();
-                slot.queued_seek = None;
-                slot.view_epoch = slot.view_epoch.wrapping_add(1);
-            }
+            self.screens.invalidate_pending();
             self.host = (rows, columns);
             let (rows, columns) = self.viewport();
             self.menu.set_viewport(rows, columns);
@@ -1953,56 +1884,7 @@ impl App {
             self.dismiss_close_confirmation();
             self.status = Some(("pane already closed", Instant::now()));
         }
-        for slot in &mut self.screens {
-            if let Some(target) = slot.target {
-                let new_pane = reply
-                    .panes
-                    .iter()
-                    .flatten()
-                    .find(|pane| pane.target == target);
-                if let Some(pane) = new_pane {
-                    let old_rect = self.layout.and_then(|layout| {
-                        layout
-                            .panes
-                            .iter()
-                            .flatten()
-                            .find(|old| old.target == target)
-                            .map(|old| old.rect)
-                    });
-                    if old_rect != Some(pane.rect) {
-                        slot.history_total = 0;
-                        slot.history_extent_known = false;
-                        slot.history_offset = 0;
-                        slot.history_base = None;
-                        slot.new_output = false;
-                        slot.history_truncated = false;
-                        slot.history_revision = 0;
-                        slot.view_epoch = slot.view_epoch.wrapping_add(1);
-                        slot.history_pending = false;
-                        slot.queued_scroll = None;
-                        slot.queued_alternate_wheel.clear();
-                        slot.queued_seek = None;
-                        slot.history_pending = false;
-                    }
-                } else {
-                    slot.target = None;
-                    slot.history_total = 0;
-                    slot.history_extent_known = false;
-                    slot.revision = 0;
-                    slot.history_offset = 0;
-                    slot.history_base = None;
-                    slot.new_output = false;
-                    slot.history_truncated = false;
-                    slot.history_revision = 0;
-                    slot.view_epoch = slot.view_epoch.wrapping_add(1);
-                    slot.history_pending = false;
-                    slot.queued_scroll = None;
-                    slot.queued_alternate_wheel.clear();
-                    slot.queued_seek = None;
-                    slot.history_pending = false;
-                }
-            }
-        }
+        self.screens.reconcile_layout(self.layout, &reply);
         self.layout = Some(reply);
         for attempt in &mut self.latest_copy_attempt {
             if attempt.is_some_and(|(target, _)| !captured_target_present(target)) {
@@ -2263,9 +2145,7 @@ impl App {
             update.server_present && (update.layout.is_some() || update.pane_operations.is_some());
         if !update.server_present {
             self.server_present = false;
-            for slot in &mut self.screens {
-                slot.queued_alternate_wheel.clear();
-            }
+            self.screens.discard_alternate();
             if self.pending_len > 0 {
                 self.abandon_pending_keys();
             }
@@ -2372,152 +2252,15 @@ impl App {
         {
             self.cancel_selection();
         }
-        let Some(slot_index) = self
-            .screens
-            .iter_mut()
-            .position(|slot| slot.target == Some(update.target) && slot.view_epoch == update.epoch)
-        else {
-            if let Some(slot) = self
-                .screens
-                .iter_mut()
-                .find(|slot| slot.target == Some(update.target))
-            {
-                slot.queued_alternate_wheel.clear();
-            }
-            return;
-        };
-        let slot = &mut self.screens[slot_index];
-        slot.history_pending = false;
-        match update.result {
-            ScrollResult::History {
-                revision,
-                offset_rows,
-                total_rows,
-                extent_known,
-                checkpoint,
-                row_wraps,
-                history_cursor,
-            } => {
-                slot.queued_alternate_wheel.clear();
-                slot.history_total = total_rows;
-                slot.history_extent_known = extent_known;
-                let requested_offset = slot.history_inflight_offset;
-                if extent_known && offset_rows < requested_offset {
-                    slot.history_truncated = true;
-                }
-                let mut effective_offset = offset_rows;
-                let mut cursor_epoch_changed = false;
-                if let (Some(reply_cursor), Some(live_cursor)) = (history_cursor, slot.history_base)
-                {
-                    if reply_cursor.epoch == live_cursor.epoch {
-                        if live_cursor.ordinal > reply_cursor.ordinal {
-                            let delta = live_cursor.ordinal - reply_cursor.ordinal;
-                            effective_offset = add_history_rows(effective_offset, delta);
-                            if extent_known {
-                                slot.history_total = add_history_rows(slot.history_total, delta);
-                            }
-                        }
-                        slot.history_base = Some(live_cursor);
-                    } else {
-                        slot.history_truncated = true;
-                        cursor_epoch_changed = true;
-                    }
-                } else if history_cursor.is_some() {
-                    slot.history_base = history_cursor;
-                }
-                // An older in-flight frame must not flash over the latest drag
-                // intent. Keep the last committed history snapshot until the
-                // replaceable queued seek completes.
-                let superseded = slot
-                    .queued_seek
-                    .is_some_and(|queued| queued != effective_offset)
-                    || cursor_epoch_changed;
-                match panelink::screen_checkpoint::decode(&checkpoint) {
-                    Ok(snapshot) if offset_rows > 0 => {
-                        if !superseded && slot.history.load_checkpoint(&snapshot).is_ok() {
-                            if let Some(wraps) = row_wraps.as_deref() {
-                                if slot.history.apply_row_wraps(wraps).is_err() {
-                                    slot.history.clear_row_wraps();
-                                    slot.queued_scroll = None;
-                                    slot.queued_alternate_wheel.clear();
-                                    slot.queued_seek = None;
-                                    self.set_status("history snapshot invalid", now);
-                                    return;
-                                }
-                            }
-                            slot.history_offset = effective_offset;
-                            slot.history_revision = revision;
-                            slot.history_requested = effective_offset;
-                            self.dirty = true;
-                        } else if !superseded {
-                            slot.queued_scroll = None;
-                            slot.queued_alternate_wheel.clear();
-                            slot.queued_seek = None;
-                            self.set_status("history snapshot invalid", now);
-                        }
-                    }
-                    Ok(_) => {
-                        if !superseded {
-                            slot.history.clear_row_wraps();
-                            slot.history_offset = 0;
-                            slot.history_revision = revision;
-                            slot.history_base = history_cursor;
-                            slot.new_output = false;
-                            slot.history_truncated = false;
-                            slot.history_requested = 0;
-                            self.dirty = true;
-                        }
-                    }
-                    Err(_) => {
-                        slot.queued_scroll = None;
-                        slot.queued_alternate_wheel.clear();
-                        slot.queued_seek = None;
-                        self.set_status("history snapshot invalid", now);
-                    }
-                }
-            }
-            ScrollResult::MouseDelivered => {
-                for intent in &mut slot.queued_alternate_wheel {
-                    intent.epoch = slot.view_epoch;
-                }
-                slot.queued_scroll = None;
-                slot.queued_seek = None;
-                slot.history_total = 0;
-                slot.history_extent_known = false;
-                slot.history_offset = 0;
-                slot.history_requested = 0;
-                slot.history_inflight_offset = 0;
-                slot.history_base = None;
-                slot.new_output = false;
-                slot.history_truncated = false;
-                slot.history_revision = 0;
-                self.dirty = true;
-            }
-            ScrollResult::AlternateScreenNoMouse => {
-                slot.queued_scroll = None;
-                slot.queued_alternate_wheel.clear();
-                slot.queued_seek = None;
-                slot.history_total = 0;
-                slot.history_extent_known = false;
-                slot.history_offset = 0;
-                slot.history_requested = 0;
-                slot.history_inflight_offset = 0;
-                slot.history_base = None;
-                slot.new_output = false;
-                slot.history_truncated = false;
-                slot.history_revision = 0;
-                self.dirty = true;
-                self.set_status("alternate-screen app; use its scroll keys", now);
-            }
-            ScrollResult::Failed(label) => {
-                slot.queued_scroll = None;
-                slot.queued_alternate_wheel.clear();
-                slot.queued_seek = None;
-                slot.history_requested = slot.history_offset;
-                self.set_status(label, now);
-            }
+        let target = update.target;
+        let change = self.screens.apply_scroll_update(update);
+        self.dirty |= change.dirty;
+        if let Some(label) = change.status {
+            self.set_status(label, now);
         }
-        self.finish_unknown_extent_capture(update.target);
+        if change.finish_extent {
+            self.finish_unknown_extent_capture(target);
+        }
     }
 
     fn finish_unknown_extent_capture(&mut self, target: TargetRef) {
@@ -2539,11 +2282,7 @@ impl App {
         let layout_current = self
             .layout
             .is_some_and(|layout| layout.revision == drag.layout_revision);
-        let Some(slot) = self
-            .screens
-            .iter_mut()
-            .find(|slot| slot.target == Some(target))
-        else {
+        let Some(slot) = self.screens.iter().find(|slot| slot.target == Some(target)) else {
             if !released {
                 self.pointer_seek = None;
             }
@@ -2569,10 +2308,7 @@ impl App {
         drag.grab_offset = drag.grab_offset.min(geometry.thumb.rows.saturating_sub(1));
         drag.awaiting_extent = false;
         drag.preview_offset = pointer_seek_offset(drag, drag.last_y);
-        if drag.preview_offset != slot.history_requested {
-            slot.queued_seek = Some(drag.preview_offset);
-            slot.history_requested = drag.preview_offset;
-        }
+        self.screens.queue_seek(target, drag.preview_offset);
         if !released {
             self.pointer_seek = Some(drag);
         }
@@ -2586,11 +2322,7 @@ impl App {
         else {
             return;
         };
-        let Some(slot) = self
-            .screens
-            .iter_mut()
-            .find(|slot| slot.target == Some(target))
-        else {
+        let Some(slot) = self.screens.iter().find(|slot| slot.target == Some(target)) else {
             self.cancel_pointer_seek();
             return;
         };
@@ -2615,10 +2347,7 @@ impl App {
         drag.grab_offset = drag.grab_offset.min(geometry.thumb.rows.saturating_sub(1));
         let previous = drag.preview_offset;
         drag.preview_offset = pointer_seek_offset(drag, drag.last_y);
-        if drag.preview_offset != slot.history_requested {
-            slot.queued_seek = Some(drag.preview_offset);
-            slot.history_requested = drag.preview_offset;
-        }
+        self.screens.queue_seek(target, drag.preview_offset);
         self.pointer_seek = Some(drag);
         self.dirty |= previous != drag.preview_offset;
     }
@@ -2630,25 +2359,7 @@ impl App {
         {
             self.deferred_thumb_release = None;
         }
-        if let Some(slot) = self
-            .screens
-            .iter_mut()
-            .find(|slot| slot.target == Some(target))
-        {
-            slot.history_offset = 0;
-            slot.history_base = None;
-            slot.history_revision = 0;
-            slot.history_pending = false;
-            slot.new_output = false;
-            slot.history_truncated = false;
-            slot.history_requested = 0;
-            slot.history_inflight_offset = 0;
-            slot.queued_scroll = None;
-            slot.queued_alternate_wheel.clear();
-            slot.queued_seek = None;
-            slot.view_epoch = slot.view_epoch.wrapping_add(1);
-            self.dirty = true;
-        }
+        self.dirty |= self.screens.return_to_live(target);
     }
 
     /// Seek the focused normal buffer to an absolute retained-history offset.
@@ -2691,47 +2402,11 @@ impl App {
         refresh_extent: bool,
         effects: &mut impl Effects,
     ) {
-        let Some(slot) = self
+        if let Some(label) = self
             .screens
-            .iter_mut()
-            .find(|slot| slot.target == Some(target))
-        else {
-            return;
-        };
-        if slot.snapshot.alternate_screen() {
-            return;
-        }
-        // A wheel's immediate reply may know only its current offset. That
-        // lower bound must not cap subsequent paging or oldest-history seeks.
-        let maximum = if !slot.history_extent_known {
-            panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS
-        } else {
-            slot.history_total.max(slot.history_offset)
-        };
-        let offset = requested.min(maximum);
-        if slot.history_pending {
-            if slot.history_requested != offset {
-                slot.queued_seek = Some(offset);
-                slot.history_requested = offset;
-            }
-            return;
-        }
-        if offset == slot.history_offset && !refresh_extent {
-            return;
-        }
-        let epoch = slot.view_epoch.wrapping_add(1);
-        slot.history_pending = true;
-        slot.history_requested = offset;
-        slot.history_inflight_offset = offset;
-        slot.queued_scroll = None;
-        slot.queued_alternate_wheel.clear();
-        match effects.seek_history(target, epoch, offset) {
-            Ok(()) => slot.view_epoch = epoch,
-            Err(label) => {
-                slot.history_pending = false;
-                slot.history_requested = slot.history_offset;
-                self.set_status(label, now);
-            }
+            .seek(target, requested, refresh_extent, effects)
+        {
+            self.set_status(label, now);
         }
     }
 
@@ -2759,89 +2434,8 @@ impl App {
         let content = shifted_rect(content, u16::from(self.workspace_index.is_some()));
         let point = pointer_content_point(content, screen_x, screen_y);
         let (column, row) = (point.column, point.row);
-        let Some(slot_index) = self
-            .screens
-            .iter()
-            .position(|slot| slot.target == Some(target))
-            .or_else(|| self.screens.iter().position(|slot| slot.target.is_none()))
-        else {
-            return;
-        };
-        let slot = &mut self.screens[slot_index];
-        if slot.target != Some(target) {
-            slot.queued_alternate_wheel.clear();
-            slot.target = Some(target);
-            slot.revision = 0;
-            slot.history_offset = 0;
-            slot.history_base = None;
-            slot.history_revision = 0;
-            slot.history_total = 0;
-            slot.history_extent_known = false;
-            slot.new_output = false;
-            slot.history_truncated = false;
-            slot.history_requested = 0;
-            slot.history_inflight_offset = 0;
-        }
-        if slot.revision > 0 && slot.snapshot.alternate_screen() {
-            if slot.history_pending || !slot.queued_alternate_wheel.is_empty() {
-                if slot.queued_alternate_wheel.len() < ALT_WHEEL_CAPACITY {
-                    slot.queued_alternate_wheel.push_back(AlternateWheelIntent {
-                        target,
-                        epoch: slot.view_epoch,
-                        column,
-                        row,
-                        up,
-                        captured: now,
-                    });
-                }
-                return;
-            }
-            let epoch = slot.view_epoch.wrapping_add(1);
-            match effects.alternate_wheel(target, epoch, column, row, up) {
-                Ok(()) => {
-                    slot.view_epoch = epoch;
-                    slot.history_pending = true;
-                }
-                Err(label) => {
-                    slot.queued_alternate_wheel.clear();
-                    self.set_status(label, now);
-                }
-            }
-            return;
-        }
-        // Preserve the in-flight epoch and combine only known normal-buffer
-        // gestures. Alternate-screen wheel delivery is nonreplayable child input.
-        if slot.history_pending || slot.queued_scroll.is_some() {
-            if slot.revision > 0 && !slot.snapshot.alternate_screen() {
-                let delta = if up { 3 } else { -3 };
-                let current = slot.queued_scroll.map_or(0, |queued| queued.0);
-                slot.queued_scroll = Some((
-                    current.saturating_add(delta).clamp(-8192, 8192),
-                    column,
-                    row,
-                ));
-            }
-            return;
-        }
-        let requested = if up {
-            slot.history_offset
-                .saturating_add(3)
-                .min(panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS)
-        } else {
-            slot.history_offset.saturating_sub(3)
-        };
-        let epoch = slot.view_epoch.wrapping_add(1);
-        slot.history_pending = true;
-        slot.history_inflight_offset = requested;
-        slot.history_requested = requested;
-        match effects.scroll(target, epoch, requested, column, row, up) {
-            Ok(()) => slot.view_epoch = epoch,
-            Err(label) => {
-                slot.history_pending = false;
-                slot.queued_scroll = None;
-                slot.queued_alternate_wheel.clear();
-                self.set_status(label, now);
-            }
+        if let Some(label) = self.screens.wheel(target, column, row, up, now, effects) {
+            self.set_status(label, now);
         }
     }
 
@@ -2857,109 +2451,11 @@ impl App {
             || self.tab_dialog.is_some()
             || self.picker_open
             || self.pane_mutations_blocked()
-            || self.screens.iter().any(|slot| slot.history_pending)
         {
             return;
         }
-        if let Some(index) = self
-            .screens
-            .iter()
-            .position(|slot| !slot.queued_alternate_wheel.is_empty())
-        {
-            let slot = &mut self.screens[index];
-            while slot.queued_alternate_wheel.front().is_some_and(|intent| {
-                now.saturating_duration_since(intent.captured) > ALT_WHEEL_TTL
-                    || slot.target != Some(intent.target)
-                    || slot.view_epoch != intent.epoch
-                    || !slot.snapshot.alternate_screen()
-                    || slot.revision == 0
-            }) {
-                slot.queued_alternate_wheel.pop_front();
-            }
-            let Some(intent) = slot.queued_alternate_wheel.pop_front() else {
-                return;
-            };
-            let epoch = slot.view_epoch.wrapping_add(1);
-            match effects.alternate_wheel(
-                intent.target,
-                epoch,
-                intent.column,
-                intent.row,
-                intent.up,
-            ) {
-                Ok(()) => {
-                    slot.view_epoch = epoch;
-                    slot.history_pending = true;
-                }
-                Err(label) => {
-                    slot.queued_alternate_wheel.clear();
-                    self.set_status(label, now);
-                }
-            }
-            return;
-        }
-        if let Some(index) = self
-            .screens
-            .iter()
-            .position(|slot| slot.queued_seek.is_some())
-        {
-            let slot = &mut self.screens[index];
-            let Some(offset) = slot.queued_seek.take() else {
-                return;
-            };
-            let Some(target) = slot.target else { return };
-            if slot.snapshot.alternate_screen() {
-                return;
-            }
-            let offset = if slot.history_extent_known {
-                offset.min(slot.history_total.max(slot.history_offset))
-            } else {
-                offset
-            };
-            let epoch = slot.view_epoch.wrapping_add(1);
-            match effects.seek_history(target, epoch, offset) {
-                Ok(()) => {
-                    slot.view_epoch = epoch;
-                    slot.history_pending = true;
-                    slot.history_inflight_offset = offset;
-                    slot.history_requested = offset;
-                }
-                Err(label) => self.set_status(label, now),
-            }
-            return;
-        }
-        let Some(index) = self
-            .screens
-            .iter()
-            .position(|slot| slot.queued_scroll.is_some())
-        else {
-            return;
-        };
-        let slot = &mut self.screens[index];
-        let Some((delta, column, row)) = slot.queued_scroll.take() else {
-            return;
-        };
-        let Some(target) = slot.target else {
-            return;
-        };
-        if delta == 0 || slot.snapshot.alternate_screen() {
-            return;
-        }
-        let requested = (i32::from(slot.history_offset) + i32::from(delta))
-            .clamp(0, i32::from(panelink::ui_protocol::MAX_HISTORY_OFFSET_ROWS))
-            as u16;
-        if requested == slot.history_offset {
-            return;
-        }
-        let epoch = slot.view_epoch.wrapping_add(1);
-        match effects.scroll(target, epoch, requested, column, row, delta > 0) {
-            Ok(()) => {
-                slot.view_epoch = epoch;
-                slot.history_pending = true;
-                slot.history_inflight_offset = requested;
-                slot.history_requested = requested;
-            }
-            Err(label) => self.set_status(label, now),
+        if let Some(label) = self.screens.flush(now, effects) {
+            self.set_status(label, now);
         }
     }
 
@@ -3009,75 +2505,9 @@ impl App {
         }) {
             self.cancel_selection();
         }
-        let index = self
-            .screens
-            .iter()
-            .position(|slot| slot.target == Some(target))
-            .or_else(|| self.screens.iter().position(|slot| slot.target.is_none()))
-            .ok_or(TerminalError::InvalidSize)?;
-        let buffer_changed = {
-            let slot = &mut self.screens[index];
-            let old_buffer =
-                (slot.target == Some(target)).then(|| slot.snapshot.alternate_screen());
-            let old_revision = slot.revision;
-            slot.snapshot.load_checkpoint(checkpoint)?;
-            if let Some(wraps) = row_wraps {
-                slot.snapshot.apply_row_wraps(wraps)?;
-            }
-            slot.target = Some(target);
-            slot.revision = revision;
-            let buffer_changed =
-                old_buffer.is_some_and(|old| old != slot.snapshot.alternate_screen());
-            if buffer_changed {
-                slot.history_total = 0;
-                slot.history_extent_known = false;
-                slot.history_offset = 0;
-                slot.history_base = None;
-                slot.new_output = false;
-                slot.history_truncated = false;
-                slot.history_pending = false;
-                slot.queued_scroll = None;
-                slot.queued_alternate_wheel.clear();
-                slot.queued_seek = None;
-                slot.view_epoch = slot.view_epoch.wrapping_add(1);
-            } else if slot.history_offset > 0 {
-                let revision_advanced = revision > old_revision;
-                slot.new_output |= revision_advanced;
-                if let Some(cursor) = history_cursor {
-                    match slot.history_base {
-                        Some(base) if base.epoch == cursor.epoch => {
-                            if cursor.ordinal >= base.ordinal {
-                                let delta = cursor.ordinal - base.ordinal;
-                                if delta > 0 {
-                                    slot.new_output = true;
-                                    slot.history_offset =
-                                        add_history_rows(slot.history_offset, delta);
-                                    if slot.history_extent_known {
-                                        slot.history_total =
-                                            add_history_rows(slot.history_total, delta);
-                                    }
-                                    slot.history_requested =
-                                        add_history_rows(slot.history_requested, delta);
-                                    if let Some(queued) = slot.queued_seek.as_mut() {
-                                        *queued = add_history_rows(*queued, delta);
-                                    }
-                                }
-                                slot.history_base = Some(cursor);
-                            }
-                        }
-                        Some(_) => {
-                            slot.history_truncated = true;
-                            slot.history_base = Some(cursor);
-                        }
-                        None => slot.history_base = Some(cursor),
-                    }
-                } else {
-                    // Older servers lack row identity: revision advances can
-                    // signal new output, but cannot compensate the frozen row offset.
-                }
-            }
-            buffer_changed
-        };
+        let buffer_changed =
+            self.screens
+                .load_screen(target, revision, checkpoint, row_wraps, history_cursor)?;
         if buffer_changed {
             self.cancel_selection();
             if self.pointer_divider.take().is_some()
@@ -3476,9 +2906,7 @@ impl App {
             || self.pane_mode.is_some()
             || self.prefix.is_some()
         {
-            for slot in &mut self.screens {
-                slot.queued_alternate_wheel.clear();
-            }
+            self.screens.discard_alternate();
         }
         if let (Some(button), Event::Mouse(mouse)) = (self.menu_release_latch, event) {
             if mouse.kind == MouseEventKind::Up(button) {
@@ -5738,18 +5166,7 @@ impl App {
 
     fn cancel_pointer_seek(&mut self) {
         if let Some(drag) = self.pointer_seek.take() {
-            if let Some(slot) = self
-                .screens
-                .iter_mut()
-                .find(|slot| slot.target == Some(drag.target))
-            {
-                slot.queued_seek = None;
-                slot.history_requested = if slot.history_pending {
-                    slot.history_inflight_offset
-                } else {
-                    slot.history_offset
-                };
-            }
+            self.screens.cancel_seek(drag.target);
         }
     }
 

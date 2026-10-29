@@ -1,12 +1,12 @@
 # Code health execution state
 
 ```text
-current-phase: 02 parent viewport extraction
+current-phase: 03 workspace presentation
 last-updated: 2026-10-30
 base: a1134ec4bc69e8a97b27ba2b0b61f2e446257440
 branch: refactor/code-health-20261030
 last-verified: fresh repaired canonical8/8; original baseline failure preserved
-next-action: parent implements02 in transition groups;03-05 remain blocked on review
+next-action: commit02 and implement03 workspace ownership;04-05 remain serial
 blocked-on: none for01,02,06,07; UI chain remains serial
 ```
 
@@ -20,7 +20,7 @@ User authorized implementing the [plan](README.md) in this new worktree with par
 | --- | --- | --- |
 | 00 baseline | DONE; parent reviewed canonical8/8 | Luna reads source; writes only BASELINE.md; parent owns this progress file and other planning docs |
 | 01 host dispatch | DONE; parent integrated and verified | host.rs |
-| 02 pane viewport | parent takeover; worker no edits | state.rs, state_tests.rs and private viewport child |
+| 02 pane viewport | DONE; parent implementation/review/checks | state.rs, state_tests.rs and private viewport child |
 | 03 workspace presentation | blocked on 02 | same UI lease transferred after review |
 | 04 pane interaction | blocked on 03 | same UI lease transferred after review |
 | 05 rendering | blocked on 04 | same UI lease plus compose.rs |
@@ -100,3 +100,11 @@ Packet02 worker stopped with no edits or checks; parent takes over in smaller tr
 Packet01 source diff is a narrow shared host event dispatcher. Its final report claimed stalled workspace tests, but parent read raw completed tool activity: separate workspace targets finished5/0 (36.02s,36.00s,35.45s), with no failure output. Parent keeps the report discrepancy explicit and will verify the integrated result once, rather than treating pending output as failure or retrying to green. No matching worker-test process remains.
 
 Packet01 parent result: [dispatcher review](PACKET01.md), workspace integration5/0 and host unit6/0 pass on integrated source. Packet07 committed15369d5. Packet02 worker completed with zero edits; parent owns state/test/viewport files and will implement the chosen state owner directly. Packet06 remains committed4f58d29. No active delegates.
+
+## Packet02 parent extraction in progress
+
+Parent implemented Viewports in private state/viewport.rs: owns fixed slots, completion/load/seek/wheel/global flush and lifecycle mutations. App has immutable iter/index access in production; mutable fixture access is cfg(test)-only. Root drops from7593 to7010lines, owner720lines, existing state_tests unchanged. Initial151state tests and full323binary tests pass; p3_scroll3/0 and strict all-target Clippy pass after Option-return lint cleanup. Workspace PTY4/1 failed at generic missingClose label with partial shell screen. Failure preserved in `/private/tmp/panelink-viewport-pty.log`; no packet02 completion. Parent added track_caller diagnostic only to identify which identical fixture close lookup fails; focused diagnostic log `/private/tmp/panelink-viewport-tab-diagnostic.log`. Parent owns both state files and this bounded fixture diagnostic. Independent review is next; do not start03.
+
+Viewport review task client request `code-health-20261030-viewport-review` on the recorded common T3 prefix; Luna/high read-only shared source, sole VIEWPORT-REVIEW.md lease. Completion wakes parent. Parent diagnostic command may still be running in isolated baseline target; inspect its result once on continuation.
+
+Packet02 complete: [evidence](PACKET02.md). Reviewer found no material transition regression; binary323/0, protocol3/0, all-target Clippy and corrected workspace target5/0 pass. First PTY failure retained with explicit limits. Parent addressed observed header-only/old-modal readiness gap via cursor restoration barriers.03 can start after02 commit.

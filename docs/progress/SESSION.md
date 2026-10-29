@@ -1,3 +1,13 @@
+## Code-health packet02 verified — 2026-10-30
+
+Private Viewports now owns pane cache/history/request/queue transitions with
+immutable production access; App retains modal/selection/pointer coordination.
+Existing state151/0, full binary323/0, protocol3/0 and strict all-target Clippy
+pass; independent transition review has no material finding. A further fixture
+header/old-modal readiness gap was guarded by restored-cursor barriers; workspace
+PTY5/0 and final focused scenario1/0 pass. Original failure is retained, not
+relabeled. See [packet02 evidence](code-health-20261030/PACKET02.md). No live install.
+
 ## Code-health packets01/07 verified — 2026-10-30
 
 Shared host event dispatch preserves handler/effect order; parent host unit6/0
