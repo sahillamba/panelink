@@ -2200,6 +2200,19 @@ fn dispatch_ui(
                 Err(error) => self::error(&error),
             }
         }
+        UiRequest::ScopedMouseWheelInput(input) => {
+            match owner.handle_scoped_mouse_wheel(
+                connection,
+                &input,
+                payload,
+                now,
+                |effects| effects.validate_mouse_wheel(input.column, input.row, input.up),
+                |effects| effects.mouse_wheel(input.column, input.row, input.up),
+            ) {
+                Ok(bytes) => reply(MultiReply::Response(bytes)),
+                Err(error) => self::error(&error),
+            }
+        }
         UiRequest::RootResize(resize) => {
             use crate::server::multi_session::RootResizeReply;
             match owner.handle_root_resize(
@@ -2535,6 +2548,7 @@ enum RequestSchema {
     UiHistory(TargetRef),
     UiKeys(OperationKey),
     UiMouseWheel(OperationKey),
+    UiScopedMouseWheel(OperationKey),
     UiResize(OperationKey),
     /// Schema-13 authoritative pane view query or keyed mutation.
     PaneOperations(crate::pane_operations_protocol::Request),
@@ -2576,6 +2590,9 @@ fn classify(payload: &[u8]) -> Option<RequestSchema> {
             UiRequest::HistoryQuery(query) => Some(RequestSchema::UiHistory(query.target)),
             UiRequest::KeyInput(view) => Some(RequestSchema::UiKeys(view.key())),
             UiRequest::MouseWheelInput(input) => Some(RequestSchema::UiMouseWheel(input.key)),
+            UiRequest::ScopedMouseWheelInput(input) => {
+                Some(RequestSchema::UiScopedMouseWheel(input.key))
+            }
             UiRequest::RootResize(resize) => Some(RequestSchema::UiResize(resize.key)),
         },
         [0, 9] => {
@@ -2627,6 +2644,16 @@ fn response_matches(schema: RequestSchema, payload: &[u8]) -> bool {
         }
         RequestSchema::UiMouseWheel(key) => {
             decode_response_payload(payload).is_ok_and(|response| response.key == key)
+        }
+        RequestSchema::UiScopedMouseWheel(key) => {
+            decode_response_payload(payload).is_ok_and(|response| {
+                response.key == key
+                    && matches!(
+                        response.body,
+                        crate::response_protocol::ResponseBody::Status(_)
+                            | crate::response_protocol::ResponseBody::Rejected(_)
+                    )
+            })
         }
         RequestSchema::Session(SessionRequest::Describe) => decode_session_info(payload).is_ok(),
         RequestSchema::Session(SessionRequest::Detach) => false,
@@ -3444,6 +3471,73 @@ mod tests {
         let panes = encode_pane_reply(&sample_pane_reply()).unwrap();
         assert!(response_matches(RequestSchema::Panes, &panes));
         assert!(!response_matches(RequestSchema::Close(KEY), &panes));
+    }
+
+    #[test]
+    fn scoped_mouse_wheel_classification_and_response_matching_are_keyed_and_typed() {
+        use crate::ui_protocol::{encode_scoped_mouse_wheel_input, ScopedMouseWheelInput};
+
+        let key = OperationKey {
+            generation: 3,
+            lease: 4,
+            sequence: 5,
+        };
+        let request = ScopedMouseWheelInput {
+            key,
+            target: TargetRef {
+                generation: 3,
+                workspace: 6,
+                pane: 7,
+                session: 8,
+                occupant_revision: 9,
+            },
+            column: 2,
+            row: 3,
+            up: true,
+        };
+        let bytes = encode_scoped_mouse_wheel_input(&request).unwrap();
+        assert!(matches!(classify(&bytes), Some(RequestSchema::UiScopedMouseWheel(k)) if k == key));
+
+        let mut applied = Vec::new();
+        crate::response_protocol::encode_response_payload(
+            &crate::response_protocol::Response {
+                key,
+                body: crate::response_protocol::ResponseBody::Status(
+                    crate::protocol::OperationStatus::Completed(crate::protocol::Outcome::Applied),
+                ),
+            },
+            &mut applied,
+        )
+        .unwrap();
+        assert!(response_matches(
+            RequestSchema::UiScopedMouseWheel(key),
+            &applied
+        ));
+        let other = OperationKey { sequence: 6, ..key };
+        assert!(!response_matches(
+            RequestSchema::UiScopedMouseWheel(other),
+            &applied
+        ));
+
+        let mut read = Vec::new();
+        crate::response_protocol::encode_response_payload(
+            &crate::response_protocol::Response {
+                key,
+                body: crate::response_protocol::ResponseBody::Read {
+                    target: request.target,
+                    source: crate::control_protocol::ReadSource::Screen,
+                    screen_revision: 1,
+                    truncated: false,
+                    text: "unexpected",
+                },
+            },
+            &mut read,
+        )
+        .unwrap();
+        assert!(!response_matches(
+            RequestSchema::UiScopedMouseWheel(key),
+            &read
+        ));
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

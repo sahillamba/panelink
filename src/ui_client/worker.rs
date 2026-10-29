@@ -61,6 +61,13 @@ enum Command {
         row: u16,
         up: bool,
     },
+    AlternateWheel {
+        target: TargetRef,
+        epoch: u64,
+        column: u16,
+        row: u16,
+        up: bool,
+    },
     SeekHistory {
         target: TargetRef,
         epoch: u64,
@@ -89,6 +96,7 @@ impl Command {
             Self::Keys { keys, .. } => keys.capacity() * std::mem::size_of::<Key>(),
             Self::Paste { text, .. } => text.capacity(),
             Self::Scroll { .. } => HISTORY_QUERY_BYTES + MOUSE_WHEEL_INPUT_BYTES,
+            Self::AlternateWheel { .. } => MOUSE_WHEEL_INPUT_BYTES,
             Self::SeekHistory { .. } => HISTORY_QUERY_BYTES,
             Self::Split { .. } => std::mem::size_of::<SplitPlan>(),
             Self::Close { .. } => std::mem::size_of::<ClosePlan>(),
@@ -139,6 +147,7 @@ pub(crate) struct WorkerHandle {
     thread: Option<JoinHandle<()>>,
     poll_pending: bool,
     scroll_pending: bool,
+    alternate_wheel_pending: bool,
     server_directory: PathBuf,
 }
 
@@ -169,6 +178,7 @@ impl WorkerHandle {
             thread: Some(thread),
             poll_pending: false,
             scroll_pending: false,
+            alternate_wheel_pending: false,
             server_directory: PathBuf::new(),
         }
     }
@@ -235,7 +245,7 @@ impl WorkerHandle {
     }
 
     pub(crate) fn poll(&mut self, view: NetView) {
-        if self.poll_pending || self.scroll_pending {
+        if self.poll_pending || (self.scroll_pending && !self.alternate_wheel_pending) {
             return;
         }
         if self
@@ -267,6 +277,7 @@ impl WorkerHandle {
                 }
                 if matches!(&result.result, ClientResult::Scroll(_)) {
                     self.scroll_pending = false;
+                    self.alternate_wheel_pending = false;
                 }
                 Some(result)
             }
@@ -425,6 +436,31 @@ impl Effects for WorkerHandle {
         Ok(())
     }
 
+    fn alternate_wheel(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<(), &'static str> {
+        if self.scroll_pending {
+            return Err("client busy: wheel request pending");
+        }
+        self.submit_with(MOUSE_WHEEL_INPUT_BYTES, INPUT_RESULT_RESERVATION, || {
+            Command::AlternateWheel {
+                target,
+                epoch,
+                column,
+                row,
+                up,
+            }
+        })?;
+        self.scroll_pending = true;
+        self.alternate_wheel_pending = true;
+        Ok(())
+    }
+
     fn split(
         &mut self,
         plan: SplitPlan,
@@ -486,6 +522,13 @@ impl Backend for Net {
                 epoch,
                 offset_rows,
             } => ClientResult::Scroll(self.seek_history(target, epoch, offset_rows)),
+            Command::AlternateWheel {
+                target,
+                epoch,
+                column,
+                row,
+                up,
+            } => ClientResult::Scroll(self.alternate_wheel(target, epoch, column, row, up)),
             Command::Split {
                 id,
                 focus_generation,

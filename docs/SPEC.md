@@ -123,8 +123,26 @@ Scrolling presentation update (2026-10-27): pending history reads preserve the
 last valid pane snapshot instead of replacing it with a loading placeholder.
 Normal-buffer wheel bursts accumulate a bounded row delta while one request
 is in flight; the next request uses the completed effective offset. View/target
-invalidation discards this pending movement. Alternate-screen child input is
-not accumulated or replayed. A vertical scrollbar occupies existing right
+invalidation discards this pending movement. For a known alternate-screen view,
+wheel delivery uses the existing typed server request directly, without a
+preliminary history read. While one event is in flight, the client may retain
+up to 32 fresh unsent wheel intents per pane in FIFO order, preserving direction
+and coordinates; each expires one second after capture. Overflow drops the new
+event. Unsent intents are canceled by typing or paste, non-wheel pointer input,
+navigation/overlays, resize, target/layout/view/mode changes, disconnect, or a
+failed/stale result. The server revalidates the target, mode, and ownership for
+each admitted event. With optional capability1024 (`scoped_mouse_wheel`), each event uses one keyed
+vacancy-scoped transaction (UI schema8 kind8,80bytes): mode/target/capacity are
+validated before ownership changes; every retained holder, including the same
+caller, is refused. Applied means complete PTY delivery and scoped release before
+another owner message; every other terminal outcome retains the holder under the
+existing expiry policy. Lost replies use status only, never resending input.
+Without negotiated support, wheel routing reads current mode before a
+vacancy-only claim/send/release sequence; stable no-mouse apps do not claim.
+Uncertain or partial delivery is never replayed, and an uncertain claim is not
+released. This short-lived unsent intent buffer does not authorize retrying an
+admitted event. Screen polling may continue during alternate-screen wheel input;
+normal-history poll suppression remains unchanged. A vertical scrollbar occupies existing right
 padding, excludes selection/copy content, and stays beneath menus. It shows the
 last observed history extent (refreshed by a bounded, read-only oldest-viewport
 query once per screen revision during scrolling). At live output before that

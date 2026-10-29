@@ -56,6 +56,9 @@ pub const CAPABILITY_AGENT_OBSERVATION: u64 = 128;
 /// Read-only server build identity query after handshake negotiation.
 pub const CAPABILITY_BUILD_IDENTITY: u64 = 256;
 
+/// Optional capability for vacancy-scoped mouse-wheel input.
+pub const CAPABILITY_SCOPED_MOUSE_WHEEL: u64 = 1024;
+
 /// Stable names for every capability bit supported by this protocol revision.
 pub const CAPABILITY_NAMES: &[(u64, &str)] = &[
     (CAPABILITY_READ, "read"),
@@ -68,6 +71,7 @@ pub const CAPABILITY_NAMES: &[(u64, &str)] = &[
     (CAPABILITY_PANE_OPERATIONS, "pane_operations"),
     (CAPABILITY_AGENT_OBSERVATION, "agent_observation"),
     (CAPABILITY_BUILD_IDENTITY, "build_identity"),
+    (CAPABILITY_SCOPED_MOUSE_WHEEL, "scoped_mouse_wheel"),
 ];
 
 /// All capability bits currently defined by this schema.
@@ -80,7 +84,8 @@ pub const KNOWN_CAPABILITIES: u64 = CAPABILITY_READ
     | CAPABILITY_HISTORY_CURSOR
     | CAPABILITY_PANE_OPERATIONS
     | CAPABILITY_AGENT_OBSERVATION
-    | CAPABILITY_BUILD_IDENTITY;
+    | CAPABILITY_BUILD_IDENTITY
+    | CAPABILITY_SCOPED_MOUSE_WHEEL;
 
 /// Client capability request for the v1.0 handshake.
 ///
@@ -559,6 +564,30 @@ mod tests {
             CAPABILITY_READ | CAPABILITY_INPUT
         );
         assert_eq!(validate_welcome(&hello, &welcome), Ok(()));
+    }
+
+    #[test]
+    fn scoped_wheel_is_optional_and_does_not_imply_input() {
+        let legacy = Hello {
+            nonce: 1,
+            required_capabilities: 0,
+            optional_capabilities: CAPABILITY_SCOPED_MOUSE_WHEEL,
+        };
+        let selected = negotiate(&legacy, CAPABILITY_READ | CAPABILITY_INPUT, 2, 3).unwrap();
+        assert_eq!(selected.selected_capabilities, 0);
+        let independent = negotiate(&legacy, CAPABILITY_SCOPED_MOUSE_WHEEL, 2, 3).unwrap();
+        assert_eq!(
+            independent.selected_capabilities,
+            CAPABILITY_SCOPED_MOUSE_WHEEL
+        );
+        assert_eq!(
+            CAPABILITY_NAMES
+                .iter()
+                .find(|(bit, _)| *bit == CAPABILITY_SCOPED_MOUSE_WHEEL)
+                .map(|(_, name)| *name),
+            Some("scoped_mouse_wheel")
+        );
+        assert_ne!(KNOWN_CAPABILITIES & CAPABILITY_SCOPED_MOUSE_WHEEL, 0);
     }
 
     #[test]

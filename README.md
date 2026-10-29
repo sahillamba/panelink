@@ -24,7 +24,7 @@ panelink
 
 That's it. The first run starts your workspace with one shell. Later runs
 reattach to it. The client version appears in the bottom-right pane margin
-(`v0.1.6` in this local build), matching `panelink --version`.
+(`v0.1.8` in this local build), matching `panelink --version`.
 Use `panelink build-info --json` for the client revision/source fingerprint and
 `panelink server-info --json` for the running server's identity and negotiated
 capabilities. An older server reports identity unsupported; the client version
@@ -61,6 +61,14 @@ refreshed when you scroll. Track clicks page through history, and dragging the
 thumb previews a position before seeking on release. An initial click on an
 unknown range reads its extent. Alternate-screen apps such as OpenCode
 keep their own scrolling behavior and do not show a Panelink history scrollbar.
+For mouse-reporting alternate-screen apps, wheel input is sent directly to the
+app. A short burst can retain up to 32 unsent wheel events per pane for up to
+one second while an earlier event is in flight; typing, other pointer actions,
+or a view/target change cancels unsent events. Normal-history scrolling is
+unchanged. Clients and servers that negotiate `scoped_mouse_wheel` handle each
+wheel event in one scoped transaction. Older servers use the query-first legacy
+path; installing a new client alone does not enable the fast path. Server restart
+ends its running panes, so keep activation separate from client installation.
 
 The visible pane Menu exposes split, zoom, swap, divider adjustment, copy,
 saved layout, shortcut help, close and detach. Mouse controls use terminal cell

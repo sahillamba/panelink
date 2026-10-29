@@ -258,6 +258,39 @@ impl Net {
         self.scroll_inner(target, epoch, offset_rows, None)
     }
 
+    /// Cached alternate-screen state selects this path, but the existing typed
+    /// server operation revalidates current modes and target before delivery.
+    /// Unsupported permits only a read-only mode refresh; input is never resent.
+    pub(crate) fn alternate_wheel(
+        &mut self,
+        target: TargetRef,
+        epoch: u64,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> ScrollUpdate {
+        if let Some(pane) = self.pane_mut(target) {
+            if pane.scoped_mouse_wheel {
+                let result = match pane.send_scoped_mouse_wheel(column, row, up) {
+                    Ok(MouseInputResult::Applied) => ScrollResult::MouseDelivered,
+                    Ok(MouseInputResult::Unsupported) => {
+                        return self.seek_history(target, epoch, 0);
+                    }
+                    Ok(MouseInputResult::NotOwner) => {
+                        ScrollResult::Failed("input is owned by another client; wheel not sent")
+                    }
+                    Ok(MouseInputResult::Failed(label)) | Err(label) => ScrollResult::Failed(label),
+                };
+                return ScrollUpdate {
+                    target,
+                    epoch,
+                    result,
+                };
+            }
+        }
+        self.scroll_inner(target, epoch, 0, Some((column, row, up)))
+    }
+
     fn scroll_inner(
         &mut self,
         target: TargetRef,
@@ -297,7 +330,36 @@ impl Net {
             if let Some((column, row, up)) =
                 wheel.filter(|_| view.alternate_screen() && view.mouse_reporting())
             {
-                if !pane.claim(Instant::now())? {
+                if pane.scoped_mouse_wheel {
+                    return match pane.send_scoped_mouse_wheel(column, row, up)? {
+                        MouseInputResult::Applied => Ok(ScrollResult::MouseDelivered),
+                        MouseInputResult::Unsupported => {
+                            let retry = encode_history_query(target, 0)
+                                .map_err(|_| "history request invalid")?;
+                            let retry = match pane.request(&retry)? {
+                                Reply::Snapshot(bytes) => bytes,
+                                Reply::Error(label) => return Err(label),
+                                Reply::Response(_) => return Err("history reply invalid"),
+                            };
+                            let retry = decode_history_reply_with_metadata(
+                                &retry,
+                                pane.screen_row_wraps,
+                                pane.history_cursor,
+                            )
+                            .map_err(|_| "history reply invalid")?;
+                            if retry.target() != target {
+                                return Err("history reply invalid");
+                            }
+                            validate_history_checkpoint(&retry)?;
+                            history_result(pane, retry, extent, probe_extent, discovers_extent)
+                        }
+                        MouseInputResult::NotOwner => {
+                            Err("input is owned by another client; wheel not sent")
+                        }
+                        MouseInputResult::Failed(label) => Err(label),
+                    };
+                }
+                if !pane.claim_vacant()? {
                     return Err("input is owned by another client; wheel not sent");
                 }
                 return match pane.send_mouse_wheel(column, row, up)? {
@@ -1250,6 +1312,150 @@ mod tests {
             pane,
             session: pane,
             occupant_revision: 1,
+        }
+    }
+
+    #[test]
+    fn scoped_wheel_no_mouse_feedback_is_read_only_on_new_and_legacy_servers() {
+        use panelink::handshake_protocol::{
+            Welcome, CAPABILITY_INPUT, CAPABILITY_READ, CAPABILITY_SCOPED_MOUSE_WHEEL,
+        };
+        use panelink::protocol_wire::{Frame, MessageKind};
+        use panelink::response_protocol::{
+            encode_response_payload, RejectionCode, Response, ResponseBody,
+        };
+        use panelink::transport::AuthenticatedStream;
+        use std::os::unix::{fs::DirBuilderExt, net::UnixStream};
+        struct Root(PathBuf);
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        for scoped in [false, true] {
+            let root = Root(PathBuf::from(format!(
+                "/private/tmp/pl-wheel-no-mouse-{}-{}-{scoped}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root.0)
+                .unwrap();
+            let target = target(7, 3, 1);
+            let now = Instant::now();
+            let (client, server) = UnixStream::pair().unwrap();
+            let mut client = AuthenticatedStream::new(client).unwrap();
+            client.enable_snapshot_reads().unwrap();
+            let mut pane = PaneConn::attach(
+                &root.0,
+                &root.0,
+                target,
+                Some(Bootstrap {
+                    stream: client,
+                    welcome: Welcome {
+                        nonce: 1,
+                        generation: 7,
+                        lease: 10,
+                        selected_capabilities: CAPABILITY_READ
+                            | CAPABILITY_INPUT
+                            | if scoped {
+                                CAPABILITY_SCOPED_MOUSE_WHEEL
+                            } else {
+                                0
+                            },
+                        ttl_seconds: 1800,
+                    },
+                    used: 0,
+                    started: now,
+                }),
+                now,
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            pane.owner_revision = Some(99);
+            let mut net = Net {
+                directory: root.0.clone(),
+                context_dir: root.0.clone(),
+                panes: vec![pane],
+                next_layout: now,
+                resize_sent: None,
+                endpoint_identity: None,
+                layout: None,
+                pane_operations: None,
+                pane_operations_pending: false,
+                screen_revisions: [(None, 0); panelink::pane_layout::MAX_PANES],
+                history_extents: [(None, 0, 0); panelink::pane_layout::MAX_PANES],
+            };
+            std::thread::scope(|scope| {
+                let peer_task = scope.spawn(move || {
+                    let mut peer = AuthenticatedStream::new(server).unwrap();
+                    peer.enable_snapshot_writes().unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    if scoped {
+                        let frame = peer.read_frame(deadline).unwrap();
+                        let panelink::ui_protocol::UiRequest::ScopedMouseWheelInput(input) =
+                            panelink::ui_protocol::decode_ui_request(frame.payload()).unwrap()
+                        else {
+                            panic!("expected scoped event");
+                        };
+                        let mut reply = Vec::new();
+                        encode_response_payload(
+                            &Response {
+                                key: input.key,
+                                body: ResponseBody::Rejected(RejectionCode::Unsupported),
+                            },
+                            &mut reply,
+                        )
+                        .unwrap();
+                        peer.write_frame(
+                            &Frame::new(MessageKind::Response, frame.request_id(), &reply).unwrap(),
+                            deadline,
+                        )
+                        .unwrap();
+                    }
+                    let frame = peer.read_frame(deadline).unwrap();
+                    assert_eq!(
+                        frame.payload(),
+                        panelink::ui_protocol::encode_history_query(target, 0).unwrap()
+                    );
+                    let snapshot = panelink::terminal::ScreenSnapshot::try_new(
+                        panelink::terminal::TerminalSize::new(22, 78).unwrap(),
+                    )
+                    .unwrap();
+                    let metadata =
+                        panelink::screen_checkpoint::CheckpointMetadata::new(target, 0, 1, 1)
+                            .unwrap();
+                    let mut checkpoint =
+                        panelink::screen_checkpoint::encode(&snapshot, &metadata).unwrap();
+                    checkpoint[80] = 1;
+                    let bytes = panelink::ui_protocol::prefix_history_reply(
+                        target, 1, 0, true, false, checkpoint,
+                    )
+                    .unwrap();
+                    peer.write_frame(
+                        &Frame::new(MessageKind::Snapshot, frame.request_id(), &bytes).unwrap(),
+                        deadline,
+                    )
+                    .unwrap();
+                    peer
+                });
+                let update = net.alternate_wheel(target, 7, 3, 4, true);
+                assert!(matches!(
+                    update.result,
+                    ScrollResult::AlternateScreenNoMouse
+                ));
+                assert_eq!(net.panes[0].owner_revision, Some(99));
+                let mut peer = peer_task.join().unwrap();
+                assert!(
+                    peer.read_frame(Instant::now() + Duration::from_millis(30))
+                        .is_err(),
+                    "unexpected ownership RPC"
+                );
+            });
         }
     }
 

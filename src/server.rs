@@ -790,6 +790,11 @@ impl GlobalAuthority {
             | history_cursor
             | pane_operations
             | agent_observation
+            | if self.allow_input {
+                capability_mask & crate::handshake_protocol::CAPABILITY_SCOPED_MOUSE_WHEEL
+            } else {
+                0
+            }
             | (capability_mask & crate::handshake_protocol::CAPABILITY_BUILD_IDENTITY))
             & capability_mask;
 

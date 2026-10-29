@@ -1,3 +1,19 @@
+## PR #13 base-branch conflict resolution — 2026-10-29
+
+Confirmed clean `t3/compact-modal-layouts` at `8a81dcf` matches PR #13.
+Merged `origin/main` at `96e2a1c`, following existing merge-commit history.
+The sole conflict was concurrent test additions in `src/ui_client/state_tests.rs`;
+retained the compact/padded modal test and all incoming alternate-wheel fixtures
+and tests. Modal geometry and main's scoped wheel delivery both remain intact.
+
+Isolated CARGO_TARGET_DIR=/private/tmp/panelink-layout-client-target with
+RUST_TEST_THREADS=1: canonical scripts/verify_non_ui.py passes all 8 checks
+(root Rust, decoder, component fingerprints, fmt, strict all-target Clippy,
+build, Python and docs). Python 233 tests/1 skip; docs 412 files/0 findings.
+Ignored Rust and host/provider acceptance remain separate; no live install or
+server restart performed for this merge. Verification log is local at
+/private/tmp/panelink-pr13-merge-verification.log.
+
 ## Tab actions padding — 2026-10-29
 
 Added two-column inner padding, blank top/bottom rows and heading separation,
@@ -26,6 +42,105 @@ Markdown checker 405 files/0 findings. Skill quick_validate could not run becaus
 Python lacks PyYAML; frontmatter and local Markdown links checked separately.
 
 # Implementation session checkpoint — 2026-10-17
+
+## Server0.1.8 activated — 2026-10-29 (current)
+
+User explicitly approved server restart ending all running panes. `panelink stop`
+confirmed stopped; `panelink recovery relaunch` returned Applied for the saved two
+pane positions with fresh zsh shells. Codex/provider conversations not resumed.
+`server-info` now confirms client/server0.1.8, shared dirty fingerprint
+`f565cab6c33f3b53`, generation15642535525154316810, mask2047 including
+`scoped_mouse_wheel`1024. Two live shells, vacant owners/revision1, verified.
+User can run `panelink`, reopen/resume Codex and test actual scrolling. No live
+input/provider calls, further source/build changes, commits or pushes. Runtime
+capability activation is confirmed; real Codex/native-host acceptance remains open.
+See [activation evidence](SCOPED-WHEEL-RESULT-2026-10-29.md).
+
+## Scoped wheel0.1.8 installed, server activation pending — 2026-10-29
+
+Canonical verifier passed8/8: rootRust1595/0/20ignored, decoder39/0,
+components/fmt/strictClippy/build pass, Python233run1skip, docs412/0. Explicit
+private wheel benchmark delivered20/20 and finalvisible20; Astra bounded source
+review found no material findings. [Final evidence](SCOPED-WHEEL-RESULT-2026-10-29.md).
+
+Installed standalone `~/.local/bin/panelink`0.1.8, dirty fingerprint
+`f565cab6c33f3b53`, SHA256
+`0de732e355163a6f1e8a2b6a0c308389542545d93cc55025d1efcd16e244a254`.
+Backup0.1.7: `~/.local/bin/panelink.before-0.1.8-20261029-181325`.
+Live server remains0.1.4 generation15642535525154316809, mask511; new scope
+requires capability1024. Client update alone does not activate it. Restart ends
+current panes, so await explicit user authorization before stopping the server.
+No live input, restart, commit or push; Codex/native-host acceptance remains open.
+
+## Scoped wheel source0.1.8 follow-up — 2026-10-29 (current)
+
+User reports installed0.1.7 still slow. Astra identified six sequential RPCs and
+six full flushes/report; real ContextFile measurements independently reproduced
+~52-54 logical reports/sec for that component alone. Astra specified a single
+capability-negotiated scoped operation. Luna delivered codec and partial server/
+client packets; parent reviewed/corrected implementation and completed the core
+transaction, negotiation, revision-boundary and fake-peer tests directly.
+See [implementation result](SCOPED-WHEEL-RESULT-2026-10-29.md) for exact behavior,
+checks, measurements, remaining acceptance and source changes.
+
+Current source package0.1.8 (root lock entry only; no dependency change).
+Focused codec23/0, handshake15/0, server/classification9/0 and clientscoped5/0.
+One-process private receiver: burst20/20 final visible233.4ms, first126.9ms;
+historical0.1.6 server/same new client+receiver: burst20/20 final588.9ms. These
+are coarse fixtures, not real Codex acceptance or first-latency improvement.
+Live read-only discovery recognizes pane2 Codex; exact READ-only mode query shows
+alternate screen and mouse reporting both true. No pane input/transcript saved.
+
+Full canonical verifier running `/private/tmp/panelink-scoped-wheel-verification.log`;
+independent Astra review pending. All builds isolated in
+`/private/tmp/panelink-codex-wheel-target`; installed client0.1.7 and old server0.1.4
+unchanged. New server activation is separate because restart terminates panes.
+No commit/push; phase host/provider gates remain open.
+
+## Local scroll-fix install 0.1.7 — 2026-10-29
+
+User authorized build/install. Package and root lock entry bumped to0.1.7,
+README badge updated. Offline isolated debug build copied atomically to
+`~/.local/bin/panelink` (standalone file), SHA256
+`807bd881e81f81583b4fb8cc5cf85cfc1096f1cb585baf8953851a57c2f09318`.
+Backup: `~/.local/bin/panelink.before-0.1.7-20261029-172159`.
+Installed build-info: revision`daf28a63f062`, source fingerprint
+`a801d78163935d32`, dirty=true (uncommitted wheel changes).
+
+Post-bump library921/0/4ignored and binary317/0 passed. Opt-in exact-report
+wheel fixture passed paced20/20 and burst20/20 (first99.2/92.3ms, coarse20ms
+polling). Prior full canonical8/8 remains recorded below; no full rerun for
+version-only change. Installed --version/build-info verified and SHA matched.
+Server-info confirms the same server generation and old0.1.4 build, untouched.
+Detach attached client with Ctrl-X, then run `panelink` to see v0.1.7 and test
+scrolling. No server restart, child input, commit or push. Real Codex/native
+host acceptance remains open. Usage skill installation guidance updated.
+
+## Codex mouse-wheel repair — 2026-10-29 (current)
+
+Branch `t3/improve-codex-mouse-scroll-speed`, starting at clean `daf28a63f062`.
+User requested measurements and cost-effective Luna implementation. Parent
+review/integration repaired the initial queue-clear/cancellation defects and
+completed deterministic tests. Known alternate-screen wheel gestures now use a
+direct typed delivery path; unsent FIFO cap32, one-second independent expiry,
+cancel on input/view/target/mode/disconnect/error changes, per-event server
+checks and no uncertain replay. Normal-history path stays separate; screen
+polls can update during alternate-screen deliveries. No new dependencies or
+wire changes. Detailed [plan/evidence](CODEX-WHEEL-2026-10-29.md) and
+[original baseline](CODEX-WHEEL-BASELINE-2026-10-29.md).
+
+Parent binary317/0 and strict all-target Clippy pass. Exact-report private PTY
+fixture requires paced20/20 and burst20/20, observed first117.3/120.1ms during
+broader verification (20ms polling). Initial baseline burst1/20; first-response
+latency improvement is NOT established. Canonical verification passes8/8: root Rust1580/0/18ignored, decoder39/0,
+component sources/fmt/strict Clippy/build pass, Python233run/1skip, docs407/0.
+Opt-in wheel fixture run explicitly. Independent Luna source review found no
+material issues. Final evidence is linked above.
+
+All builds use `/private/tmp/panelink-codex-wheel-target`; no live-pane input,
+install, restart, commit or push. Installed client0.1.6 remains clean daf28a63f062;
+running server0.1.4 remains dirty10d81c24cdc2. Synthetic measurements do not close
+real Codex, Apple Terminal or other phase gates.
 
 ## UI/UX UX-07 and UX-08 — 2026-10-28 (current, read first)
 

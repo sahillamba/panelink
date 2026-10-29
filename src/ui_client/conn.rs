@@ -15,7 +15,8 @@ use panelink::control_protocol::{encode_request_payload, Command, ControlRequest
 use panelink::event_protocol::{decode_event, EventBody};
 use panelink::handshake_protocol::{
     decode_welcome, validate_welcome, Hello, Welcome, CAPABILITY_EVENTS, CAPABILITY_HISTORY_CURSOR,
-    CAPABILITY_INPUT, CAPABILITY_PANE_OPERATIONS, CAPABILITY_READ, CAPABILITY_SCREEN_ROW_WRAPS,
+    CAPABILITY_INPUT, CAPABILITY_PANE_OPERATIONS, CAPABILITY_READ, CAPABILITY_SCOPED_MOUSE_WHEEL,
+    CAPABILITY_SCREEN_ROW_WRAPS,
 };
 use panelink::protocol::{OperationKey, OperationStatus, Outcome};
 use panelink::protocol_wire::{Frame, MessageKind};
@@ -30,7 +31,8 @@ use panelink::session_protocol::{
 use panelink::terminal::Key;
 use panelink::transport::{AuthenticatedStream, OwnedFrame};
 use panelink::ui_protocol::{
-    encode_attach_target, encode_key_input, encode_mouse_wheel_input, KeyInput, MouseWheelInput,
+    encode_attach_target, encode_key_input, encode_mouse_wheel_input,
+    encode_scoped_mouse_wheel_input, KeyInput, MouseWheelInput, ScopedMouseWheelInput,
 };
 use panelink::watch_protocol::WatchStatus;
 
@@ -153,6 +155,9 @@ pub(crate) struct PaneConn {
     pub(crate) screen_row_wraps: bool,
     /// Negotiated only by multi-session leases that were originally granted it.
     pub(crate) history_cursor: bool,
+    /// Optional vacancy-scoped wheel capability selected by this lease.
+    pub(crate) scoped_mouse_wheel: bool,
+    input_capability: bool,
     pub(crate) cursor: u64,
     /// Our input-owner revision when we hold the claim.
     pub(crate) owner_revision: Option<u64>,
@@ -353,6 +358,9 @@ impl PaneConn {
         self.screen_row_wraps = welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS != 0;
         self.history_cursor = welcome.selected_capabilities & CAPABILITY_HISTORY_CURSOR != 0;
         self.pane_operations = welcome.selected_capabilities & CAPABILITY_PANE_OPERATIONS != 0;
+        self.scoped_mouse_wheel =
+            welcome.selected_capabilities & CAPABILITY_SCOPED_MOUSE_WHEEL != 0;
+        self.input_capability = welcome.selected_capabilities & CAPABILITY_INPUT != 0;
         self.stream = Some(stream);
         self.next_request = 1;
         self.lease_schedule.renewed(started);
@@ -377,6 +385,8 @@ impl PaneConn {
             pane_operations: welcome.selected_capabilities & CAPABILITY_PANE_OPERATIONS != 0,
             screen_row_wraps: welcome.selected_capabilities & CAPABILITY_SCREEN_ROW_WRAPS != 0,
             history_cursor: welcome.selected_capabilities & CAPABILITY_HISTORY_CURSOR != 0,
+            scoped_mouse_wheel: welcome.selected_capabilities & CAPABILITY_SCOPED_MOUSE_WHEEL != 0,
+            input_capability: welcome.selected_capabilities & CAPABILITY_INPUT != 0,
             cursor: 0,
             owner_revision: None,
             lease_schedule: LeaseSchedule::new(renewed_at),
@@ -549,7 +559,27 @@ impl PaneConn {
     /// Acquire input ownership for one input batch. Callers must not retain it
     /// across idle polling or reads.
     pub(crate) fn claim(&mut self, _now: Instant) -> Result<bool, &'static str> {
+        self.claim_inner(false)
+    }
+
+    /// Wheel input may claim only vacancy, never renew a retained claim.
+    pub(crate) fn claim_vacant(&mut self) -> Result<bool, &'static str> {
+        if !self.input_capability {
+            return Ok(false);
+        }
+        self.claim_inner(true)
+    }
+
+    fn claim_inner(&mut self, vacant_only: bool) -> Result<bool, &'static str> {
         let info = self.describe()?;
+        if vacant_only {
+            if info.target != self.target {
+                return Err("target changed; wheel not sent");
+            }
+            if info.owner_lease != 0 {
+                return Ok(false);
+            }
+        }
         if info.owner_lease != 0 && info.owner_lease != self.lease() {
             self.owner_revision = None;
             return Ok(false);
@@ -672,6 +702,52 @@ impl PaneConn {
             }
             ResponseOutcome::ServerError(label) => MouseInputResult::Failed(label),
             _ => MouseInputResult::Failed("mouse input not delivered"),
+        })
+    }
+
+    /// Deliver a vacancy-scoped wheel event as one durable keyed RPC.
+    pub(crate) fn send_scoped_mouse_wheel(
+        &mut self,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<MouseInputResult, &'static str> {
+        if !self.scoped_mouse_wheel || !self.input_capability {
+            return Ok(MouseInputResult::Unsupported);
+        }
+        let target = self.target;
+        let (key, reply) = self.keyed(|key| {
+            encode_scoped_mouse_wheel_input(&ScopedMouseWheelInput {
+                key,
+                target,
+                column,
+                row,
+                up,
+            })
+            .map(|bytes| bytes.to_vec())
+            .map_err(|_| "request_invalid")
+        })?;
+        Ok(match self.settle_response(key, reply)? {
+            ResponseOutcome::Status(OperationStatus::Completed(Outcome::Applied)) => {
+                MouseInputResult::Applied
+            }
+            ResponseOutcome::Rejected(RejectionCode::Unsupported) => MouseInputResult::Unsupported,
+            ResponseOutcome::Rejected(
+                RejectionCode::InputBusy | RejectionCode::StaleOwner | RejectionCode::ExpiredOwner,
+            ) => MouseInputResult::NotOwner,
+            ResponseOutcome::Status(OperationStatus::Completed(Outcome::Failed)) => {
+                MouseInputResult::Failed("wheel delivery failed; ownership release not confirmed")
+            }
+            ResponseOutcome::Status(OperationStatus::Completed(Outcome::Partial)) => {
+                MouseInputResult::Failed("wheel delivery partial; ownership release not confirmed")
+            }
+            ResponseOutcome::Status(OperationStatus::Completed(Outcome::Unknown)) => {
+                MouseInputResult::Failed("wheel delivery unknown; ownership release not confirmed")
+            }
+            ResponseOutcome::ServerError(label) => MouseInputResult::Failed(label),
+            _ => MouseInputResult::Failed(
+                "mouse input not delivered; ownership release not confirmed",
+            ),
         })
     }
 
@@ -999,7 +1075,8 @@ pub(crate) fn handshake(
             | CAPABILITY_EVENTS
             | CAPABILITY_SCREEN_ROW_WRAPS
             | CAPABILITY_HISTORY_CURSOR
-            | CAPABILITY_PANE_OPERATIONS,
+            | CAPABILITY_PANE_OPERATIONS
+            | CAPABILITY_SCOPED_MOUSE_WHEEL,
     };
     let mut payload = encode_session_hello(&SessionHello {
         hello,
@@ -1111,6 +1188,222 @@ fn nonce() -> u64 {
 mod tests {
     use super::*;
 
+    struct ScopedPeerRoot(PathBuf);
+    impl Drop for ScopedPeerRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scoped_peer_fixture() -> (ScopedPeerRoot, PaneConn, AuthenticatedStream) {
+        use std::os::unix::{fs::DirBuilderExt, net::UnixStream};
+        let root = ScopedPeerRoot(PathBuf::from(format!(
+            "/private/tmp/pl-scoped-peer-{}-{}",
+            std::process::id(),
+            nonce()
+        )));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root.0)
+            .unwrap();
+        let target = TargetRef {
+            generation: 7,
+            workspace: 3,
+            pane: 1,
+            session: 1,
+            occupant_revision: 1,
+        };
+        let now = Instant::now();
+        let (client, server) = UnixStream::pair().unwrap();
+        let pane = PaneConn::attach(
+            &root.0,
+            &root.0,
+            target,
+            Some(Bootstrap {
+                stream: AuthenticatedStream::new(client).unwrap(),
+                welcome: Welcome {
+                    nonce: 1,
+                    generation: 7,
+                    lease: 10,
+                    selected_capabilities: CAPABILITY_READ
+                        | CAPABILITY_INPUT
+                        | CAPABILITY_SCOPED_MOUSE_WHEEL,
+                    ttl_seconds: 1800,
+                },
+                used: 0,
+                started: now,
+            }),
+            now,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        (root, pane, AuthenticatedStream::new(server).unwrap())
+    }
+
+    fn scoped_peer_status(
+        peer: &mut AuthenticatedStream,
+        request_id: u64,
+        key: OperationKey,
+        outcome: Outcome,
+    ) {
+        use panelink::response_protocol::{encode_response_payload, Response};
+        let mut bytes = Vec::new();
+        encode_response_payload(
+            &Response {
+                key,
+                body: ResponseBody::Status(OperationStatus::Completed(outcome)),
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        peer.write_frame(
+            &Frame::new(MessageKind::Response, request_id, &bytes).unwrap(),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scoped_wheel_one_keyed_request_preserves_local_owner_and_settles_once() {
+        for outcome in [
+            Outcome::Applied,
+            Outcome::Failed,
+            Outcome::Partial,
+            Outcome::Unknown,
+        ] {
+            let (_root, mut pane, mut peer) = scoped_peer_fixture();
+            pane.owner_revision = Some(77);
+            std::thread::scope(|scope| {
+                let peer_task = scope.spawn(move || {
+                    let frame = peer
+                        .read_frame(Instant::now() + Duration::from_secs(2))
+                        .unwrap();
+                    assert_eq!(
+                        frame.payload().len(),
+                        panelink::ui_protocol::SCOPED_MOUSE_WHEEL_INPUT_BYTES
+                    );
+                    let panelink::ui_protocol::UiRequest::ScopedMouseWheelInput(request) =
+                        panelink::ui_protocol::decode_ui_request(frame.payload()).unwrap()
+                    else {
+                        panic!("not scoped wheel");
+                    };
+                    assert_eq!((request.column, request.row, request.up), (4, 5, false));
+                    assert_eq!(request.key.sequence, 1);
+                    scoped_peer_status(&mut peer, frame.request_id(), request.key, outcome);
+                    peer
+                });
+                let result = pane.send_scoped_mouse_wheel(4, 5, false).unwrap();
+                if outcome == Outcome::Applied {
+                    assert_eq!(result, MouseInputResult::Applied);
+                } else {
+                    assert!(
+                        matches!(result, MouseInputResult::Failed(label) if label.contains("ownership release not confirmed"))
+                    );
+                }
+                assert_eq!(pane.owner_revision, Some(77));
+                assert_eq!(pane.context.context().next_sequence(), 2);
+                assert_eq!(pane.context.context().uncertain(), None);
+                let mut peer = peer_task.join().unwrap();
+                assert!(
+                    peer.read_frame(Instant::now() + Duration::from_millis(30))
+                        .is_err(),
+                    "extra Claim/Release/Describe RPC"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn scoped_wheel_wrong_reply_key_reconciles_by_status_without_replay() {
+        let (_root, mut pane, mut peer) = scoped_peer_fixture();
+        std::thread::scope(|scope| {
+            let peer_task = scope.spawn(move || {
+                let frame = peer
+                    .read_frame(Instant::now() + Duration::from_secs(2))
+                    .unwrap();
+                let panelink::ui_protocol::UiRequest::ScopedMouseWheelInput(request) =
+                    panelink::ui_protocol::decode_ui_request(frame.payload()).unwrap()
+                else {
+                    panic!("not scoped wheel");
+                };
+                scoped_peer_status(
+                    &mut peer,
+                    frame.request_id(),
+                    OperationKey {
+                        sequence: request.key.sequence + 1,
+                        ..request.key
+                    },
+                    Outcome::Applied,
+                );
+                let status = peer
+                    .read_frame(Instant::now() + Duration::from_secs(2))
+                    .unwrap();
+                assert_eq!(
+                    panelink::session_protocol::decode_session_request(status.payload()).unwrap(),
+                    SessionRequest::OperationStatus { key: request.key }
+                );
+                scoped_peer_status(
+                    &mut peer,
+                    status.request_id(),
+                    request.key,
+                    Outcome::Applied,
+                );
+            });
+            assert_eq!(
+                pane.send_scoped_mouse_wheel(4, 5, true),
+                Err("response_invalid")
+            );
+            assert!(pane.context.context().uncertain().is_some());
+            pane.settle_uncertain().unwrap();
+            assert_eq!(pane.context.context().uncertain(), None);
+            assert_eq!(pane.context.context().next_sequence(), 2);
+            peer_task.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn scoped_wheel_legacy_vacancy_claim_refuses_retained_same_caller() {
+        let (_root, mut pane, mut peer) = scoped_peer_fixture();
+        pane.owner_revision = Some(9);
+        let target = pane.target;
+        std::thread::scope(|scope| {
+            let peer_task = scope.spawn(move || {
+                let frame = peer
+                    .read_frame(Instant::now() + Duration::from_secs(2))
+                    .unwrap();
+                assert_eq!(
+                    panelink::session_protocol::decode_session_request(frame.payload()).unwrap(),
+                    SessionRequest::Describe
+                );
+                let bytes = panelink::session_protocol::encode_session_info(
+                    &panelink::session_protocol::SessionInfo {
+                        target,
+                        owner_lease: 10,
+                        owner_revision: 9,
+                        owner_expires_secs: 30,
+                        child_exited: false,
+                    },
+                )
+                .unwrap();
+                peer.write_frame(
+                    &Frame::new(MessageKind::Response, frame.request_id(), &bytes).unwrap(),
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .unwrap();
+                peer
+            });
+            assert_eq!(pane.claim_vacant(), Ok(false));
+            assert_eq!(pane.owner_revision, Some(9));
+            assert_eq!(pane.context.context().next_sequence(), 1);
+            let mut peer = peer_task.join().unwrap();
+            assert!(
+                peer.read_frame(Instant::now() + Duration::from_millis(30))
+                    .is_err(),
+                "retained claim was renewed"
+            );
+        });
+    }
+
     #[test]
     fn old_server_reject_label_explains_scroll_compatibility() {
         for label in [
@@ -1184,6 +1477,74 @@ mod tests {
         );
         assert_ne!(welcome.selected_capabilities & CAPABILITY_HISTORY_CURSOR, 0);
         server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_wheel_requires_both_selected_capabilities_without_reserving() {
+        use panelink::handshake_protocol::{Welcome, CAPABILITY_READ};
+        use std::os::unix::{fs::DirBuilderExt, net::UnixStream};
+        use std::time::SystemTime;
+
+        for selected in [CAPABILITY_READ, CAPABILITY_READ | CAPABILITY_INPUT] {
+            let serial = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let directory = PathBuf::from(format!(
+                "/private/tmp/panelink-scoped-cap-{}-{serial}",
+                std::process::id()
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&directory)
+                .unwrap();
+            let target = TargetRef {
+                generation: 7,
+                workspace: 3,
+                pane: 1,
+                session: 1,
+                occupant_revision: 1,
+            };
+            let now = Instant::now();
+            let (client_socket, peer_socket) = UnixStream::pair().unwrap();
+            let mut pane = PaneConn::attach(
+                &directory,
+                &directory,
+                target,
+                Some(Bootstrap {
+                    stream: AuthenticatedStream::new(client_socket).unwrap(),
+                    welcome: Welcome {
+                        nonce: 1,
+                        generation: 7,
+                        lease: 10,
+                        selected_capabilities: selected,
+                        ttl_seconds: 1800,
+                    },
+                    used: 0,
+                    started: now,
+                }),
+                now,
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            assert_eq!(
+                pane.send_scoped_mouse_wheel(4, 5, true).unwrap(),
+                MouseInputResult::Unsupported
+            );
+            assert_eq!(pane.context.context().next_sequence(), 1);
+            assert_eq!(pane.context.context().uncertain(), None);
+            peer_socket
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
+            let mut byte = [0];
+            use std::io::Read;
+            assert!(
+                matches!(peer_socket.try_clone().unwrap().read(&mut byte), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut)
+            );
+            drop(pane);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[cfg(unix)]
