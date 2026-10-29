@@ -1722,6 +1722,14 @@ fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
         screen.contains("Ends all tab processes") && screen.contains("[Close tab] [Cancel]")
     });
     client.click_text("[Cancel]");
+    // A still-captured first confirmation must not satisfy the second one's
+    // wait. Fresh child output proves Cancel was consumed before reopening it.
+    client.type_shell("printf 'UX06_CANCEL_PID_%d\\n' $$; printf 'UX06_CANCEL_READY\\n'");
+    client.wait_marker("UX06_CANCEL_READY");
+    assert_eq!(
+        pane_shell_pid(&client.parser(), whole_root_cells(), "UX06_CANCEL_PID_"),
+        shell_pid
+    );
     assert!(server_lock_held(
         &fixture.route_root(project, shell).join("server")
     ));

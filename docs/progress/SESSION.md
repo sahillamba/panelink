@@ -1,3 +1,30 @@
+## Code-health baseline verified — 2026-10-30
+
+Fresh canonical verifier passes8/8 after the bounded positive-cancel fixture
+repair; parent reviewed the independent report and exact marker/PID checks.
+The original failing baseline log is preserved. Packet00 is complete; host and
+server-test organization lanes are next. See [execution state](code-health-20261030/PROGRESS.md).
+Product/native/provider/clipboard/reboot/performance gates remain separate.
+
+## Code-health baseline fixture repair — 2026-10-30
+
+New worktree baseline recorded 7/8 checks: the tab-create/rename/close fixture
+could accept its first, still-captured close confirmation as the second one
+after clicking Cancel. Parent added fresh child acknowledgment and same-PID
+verification before reopening. Focused test passes; affected-target and canonical
+verification remain pending. See [execution state](code-health-20261030/PROGRESS.md).
+No production source, timeout contract, live runtime or installed binary changed.
+
+## Code-health implementation started — 2026-10-30 (current worktree)
+
+User authorized parent orchestration in the new
+`refactor/code-health-20261030` worktree at `a1134ec4bc69e8a97b27ba2b0b61f2e446257440`.
+The portable plan is now [durable in this worktree](code-health-20261030/README.md);
+[PROGRESS.md](code-health-20261030/PROGRESS.md) records blockers, exclusive leases
+and verification. GPT-6-Luna will run the fresh serial canonical baseline first.
+No source changes, live pane use, installed-binary changes or push. Existing
+product acceptance gates and historical results below remain separate.
+
 ## PR #13 CI fixture repair — 2026-10-29
 
 Confirmed clean PR branch/head `t3/compact-modal-layouts` / `7a91f45`;
