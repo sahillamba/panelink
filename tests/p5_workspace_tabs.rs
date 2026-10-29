@@ -1578,8 +1578,9 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
                 && shell_prompt_is_visible(parser, right)
         })
     });
-    // Wheel once to obtain the real retained extent, then drag the rendered
-    // thumb. Its coordinates come from VT100 cells in the pane's margin.
+    // A fast wheel supplies only a conservative extent. This client defers
+    // a drag until extent discovery completes. Wait for actual oldest content
+    // after the deferred release before starting the next drag.
     pointer_event(&mut client, 64, COLUMNS as usize - 5, 8, false);
     client.wait_screen("normal history thumb", |parser, _| {
         parser.screen().hide_cursor()

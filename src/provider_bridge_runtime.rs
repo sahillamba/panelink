@@ -1679,9 +1679,11 @@ mod tests {
             runtime.request_validation("session_manual"),
             Err(ControlSubmitError::Unavailable)
         );
+        // The failure reply is sent before the worker's completion signal.
+        // Receiving the reply does not establish that the worker has exited.
         assert!(matches!(
-            runtime.io_done.try_recv(),
-            Ok(()) | Err(TryRecvError::Disconnected)
+            runtime.io_done.recv_timeout(Duration::from_secs(2)),
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected)
         ));
         let _ = runtime.finish(Instant::now() + Duration::from_secs(1));
     }
