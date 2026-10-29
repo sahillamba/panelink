@@ -1556,8 +1556,9 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
                 && shell_prompt_is_visible(parser, right)
         })
     });
-    // Wheel once to obtain the real retained extent, then drag the rendered
-    // thumb. Its coordinates come from VT100 cells in the pane's margin.
+    // A fast wheel supplies only a conservative extent. The first scrollbar
+    // press discovers the real extent and seeks oldest; it does not begin a
+    // drag. Wait for actual oldest content before pressing the new thumb.
     pointer_event(&mut client, 64, COLUMNS as usize - 5, 8, false);
     client.wait_screen("normal history thumb", |parser, _| {
         parser.screen().hide_cursor()
@@ -1567,13 +1568,13 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
     let thumb_row = (2..ROWS as usize - 1)
         .find(|&row| pane_cell_text(&client.parser(), row, COLUMNS as usize - 1) == "#")
         .expect("visible right history thumb");
-    pointer_event(&mut client, 0, COLUMNS as usize - 1, thumb_row, false);
-    pointer_event(&mut client, 32, COLUMNS as usize - 1, 2, false);
-    pointer_event(&mut client, 0, COLUMNS as usize - 1, 2, true);
-    client.wait_screen("oldest history through scrollbar drag", |parser, _| {
+    click_cell(&mut client, COLUMNS as usize - 1, thumb_row);
+    client.wait_screen("resolved oldest history extent", |parser, _| {
         pane_cell_text(parser, 2, COLUMNS as usize - 1) == "#"
-            && split_pane_cells(parser)
-                .is_some_and(|(_, right)| pane_marker_position(parser, right, "PTR_TAIL").is_none())
+            && split_pane_cells(parser).is_some_and(|(_, right)| {
+                pane_marker_position(parser, right, "PTR_ROW_001").is_some()
+                    && pane_marker_position(parser, right, "PTR_TAIL").is_none()
+            })
     });
     pointer_event(&mut client, 0, COLUMNS as usize - 1, 2, false);
     pointer_event(

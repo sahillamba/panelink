@@ -101,3 +101,18 @@ The local repair verifier also exposed a provider fixture race in
 the failure reply precedes the worker's completion notification. Its immediate
 channel probe now uses a two-second bounded receive, preserving the failure,
 unavailable-state and no-reconnect assertions. Production behavior is unchanged.
+
+## Scrollbar extent discovery barrier
+
+PR 11 run [40839537665](https://github.com/sahillamba/panelink/actions/runs/40839537665)
+passed the earlier repaired tests but failed the pointer integration test.
+Fast wheel scrolling leaves a conservative extent; the first scrollbar press
+discovers the authoritative extent and seeks oldest instead of beginning a
+drag. The fixture previously accepted a preview thumb and absent tail as proof
+that this asynchronous operation had completed, then could issue another
+extent-discovery press instead of the intended drag.
+
+The fixture now explicitly clicks to discover the extent and waits for the
+positive oldest-content marker before dragging the resolved thumb to live.
+The live-tail marker and prompt assertions remain. Application behavior,
+timeouts and ignored-test counts are unchanged.
