@@ -505,7 +505,7 @@ fn raw_resize(
 }
 
 #[test]
-fn agent_cli_list_read_claim_send_wait_events_close_and_stale_indices() {
+fn agent_cli_list_read_claim_send_wait_close_and_stale_indices() {
     let mut fixture = Fixture::new();
     let startup = fixture.start();
     assert_eq!(field(&startup, "action"), Some("serve"), "{startup}");
@@ -698,34 +698,15 @@ fn agent_cli_list_read_claim_send_wait_events_close_and_stale_indices() {
         eprintln!("L18 exit-status acceptance exercised documented pane-collapse fallback");
     }
 
-    let events = fixture
-        .command()
-        .args([
-            "events",
-            "--timeout",
-            "5",
-            "--json",
-            "--as",
-            "event-observer",
-        ])
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("spawn event stream");
-    thread::sleep(Duration::from_millis(300));
+    // Closing the last pane retires the server. A polling observer may be
+    // between requests then, so final-event delivery is not guaranteed.
+    // close_event_and_stale_index_remain_scoped_to_current_layout covers
+    // pane_closed delivery while a sibling keeps the workspace alive.
     let closed = Fixture::assert_ok(
         &fixture.agent(&["pane", "close", "1", "--json", "--as", "closer"]),
         "pane close",
     );
     assert_eq!(field(&closed, "action"), Some("pane_close"), "{closed}");
-    let event_output = events.wait_with_output().expect("wait for event timeout");
-    assert!(event_output.status.success(), "events: {event_output:?}");
-    let events = String::from_utf8_lossy(&event_output.stdout);
-    assert!(
-        events
-            .lines()
-            .any(|line| line.contains("\"event\":\"pane_closed\"")),
-        "{events}"
-    );
     fixture.wait_for_server_stop();
 
     let stale = fixture.agent(&["pane", "read", "2", "--json"]);
