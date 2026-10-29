@@ -1286,25 +1286,27 @@ impl App {
         if rows == 0 || columns == 0 {
             return None;
         }
+        let width = columns.min(48);
+        let left = columns.saturating_sub(width) / 2;
         let overlay_rows = rows.min(2);
         let top = rows.saturating_sub(overlay_rows);
         let button_y = top.saturating_add(overlay_rows.saturating_sub(1));
         let header_offset = u16::from(self.workspace_index.is_some());
         Some(ConfirmUiGeometry {
             overlay: Rect {
-                x: 0,
+                x: left,
                 y: top,
                 rows: overlay_rows,
-                columns,
+                columns: width,
             },
             close: Rect {
-                x: 0,
+                x: left,
                 y: button_y.saturating_add(header_offset),
                 rows: 1,
                 columns: 7,
             },
             cancel: Rect {
-                x: 9,
+                x: left + 9,
                 y: button_y.saturating_add(header_offset),
                 rows: 1,
                 columns: 8,
@@ -4577,21 +4579,29 @@ impl App {
         true
     }
 
+    fn padded_tab_actions(&self) -> bool {
+        let (rows, columns) = self.viewport();
+        rows >= 9 && columns >= 28
+    }
+
     fn tab_dialog_geometry(&self) -> Option<Rect> {
         let dialog = self.tab_dialog.as_ref()?;
         let (rows, columns) = self.viewport();
-        let overlay_rows = match dialog {
-            TabDialog::Actions { .. } | TabDialog::Rename { .. } => 4,
-            TabDialog::Close { .. } => 3,
+        let (overlay_rows, preferred_columns) = match dialog {
+            TabDialog::Actions { .. } if self.padded_tab_actions() => (9, 28),
+            TabDialog::Actions { .. } => (4, 28),
+            TabDialog::Rename { .. } => (4, 56),
+            TabDialog::Close { .. } => (3, 44),
         };
         if rows < overlay_rows || columns == 0 {
             return None;
         }
+        let width = columns.min(preferred_columns);
         Some(Rect {
-            x: 0,
+            x: columns.saturating_sub(width) / 2,
             y: rows.saturating_sub(overlay_rows) / 2,
             rows: overlay_rows,
-            columns,
+            columns: width,
         })
     }
 
@@ -4650,8 +4660,13 @@ impl App {
                     if let Some(rect) = geometry {
                         let screen_y = rect.y + u16::from(self.workspace_index.is_some());
                         let row = mouse.row.saturating_sub(screen_y);
-                        if (1..=3).contains(&row) && mouse.column < rect.columns {
-                            self.activate_tab_action(route, usize::from(row - 1), now);
+                        let first = if self.padded_tab_actions() { 3 } else { 1 };
+                        let padding = if self.padded_tab_actions() { 2 } else { 0 };
+                        if (first..first + 3).contains(&row)
+                            && (rect.x + padding..rect.x + rect.columns - padding)
+                                .contains(&mouse.column)
+                        {
+                            self.activate_tab_action(route, usize::from(row - first), now);
                         }
                     }
                 }
@@ -4693,9 +4708,13 @@ impl App {
                         let save_y = rect
                             .y
                             .saturating_add(3 + u16::from(self.workspace_index.is_some()));
-                        if mouse.row == save_y && mouse.column < 6 {
+                        if mouse.row == save_y
+                            && (rect.x..rect.x + rect.columns.min(6)).contains(&mouse.column)
+                        {
                             self.submit_tab_rename(now);
-                        } else if mouse.row == save_y && (7..15).contains(&mouse.column) {
+                        } else if mouse.row == save_y
+                            && (rect.x + 7..rect.x + rect.columns.min(15)).contains(&mouse.column)
+                        {
                             self.cancel_tab_dialog();
                         }
                     }
@@ -4740,10 +4759,13 @@ impl App {
                         let button_y = rect
                             .y
                             .saturating_add(2 + u16::from(self.workspace_index.is_some()));
-                        if mouse.row == button_y && mouse.column < 11 && !pending {
+                        if mouse.row == button_y
+                            && (rect.x..rect.x + rect.columns.min(11)).contains(&mouse.column)
+                            && !pending
+                        {
                             self.confirm_tab_close(now);
                         } else if mouse.row == button_y
-                            && (12..20).contains(&mouse.column)
+                            && (rect.x + 12..rect.x + rect.columns.min(20)).contains(&mouse.column)
                             && !pending
                         {
                             self.cancel_tab_dialog();
@@ -4827,7 +4849,10 @@ impl App {
                         .is_some_and(|rect| rect.contains(mouse.column, mouse.row))
                     {
                         self.clear_picker_filter();
-                    } else if mouse.row > top && mouse.row < top.saturating_add(rows) {
+                    } else if self.picker_horizontal_bounds().contains(&mouse.column)
+                        && mouse.row > top
+                        && mouse.row < top.saturating_add(rows)
+                    {
                         if let Some(route) = self.picker_route_at_row(mouse.row - top - 1) {
                             self.request_route(route, now);
                         }
@@ -4854,11 +4879,18 @@ impl App {
             .collect()
     }
 
+    fn picker_horizontal_bounds(&self) -> std::ops::Range<u16> {
+        let (_, columns) = self.viewport();
+        let width = columns.min(64);
+        let left = columns.saturating_sub(width) / 2;
+        left..left + width
+    }
+
     fn picker_clear_rect(&self) -> Option<Rect> {
         let (top, _) = self.picker_screen_geometry()?;
-        let (_, columns) = self.viewport();
-        (columns >= 8).then_some(Rect {
-            x: 0,
+        let bounds = self.picker_horizontal_bounds();
+        (bounds.len() >= 8).then_some(Rect {
+            x: bounds.start,
             y: top,
             rows: 1,
             columns: 7,
@@ -4893,6 +4925,7 @@ impl App {
     fn picker_visible_route_count(&self) -> usize {
         let (view_rows, _) = self.viewport();
         usize::from(view_rows)
+            .min(12)
             .min(panelink::split_menu::MAX_OVERLAY_ROWS)
             .saturating_sub(1)
     }
@@ -6739,18 +6772,33 @@ impl App {
                 },
             };
         }
-        let mut tab_dialog_text = [String::new(), String::new(), String::new(), String::new()];
-        let mut tab_dialog_selected = [false; 4];
+        let mut tab_dialog_text: [String; 9] = std::array::from_fn(|_| String::new());
+        let mut tab_dialog_selected = [false; 9];
         let tab_dialog_count = match self.tab_dialog.as_ref() {
             Some(TabDialog::Actions { selected, .. }) => {
-                tab_dialog_text[0] = "Tab actions (Esc cancels)".into();
+                let padded = self.padded_tab_actions();
+                let first = if padded { 3 } else { 1 };
+                tab_dialog_text[if padded { 1 } else { 0 }] = if padded {
+                    "  Tab actions".into()
+                } else {
+                    "Tab actions (Esc cancels)".into()
+                };
                 let labels = ["Select tab", "Rename", "Close tab"];
                 for (index, label) in labels.iter().enumerate() {
-                    tab_dialog_text[index + 1] =
-                        format!("{} [{}]", if *selected == index { ">" } else { " " }, label);
-                    tab_dialog_selected[index + 1] = *selected == index;
+                    tab_dialog_text[index + first] = format!(
+                        "{}{} [{}]",
+                        if padded { "  " } else { "" },
+                        if *selected == index { ">" } else { " " },
+                        label
+                    );
+                    tab_dialog_selected[index + first] = *selected == index;
                 }
-                4
+                if padded {
+                    tab_dialog_text[7] = "  Enter: select  Esc: close".into();
+                    9
+                } else {
+                    4
+                }
             }
             Some(TabDialog::Rename {
                 draft,
@@ -6797,7 +6845,7 @@ impl App {
                 text,
                 style: if tab_dialog_selected[index] {
                     OverlayStyle::Selected
-                } else if index == 0 {
+                } else if index == 0 || (self.padded_tab_actions() && index == 1) {
                     OverlayStyle::Status
                 } else {
                     OverlayStyle::Normal
@@ -7024,10 +7072,10 @@ impl App {
         {
             Some((
                 Rect {
-                    x: 0,
+                    x: self.picker_horizontal_bounds().start,
                     y: top.saturating_sub(1),
                     rows,
-                    columns: view_columns,
+                    columns: self.picker_horizontal_bounds().len() as u16,
                 },
                 usize::from(rows).min(picker_count),
             ))

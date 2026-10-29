@@ -1,3 +1,30 @@
+## Tab actions padding — 2026-10-29
+
+Added two-column inner padding, blank top/bottom rows and heading separation,
+a distinct Tab actions heading and keyboard footer. Uses nine rows when the
+viewport fits; retains the four-row compact fallback. Pointer activation excludes
+padding and uses the new action row offsets. Client suite 209/0, final focused
+modal test 1/0, strict binary Clippy, build, formatting and docs (405/0) passed.
+Skill frontmatter and local links checked. Installed the hash-verified debug
+client at ~/.local/bin/panelink with a timestamped backup; no running client or
+server restarted. Prior compact-modal install was also completed in this session.
+No commit or push. Native visual acceptance remains open.
+
+## Compact modal layouts — 2026-10-29
+
+On `t3/compact-modal-layouts`, narrowed and centered tab actions (28 columns),
+rename (56), tab close (44), All tabs (64, at most 12 rows), and bottom pane-close
+confirmation (48). Shared dialog geometry drives rendering and pointer offsets;
+chooser clicks outside its horizontal bounds cannot switch tabs. Existing pane
+menu, help, swap and divider overlays already have bounded widths. Updated
+README, SPEC and runtime skill. No live executable replaced, panes operated,
+commit or push performed; native-host visual acceptance remains open.
+
+Verification: isolated CARGO_TARGET_DIR=/private/tmp/panelink-layout-client-target;
+client tests 209 passed/0 failed; strict binary Clippy, fmt and diff checks pass;
+Markdown checker 405 files/0 findings. Skill quick_validate could not run because
+Python lacks PyYAML; frontmatter and local Markdown links checked separately.
+
 # Implementation session checkpoint — 2026-10-17
 
 ## UI/UX UX-07 and UX-08 — 2026-10-28 (current, read first)
