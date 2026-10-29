@@ -1,12 +1,12 @@
 # Code health execution state
 
 ```text
-current-phase: 05 rendering
+current-phase: 08 combined verification
 last-updated: 2026-10-30
 base: a1134ec4bc69e8a97b27ba2b0b61f2e446257440
 branch: refactor/code-health-20261030
 last-verified: fresh repaired canonical8/8; original baseline failure preserved
-next-action: implement05 immutable rendering, then08 combined verification
+next-action: fresh canonical verification of combined committed source, then final evidence/commit
 blocked-on: none for01,02,06,07; UI chain remains serial
 ```
 
@@ -23,10 +23,10 @@ User authorized implementing the [plan](README.md) in this new worktree with par
 | 02 pane viewport | DONE; parent implementation/review/checks | state.rs, state_tests.rs and private viewport child |
 | 03 workspace presentation | DONE; parent checks and independent review clear | state.rs, state_tests.rs and private workspace child |
 | 04 pane interaction | DONE; parent transition review and checks pass; delegated review incomplete | state.rs, state_tests.rs and private copy/interaction children |
-| 05 rendering | parent implementation | same UI lease plus compose.rs |
+| 05 rendering | DONE; parent review and focused checks pass | state/render.rs and immutable owner presentation methods |
 | 06 positive fixture barrier | DONE; parent implemented and verified | p3_attach_four.rs |
 | 07 server test layout | DONE; committed15369d5 | multi_session.rs and private child test files |
-| 08 integration/docs | blocked on 01,05,06,07 | parent; all shared evidence and usage-skill maintenance |
+| 08 integration/docs | source review/navigation complete; canonical pending | parent; canonical worker report-only lease |
 
 Active worker leases are disjoint and recorded below. Parent holds the UI-state design and split-fixture lease. UI source changes are serial. Keep exact target, input nonreplayability, scoped-wheel negotiation/FIFO, metadata, modal, geometry, output commit and host restoration contracts from [SPEC.md](SPEC.md).
 
@@ -128,3 +128,5 @@ Packet03 committed8ba6672. Parent implemented CopyState/Interaction owners; see 
 - Completion wakes parent; no polling. Parent then reviews findings, fixes any material issue, accepts/commits04 and continues05 plus08 without additional setup questions. No push/install authorized.
 
 Packet04 accepted by parent after completing [transition review](INTERACTION-REVIEW.md). Delegated review was incomplete and is not counted as independent approval. Existing final checks pass; source unchanged since those checks. No active delegates.05 starts after04 commit.
+
+Packet05 accepted: [evidence](PACKET05.md), immutable renderer and owner presentation methods. Binary323/0, compositor43/0, private PTY7/0, strict Clippy/fmt/diff/docs pass. Source test assertions unchanged. Parent combined interface review finds no whole-App helpers, mutable render state, protocol/storage/manifest/lock changes, or altered public command semantics. Canonical gate remains pending; do not mark08 complete.

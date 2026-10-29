@@ -211,6 +211,10 @@ evidence; do not advertise a planned feature or an unrun check as working.
 Validate the skill and Markdown links after edits. Record remaining verification
 gaps in the normal repository handoff, rather than accumulating test totals here.
 
+For development, the [maintainability navigation](../../../docs/progress/code-health-20261030/NAVIGATION.md)
+maps private UI owners and their verification boundaries. This structural work
+changes no runtime command or installation; inspect the selected executable as above.
+
 Tab action, rename and tab-close dialogs are centered and capped at 28, 56
 and 44 terminal columns respectively. All tabs is capped at 64 columns and
 12 rows (including its search header); keyboard navigation scrolls the list.

@@ -1265,3 +1265,173 @@ impl Interaction {
             .open_for_focused_with_recovery(local, target, rows, columns, recovery)
     }
 }
+
+impl Interaction {
+    pub(super) fn format_mode(
+        &self,
+        context: InteractionContext<'_>,
+        pane_mode_text: &mut [String; panelink::split_menu::MAX_OVERLAY_ROWS],
+    ) -> usize {
+        match self.pane_mode {
+            Some(PaneMode::Swap {
+                source,
+                choices,
+                selected,
+                ..
+            }) => {
+                pane_mode_text[0] =
+                    "Swap pane: arrows/hjkl choose; Enter applies, Esc cancels".into();
+                let mut count = 1;
+                for (index, candidate) in choices.iter().flatten().enumerate() {
+                    let pane_number = context
+                        .layout
+                        .and_then(|layout| {
+                            layout
+                                .panes
+                                .iter()
+                                .position(|pane| pane.is_some_and(|pane| pane.target == *candidate))
+                        })
+                        .map_or(index + 1, |index| index + 1);
+                    if count < pane_mode_text.len() {
+                        pane_mode_text[count] = format!(
+                            "{} Pane {pane_number}",
+                            if index == selected { ">" } else { " " }
+                        );
+                        count += 1;
+                    }
+                }
+                if count < pane_mode_text.len() {
+                    pane_mode_text[count] = "[Apply]".into();
+                    count += 1;
+                }
+                if count < pane_mode_text.len() {
+                    pane_mode_text[count] = "[Cancel]".into();
+                    count += 1;
+                }
+                let _ = source;
+                count
+            }
+            Some(PaneMode::Divider {
+                target,
+                revision,
+                indices,
+                selected,
+                first_cells,
+            }) => {
+                let index = indices.get(selected).copied().flatten().unwrap_or(0);
+                let axis = context
+                    .local
+                    .and_then(|layout| layout.divider_info(target, revision, index).ok())
+                    .map_or("axis", |info| match info.orientation {
+                        DividerOrientation::Horizontal => "left/right",
+                        DividerOrientation::Vertical => "up/down",
+                    });
+                pane_mode_text[0] = format!(
+                    "Divider {} ({axis}) span {first_cells}; Tab changes ancestor, Enter applies, Esc cancels",
+                    index + 1
+                );
+                let mut count = 1;
+                for (candidate, divider_index) in indices
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, index)| index.map(|index| (slot, index)))
+                {
+                    if count < pane_mode_text.len() {
+                        pane_mode_text[count] = format!(
+                            "{} Divider {}",
+                            if candidate == selected { ">" } else { " " },
+                            divider_index + 1
+                        );
+                        count += 1;
+                    }
+                }
+                if count < pane_mode_text.len() {
+                    pane_mode_text[count] = "[-] [+]".into();
+                    count += 1;
+                }
+                if count < pane_mode_text.len() {
+                    pane_mode_text[count] = "[Apply]".into();
+                    count += 1;
+                }
+                if count < pane_mode_text.len() {
+                    pane_mode_text[count] = "[Cancel]".into();
+                    count += 1;
+                }
+                count
+            }
+            None => 0,
+        }
+    }
+    pub(super) fn format_actions(
+        &self,
+        context: InteractionContext<'_>,
+        menu: ActionsMenu,
+        action_text: &mut [String; panelink::split_menu::MAX_OVERLAY_ROWS],
+    ) -> Option<ActionsMenuPage> {
+        let page = self.actions_page_geometry(context, menu)?;
+        let pane = context
+            .layout
+            .and_then(|layout| {
+                layout
+                    .panes
+                    .iter()
+                    .position(|pane| pane.is_some_and(|pane| pane.target == menu.target))
+            })
+            .map_or(1, |index| index + 1);
+        let (start, end) = (page.start, page.end);
+        action_text[0] = if end < LOCAL_ACTIONS.len() {
+            format!("Pane {pane} actions: Split pane... (More: Zoom)")
+        } else {
+            format!("Pane {pane} actions (Esc cancels)")
+        };
+        for (row, index) in (start..end).enumerate() {
+            let (action, label, availability) = self
+                .local_action_item(menu, index)
+                .expect("bounded local action index");
+            let marker = if menu.selected == index { "> " } else { "  " };
+            action_text[page.action_row + row] = match (action, availability) {
+                (PaneMenuAction::Split(direction), Availability::Disabled(reason)) => {
+                    format!(
+                        "{marker}{} - {}",
+                        split_menu_direction(direction),
+                        reason.compact_label()
+                    )
+                }
+                _ => format!("{marker}{label}"),
+            };
+            if menu.selected == index {
+                action_text[page.reason_row] = match availability {
+                    Availability::Enabled => String::from("Enter: activate"),
+                    Availability::Disabled(reason) if page.rect.columns < 36 => {
+                        reason.compact_label()
+                    }
+                    Availability::Disabled(reason) => reason.to_string(),
+                };
+            }
+        }
+        if menu.selected == LOCAL_ACTIONS.len() {
+            action_text[page.reason_row] = "Cancel menu".into();
+        }
+        action_text[page.navigation_row] = if menu.selected == LOCAL_ACTIONS.len() {
+            "> [Cancel]".into()
+        } else {
+            match (start > 0, end < LOCAL_ACTIONS.len()) {
+                (true, true) => "[Back] [More] [Cancel]".into(),
+                (true, false) if start > 3 => "[Back] [Cancel] Close on prior page".into(),
+                (true, false) => "[Back] [Cancel]".into(),
+                (false, true) => "[More] [Cancel]".into(),
+                (false, false) => "[Cancel]".into(),
+            }
+        };
+        Some(page)
+    }
+}
+
+fn split_menu_direction(direction: SplitDirection) -> &'static str {
+    match direction {
+        SplitDirection::Left => "Split Left",
+        SplitDirection::Right => "Split Right",
+        SplitDirection::Up => "Split Up",
+        SplitDirection::Down => "Split Down",
+    }
+}

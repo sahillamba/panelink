@@ -1,3 +1,12 @@
+## Code-health packet05 verified; combined gate next — 2026-10-30
+
+Frame assembly now uses immutable RenderView; modal labels and selection overlays
+live with their state owners. Parent review, binary323/0, compositor43/0, private
+PTY7/0 and strict checks pass. See [packet05 evidence](code-health-20261030/PACKET05.md)
+and [navigation](code-health-20261030/NAVIGATION.md). All implementation packets
+are verified;08 fresh combined canonical gate and final evidence remain pending.
+No install, live panes or push.
+
 ## Code-health packet04 verified — 2026-10-30
 
 CopyState owns frozen selection and clipboard request/result state; Interaction

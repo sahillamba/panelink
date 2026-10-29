@@ -7,7 +7,7 @@ use super::super::{
 use super::viewport::Viewports;
 use super::{is_clipboard_failure_label, Flow};
 use crossterm_input::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use panelink::terminal::compose::pointer_content_point;
+use panelink::terminal::compose::{pointer_content_point, CopyCaretOverlay, SelectionOverlay};
 use panelink::{
     control_protocol::TargetRef,
     pane_layout::Rect,
@@ -584,5 +584,56 @@ fn normalize_point(snapshot: &ScreenSnapshot, point: Point) -> Point {
         }
     } else {
         point
+    }
+}
+
+impl CopyState {
+    pub(super) fn selection_overlay(
+        &self,
+        context: &CopyContext<'_>,
+    ) -> Option<SelectionOverlay<'_>> {
+        self.selection.as_ref().and_then(|drag| {
+            let identity = context.current_selection_identity(drag)?;
+            if identity != drag.identity || (self.copy_mode && self.copy_anchor.is_none()) {
+                return None;
+            }
+            let slot = context.display_layout?.panes.iter().position(|pane| {
+                pane.is_some_and(|pane| {
+                    pane.target == drag.target
+                        && panelink::pane_layout::content_rect(pane.rect) == Some(drag.content_rect)
+                })
+            })?;
+            Some(SelectionOverlay {
+                slot,
+                frozen: &drag.frozen,
+                anchor: self.copy_anchor.unwrap_or(drag.anchor),
+                end: drag.end,
+            })
+        })
+    }
+    pub(super) fn caret_overlay(
+        &self,
+        context: &CopyContext<'_>,
+        visible: bool,
+    ) -> Option<CopyCaretOverlay<'_>> {
+        if self.copy_mode && visible {
+            self.selection.as_ref().and_then(|drag| {
+                if context.current_selection_identity(drag)? != drag.identity {
+                    return None;
+                }
+                let slot = context
+                    .display_layout?
+                    .panes
+                    .iter()
+                    .position(|pane| pane.is_some_and(|pane| pane.target == drag.target))?;
+                Some(CopyCaretOverlay {
+                    slot,
+                    frozen: &drag.frozen,
+                    point: drag.end,
+                })
+            })
+        } else {
+            None
+        }
     }
 }

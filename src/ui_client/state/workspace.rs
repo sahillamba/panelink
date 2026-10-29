@@ -1434,3 +1434,79 @@ fn lifecycle_error_label(error: LifecycleError) -> &'static str {
         LifecycleError::LaunchContextInvalid => "launch context unavailable",
     }
 }
+
+impl WorkspaceState {
+    pub(super) fn format_dialog(
+        &self,
+        viewport: (u16, u16),
+        tab_dialog_text: &mut [String; 9],
+        tab_dialog_selected: &mut [bool; 9],
+    ) -> usize {
+        match self.tab_dialog.as_ref() {
+            Some(TabDialog::Actions { selected, .. }) => {
+                let padded = self.padded_tab_actions(viewport);
+                let first = if padded { 3 } else { 1 };
+                tab_dialog_text[if padded { 1 } else { 0 }] = if padded {
+                    "  Tab actions".into()
+                } else {
+                    "Tab actions (Esc cancels)".into()
+                };
+                let labels = ["Select tab", "Rename", "Close tab"];
+                for (index, label) in labels.iter().enumerate() {
+                    tab_dialog_text[index + first] = format!(
+                        "{}{} [{}]",
+                        if padded { "  " } else { "" },
+                        if *selected == index { ">" } else { " " },
+                        label
+                    );
+                    tab_dialog_selected[index + first] = *selected == index;
+                }
+                if padded {
+                    tab_dialog_text[7] = "  Enter: select  Esc: close".into();
+                    9
+                } else {
+                    4
+                }
+            }
+            Some(TabDialog::Rename {
+                draft,
+                error,
+                saving,
+                ..
+            }) => {
+                tab_dialog_text[0] = "Rename tab (Enter saves; Esc cancels)".into();
+                tab_dialog_text[1] =
+                    format!("Name: {draft}{}", if *saving { " (saving)" } else { "_" });
+                tab_dialog_text[2] = error.unwrap_or(" ").to_owned();
+                tab_dialog_text[3] = "[Save] [Cancel]".into();
+                tab_dialog_selected[0] = true;
+                if error.is_some() {
+                    tab_dialog_selected[2] = true;
+                }
+                4
+            }
+            Some(TabDialog::Close {
+                close_selected,
+                pending,
+                ..
+            }) => {
+                tab_dialog_text[0] = if *close_selected {
+                    "Close selected: close tab"
+                } else {
+                    "Cancel selected: close tab"
+                }
+                .into();
+                tab_dialog_text[1] = "Ends all tab processes".into();
+                tab_dialog_text[2] = "[Close tab] [Cancel]".into();
+                if *pending {
+                    tab_dialog_text[1] = "Closing tab; verifying process stop...".into();
+                    tab_dialog_text[2] = "Close pending".into();
+                }
+                tab_dialog_selected[0] = true;
+                tab_dialog_selected[2] = !close_selected && !pending;
+                3
+            }
+            None => 0,
+        }
+    }
+}
