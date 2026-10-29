@@ -1,3 +1,31 @@
+## PR #13 CI fixture repair — 2026-10-29
+
+Confirmed clean PR branch/head `t3/compact-modal-layouts` / `7a91f45`;
+GitHub returned no review threads, reviews or comments. Hosted run40884497931
+failed only cargo_test: `workspace_events_pin_filtered_pane_across_same_generation_replacement`
+reported layout_changed, pane_closed and quiet, without output.
+
+The original fixture allowed only 100 ms between output and pane close, while
+the observer can wait 200 ms on workspace changes before polling pane events.
+Closing removes that pane's cursor on topology reconciliation. A disposable
+SIGSTOP/SIGCONT observer-delay experiment reproduced the exact hosted failure;
+the unmodified focused test passed, establishing timing dependence rather than
+a modal regression. Experiment-only signals were removed from the final tree.
+
+The test now captures observer JSONL in a private file and waits boundedly for
+an output event before closing the pane. A single submitted shell loop emits
+synthetic output until a private stop-file is created, so observer startup needs
+no fixed sleep. ObserverGuard bounds exit and cleans up on panic. The concurrent
+observer has its own private context directory: an initial no-startup-sleep run
+exposed context_directory_unavailable from shared-directory creation. No product
+code, timeout contracts, live panes or installed executable changed.
+
+Focused repaired test passes; strict Clippy for p3_agent_cli, fmt and diff checks
+pass. Full serial p3_agent_cli: 8 passed/0 failed/0 ignored in 51.85 seconds.
+Documentation check: 412 Markdown files/0 findings.
+Local logs: /private/tmp/panelink-pr13-observer-delay-red.log and
+/private/tmp/panelink-pr13-agent-cli-fixed.log. Fresh hosted CI remains required.
+
 ## PR #13 base-branch conflict resolution — 2026-10-29
 
 Confirmed clean `t3/compact-modal-layouts` at `8a81dcf` matches PR #13.
