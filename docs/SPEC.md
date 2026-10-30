@@ -1270,7 +1270,10 @@ Every future task must identify owned modules, required protocol changes, observ
 Tab action, rename and tab-close dialogs are centered and capped at 28, 56
 and 44 terminal columns respectively. All tabs is capped at 64 columns and
 12 rows (including its search header); keyboard navigation scrolls the list.
-Pane-close confirmation is capped at 48 columns at the bottom of the view.
+Pane-close confirmation is a centred, bordered 9-row box capped at 52 columns
+with three columns of inner padding, blank rows around its content, centred
+`[Close]` `[Cancel]` buttons and a key hint footer. Views smaller than 11 rows
+or 44 columns use a compact two-row prompt capped at 48 columns at the bottom.
 Widths shrink to fit smaller viewports. Pointer targets follow the visible
 dialog bounds; clicks beside a dialog do not activate its actions.
 

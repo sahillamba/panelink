@@ -139,7 +139,9 @@ panelink workspace tab close <project-id> <tab-id>
   never `Copied`. Copied text is never shown in labels, status or logs.
 - Pane close (`x`, menu, `Ctrl-B x`) opens a confirmation naming the captured
   pane with "Ends this process" (the last pane explains the workspace ends) and
-  clickable `[Close]` `[Cancel]`. Cancel is selected by default: Enter on the
+  clickable `[Close]` `[Cancel]`. On views of at least 11 rows and 44 columns
+  it is a centred, bordered, padded box (up to 52 columns) with centred buttons
+  and a key hint; smaller views use a compact two-row prompt at the bottom. Cancel is selected by default: Enter on the
   default cancels; Left/Right/Tab move the selection; `y` confirms explicitly;
   `n`/Esc cancel. The opening click/key and key repeats cannot confirm. A layout
   or occupant change cancels the prompt; it never closes a replacement.

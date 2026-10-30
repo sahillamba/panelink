@@ -2545,7 +2545,8 @@ fn ctrl_b_x_asks_for_confirmation_and_y_closes_the_focused_pane() {
     assert!(!app.nav_active());
     assert!(fake.closes.is_empty(), "nothing is sent before y");
     let text = screen_text(&app);
-    assert!(text.contains("Close pane 2? Ends this process"), "{text}");
+    assert!(text.contains("Close pane 2?"), "{text}");
+    assert!(text.contains("Ends this process."), "{text}");
     assert!(
         text.contains(">[Cancel]"),
         "Cancel is selected by default: {text}"
@@ -2574,7 +2575,7 @@ fn close_confirmation_defaults_to_cancel_and_enter_closes_only_after_selection()
     feed(&mut app, &mut fake, b"\x02x");
 
     assert!(app.confirm_open());
-    assert!(render_text(&app).contains("[Close] >[Cancel]"));
+    assert!(render_text(&app).contains(" [Close]      >[Cancel]"));
     feed(&mut app, &mut fake, b"\r");
     assert!(!app.confirm_open());
     assert!(
@@ -2590,6 +2591,74 @@ fn close_confirmation_defaults_to_cancel_and_enter_closes_only_after_selection()
     assert_eq!(fake.closes[0].target, target(2));
     assert_eq!(fake.closes[0].expected_layout_revision, 2);
     assert_eq!(app.focus(), Some(target(1)));
+}
+
+#[test]
+fn close_confirmation_is_a_centred_padded_box_with_compact_fallback() {
+    for (rows, columns) in [(24, 81), (60, 269), (13, 44), (40, 120)] {
+        let mut app = App::new(rows, columns).unwrap();
+        let mut fake = Fake::default();
+        app.set_layout(two_panes());
+        app.focus_target(target(2));
+        feed(&mut app, &mut fake, b"\x02x");
+        let (view_rows, view_columns) = app.viewport();
+        let geometry = app.confirm_ui_geometry(view_rows, view_columns).unwrap();
+        assert!(geometry.padded, "{rows}x{columns}");
+        let overlay = geometry.overlay;
+        assert_eq!(overlay.rows, 9);
+        assert_eq!(overlay.columns, view_columns.min(52));
+        // Centred on both axes: equal margins, off by at most one cell.
+        let below = view_rows - overlay.y - overlay.rows;
+        let right = view_columns - overlay.x - overlay.columns;
+        assert!(
+            overlay.y.abs_diff(below) <= 1,
+            "{rows}x{columns}: {overlay:?}"
+        );
+        assert!(
+            overlay.x.abs_diff(right) <= 1,
+            "{rows}x{columns}: {overlay:?}"
+        );
+        // The button pair is centred inside the box.
+        let group_left = geometry.close.x - 1 - overlay.x;
+        let group_right =
+            overlay.x + overlay.columns - (geometry.cancel.x + geometry.cancel.columns);
+        assert!(group_left.abs_diff(group_right) <= 1, "{geometry:?}");
+        assert_eq!(geometry.close.y, geometry.cancel.y);
+        assert_eq!(geometry.close.y, overlay.y + 5);
+
+        let text = screen_text(&app);
+        assert!(text.contains("Close pane 2?"), "{text}");
+        assert!(
+            text.contains("y: close   n/Esc: cancel   Tab: switch"),
+            "{text}"
+        );
+        assert!(text.contains(&format!(
+            "+{}+",
+            "-".repeat(usize::from(overlay.columns) - 2)
+        )));
+        assert_eq!(
+            parsed_label_position(&app, "[Close]"),
+            Some((geometry.close.x, geometry.close.y))
+        );
+        assert_eq!(
+            parsed_label_position(&app, "[Cancel]"),
+            Some((geometry.cancel.x, geometry.cancel.y))
+        );
+    }
+
+    // Too short or narrow for the padded box: compact rows at the bottom.
+    for (rows, columns) in [(10, 81), (24, 40)] {
+        let mut app = App::new(rows, columns).unwrap();
+        let mut fake = Fake::default();
+        app.set_layout(one_pane(4));
+        feed(&mut app, &mut fake, b"\x02x");
+        let (view_rows, view_columns) = app.viewport();
+        let geometry = app.confirm_ui_geometry(view_rows, view_columns).unwrap();
+        assert!(!geometry.padded, "{rows}x{columns}");
+        assert_eq!(geometry.overlay.rows, 2);
+        assert_eq!(geometry.overlay.y + 2, view_rows);
+        assert!(render_text(&app).contains("[Close] >[Cancel]"));
+    }
 }
 
 #[test]
@@ -2624,7 +2693,8 @@ fn close_confirmation_opening_key_repeats_and_confirmation_repeats_cannot_close(
 
 #[test]
 fn pane_close_confirmation_mouse_buttons_capture_target_and_ignore_opening_release() {
-    for (button, expect_close) in [(1, true), (10, false)] {
+    // Offsets from [Close]'s first cell: inside Close, then inside Cancel.
+    for (button, expect_close) in [(1, true), (15, false)] {
         let mut app = App::new(24, 81).unwrap();
         let mut fake = Fake::default();
         app.set_layout(two_panes());
@@ -2656,14 +2726,14 @@ fn pane_close_confirmation_mouse_buttons_capture_target_and_ignore_opening_relea
             &mut app,
             &mut fake,
             MouseEventKind::Down(MouseButton::Left),
-            geometry.overlay.x + button,
+            geometry.close.x + button,
             geometry.close.y,
         );
         gesture(
             &mut app,
             &mut fake,
             MouseEventKind::Up(MouseButton::Left),
-            geometry.overlay.x + button,
+            geometry.close.x + button,
             geometry.close.y,
         );
         assert!(!app.confirm_open());
@@ -2814,7 +2884,8 @@ fn menu_close_on_single_pane_warns_that_the_workspace_ends() {
     );
     assert!(app.confirm_open());
     let text = screen_text(&app);
-    assert!(text.contains("Close pane 1? Ends the workspace"), "{text}");
+    assert!(text.contains("Close pane 1?"), "{text}");
+    assert!(text.contains("Ends the workspace."), "{text}");
     feed(&mut app, &mut fake, b"y");
     assert_eq!(
         fake.closes,
@@ -3953,10 +4024,12 @@ fn close_confirmation_mouse_buttons_are_explicit_and_consumed() {
         app.confirm_open(),
         "the opener release cannot activate Close"
     );
+    let geometry = app.confirm_ui_geometry(24, 81).unwrap();
+    assert!(geometry.padded);
     let cancel = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: 26,
-        row: 23,
+        column: geometry.cancel.x + 1,
+        row: geometry.cancel.y,
         modifiers: KeyModifiers::NONE,
     });
     app.handle_event(
@@ -3981,10 +4054,11 @@ fn close_confirmation_mouse_buttons_are_explicit_and_consumed() {
     assert!(fake.closes.is_empty());
     app.focus_target(target(1));
     feed(&mut app, &mut fake, b"\x02x");
+    let geometry = app.confirm_ui_geometry(24, 81).unwrap();
     let close = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: 18,
-        row: 23,
+        column: geometry.close.x + 6,
+        row: geometry.close.y,
         modifiers: KeyModifiers::NONE,
     });
     app.handle_event(

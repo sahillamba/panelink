@@ -1,3 +1,17 @@
+## Chrome spacing step 1: centred pane-close dialog — 2026-10-31
+
+User approved a three-step chrome spacing plan (centred close dialog; wider
+header spacing at >=120 columns; blank row under the tab strip) with centred
+buttons. Step 1 is done: `confirm_ui_geometry` returns a centred, bordered 9-row box
+(<=52 columns, centred `[Close]` `[Cancel]`, key hint) on views of at least 11×44.
+Smaller views keep the compact bottom prompt. Hit rectangles share the render
+offsets; a new state test covers centring, label/hit agreement and fallback.
+`p3_attach_four` now waits for "Close pane" instead of "(y/n)". Checks:
+`RUST_TEST_THREADS=1 cargo test --no-fail-fast` all pass; fmt/clippy/build/docs
+pass in `verify_non_ui.py`. Its Python step has 13
+`test_opencode_bridge_plugin` listener timeouts, reproduced identically on the
+unmodified tree (pre-existing, unrelated). Steps 2–3 pending; no install or push.
+
 ## Button redesign client installed — 2026-10-31
 
 User explicitly requested installation. Rebuilt the verified dirty checkout and

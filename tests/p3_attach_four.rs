@@ -946,7 +946,7 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
         .expect("upper-left sibling exists");
     client.click(closing.1);
     client.write(b"\x02x");
-    client.wait_screen("close confirmation", |screen| screen.contains("(y/n)"));
+    client.wait_screen("close confirmation", |screen| screen.contains("Close pane"));
     client.write(b"y");
     let after_close = fixture.wait_layout("pane-0.ctx", 3);
     let surviving_targets = targets(&after_close);

@@ -22,7 +22,26 @@ pub(super) struct ConfirmUiGeometry {
     pub(super) cancel: Rect,
     pub(super) position: u8,
     pub(super) consequence: &'static str,
+    /// Centred bordered dialog with padding; `false` is the compact
+    /// two-row fallback pinned to the bottom of small viewports.
+    pub(super) padded: bool,
 }
+
+/// Width cap of the padded pane-close dialog, borders included.
+pub(super) const CONFIRM_PADDED_WIDTH: u16 = 52;
+/// Rows of the padded dialog: border, blank, heading, consequence, blank,
+/// buttons, blank, key hint, border.
+pub(super) const CONFIRM_PADDED_ROWS: u16 = 9;
+/// Row of the button pair inside the padded dialog.
+pub(super) const CONFIRM_PADDED_BUTTON_ROW: u16 = 5;
+/// Smallest viewport that keeps at least one pane row above and below.
+const CONFIRM_PADDED_MIN_ROWS: u16 = CONFIRM_PADDED_ROWS + 2;
+/// Narrowest viewport that fits the key hint without clipping.
+const CONFIRM_PADDED_MIN_COLUMNS: u16 = 44;
+/// Blank cells between `[Close]` and the Cancel focus marker.
+pub(super) const CONFIRM_BUTTON_GAP: u16 = 6;
+pub(super) const CONFIRM_CLOSE_COLUMNS: u16 = 7;
+pub(super) const CONFIRM_CANCEL_COLUMNS: u16 = 8;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PaneMode {
     Swap {
@@ -715,11 +734,44 @@ impl Interaction {
         if rows == 0 || columns == 0 {
             return None;
         }
-        let width = columns.min(48);
+        let consequence = if intent.last_pane {
+            "Ends the workspace"
+        } else {
+            "Ends this process"
+        };
+        let padded = rows >= CONFIRM_PADDED_MIN_ROWS && columns >= CONFIRM_PADDED_MIN_COLUMNS;
+        let (width, overlay_rows, button_row, close_offset) = if padded {
+            let width = columns.min(CONFIRM_PADDED_WIDTH);
+            // One focus-marker cell precedes each button; the pair is
+            // centred as a group inside the bordered box.
+            let group = 1 + CONFIRM_CLOSE_COLUMNS + CONFIRM_BUTTON_GAP + 1 + CONFIRM_CANCEL_COLUMNS;
+            (
+                width,
+                CONFIRM_PADDED_ROWS,
+                CONFIRM_PADDED_BUTTON_ROW,
+                width.saturating_sub(group) / 2 + 1,
+            )
+        } else {
+            (
+                columns.min(48),
+                rows.min(2),
+                rows.min(2).saturating_sub(1),
+                0,
+            )
+        };
         let left = columns.saturating_sub(width) / 2;
-        let overlay_rows = rows.min(2);
-        let top = rows.saturating_sub(overlay_rows);
-        let button_y = top.saturating_add(overlay_rows.saturating_sub(1));
+        let top = if padded {
+            rows.saturating_sub(overlay_rows) / 2
+        } else {
+            rows.saturating_sub(overlay_rows)
+        };
+        let button_y = top.saturating_add(button_row).saturating_add(header_offset);
+        let close_x = left + close_offset;
+        let cancel_x = if padded {
+            close_x + CONFIRM_CLOSE_COLUMNS + CONFIRM_BUTTON_GAP + 1
+        } else {
+            left + 9
+        };
         Some(ConfirmUiGeometry {
             overlay: Rect {
                 x: left,
@@ -728,23 +780,20 @@ impl Interaction {
                 columns: width,
             },
             close: Rect {
-                x: left,
-                y: button_y.saturating_add(header_offset),
+                x: close_x,
+                y: button_y,
                 rows: 1,
-                columns: 7,
+                columns: CONFIRM_CLOSE_COLUMNS,
             },
             cancel: Rect {
-                x: left + 9,
-                y: button_y.saturating_add(header_offset),
+                x: cancel_x,
+                y: button_y,
                 rows: 1,
-                columns: 8,
+                columns: CONFIRM_CANCEL_COLUMNS,
             },
             position: intent.position,
-            consequence: if intent.last_pane {
-                "Ends the workspace"
-            } else {
-                "Ends this process"
-            },
+            consequence,
+            padded,
         })
     }
     pub(super) fn handle_pane_mode_event(
