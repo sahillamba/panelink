@@ -1,0 +1,10 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running tests/p3_attach_four.rs (/tmp/panelink-btn00-baseline-target/debug/deps/p3_attach_four-9b8b2a8fead17652)
+
+running 2 tests
+test killed_attach_client_reattaches_to_same_live_child_without_replaying_input ... ok
+test real_attach_routes_renders_closes_and_detaches_four_panes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.27s
+

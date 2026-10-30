@@ -1,0 +1,25 @@
+$ cargo clippy --locked --offline --all-targets -- -D warnings
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+error: struct update has no effect, all the fields in the struct have already been specified
+   --> src/ui_client/state/workspace.rs:170:35
+    |
+170 | ...                   ..rect
+    |                         ^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_update
+    = note: `-D clippy::needless-update` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_update)]`
+
+error: struct update has no effect, all the fields in the struct have already been specified
+   --> src/ui_client/state/workspace.rs:191:35
+    |
+191 | ...                   ..rect
+    |                         ^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_update
+
+error: could not compile `panelink` (bin "panelink") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `panelink` (bin "panelink" test) due to 2 previous errors
+
+exit: 101

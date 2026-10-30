@@ -1,0 +1,6 @@
+0,1 " " fg=Idx(15) bg=Idx(4)
+0,2 "M" fg=Idx(15) bg=Idx(4)
+0,3 "e" fg=Idx(15) bg=Idx(4)
+0,4 "n" fg=Idx(15) bg=Idx(4)
+0,5 "u" fg=Idx(15) bg=Idx(4)
+0,6 " " fg=Idx(15) bg=Idx(4)

@@ -1,5 +1,26 @@
 # Panelink implementation roadmap
 
+Button redesign source complete (2026-10-31): all BTN-00..06 packets implemented
+in `t3/terminal-button-design-research`. Parent final canonical8/8:
+Rust1626/0/20ignored, decoder39, Python233run/1skip, docs464/0 and strict checks.
+[Integration evidence](docs/progress/button-redesign/BTN06.md) and
+[execution state](docs/progress/button-redesign/PROGRESS.md) retain source review,
+red/green evidence and native gates. Changes uncommitted, uninstalled and unpushed;
+Phase3/5 host/provider/clipboard/touch/reboot gates remain unchanged. Older dated
+planning/execution notes below are historical.
+
+Button redesign execution: user authorized implementation after the ten-question
+interview. [Execution state](docs/progress/button-redesign/PROGRESS.md) tracks
+BTN-00..06, bounded ownership and verification. No activation/push authorized.
+
+Button redesign planning (2026-10-30): ten interview decisions select compact
+filled buttons across existing controls, revised menu/dialog interactions,
+release-to-activate, explicit focus/disabled/pending states and tab-control
+placement. Close ends processes after confirmation; Detach preserves them.
+[Complete seven-packet plan](docs/design/BUTTON-IMPLEMENTATION-PLAN.md) is ready
+for final shared-understanding confirmation. Planning/docs only; no application
+implementation, activation or product acceptance gate completion.
+
 Code-health maintenance (2026-10-30): user authorized the nine-packet plan in
 isolated `refactor/code-health-20261030`, based on `a1134ec`. Parent orchestration
 uses GPT-6-Luna for bounded tasks. Fresh repaired baseline passes8/8; packets00–08 are complete; the fresh combined verifier passes8/8.

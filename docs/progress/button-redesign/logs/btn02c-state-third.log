@@ -1,0 +1,16 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+error[E0425]: cannot find value `page` in this scope
+   --> src/ui_client/state/render.rs:271:32
+    |
+271 | ...                   == page.rect.y
+    |                          ^^^^ not found in this scope
+
+error[E0599]: no method named `visible_modal_press` found for reference `&RenderView<'a>` in the current scope
+   --> src/ui_client/state/render.rs:238:28
+    |
+238 |         let pressed = self.visible_modal_press();
+    |                            ^^^^^^^^^^^^^^^^^^^ method not found in `&RenderView<'a>`
+
+Some errors have detailed explanations: E0425, E0599.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `panelink` (bin "panelink" test) due to 2 previous errors

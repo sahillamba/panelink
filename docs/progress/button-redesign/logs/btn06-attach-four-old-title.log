@@ -1,0 +1,47 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running tests/p3_attach_four.rs (/tmp/panelink-btn00-baseline-target/debug/deps/p3_attach_four-9b8b2a8fead17652)
+
+running 2 tests
+test killed_attach_client_reattaches_to_same_live_child_without_replaying_input ... ok
+test real_attach_routes_renders_closes_and_detaches_four_panes ... FAILED
+
+failures:
+
+---- real_attach_routes_renders_closes_and_detaches_four_panes stdout ----
+
+thread 'real_attach_routes_renders_closes_and_detaches_four_panes' (42212594) panicked at tests/p3_attach_four.rs:548:13:
+timed out waiting for pane actions menu:
+  Menu  > Pane 1                              x  |  Menu    Pane 3                               x 
+ PANE1-READY                                     | sahillamba@HyperMac ~ % echo ATTACH4_MARKER_2    
+ ATTACH4$ echo ATTACH4_MARKER_0                  | ATTACH4_MARKER_2                                 
+ ATTACH4_MARKER_0                                | sahillamba@HyperMac ~ %                          
+ ATTACH4$                                        |                                                  
+                                                 |                                                  
+                                                 |                                                  
+                             Pane 1 - Layout: Split / Resize                                        
+                             > Split Left - Pane limit reached (4)                                  
+                               Split Right - Pane limit reached (4)                                 
+                               Split Up - Pane limit reached (4)       
+-----------------------------  Split Down - Pane limit reached (4)     -----------------------------
+  Menu    Pane 2               Resize divider                                                    x 
+ sahillamba@HyperMac ~ % echoPane limit reached (4)                    ~ % echo ATTACH4_MARKER_3    
+ ATTACH4_MARKER_1            [More] [Cancel]                                                        
+ sahillamba@HyperMac ~ %                                               ~ %                          
+                                                 |                                                  
+                                                 |                                                  
+                                                 |                                                  
+                                                 |                                                  
+                                                 |                                                  
+                                                 |                                                  
+                                                 |                                                  
+                                                 |                                           v0.1.8 
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    real_attach_routes_renders_closes_and_detaches_four_panes
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.72s
+
+error: test failed, to rerun pass `--test p3_attach_four`

@@ -8,7 +8,7 @@ use crate::workspace_lifecycle::{
     CreateIntentId, CreateShellTab, CreateStatus, ExpectedRuntimeIdentity, LifecycleError,
     RenameOutcome,
 };
-use crossterm_input::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm_input::{Event, KeyCode, KeyModifiers};
 use panelink::pane_layout::Rect;
 use panelink::workspace_index::{
     ProjectId, TabPresentationSnapshot, WorkspaceIndex, MAX_DISPLAY_NAME_BYTES,
@@ -58,6 +58,27 @@ pub(super) struct PendingMetadata {
     pub(super) expected_revision: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WorkspaceControl {
+    Action(WorkspaceRouteId, usize),
+    Save,
+    Cancel,
+    Close,
+    Clear,
+    Route(WorkspaceRouteId),
+}
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct WorkspaceStamp {
+    epoch: u64,
+    catalog: Option<WorkspaceIndex>,
+    revision: Option<u64>,
+    route: Option<WorkspaceRouteId>,
+    dialog: Option<TabDialog>,
+    filter: String,
+    selection: Option<WorkspaceRouteId>,
+    open: bool,
+    switching: bool,
+}
 #[derive(Default)]
 pub(super) struct WorkspaceFeedback {
     pub dirty: bool,
@@ -87,9 +108,210 @@ pub(super) struct WorkspaceState {
     /// A partial/unknown tab close keeps this client open on server end.
     pub(super) keep_tab_visible_on_server_end: bool,
     pub(super) pending_metadata: Option<PendingMetadata>,
+    /// 0: rename editor, 1: Save, 2: Cancel. Local to the dialog.
+    rename_focus: u8,
+    ui_epoch: u64,
     feedback: WorkspaceFeedback,
 }
 impl WorkspaceState {
+    pub(super) fn control_stamp(&self) -> WorkspaceStamp {
+        WorkspaceStamp {
+            epoch: self.ui_epoch,
+            catalog: self.workspace_index.clone(),
+            revision: self.workspace_revision,
+            route: self.current_route,
+            dialog: self.tab_dialog.clone(),
+            filter: self.picker_filter.clone(),
+            selection: self.picker_selection,
+            open: self.picker_open,
+            switching: self.route_switching,
+        }
+    }
+    pub(super) fn control_visual(
+        &self,
+        control: WorkspaceControl,
+    ) -> (
+        panelink::terminal::controls::ControlRole,
+        panelink::terminal::controls::ControlState,
+    ) {
+        use panelink::terminal::controls::{ControlRole as R, ControlState as S};
+        use WorkspaceControl::*;
+        let role = if matches!(control, Close | Action(_, 2)) {
+            R::Destructive
+        } else {
+            R::Secondary
+        };
+        let mut state = S::Normal;
+        match &self.tab_dialog {
+            Some(TabDialog::Actions { selected, .. }) => {
+                if matches!(control, Action(_, i) if i == *selected) {
+                    state = S::Focus;
+                }
+            }
+            Some(TabDialog::Rename { saving, .. }) => {
+                if (control == Save && self.rename_focus == 1)
+                    || (control == Cancel && self.rename_focus == 2)
+                {
+                    state = S::Focus;
+                }
+                if *saving {
+                    state = if control == Save {
+                        S::Pending
+                    } else {
+                        S::Disabled
+                    };
+                }
+            }
+            Some(TabDialog::Close {
+                close_selected,
+                pending,
+                ..
+            }) => {
+                if (control == Close) == *close_selected {
+                    state = S::Focus;
+                }
+                if *pending {
+                    state = if control == Close {
+                        S::Pending
+                    } else {
+                        S::Disabled
+                    };
+                }
+            }
+            None => {
+                if matches!(control, Route(route) if Some(route) == self.picker_selection) {
+                    state = S::Focus;
+                }
+            }
+        }
+        (role, state)
+    }
+    /// Shared screen-space bounds for activation and pressed presentation.
+    pub(super) fn workspace_controls(&self, viewport: (u16, u16)) -> Vec<(WorkspaceControl, Rect)> {
+        use WorkspaceControl::*;
+        let mut controls = Vec::new();
+        if let Some(dialog) = &self.tab_dialog {
+            if let Some(mut rect) = self.tab_dialog_geometry(viewport) {
+                rect.y += u16::from(self.workspace_index.is_some());
+                match dialog {
+                    TabDialog::Actions { route, .. } => {
+                        let padded = self.padded_tab_actions(viewport);
+                        let pad = if padded { 2 } else { 0 };
+                        for i in 0..3 {
+                            controls.push((
+                                Action(*route, i),
+                                Rect {
+                                    x: rect.x + pad,
+                                    y: rect.y + if padded { 3 } else { 1 } + i as u16,
+                                    rows: 1,
+                                    columns: rect.columns.saturating_sub(2 * pad),
+                                },
+                            ));
+                        }
+                    }
+                    TabDialog::Rename { .. } => {
+                        controls.push((
+                            Save,
+                            Rect {
+                                y: rect.y + 3,
+                                rows: 1,
+                                columns: rect.columns.min(6),
+                                ..rect
+                            },
+                        ));
+                        controls.push((
+                            Cancel,
+                            Rect {
+                                x: rect.x + 7,
+                                y: rect.y + 3,
+                                rows: 1,
+                                columns: rect.columns.saturating_sub(7).min(8),
+                            },
+                        ));
+                    }
+                    TabDialog::Close { .. } => {
+                        controls.push((
+                            Close,
+                            Rect {
+                                y: rect.y + 2,
+                                rows: 1,
+                                columns: rect.columns.min(11),
+                                ..rect
+                            },
+                        ));
+                        controls.push((
+                            Cancel,
+                            Rect {
+                                x: rect.x + 12,
+                                y: rect.y + 2,
+                                rows: 1,
+                                columns: rect.columns.saturating_sub(12).min(8),
+                            },
+                        ));
+                    }
+                }
+            }
+        } else if self.picker_open {
+            if let Some(rect) = self.picker_clear_rect(viewport) {
+                controls.push((Clear, rect));
+            }
+            if let Some((top, rows)) = self.picker_screen_geometry(viewport) {
+                let bounds = self.picker_horizontal_bounds(viewport);
+                for row in 1..rows {
+                    if let Some(route) = self.picker_route_at_row(row - 1, viewport) {
+                        controls.push((
+                            Route(route),
+                            Rect {
+                                x: bounds.start,
+                                y: top + row,
+                                rows: 1,
+                                columns: bounds.len() as u16,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        controls
+    }
+    pub(super) fn workspace_control_at(
+        &self,
+        viewport: (u16, u16),
+        x: u16,
+        y: u16,
+    ) -> Option<(WorkspaceControl, Rect)> {
+        self.workspace_controls(viewport)
+            .into_iter()
+            .find(|(_, r)| r.contains(x, y))
+    }
+    pub(super) fn activate_control(
+        &mut self,
+        control: WorkspaceControl,
+        now: Instant,
+        generation: Option<u64>,
+    ) {
+        use WorkspaceControl::*;
+        match control {
+            Action(route, index) => self.activate_tab_action(route, index, now, generation),
+            Save => self.submit_tab_rename(now),
+            Close => self.confirm_tab_close(now),
+            Cancel => {
+                if matches!(
+                    self.tab_dialog,
+                    Some(
+                        TabDialog::Rename { saving: true, .. }
+                            | TabDialog::Close { pending: true, .. }
+                    )
+                ) {
+                    self.set_status("workspace metadata busy", now);
+                } else {
+                    self.cancel_tab_dialog();
+                }
+            }
+            Clear => self.clear_picker_filter(),
+            Route(route) => self.request_route(route, now),
+        }
+    }
     pub(super) const fn view(&self) -> &Self {
         self
     }
@@ -114,6 +336,7 @@ impl WorkspaceState {
         self.feedback.begin_switch = Some(now);
     }
     pub(super) fn freeze(&mut self, notice: &'static str) {
+        self.ui_epoch = self.ui_epoch.wrapping_add(1);
         self.route_switching = true;
         self.picker_selection = None;
         self.picker_open = false;
@@ -129,6 +352,7 @@ impl WorkspaceState {
         snapshot: TabPresentationSnapshot,
         current: Option<WorkspaceRouteId>,
     ) -> bool {
+        self.ui_epoch = self.ui_epoch.wrapping_add(1);
         let Some(index) = presentation_index(&snapshot, current) else {
             return false;
         };
@@ -498,6 +722,7 @@ impl WorkspaceState {
         }
     }
     pub(super) fn update_workspace_catalog(&mut self, index: WorkspaceIndex) -> bool {
+        self.ui_epoch = self.ui_epoch.wrapping_add(1);
         let (Some(current), Some(_)) = (self.current_route, self.workspace_index.as_ref()) else {
             return false;
         };
@@ -521,6 +746,7 @@ impl WorkspaceState {
         snapshot: TabPresentationSnapshot,
         observed_revision: u64,
     ) -> bool {
+        self.ui_epoch = self.ui_epoch.wrapping_add(1);
         if self.route_switching
             || self.current_route != source_route
             || self
@@ -570,6 +796,7 @@ impl WorkspaceState {
             .is_some_and(|project| project.tabs().any(|tab| tab.id == route.tab))
     }
     pub(super) fn open_workspace_picker(&mut self) {
+        self.ui_epoch = self.ui_epoch.wrapping_add(1);
         self.cancel_selection();
         self.picker_open = true;
         self.picker_filter.clear();
@@ -702,6 +929,7 @@ impl WorkspaceState {
         self.feedback.dirty = true;
     }
     pub(super) fn open_tab_actions(&mut self, route: WorkspaceRouteId) {
+        self.ui_epoch = self.ui_epoch.wrapping_add(1);
         if !self.route_exists(route) {
             return;
         }
@@ -713,6 +941,7 @@ impl WorkspaceState {
         self.feedback.dirty = true;
     }
     pub(super) fn begin_tab_rename(&mut self, route: WorkspaceRouteId) {
+        self.ui_epoch = self.ui_epoch.wrapping_add(1);
         let Some(expected_revision) = self.workspace_revision else {
             self.set_status("workspace metadata is still loading", Instant::now());
             return;
@@ -727,6 +956,7 @@ impl WorkspaceState {
             self.set_status("workspace tab unavailable", Instant::now());
             return;
         };
+        self.rename_focus = 0;
         self.tab_dialog = Some(TabDialog::Rename {
             route,
             expected_revision,
@@ -737,6 +967,7 @@ impl WorkspaceState {
         self.feedback.dirty = true;
     }
     pub(super) fn begin_tab_close(&mut self, route: WorkspaceRouteId, generation: Option<u64>) {
+        self.ui_epoch = self.ui_epoch.wrapping_add(1);
         if !self.route_exists(route) {
             self.set_status("workspace tab unavailable", Instant::now());
             return;
@@ -923,6 +1154,7 @@ impl WorkspaceState {
         })
     }
     pub(super) fn cancel_tab_dialog(&mut self) {
+        self.ui_epoch = self.ui_epoch.wrapping_add(1);
         self.tab_dialog = None;
         self.feedback.dirty = true;
     }
@@ -954,7 +1186,7 @@ impl WorkspaceState {
         let Some(dialog) = self.tab_dialog.clone() else {
             return;
         };
-        let geometry = self.tab_dialog_geometry(viewport);
+        let _ = viewport;
         match dialog {
             TabDialog::Actions {
                 route,
@@ -964,56 +1196,35 @@ impl WorkspaceState {
                     let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
                     match (key.code, plain) {
                         (KeyCode::Esc, true) => self.cancel_tab_dialog(),
-                        (KeyCode::Up, true) => {
+                        (KeyCode::Up | KeyCode::BackTab, true) => {
                             selected = (selected + 2) % 3;
                             self.tab_dialog = Some(TabDialog::Actions { route, selected });
                             self.feedback.dirty = true;
                         }
-                        (KeyCode::Down, true) => {
-                            selected = (selected + 1) % 3;
+                        (KeyCode::Down | KeyCode::Tab, true) => {
+                            selected = (selected
+                                + if key.modifiers == KeyModifiers::SHIFT {
+                                    2
+                                } else {
+                                    1
+                                })
+                                % 3;
                             self.tab_dialog = Some(TabDialog::Actions { route, selected });
                             self.feedback.dirty = true;
                         }
                         (KeyCode::Enter, true) if key.is_press() => {
                             self.activate_tab_action(route, selected, now, generation)
                         }
-                        (KeyCode::Char('s' | 'S'), true) => {
+                        (KeyCode::Char('s' | 'S'), true) if key.is_press() => {
                             self.activate_tab_action(route, 0, now, generation)
                         }
-                        (KeyCode::Char('r' | 'R'), true) => {
+                        (KeyCode::Char('r' | 'R'), true) if key.is_press() => {
                             self.activate_tab_action(route, 1, now, generation)
                         }
-                        (KeyCode::Char('x' | 'X'), true) => {
+                        (KeyCode::Char('x' | 'X'), true) if key.is_press() => {
                             self.activate_tab_action(route, 2, now, generation)
                         }
                         _ => {}
-                    }
-                }
-                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(rect) = geometry {
-                        let screen_y = rect.y + u16::from(self.workspace_index.is_some());
-                        let row = mouse.row.saturating_sub(screen_y);
-                        let first = if self.padded_tab_actions(viewport) {
-                            3
-                        } else {
-                            1
-                        };
-                        let padding = if self.padded_tab_actions(viewport) {
-                            2
-                        } else {
-                            0
-                        };
-                        if (first..first + 3).contains(&row)
-                            && (rect.x + padding..rect.x + rect.columns - padding)
-                                .contains(&mouse.column)
-                        {
-                            self.activate_tab_action(
-                                route,
-                                usize::from(row - first),
-                                now,
-                                generation,
-                            );
-                        }
                     }
                 }
                 Event::Resize(_, _) => self.feedback.dirty = true,
@@ -1030,8 +1241,21 @@ impl WorkspaceState {
                     let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
                     match (key.code, plain) {
                         (KeyCode::Esc, true) if key.is_press() => self.cancel_tab_dialog(),
-                        (KeyCode::Enter, true) if key.is_press() => self.submit_tab_rename(now),
-                        (KeyCode::Backspace, true) if !saving => {
+                        (KeyCode::Tab | KeyCode::BackTab, true) if !saving => {
+                            let backwards = key.code == KeyCode::BackTab
+                                || key.modifiers == KeyModifiers::SHIFT;
+                            self.rename_focus =
+                                (self.rename_focus + if backwards { 2 } else { 1 }) % 3;
+                            self.feedback.dirty = true;
+                        }
+                        (KeyCode::Enter, true) if key.is_press() => {
+                            if self.rename_focus == 2 {
+                                self.cancel_tab_dialog();
+                            } else {
+                                self.submit_tab_rename(now);
+                            }
+                        }
+                        (KeyCode::Backspace, true) if !saving && self.rename_focus == 0 => {
                             draft.pop();
                             self.tab_dialog = Some(TabDialog::Rename {
                                 route,
@@ -1042,28 +1266,14 @@ impl WorkspaceState {
                             });
                             self.feedback.dirty = true;
                         }
-                        (KeyCode::Char(character), true) if !saving => {
+                        (KeyCode::Char(character), true) if !saving && self.rename_focus == 0 => {
                             self.append_rename_text(&character.to_string());
                         }
                         _ => {}
                     }
                 }
-                Event::Paste(text) if !saving => self.append_rename_text(text),
-                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(rect) = geometry {
-                        let save_y = rect
-                            .y
-                            .saturating_add(3 + u16::from(self.workspace_index.is_some()));
-                        if mouse.row == save_y
-                            && (rect.x..rect.x + rect.columns.min(6)).contains(&mouse.column)
-                        {
-                            self.submit_tab_rename(now);
-                        } else if mouse.row == save_y
-                            && (rect.x + 7..rect.x + rect.columns.min(15)).contains(&mouse.column)
-                        {
-                            self.cancel_tab_dialog();
-                        }
-                    }
+                Event::Paste(text) if !saving && self.rename_focus == 0 => {
+                    self.append_rename_text(text)
                 }
                 Event::Resize(_, _) => self.feedback.dirty = true,
                 _ => {
@@ -1080,7 +1290,10 @@ impl WorkspaceState {
                     let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
                     match (key.code, plain) {
                         (KeyCode::Esc, true) if key.is_press() => self.cancel_tab_dialog(),
-                        (KeyCode::Left | KeyCode::Right | KeyCode::Tab, true) if !pending => {
+                        (
+                            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab,
+                            true,
+                        ) if !pending => {
                             close_selected = !close_selected;
                             self.tab_dialog = Some(TabDialog::Close {
                                 expected,
@@ -1098,24 +1311,6 @@ impl WorkspaceState {
                             }
                         }
                         _ => {}
-                    }
-                }
-                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(rect) = geometry {
-                        let button_y = rect
-                            .y
-                            .saturating_add(2 + u16::from(self.workspace_index.is_some()));
-                        if mouse.row == button_y
-                            && (rect.x..rect.x + rect.columns.min(11)).contains(&mouse.column)
-                            && !pending
-                        {
-                            self.confirm_tab_close(now);
-                        } else if mouse.row == button_y
-                            && (rect.x + 12..rect.x + rect.columns.min(20)).contains(&mouse.column)
-                            && !pending
-                        {
-                            self.cancel_tab_dialog();
-                        }
                     }
                 }
                 Event::Resize(_, _) => self.feedback.dirty = true,
@@ -1154,6 +1349,7 @@ impl WorkspaceState {
         now: Instant,
         viewport: (u16, u16),
     ) {
+        let _ = viewport;
         match event {
             Event::Key(key) if key.is_press() || key.is_repeat() => {
                 let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
@@ -1190,26 +1386,6 @@ impl WorkspaceState {
                 }
             }
             Event::Paste(text) => self.update_picker_filter(text),
-            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                if let Some((top, rows)) = self.picker_screen_geometry(viewport) {
-                    if self
-                        .picker_clear_rect(viewport)
-                        .is_some_and(|rect| rect.contains(mouse.column, mouse.row))
-                    {
-                        self.clear_picker_filter();
-                    } else if self
-                        .picker_horizontal_bounds(viewport)
-                        .contains(&mouse.column)
-                        && mouse.row > top
-                        && mouse.row < top.saturating_add(rows)
-                    {
-                        if let Some(route) = self.picker_route_at_row(mouse.row - top - 1, viewport)
-                        {
-                            self.request_route(route, now);
-                        }
-                    }
-                }
-            }
             Event::Resize(_, _) => self.feedback.dirty = true,
             _ => {}
         }
@@ -1479,7 +1655,8 @@ impl WorkspaceState {
                     format!("Name: {draft}{}", if *saving { " (saving)" } else { "_" });
                 tab_dialog_text[2] = error.unwrap_or(" ").to_owned();
                 tab_dialog_text[3] = "[Save] [Cancel]".into();
-                tab_dialog_selected[0] = true;
+                tab_dialog_selected[0] = self.rename_focus == 0;
+                tab_dialog_selected[3] = self.rename_focus != 0;
                 if error.is_some() {
                     tab_dialog_selected[2] = true;
                 }

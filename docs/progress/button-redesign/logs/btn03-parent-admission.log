@@ -1,0 +1,10 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.65s
+     Running unittests src/lib.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-cb36793118f48d00)
+
+running 2 tests
+test terminal::compose::tests::overlay_control_admission_rejects_truncation_and_invalid_rows_before_output ... ok
+test terminal::compose::tests::overlay_controls_fill_exact_spans_and_style_only_changes_repaint ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 940 filtered out; finished in 0.01s
+

@@ -1905,7 +1905,7 @@ fn legacy_attach_clamps_large_hosts_before_initial_and_incremental_render() {
         assert!(compositor.commit());
         let mut parser = vt100::Parser::new(rows, columns, 0);
         parser.process(&bytes);
-        assert!(parser.screen().contents().contains("[Menu]"));
+        assert!(parser.screen().contents().contains(" Menu "));
         bytes.clear();
         app.render(&mut compositor, &mut bytes, Instant::now())
             .unwrap();
@@ -1947,6 +1947,28 @@ fn screen_text(app: &App) -> String {
     let mut parser = vt100::Parser::new(rows.max(1), columns.max(1), 0);
     parser.process(&output);
     parser.screen().contents()
+}
+
+fn control_background(app: &App, x: u16, y: u16) -> vt100::Color {
+    let mut compositor = Compositor::try_new().unwrap();
+    let mut bytes = Vec::new();
+    app.render(&mut compositor, &mut bytes, Instant::now())
+        .unwrap();
+    let mut parser = vt100::Parser::new(app.host.0, app.host.1, 0);
+    parser.process(&bytes);
+    parser.screen().cell(y, x).unwrap().bgcolor()
+}
+
+fn page_to_label(app: &mut App, fake: &mut Fake, label: &str) {
+    for _ in 0..panelink::split_menu::PANE_ACTION_COUNT {
+        if parsed_label_position(app, label).is_some() {
+            return;
+        }
+        let (x, y) = parsed_label_position(app, "[More]").expect("next action group");
+        gesture(app, fake, MouseEventKind::Down(MouseButton::Left), x, y);
+        gesture(app, fake, MouseEventKind::Up(MouseButton::Left), x, y);
+    }
+    panic!("unreachable action {label}");
 }
 
 fn parsed_label_position(app: &App, label: &str) -> Option<(u16, u16)> {
@@ -2374,7 +2396,10 @@ fn header_composes_at_screen_row_zero_and_selection_uses_root_coordinates() {
     assert!(header.contains("Editors"), "{header}");
     assert!(header.contains("Main"), "{header}");
     let selected_column = u16::try_from(header.find("Main").unwrap()).unwrap();
-    assert!(parser.screen().cell(0, selected_column).unwrap().inverse());
+    assert_eq!(
+        parser.screen().cell(0, selected_column).unwrap().bgcolor(),
+        vt100::Color::Idx(12)
+    );
 
     feed(&mut app, &mut fake, b"\x02?");
     feed(&mut app, &mut fake, b"\x1b[<0;2;1M\x1b[<0;2;1m");
@@ -2612,7 +2637,7 @@ fn pane_close_confirmation_mouse_buttons_capture_target_and_ignore_opening_relea
             78,
             0,
         );
-        assert!(app.confirm_open());
+        assert!(!app.confirm_open());
         assert!(fake.closes.is_empty());
         gesture(
             &mut app,
@@ -2631,6 +2656,13 @@ fn pane_close_confirmation_mouse_buttons_capture_target_and_ignore_opening_relea
             &mut app,
             &mut fake,
             MouseEventKind::Down(MouseButton::Left),
+            geometry.overlay.x + button,
+            geometry.close.y,
+        );
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Up(MouseButton::Left),
             geometry.overlay.x + button,
             geometry.close.y,
         );
@@ -2744,6 +2776,16 @@ fn menu_close_item_uses_captured_target_and_server_revision_after_confirmation()
         more_x,
         more_y,
     );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        more_x,
+        more_y,
+    );
+    while app.interaction.actions_menu.unwrap().selected != 6 {
+        feed(&mut app, &mut fake, b"\x1b[B");
+    }
     feed(&mut app, &mut fake, b"\r");
     assert!(!app.menu_open());
     assert!(app.confirm_open());
@@ -3494,6 +3536,14 @@ fn back_to_live_click_returns_only_that_pane_without_focus_change() {
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
+    assert_eq!(app.screens[1].history_offset, 20);
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        controls.back.x,
+        controls.back.y,
+    );
     assert_eq!(app.focus(), Some(target(1)));
     assert_eq!(app.screens[0].history_offset, 20);
     assert_eq!(
@@ -3915,6 +3965,18 @@ fn close_confirmation_mouse_buttons_are_explicit_and_consumed() {
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
+    let Event::Mouse(pressed) = cancel else {
+        unreachable!()
+    };
+    app.handle_event(
+        &Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..pressed
+        }),
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
     assert!(!app.confirm_open());
     assert!(fake.closes.is_empty());
     app.focus_target(target(1));
@@ -3927,6 +3989,18 @@ fn close_confirmation_mouse_buttons_are_explicit_and_consumed() {
     });
     app.handle_event(
         &close,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    let Event::Mouse(pressed) = close else {
+        unreachable!()
+    };
+    app.handle_event(
+        &Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..pressed
+        }),
         Instant::now(),
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
@@ -3984,7 +4058,10 @@ fn rendered_confirmation_labels_share_click_geometry_across_routes_and_widths() 
                     Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
                     &mut fake,
                 );
-                assert!(app.confirm_open(), "width={width} workspace={workspace}");
+                assert!(
+                    !app.confirm_open(),
+                    "Down defers width={width} workspace={workspace}"
+                );
                 let release = Event::Mouse(MouseEvent {
                     kind: MouseEventKind::Up(MouseButton::Left),
                     column: close_x,
@@ -4013,11 +4090,29 @@ fn rendered_confirmation_labels_share_click_geometry_across_routes_and_widths() 
                     Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
                     &mut fake,
                 );
+                let Event::Mouse(pressed) = cancel_event else {
+                    unreachable!()
+                };
+                app.handle_event(
+                    &Event::Mouse(MouseEvent {
+                        kind: MouseEventKind::Up(MouseButton::Left),
+                        ..pressed
+                    }),
+                    Instant::now(),
+                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                    &mut fake,
+                );
                 assert!(!app.confirm_open());
                 assert!(fake.closes.is_empty());
 
                 app.handle_event(
                     &opener,
+                    Instant::now(),
+                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                    &mut fake,
+                );
+                app.handle_event(
+                    &release,
                     Instant::now(),
                     Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
                     &mut fake,
@@ -4031,6 +4126,18 @@ fn rendered_confirmation_labels_share_click_geometry_across_routes_and_widths() 
                 });
                 app.handle_event(
                     &close_event,
+                    Instant::now(),
+                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                    &mut fake,
+                );
+                let Event::Mouse(pressed) = close_event else {
+                    unreachable!()
+                };
+                app.handle_event(
+                    &Event::Mouse(MouseEvent {
+                        kind: MouseEventKind::Up(MouseButton::Left),
+                        ..pressed
+                    }),
                     Instant::now(),
                     Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
                     &mut fake,
@@ -4062,6 +4169,18 @@ fn pointer_menu_cancel_is_mouse_only_and_never_sends_child_input() {
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
+    let release = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 2,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    });
+    app.handle_event(
+        &release,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
     assert!(app.interaction.actions_menu.is_some());
     let cancel = parsed_label_position(&app, "Cancel").unwrap();
     let event = Event::Mouse(MouseEvent {
@@ -4072,6 +4191,18 @@ fn pointer_menu_cancel_is_mouse_only_and_never_sends_child_input() {
     });
     app.handle_event(
         &event,
+        Instant::now(),
+        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+        &mut fake,
+    );
+    let Event::Mouse(pressed) = event else {
+        unreachable!()
+    };
+    app.handle_event(
+        &Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..pressed
+        }),
         Instant::now(),
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
@@ -4406,6 +4537,14 @@ fn help_can_be_closed_by_its_rendered_control_without_shell_input() {
         x + 1,
         y,
     );
+    assert!(app.help_open());
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        x + 1,
+        y,
+    );
     assert!(!app.help_open());
     assert!(fake.keys.is_empty() && fake.pastes.is_empty());
 }
@@ -4423,7 +4562,7 @@ fn every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height() {
                 }
                 let tree = PaneLayout::new(target(1), rows, columns).unwrap();
                 app.set_layout(reply_from_tree(&tree));
-                let (x, y) = parsed_label_position(&app, "[Menu]").unwrap();
+                let (x, y) = parsed_label_position(&app, " Menu ").unwrap();
                 gesture(
                     &mut app,
                     &mut fake,
@@ -4431,8 +4570,22 @@ fn every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height() {
                     x + 1,
                     y,
                 );
+                gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Up(MouseButton::Left),
+                    x + 1,
+                    y,
+                );
+                gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Up(MouseButton::Left),
+                    x + 1,
+                    y,
+                );
                 let mut visited = std::collections::BTreeSet::new();
-                for _ in 0..4 {
+                for _ in 0..panelink::split_menu::PANE_ACTION_COUNT {
                     let (start, end) = app.actions_page(app.interaction.actions_menu.unwrap());
                     visited.extend(start..end);
                     assert!(parsed_label_position(&app, "[Cancel]").is_some());
@@ -4462,6 +4615,13 @@ fn every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height() {
                         x + 1,
                         y,
                     );
+                    gesture(
+                        &mut app,
+                        &mut fake,
+                        MouseEventKind::Up(MouseButton::Left),
+                        x + 1,
+                        y,
+                    );
                 }
                 assert_eq!(
                     visited.into_iter().collect::<Vec<_>>(),
@@ -4472,6 +4632,13 @@ fn every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height() {
                     &mut app,
                     &mut fake,
                     MouseEventKind::Down(MouseButton::Left),
+                    x + 1,
+                    y,
+                );
+                gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Up(MouseButton::Left),
                     x + 1,
                     y,
                 );
@@ -4531,6 +4698,13 @@ fn four_directional_split_rows_show_their_reasons_and_page_through_to_cancel() {
         more_x,
         more_y,
     );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        more_x,
+        more_y,
+    );
     assert!(screen_text(&app).contains("[Back] [More] [Cancel]"));
 
     for _ in 0..2 {
@@ -4544,15 +4718,22 @@ fn four_directional_split_rows_show_their_reasons_and_page_through_to_cancel() {
         more_x,
         more_y,
     );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        more_x,
+        more_y,
+    );
+    page_to_label(&mut app, &mut fake, "Shortcut help");
+    assert!(screen_text(&app).contains("Shortcut help"));
+    page_to_label(&mut app, &mut fake, "Detach");
     let last_page = screen_text(&app);
     assert!(
         last_page.contains("[Cancel]"),
         "Cancel remains reachable: {last_page}"
     );
-    assert!(
-        last_page.contains("Shortcut help"),
-        "Help remains reachable: {last_page}"
-    );
+
     assert!(
         last_page.contains("Detach"),
         "Detach remains reachable: {last_page}"
@@ -4564,11 +4745,18 @@ fn disabled_split_click_keeps_selection_so_its_reason_remains_visible() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     app.set_layout(two_panes());
-    let (menu_x, menu_y) = parsed_label_position(&app, "[Menu]").unwrap();
+    let (menu_x, menu_y) = parsed_label_position(&app, " Menu ").unwrap();
     gesture(
         &mut app,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
+        menu_x + 1,
+        menu_y,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
         menu_x + 1,
         menu_y,
     );
@@ -4601,6 +4789,13 @@ fn more_hit_region_starts_on_the_rendered_label_boundary() {
         first_more_x,
         first_more_y,
     );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        first_more_x,
+        first_more_y,
+    );
     assert_eq!(app.interaction.actions_menu.unwrap().selected, 4);
 
     let (more_x, more_y) = parsed_label_position(&app, "[More]").unwrap();
@@ -4608,6 +4803,13 @@ fn more_hit_region_starts_on_the_rendered_label_boundary() {
         &mut app,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
+        more_x - 1,
+        more_y,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
         more_x - 1,
         more_y,
     );
@@ -4623,10 +4825,17 @@ fn more_hit_region_starts_on_the_rendered_label_boundary() {
         more_x,
         more_y,
     );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        more_x,
+        more_y,
+    );
     assert_eq!(
         app.interaction.actions_menu.unwrap().selected,
-        8,
-        "first label cell pages forward"
+        5,
+        "first label cell pages to the Copy / History group"
     );
 }
 
@@ -4639,7 +4848,15 @@ fn actions_keyboard_cancel_highlight_matches_its_behavior() {
     for _ in 0..panelink::split_menu::PANE_ACTION_COUNT {
         feed(&mut app, &mut fake, b"\x1b[B");
     }
-    assert!(render_text(&app).contains("> [Cancel]"));
+    let (cancel_x, cancel_y) = parsed_label_position(&app, "[Cancel]").unwrap();
+    assert_eq!(
+        control_background(&app, cancel_x, cancel_y),
+        vt100::Color::Idx(6)
+    );
+    assert_eq!(
+        control_background(&app, cancel_x + 7, cancel_y),
+        vt100::Color::Idx(6)
+    );
     feed(&mut app, &mut fake, b"\r");
     assert!(app.interaction.actions_menu.is_none());
     assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
@@ -4679,6 +4896,13 @@ fn divider_menu_has_pointer_adjust_apply_and_cancel_controls() {
             x + 1,
             y,
         );
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Up(MouseButton::Left),
+            x + 1,
+            y,
+        );
     }
     assert_eq!(
         fake.pane_operations,
@@ -4702,11 +4926,18 @@ fn pane_menu_remains_pointer_reachable_during_keyboard_copy_mode() {
         .unwrap();
     feed(&mut app, &mut fake, b"\x02c");
     assert!(app.copy.copy_mode);
-    let (x, y) = parsed_label_position(&app, "[Menu]").unwrap();
+    let (x, y) = parsed_label_position(&app, " Menu ").unwrap();
     gesture(
         &mut app,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
+        x + 1,
+        y,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
         x + 1,
         y,
     );
@@ -4806,7 +5037,17 @@ fn detach_from_empty_workspace_exits_locally_without_effects() {
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
-    assert_eq!(flow, Flow::Quit);
+    assert_eq!(flow, Flow::Continue);
+    let flow = app.handle_empty_workspace_event(
+        &Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column,
+            row: geometry.detach.y,
+            modifiers: KeyModifiers::NONE,
+        }),
+        Instant::now(),
+    );
+    assert_eq!(flow, Some(Flow::Quit));
     assert!(app.take_create_request().is_none());
     assert!(fake.keys.is_empty() && fake.pastes.is_empty());
     assert!(fake.splits.is_empty() && fake.closes.is_empty());
@@ -4820,17 +5061,22 @@ fn unknown_create_outcome_waits_for_explicit_new_tab_and_reuses_intent() {
     let mut fake = Fake::default();
     let controls = app.empty_action_geometry().expect("visible empty controls");
     let click_new_tab = |app: &mut App, fake: &mut Fake| {
-        app.handle_event(
-            &Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: controls.new_tab.x + controls.new_tab.columns / 2,
-                row: controls.new_tab.y,
-                modifiers: KeyModifiers::NONE,
-            }),
-            Instant::now(),
-            Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
-            fake,
-        );
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.handle_event(
+                &Event::Mouse(MouseEvent {
+                    kind,
+                    column: controls.new_tab.x + controls.new_tab.columns / 2,
+                    row: controls.new_tab.y,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                Instant::now(),
+                Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                fake,
+            );
+        }
     };
     click_new_tab(&mut app, &mut fake);
     let (project, reconcile) = app.take_create_request().expect("first intent");
@@ -4888,6 +5134,13 @@ fn pane_menu_and_close_route_the_exact_shared_control_edges() {
         controls.menu.x + controls.menu.columns - 1,
         controls.menu.y,
     );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        controls.menu.x + controls.menu.columns - 1,
+        controls.menu.y,
+    );
     assert!(app.interaction.actions_menu.is_some());
     app.handle_event(
         &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -4917,6 +5170,13 @@ fn pane_menu_and_close_route_the_exact_shared_control_edges() {
         &mut app,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
+        controls.close.x + controls.close.columns - 1,
+        controls.close.y,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
         controls.close.x + controls.close.columns - 1,
         controls.close.y,
     );
@@ -5038,6 +5298,13 @@ fn pane_menu_entry_points_share_captured_model_without_stealing_focus() {
                     controls.menu.x + 1,
                     controls.menu.y,
                 );
+                gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Up(MouseButton::Left),
+                    controls.menu.x + 1,
+                    controls.menu.y,
+                );
             }
             1 => gesture(
                 &mut app,
@@ -5081,7 +5348,7 @@ fn pane_menu_opening_release_and_outside_click_are_consumed_without_focus_change
         controls.menu.x + 1,
         controls.menu.y,
     );
-    assert!(app.interaction.actions_menu.is_some());
+    assert!(app.interaction.actions_menu.is_none());
     gesture(
         &mut app,
         &mut fake,
@@ -5305,11 +5572,26 @@ fn shared_menu_close_uses_its_captured_pane_and_revision_without_refocusing() {
         more_x,
         more_y,
     );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        more_x,
+        more_y,
+    );
+    page_to_label(&mut app, &mut fake, "Close pane");
     let (x, y) = parsed_label_position(&app, "Close pane").unwrap();
     gesture(
         &mut app,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
+        x + 1,
+        y,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
         x + 1,
         y,
     );
@@ -5460,6 +5742,14 @@ fn active_tab_click_and_keyboard_menu_open_rename_and_close_actions() {
         column,
         0,
     );
+    assert!(app.workspace.tab_dialog.is_none());
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        0,
+    );
     assert!(
         matches!(app.workspace.tab_dialog, Some(TabDialog::Actions { route, .. }) if route == current)
     );
@@ -5508,6 +5798,13 @@ fn rename_enter_saves_once_and_mouse_cancel_discards_the_draft() {
         geometry.x + 2,
         geometry.y + 4,
     );
+    gesture(
+        &mut mouse_save,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        geometry.x + 2,
+        geometry.y + 4,
+    );
     assert!(matches!(
         mouse_save.take_workspace_metadata_mutation(),
         Some(WorkspaceMetadataMutation::Rename { name, .. }) if name == "MainMouse"
@@ -5522,6 +5819,13 @@ fn rename_enter_saves_once_and_mouse_cancel_discards_the_draft() {
         &mut cancel,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
+        geometry.x + 10,
+        geometry.y + 4,
+    );
+    gesture(
+        &mut cancel,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
         geometry.x + 10,
         geometry.y + 4,
     );
@@ -5622,6 +5926,13 @@ fn close_tab_defaults_to_cancel_and_confirmation_captures_one_exact_route() {
         geometry.x + 15,
         geometry.y + 3,
     );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        geometry.x + 15,
+        geometry.y + 3,
+    );
     assert_eq!(app.workspace.tab_dialog, None);
     assert!(app.take_workspace_metadata_mutation().is_none());
 
@@ -5718,6 +6029,13 @@ fn all_tabs_search_reports_empty_results_and_supports_mouse_selection() {
         clear.x,
         top,
     );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        clear.x,
+        top,
+    );
     assert!(app.workspace.picker_filter.is_empty());
 
     let (top, _) = app.picker_screen_geometry().unwrap();
@@ -5725,6 +6043,13 @@ fn all_tabs_search_reports_empty_results_and_supports_mouse_selection() {
         &mut app,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
+        10,
+        top + 2,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
         10,
         top + 2,
     );
@@ -5837,6 +6162,16 @@ fn empty_workspace_header_plus_requests_one_default_project_tab() {
         ),
         Some(Flow::Continue)
     );
+    assert!(app.take_create_request().is_none());
+    app.handle_empty_workspace_event(
+        &Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 76,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }),
+        Instant::now(),
+    );
     assert_eq!(
         app.take_create_request(),
         Some((ProjectId::new(1).unwrap(), None))
@@ -5919,6 +6254,13 @@ fn tab_modals_stay_compact_and_ignore_clicks_outside_their_bounds() {
         0,
         bounds.y + 2,
     );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        0,
+        bounds.y + 2,
+    );
     assert!(matches!(
         app.workspace.tab_dialog,
         Some(TabDialog::Actions { .. })
@@ -5927,6 +6269,13 @@ fn tab_modals_stay_compact_and_ignore_clicks_outside_their_bounds() {
         &mut app,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
+        bounds.x + 2,
+        bounds.y + 5,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
         bounds.x + 2,
         bounds.y + 5,
     );
@@ -5944,6 +6293,13 @@ fn tab_modals_stay_compact_and_ignore_clicks_outside_their_bounds() {
         &mut app,
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
+        0,
+        top + 2,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
         0,
         top + 2,
     );
@@ -6114,4 +6470,1374 @@ fn alternate_output_keeps_fifo_and_failed_admission_is_not_retried() {
     app.flush_scroll(now, &mut fake);
     assert_eq!(fake.alternate_wheels.len(), 2);
     assert!(app.screens[0].queued_alternate_wheel.is_empty());
+}
+
+#[test]
+fn header_press_waits_for_valid_release_and_does_not_leak_to_child() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(2));
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        2,
+        0,
+    );
+    assert!(app.interaction.actions_menu.is_none());
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        3,
+        0,
+    );
+    assert!(app.interaction.actions_menu.is_some());
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+}
+
+#[test]
+fn header_press_cancels_on_drag_away_escape_and_layout_change() {
+    for reason in 0..3 {
+        let mut app = App::new(24, 81).unwrap();
+        let mut fake = Fake::default();
+        app.set_layout(one_pane(2));
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            0,
+        );
+        match reason {
+            0 => gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Drag(MouseButton::Left),
+                10,
+                4,
+            ),
+            1 => {
+                feed(&mut app, &mut fake, b"\x1b");
+            }
+            _ => {
+                let mut next = one_pane(2);
+                next.revision += 1;
+                app.set_layout(next);
+            }
+        }
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Up(MouseButton::Left),
+            2,
+            0,
+        );
+        assert!(app.interaction.actions_menu.is_none());
+        assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+    }
+}
+
+#[test]
+fn header_press_rejects_replacement_focus_loss_focus_change_and_wrong_release() {
+    for reason in 0..4 {
+        let mut app = App::new(24, 81).unwrap();
+        let mut fake = Fake::default();
+        app.set_layout(two_panes());
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Down(MouseButton::Left),
+            78,
+            0,
+        );
+        assert!(!app.confirm_open());
+        match reason {
+            0 => {
+                // Same geometry and revision, different process identity.
+                let mut replacement = two_panes();
+                replacement.panes[1].as_mut().unwrap().target = target(3);
+                app.set_layout(replacement);
+            }
+            1 => {
+                app.handle_event(
+                    &Event::FocusLost,
+                    Instant::now(),
+                    Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                    &mut fake,
+                );
+            }
+            2 => {
+                app.focus_target(target(2));
+                app.focus_target(target(1));
+            }
+            _ => gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Up(MouseButton::Right),
+                78,
+                0,
+            ),
+        }
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Up(MouseButton::Left),
+            78,
+            0,
+        );
+        assert!(!app.confirm_open(), "reason={reason}");
+        assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+    }
+}
+
+#[test]
+fn header_press_duplicate_release_does_not_activate_confirmation() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(two_panes());
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        78,
+        0,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        78,
+        0,
+    );
+    assert!(app.confirm_open());
+    let geometry = app.confirm_ui_geometry(24, 81).unwrap();
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        geometry.close.x,
+        geometry.close.y,
+    );
+    assert!(app.confirm_open());
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+}
+
+#[test]
+fn captured_header_colors_restore_before_release_on_every_invalidation() {
+    for close in [false, true] {
+        for reason in 0..9 {
+            let mut app = App::new(24, 81).unwrap();
+            let mut fake = Fake::default();
+            app.set_layout(one_pane(2));
+            let x = if close { 78 } else { 2 };
+            let mut compositor = Compositor::try_new().unwrap();
+            let mut parser = vt100::Parser::new(24, 81, 0);
+            let paint = |app: &App, compositor: &mut Compositor, parser: &mut vt100::Parser| {
+                let mut bytes = Vec::new();
+                app.render(compositor, &mut bytes, Instant::now()).unwrap();
+                parser.process(&bytes);
+                assert!(compositor.commit());
+                bytes
+            };
+            paint(&app, &mut compositor, &mut parser);
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Down(MouseButton::Left),
+                x,
+                0,
+            );
+            assert!(app.interaction.actions_menu.is_none() && !app.confirm_open());
+            paint(&app, &mut compositor, &mut parser);
+            let controls =
+                panelink::terminal::compose::pane_controls(one_pane(2).panes[0].unwrap().rect)
+                    .unwrap();
+            let bounds = if close { controls.close } else { controls.menu };
+            for col in bounds.x..bounds.x + bounds.columns {
+                assert_eq!(
+                    parser.screen().cell(0, col).unwrap().bgcolor(),
+                    vt100::Color::Idx(4)
+                );
+            }
+            assert!(paint(&app, &mut compositor, &mut parser).is_empty());
+            match reason {
+                0 => gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    10,
+                    4,
+                ),
+                1 => {
+                    feed(&mut app, &mut fake, b"\x1b");
+                }
+                2 => gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Up(MouseButton::Left),
+                    x,
+                    0,
+                ),
+                3 => {
+                    let mut layout = one_pane(2);
+                    layout.revision += 1;
+                    app.set_layout(layout);
+                }
+                4 => {
+                    let mut layout = one_pane(2);
+                    layout.panes[0].as_mut().unwrap().target = target(3);
+                    app.set_layout(layout);
+                }
+                5 => {
+                    app.focus_generation += 1;
+                }
+                6 => {
+                    app.host.0 += 1;
+                }
+                7 => {
+                    app.workspace.route_switching = true;
+                }
+                _ => {
+                    app.workspace.current_route = Some(workspace_catalog().1);
+                }
+            }
+            paint(&app, &mut compositor, &mut parser);
+            for col in bounds.x..bounds.x + bounds.columns {
+                assert_eq!(
+                    parser.screen().cell(0, col).unwrap().bgcolor(),
+                    vt100::Color::Idx(if close { 1 } else { 8 }),
+                    "reason={reason}"
+                );
+            }
+            assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+        }
+    }
+}
+
+#[test]
+fn modal_raw_release_capture_cancels_without_leaking_or_retargeting() {
+    for scenario in 0..11 {
+        let mut app = App::new(24, 81).unwrap();
+        let mut fake = Fake::default();
+        app.set_layout(two_panes());
+        feed(&mut app, &mut fake, b"\x02x");
+        let g = app.confirm_ui_geometry(24, 81).unwrap();
+        // An opener/duplicate release cannot select the initially focused Cancel.
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Up(MouseButton::Left),
+            g.close.x,
+            g.close.y,
+        );
+        assert!(app.confirm_open());
+        assert!(!app.interaction.confirm_close_selected);
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Down(MouseButton::Left),
+            g.close.x,
+            g.close.y,
+        );
+        assert!(fake.closes.is_empty());
+        assert!(app.visible_modal_press().is_some());
+        assert_eq!(
+            control_background(&app, g.close.x, g.close.y),
+            vt100::Color::Idx(4)
+        );
+        match scenario {
+            0 => {}
+            1 => gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Up(MouseButton::Right),
+                g.close.x,
+                g.close.y,
+            ),
+            2 => gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Drag(MouseButton::Left),
+                0,
+                0,
+            ),
+            3 => {
+                app.handle_event(
+                    &Event::FocusLost,
+                    Instant::now(),
+                    Availability::Enabled,
+                    &mut fake,
+                );
+            }
+            4 => {
+                app.handle_event(
+                    &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                    Instant::now(),
+                    Availability::Enabled,
+                    &mut fake,
+                );
+            }
+            5 => {
+                app.set_host(25, 81);
+                app.set_host(24, 81);
+            }
+            6 => {
+                let intent = app.interaction.confirm.intent().unwrap();
+                app.interaction.open_close_confirmation(intent);
+            }
+            7 => {
+                let mut layout = two_panes();
+                layout.panes[0].as_mut().unwrap().target = target(9);
+                app.set_layout(layout);
+            }
+            8 => {
+                let mut layout = two_panes();
+                layout.revision += 1;
+                app.set_layout(layout);
+            }
+            9 => gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Up(MouseButton::Left),
+                0,
+                0,
+            ),
+            10 => gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Up(MouseButton::Left),
+                g.cancel.x,
+                g.cancel.y,
+            ),
+            _ => unreachable!(),
+        }
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Up(MouseButton::Left),
+            g.close.x,
+            g.close.y,
+        );
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Up(MouseButton::Left),
+            g.close.x,
+            g.close.y,
+        );
+        assert_eq!(
+            fake.closes.len(),
+            usize::from(scenario == 0),
+            "scenario {scenario}"
+        );
+        assert!(app.visible_modal_press().is_none());
+        if app.confirm_open() {
+            assert_ne!(
+                control_background(&app, g.close.x, g.close.y),
+                vt100::Color::Idx(4)
+            );
+        }
+        assert!(fake.keys.is_empty() && fake.pastes.is_empty());
+    }
+}
+
+#[test]
+fn action_row_press_has_distinct_rendering_and_cannot_transfer_to_another_row() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(2));
+    feed(&mut app, &mut fake, b"\x02s");
+    let menu = app.interaction.actions_menu.unwrap();
+    let page = app.actions_page_geometry(menu).unwrap();
+    let (x, y) = (page.rect.x, page.rect.y + page.action_row as u16);
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        x,
+        y,
+    );
+    assert!(fake.splits.is_empty());
+    assert_eq!(control_background(&app, x, y), vt100::Color::Idx(4));
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        x,
+        y + 1,
+    );
+    assert!(fake.splits.is_empty());
+    assert_ne!(control_background(&app, x, y), vt100::Color::Idx(4));
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        x,
+        y,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        x,
+        y,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        x,
+        y,
+    );
+    assert_eq!(fake.splits.len(), 1);
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty());
+}
+
+#[test]
+fn disabled_action_release_selects_reason_and_confirmation_cycles_locally() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(two_panes());
+    feed(&mut app, &mut fake, b"\x02s");
+    let menu = app.interaction.actions_menu.unwrap();
+    assert!(matches!(
+        menu.model.items()[0].availability,
+        Availability::Disabled(_)
+    ));
+    let page = app.actions_page_geometry(menu).unwrap();
+    let (x, y) = (page.rect.x, page.rect.y + page.action_row as u16);
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        x,
+        y,
+    );
+    assert!(fake.splits.is_empty());
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        x,
+        y,
+    );
+    assert_eq!(app.interaction.actions_menu.unwrap().selected, 0);
+    assert!(fake.splits.is_empty());
+    app.interaction.replace_actions(None);
+    app.interaction.close_menu();
+    app.interaction
+        .open_close_confirmation(menu.model.close_intent());
+    assert!(app.confirm_open());
+    assert!(!app.interaction.confirm_close_selected);
+    app.handle_event(
+        &Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+        Instant::now(),
+        Availability::Enabled,
+        &mut fake,
+    );
+    assert!(app.interaction.confirm_close_selected);
+    feed(&mut app, &mut fake, b"\t");
+    assert!(!app.interaction.confirm_close_selected);
+    feed(&mut app, &mut fake, b"\r");
+    assert!(!app.confirm_open());
+    assert!(fake.closes.is_empty() && fake.keys.is_empty() && fake.pastes.is_empty());
+}
+
+#[test]
+fn tab_dialog_local_focus_preserves_editing_and_guards_activation() {
+    let (index, current, _) = workspace_catalog();
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.install_workspace_index(index, current);
+    app.set_workspace_revision(5);
+    feed(&mut app, &mut fake, b"\x02tr A");
+    assert!(
+        matches!(&app.workspace.tab_dialog, Some(TabDialog::Rename { draft, .. }) if draft == "Main A")
+    );
+    // Shift-Tab from the editor selects Cancel; Enter must discard, not save.
+    feed(&mut app, &mut fake, b"\x1b[Z\r");
+    assert!(app.workspace.tab_dialog.is_none());
+    assert!(app.take_workspace_metadata_mutation().is_none());
+    feed(&mut app, &mut fake, b"\x02tr\t");
+    // Space and paste while Save is focused cannot modify the editor.
+    feed(&mut app, &mut fake, b" ");
+    app.handle_event(
+        &Event::Paste("ignored".into()),
+        Instant::now(),
+        Availability::Enabled,
+        &mut fake,
+    );
+    assert!(
+        matches!(&app.workspace.tab_dialog, Some(TabDialog::Rename { draft, .. }) if draft == "Main")
+    );
+    feed(&mut app, &mut fake, b"\r\r");
+    assert!(
+        matches!(app.take_workspace_metadata_mutation(), Some(WorkspaceMetadataMutation::Rename { name, .. }) if name == "Main")
+    );
+    assert!(app.take_workspace_metadata_mutation().is_none());
+    assert!(fake.keys.is_empty());
+}
+
+#[test]
+fn tab_actions_cycle_both_directions_and_ignore_repeat_shortcuts() {
+    let (index, current, _) = workspace_catalog();
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.install_workspace_index(index, current);
+    app.set_workspace_revision(5);
+    feed(&mut app, &mut fake, b"\x02t\t");
+    assert!(matches!(
+        app.workspace.tab_dialog,
+        Some(TabDialog::Actions { selected: 1, .. })
+    ));
+    feed(&mut app, &mut fake, b"\x1b[Z");
+    assert!(matches!(
+        app.workspace.tab_dialog,
+        Some(TabDialog::Actions { selected: 0, .. })
+    ));
+    let repeat = Event::Key(KeyEvent {
+        code: KeyCode::Char('r'),
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Repeat,
+        state: crossterm_input::KeyEventState::NONE,
+    });
+    app.handle_event(&repeat, Instant::now(), Availability::Enabled, &mut fake);
+    assert!(matches!(
+        app.workspace.tab_dialog,
+        Some(TabDialog::Actions { selected: 0, .. })
+    ));
+    feed(&mut app, &mut fake, b"\x1b");
+    assert!(fake.keys.is_empty());
+}
+
+#[test]
+fn strip_capture_waits_for_release_and_cancels_stale_catalog_or_drag_away() {
+    for scenario in 0..3 {
+        let (index, current, _) = workspace_catalog();
+        let mut app = App::new(25, 81).unwrap();
+        let mut fake = Fake::default();
+        app.install_workspace_index(index, current);
+        app.set_layout(two_panes());
+        let strip = app.tabs_layout().unwrap();
+        let x = (0..81)
+            .find(|x| strip.hit_test(*x, 0) == Some(TabAction::AllTabs))
+            .unwrap();
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            0,
+        );
+        assert!(!app.workspace.picker_open);
+        match scenario {
+            1 => {
+                app.set_workspace_revision(999);
+            }
+            2 => gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Drag(MouseButton::Left),
+                0,
+                4,
+            ),
+            _ => {}
+        }
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            0,
+        );
+        assert_eq!(app.workspace.picker_open, scenario == 0);
+        assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+    }
+}
+
+#[test]
+fn empty_body_raw_capture_direct_and_root_pressed_cancel_release() {
+    for direct in [false, true] {
+        for detach in [false, true] {
+            let mut app = App::new_workspace_empty(
+                24,
+                81,
+                TabPresentationSnapshot::new(&WorkspaceIndex::new(), false),
+            )
+            .unwrap();
+            let mut fake = Fake::default();
+            let geometry = app.empty_action_geometry().unwrap();
+            let bounds = if detach {
+                geometry.detach
+            } else {
+                geometry.new_tab
+            };
+            let mut compositor = Compositor::try_new().unwrap();
+            let mut parser = vt100::Parser::new(24, 81, 0);
+            let mut render = |app: &App| {
+                let mut bytes = Vec::new();
+                app.render(&mut compositor, &mut bytes, Instant::now())
+                    .unwrap();
+                parser.process(&bytes);
+                parser.screen().cell(bounds.y, bounds.x).unwrap().bgcolor()
+            };
+            assert_ne!(render(&app), vt100::Color::Idx(4));
+            let mut send = |app: &mut App, kind| {
+                let event = Event::Mouse(MouseEvent {
+                    kind,
+                    column: bounds.x,
+                    row: bounds.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+                if direct {
+                    app.handle_empty_workspace_event(&event, Instant::now())
+                        .unwrap()
+                } else {
+                    app.handle_event(
+                        &event,
+                        Instant::now(),
+                        Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
+                        &mut fake,
+                    )
+                }
+            };
+            assert_eq!(
+                send(&mut app, MouseEventKind::Down(MouseButton::Left)),
+                Flow::Continue
+            );
+            assert!(app.take_create_request().is_none());
+            assert_eq!(render(&app), vt100::Color::Idx(4));
+            app.handle_empty_workspace_event(
+                &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                Instant::now(),
+            );
+            assert_ne!(render(&app), vt100::Color::Idx(4));
+            assert_eq!(
+                send(&mut app, MouseEventKind::Up(MouseButton::Left)),
+                Flow::Continue
+            );
+            assert!(app.take_create_request().is_none());
+            send(&mut app, MouseEventKind::Down(MouseButton::Left));
+            assert_eq!(
+                send(&mut app, MouseEventKind::Up(MouseButton::Left)),
+                if detach { Flow::Quit } else { Flow::Continue }
+            );
+            assert_eq!(app.take_create_request().is_some(), !detach);
+            assert_eq!(
+                send(&mut app, MouseEventKind::Up(MouseButton::Left)),
+                Flow::Continue
+            );
+            assert!(app.take_create_request().is_none());
+            assert!(
+                fake.keys.is_empty()
+                    && fake.pastes.is_empty()
+                    && fake.closes.is_empty()
+                    && fake.splits.is_empty()
+            );
+            assert!(app.layout.is_none());
+        }
+    }
+}
+
+#[test]
+fn surface_pressed_cells_restore_and_failed_output_retries() {
+    struct Broken;
+    impl std::io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("injected output failure"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    for strip in [false, true] {
+        let mut app = App::new(25, 81).unwrap();
+        let mut fake = Fake::default();
+        if strip {
+            let (index, current, _) = workspace_catalog();
+            app.install_workspace_index(index, current);
+        }
+        app.set_layout(two_panes());
+        let (x, y) = if strip {
+            let layout = app.tabs_layout().unwrap();
+            (
+                (0..81)
+                    .find(|x| layout.hit_test(*x, 0) == Some(TabAction::AllTabs))
+                    .unwrap(),
+                0,
+            )
+        } else {
+            let pane = app.layout().unwrap().panes[0].unwrap();
+            let content = panelink::pane_layout::content_rect(pane.rect).unwrap();
+            let checkpoint =
+                text_checkpoint_size("live", pane.target.pane, content.rows, content.columns);
+            app.load_screen(pane.target, 1, &decode(&checkpoint).unwrap())
+                .unwrap();
+            install_history_view(&mut app, pane.target, 20);
+            let controls =
+                pane_history_controls(pane.rect, HistoryLabelKind::History, None).unwrap();
+            (controls.back.x, controls.back.y)
+        };
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut parser = vt100::Parser::new(25, 81, 0);
+        let mut bytes = Vec::new();
+        app.render(&mut compositor, &mut bytes, Instant::now())
+            .unwrap();
+        assert!(compositor.commit());
+        parser.process(&bytes);
+        let normal = parser.screen().cell(y, x).unwrap().bgcolor();
+        println!(
+            "surface strip={strip} cell=({x},{y}) normal={:?}",
+            parser.screen().cell(y, x).unwrap()
+        );
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            y,
+        );
+        assert!(app
+            .render(&mut compositor, &mut Broken, Instant::now())
+            .is_err());
+        assert!(!compositor.commit());
+        bytes.clear();
+        app.render(&mut compositor, &mut bytes, Instant::now())
+            .unwrap();
+        assert!(!bytes.is_empty());
+        assert!(compositor.commit());
+        parser.process(&bytes);
+        println!("pressed={:?}", parser.screen().cell(y, x).unwrap());
+        assert_ne!(parser.screen().cell(y, x).unwrap().bgcolor(), normal);
+        bytes.clear();
+        app.render(&mut compositor, &mut bytes, Instant::now())
+            .unwrap();
+        assert!(bytes.is_empty());
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Drag(MouseButton::Left),
+            0,
+            1,
+        );
+        bytes.clear();
+        app.render(&mut compositor, &mut bytes, Instant::now())
+            .unwrap();
+        assert!(compositor.commit());
+        parser.process(&bytes);
+        println!("canceled={:?}", parser.screen().cell(y, x).unwrap());
+        assert_eq!(parser.screen().cell(y, x).unwrap().bgcolor(), normal);
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            y,
+        );
+        assert!(!app.workspace.picker_open);
+        assert!(fake.keys.is_empty() && fake.pastes.is_empty());
+        if !strip {
+            assert_eq!(app.screens[0].history_offset, 20);
+        }
+    }
+}
+
+#[test]
+fn surface_capture_invalidations_do_not_activate_or_retarget() {
+    for empty in [false, true] {
+        for scenario in 0..7 {
+            let mut fake = Fake::default();
+            let mut app = if empty {
+                App::new_workspace_empty(
+                    24,
+                    81,
+                    TabPresentationSnapshot::new(&WorkspaceIndex::new(), false),
+                )
+                .unwrap()
+            } else {
+                App::new(24, 81).unwrap()
+            };
+            let (x, y) = if empty {
+                let bounds = app.empty_action_geometry().unwrap().new_tab;
+                (bounds.x, bounds.y)
+            } else {
+                app.set_layout(one_pane(1));
+                let content = panelink::pane_layout::content_rect(
+                    app.layout().unwrap().panes[0].unwrap().rect,
+                )
+                .unwrap();
+                app.load_screen(
+                    target(1),
+                    1,
+                    &decode(&text_checkpoint_size(
+                        "live",
+                        1,
+                        content.rows,
+                        content.columns,
+                    ))
+                    .unwrap(),
+                )
+                .unwrap();
+                install_history_view(&mut app, target(1), 20);
+                let controls = pane_history_controls(
+                    rect(0, 0, 24, 81),
+                    HistoryLabelKind::History,
+                    pane_version_badge(rect(0, 0, 24, 81), 24, 81),
+                )
+                .unwrap();
+                (controls.back.x, controls.back.y)
+            };
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Down(MouseButton::Left),
+                x,
+                y,
+            );
+            match scenario {
+                0 => gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    0,
+                    0,
+                ),
+                1 => gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Up(MouseButton::Right),
+                    x,
+                    y,
+                ),
+                2 => {
+                    app.handle_event(
+                        &Event::FocusLost,
+                        Instant::now(),
+                        Availability::Enabled,
+                        &mut fake,
+                    );
+                }
+                3 => app.set_host(25, 82),
+                4 => app.set_workspace_revision(999),
+                5 => {
+                    app.handle_event(
+                        &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                        Instant::now(),
+                        Availability::Enabled,
+                        &mut fake,
+                    );
+                }
+                _ => {
+                    if !empty {
+                        app.set_layout(one_pane(2));
+                    } else {
+                        app.set_host(20, 60);
+                    }
+                }
+            }
+            assert!(app.visible_surface_press().is_none());
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Up(MouseButton::Left),
+                x,
+                y,
+            );
+            assert!(app.take_create_request().is_none());
+            if !empty && scenario != 6 {
+                assert_eq!(app.screens[0].history_offset, 20);
+            }
+            assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+        }
+    }
+}
+
+#[test]
+fn workspace_controls_capture_exact_identity_and_render_release_feedback() {
+    use super::workspace::WorkspaceControl;
+    for surface in 0..9 {
+        for invalidation in 0..13 {
+            let (index, current, _) = workspace_catalog();
+            let mut app = App::new(24, 81).unwrap();
+            let mut fake = Fake::default();
+            app.install_workspace_index(index.clone(), current);
+            app.set_workspace_revision(5);
+            app.set_layout(one_pane(1));
+            match surface {
+                0 | 7 | 8 => app.workspace.open_tab_actions(current),
+                1 | 2 => app.workspace.begin_tab_rename(current),
+                3 | 4 => app.workspace.begin_tab_close(current, Some(7)),
+                _ => app.workspace.open_workspace_picker(),
+            }
+            let controls = app.workspace.workspace_controls(app.viewport());
+            let (control, bounds) = controls[match surface {
+                2 | 4 | 6 | 7 => 1,
+                8 => 2,
+                _ => 0,
+            }];
+            let before = app.workspace.control_stamp();
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Down(MouseButton::Left),
+                bounds.x,
+                bounds.y,
+            );
+            assert!(app.workspace.control_stamp() == before);
+            assert!(app.take_workspace_metadata_mutation().is_none());
+            assert_eq!(app.valid_workspace_press(), Some(bounds));
+            let pressed = screen_text(&app);
+            assert!(
+                (bounds.x..bounds.x + bounds.columns)
+                    .all(|x| control_background(&app, x, bounds.y) == vt100::Color::Idx(4)),
+                "surface {surface}: {pressed}"
+            );
+            match invalidation {
+                0 => {}
+                1 => gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Up(MouseButton::Left),
+                    0,
+                    0,
+                ),
+                2 => gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Up(MouseButton::Right),
+                    bounds.x,
+                    bounds.y,
+                ),
+                3 => gesture(
+                    &mut app,
+                    &mut fake,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    bounds.x + bounds.columns,
+                    bounds.y,
+                ),
+                4 => {
+                    app.handle_event(
+                        &Event::FocusLost,
+                        Instant::now(),
+                        Availability::Enabled,
+                        &mut fake,
+                    );
+                }
+                5 => app.set_host(25, 82),
+                6 => app.set_workspace_revision(6),
+                7 => {
+                    app.set_layout(LayoutReply {
+                        panes: one_pane(1).panes.map(|p| {
+                            p.map(|mut p| {
+                                p.target.generation += 1;
+                                p
+                            })
+                        }),
+                        ..one_pane(1)
+                    });
+                }
+                8 => {
+                    app.workspace.cancel_tab_dialog();
+                    app.workspace.open_tab_actions(current);
+                }
+                9 => {
+                    app.workspace.update_workspace_catalog(index);
+                }
+                10 => {
+                    app.workspace.current_route = None;
+                }
+                11 => {
+                    app.handle_event(
+                        &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                        Instant::now(),
+                        Availability::Enabled,
+                        &mut fake,
+                    );
+                }
+                _ => {
+                    if matches!(surface, 5 | 6) {
+                        app.workspace.update_picker_filter("changed");
+                    } else {
+                        app.workspace.begin_tab_rename(current);
+                    }
+                }
+            }
+            if invalidation != 0 {
+                assert!(app.valid_workspace_press().is_none());
+                assert_ne!(
+                    control_background(&app, bounds.x, bounds.y),
+                    vt100::Color::Idx(4)
+                );
+            }
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Up(MouseButton::Left),
+                bounds.x,
+                bounds.y,
+            );
+            if invalidation != 0 {
+                assert!(app.take_workspace_metadata_mutation().is_none());
+                assert!(app.take_route_request().is_none());
+            } else {
+                match control {
+                    WorkspaceControl::Save => assert!(matches!(
+                        app.take_workspace_metadata_mutation(),
+                        Some(WorkspaceMetadataMutation::Rename { .. })
+                    )),
+                    WorkspaceControl::Close => assert!(matches!(
+                        app.take_workspace_metadata_mutation(),
+                        Some(WorkspaceMetadataMutation::Close { .. })
+                    )),
+                    _ => {}
+                }
+            }
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Up(MouseButton::Left),
+                bounds.x,
+                bounds.y,
+            );
+            assert!(app.take_workspace_metadata_mutation().is_none());
+            assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+            if invalidation == 0 {
+                println!(
+                    "BTN02g surface {surface} pressed:\n{pressed}\nreleased:\n{}",
+                    screen_text(&app)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn workspace_pending_controls_and_empty_picker_remain_local() {
+    for close in [false, true] {
+        let (index, current, _) = workspace_catalog();
+        let mut app = App::new(24, 81).unwrap();
+        let mut fake = Fake::default();
+        app.install_workspace_index(index, current);
+        app.set_workspace_revision(5);
+        app.set_layout(one_pane(1));
+        if close {
+            app.workspace.begin_tab_close(current, Some(7));
+        } else {
+            app.workspace.begin_tab_rename(current);
+        }
+        let controls = app.workspace.workspace_controls(app.viewport());
+        let (_, r) = controls[0];
+        for _ in 0..2 {
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Down(MouseButton::Left),
+                r.x,
+                r.y,
+            );
+            gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Up(MouseButton::Left),
+                r.x,
+                r.y,
+            );
+        }
+        assert!(app.take_workspace_metadata_mutation().is_some());
+        let pending = app.workspace.tab_dialog.clone();
+        let (_, cancel) = controls[1];
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Down(MouseButton::Left),
+            cancel.x,
+            cancel.y,
+        );
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Up(MouseButton::Left),
+            cancel.x,
+            cancel.y,
+        );
+        assert_eq!(app.workspace.tab_dialog, pending);
+        assert!(app.take_workspace_metadata_mutation().is_none());
+        assert_eq!(app.status.map(|s| s.0), Some("workspace metadata busy"));
+        assert!(screen_text(&app).contains(if close { "Closing tab" } else { "saving" }));
+        assert!(fake.keys.is_empty());
+    }
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.install_workspace_tabs(
+        TabPresentationSnapshot::new(&WorkspaceIndex::new(), false),
+        None,
+    );
+    app.workspace.open_workspace_picker();
+    app.workspace.update_picker_filter("empty");
+    let r = app.workspace.picker_clear_rect(app.viewport()).unwrap();
+    let down = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: r.x,
+        row: r.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    let up = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: r.x,
+        row: r.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app
+        .handle_empty_workspace_event(&down, Instant::now())
+        .is_some());
+    assert_eq!(app.workspace.picker_filter, "empty");
+    assert_eq!(control_background(&app, r.x, r.y), vt100::Color::Idx(4));
+    assert!(app
+        .handle_empty_workspace_event(&up, Instant::now())
+        .is_some());
+    assert!(app.workspace.picker_filter.is_empty());
+    app.handle_event(
+        &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        Instant::now(),
+        Availability::Enabled,
+        &mut fake,
+    );
+    assert!(!app.workspace.picker_open);
+    assert!(app.take_create_request().is_none());
+    assert!(fake.keys.is_empty());
+}
+
+#[test]
+fn btn03_pane_controls_fill_shared_bounds_and_leave_status_plain() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(one_pane(2));
+    feed(&mut app, &mut fake, b"\x02s");
+    let menu = app.interaction.actions_menu.unwrap();
+    let intent = menu.model.close_intent();
+    let page = app.actions_page_geometry(menu).unwrap();
+    println!("BTN03 actual pane menu:\n{}", screen_text(&app));
+    for control in app.interaction.modal_controls(app.interaction_context()) {
+        for x in control.bounds.x..control.bounds.x + control.bounds.columns {
+            assert_ne!(
+                control_background(&app, x, control.bounds.y),
+                vt100::Color::Default
+            );
+        }
+        println!(
+            "control {:?}: {:?}",
+            control.bounds,
+            control_background(&app, control.bounds.x, control.bounds.y)
+        );
+    }
+    assert_eq!(
+        control_background(&app, page.rect.x, page.rect.y),
+        vt100::Color::Default
+    );
+    assert_eq!(
+        control_background(&app, page.rect.x, page.rect.y + page.reason_row as u16),
+        vt100::Color::Default
+    );
+    app.interaction.replace_actions(None);
+    app.interaction.confirm.open(intent);
+    let geometry = app.confirm_ui_geometry(app.host.0, app.host.1).unwrap();
+    assert!(!app.interaction.confirm_close_selected);
+    assert_eq!(
+        control_background(&app, geometry.close.x, geometry.close.y),
+        vt100::Color::Idx(1)
+    );
+    assert_eq!(
+        control_background(&app, geometry.cancel.x, geometry.cancel.y),
+        vt100::Color::Idx(6)
+    );
+    assert_eq!(
+        control_background(
+            &app,
+            geometry.close.x + geometry.close.columns,
+            geometry.close.y
+        ),
+        vt100::Color::Default
+    );
+    println!(
+        "BTN03 actual Cancel-focused confirmation:\n{}",
+        screen_text(&app)
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        geometry.close.x,
+        geometry.close.y,
+    );
+    assert_eq!(
+        control_background(&app, geometry.close.x, geometry.close.y),
+        vt100::Color::Idx(4)
+    );
+    println!(
+        "BTN03 actual pressed Close: {:?}",
+        control_background(&app, geometry.close.x, geometry.close.y)
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        0,
+        0,
+    );
+    assert!(fake.closes.is_empty());
+    assert_eq!(
+        control_background(&app, geometry.close.x, geometry.close.y),
+        vt100::Color::Idx(1)
+    );
+}
+
+#[test]
+fn btn04_workspace_individual_fills_and_close_does_not_switch() {
+    let (index, current, other) = workspace_catalog();
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.install_workspace_index(index, current);
+    app.set_workspace_revision(5);
+    app.set_layout(one_pane(1));
+    let strip = app.tabs_layout().unwrap();
+    let x = (0..81)
+        .find(|x| strip.hit_test(*x, 0) == Some(TabAction::Close(other)))
+        .unwrap();
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        x,
+        0,
+    );
+    assert_eq!(app.workspace.current_route, Some(current));
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        x,
+        0,
+    );
+    assert_eq!(app.workspace.current_route, Some(current));
+    assert!(app.workspace.tab_dialog.is_none());
+    assert!(app.take_workspace_metadata_mutation().is_none());
+    app.workspace.begin_tab_rename(current);
+    app.handle_event(
+        &Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        Instant::now(),
+        Availability::Enabled,
+        &mut fake,
+    );
+    let controls = app.workspace.workspace_controls(app.viewport());
+    for (control, bounds) in controls {
+        let (_, state) = app.workspace.control_visual(control);
+        let expected = if state == panelink::terminal::controls::ControlState::Focus {
+            vt100::Color::Idx(6)
+        } else {
+            vt100::Color::Idx(8)
+        };
+        for x in bounds.x..bounds.x + bounds.columns {
+            assert_eq!(control_background(&app, x, bounds.y), expected);
+        }
+        println!("BTN04 {control:?} {bounds:?} background={expected:?}");
+    }
+    println!("{}", screen_text(&app));
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+}
+
+#[test]
+fn help_control_requires_release_and_cancels_drag_focus_resize_and_escape() {
+    for reason in 0..5 {
+        let mut app = App::new(24, 81).unwrap();
+        let mut fake = Fake::default();
+        app.set_layout(one_pane(1));
+        feed(&mut app, &mut fake, b"\x02?");
+        let (x, y) = parsed_label_position(&app, "[Close]").unwrap();
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 1,
+            y,
+        );
+        assert!(app.help_open());
+        assert!(app.interaction.help_pressed(app.viewport(), 0));
+        match reason {
+            0 => gesture(
+                &mut app,
+                &mut fake,
+                MouseEventKind::Drag(MouseButton::Left),
+                0,
+                0,
+            ),
+            1 => {
+                feed(&mut app, &mut fake, b"\x1b");
+            }
+            2 => {
+                app.handle_event(
+                    &Event::FocusLost,
+                    Instant::now(),
+                    Availability::Enabled,
+                    &mut fake,
+                );
+            }
+            3 => {
+                app.handle_event(
+                    &Event::Resize(80, 24),
+                    Instant::now(),
+                    Availability::Enabled,
+                    &mut fake,
+                );
+            }
+            _ => {
+                app.interaction.show_help(false);
+                app.interaction.show_help(true);
+            }
+        }
+        assert!(!app.interaction.help_pressed(app.viewport(), 0));
+        gesture(
+            &mut app,
+            &mut fake,
+            MouseEventKind::Up(MouseButton::Left),
+            x + 1,
+            y,
+        );
+        assert!(app.help_open());
+        assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+    }
+}
+
+#[test]
+fn workspace_button_in_bounds_drag_preserves_release_activation() {
+    let (index, current, _) = workspace_catalog();
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.install_workspace_index(index, current);
+    app.set_workspace_revision(5);
+    app.set_layout(one_pane(1));
+    app.workspace.begin_tab_rename(current);
+    let (_, bounds) = app
+        .workspace
+        .workspace_controls(app.viewport())
+        .into_iter()
+        .find(|(control, _)| *control == super::workspace::WorkspaceControl::Save)
+        .unwrap();
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Drag(MouseButton::Left),
+    ] {
+        gesture(&mut app, &mut fake, kind, bounds.x + 1, bounds.y);
+        assert!(app.valid_workspace_press().is_some());
+        assert!(app.take_workspace_metadata_mutation().is_none());
+    }
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        bounds.x + 1,
+        bounds.y,
+    );
+    assert!(app.take_workspace_metadata_mutation().is_some());
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty());
 }

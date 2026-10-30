@@ -1,0 +1,88 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/lib.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-cb36793118f48d00)
+
+running 1 test
+BTN03 Normal:   Menu    Pane 1   x 
+ child text          
+ [Yes] gap[Cancel] st
+                     
+                     
+                     
+               v0.1.8
+cells: [(0, "", Default), (1, "[", Idx(1)), (2, "Y", Idx(1)), (3, "e", Idx(1)), (4, "s", Idx(1)), (5, "]", Idx(1)), (6, " ", Default), (7, "g", Default), (8, "a", Default), (9, "p", Default), (10, "[", Idx(8)), (11, "C", Idx(8)), (12, "a", Idx(8)), (13, "n", Idx(8)), (14, "c", Idx(8)), (15, "e", Idx(8)), (16, "l", Idx(8)), (17, "]", Idx(8)), (18, " ", Default), (19, "s", Default), (20, "t", Default)]
+BTN03 Focus:   Menu    Pane 1   x 
+ child text          
+ [Yes] gap[Cancel] st
+                     
+                     
+                     
+               v0.1.8
+cells: [(0, "", Default), (1, "[", Idx(6)), (2, "Y", Idx(6)), (3, "e", Idx(6)), (4, "s", Idx(6)), (5, "]", Idx(6)), (6, " ", Default), (7, "g", Default), (8, "a", Default), (9, "p", Default), (10, "[", Idx(8)), (11, "C", Idx(8)), (12, "a", Idx(8)), (13, "n", Idx(8)), (14, "c", Idx(8)), (15, "e", Idx(8)), (16, "l", Idx(8)), (17, "]", Idx(8)), (18, " ", Default), (19, "s", Default), (20, "t", Default)]
+BTN03 Pressed:   Menu    Pane 1   x 
+ child text          
+ [Yes] gap[Cancel] st
+                     
+                     
+                     
+               v0.1.8
+cells: [(0, "", Default), (1, "[", Idx(4)), (2, "Y", Idx(4)), (3, "e", Idx(4)), (4, "s", Idx(4)), (5, "]", Idx(4)), (6, " ", Default), (7, "g", Default), (8, "a", Default), (9, "p", Default), (10, "[", Idx(8)), (11, "C", Idx(8)), (12, "a", Idx(8)), (13, "n", Idx(8)), (14, "c", Idx(8)), (15, "e", Idx(8)), (16, "l", Idx(8)), (17, "]", Idx(8)), (18, " ", Default), (19, "s", Default), (20, "t", Default)]
+BTN03 Disabled:   Menu    Pane 1   x 
+ child text          
+ [Yes] gap[Cancel] st
+                     
+                     
+                     
+               v0.1.8
+cells: [(0, "", Default), (1, "[", Idx(0)), (2, "Y", Idx(0)), (3, "e", Idx(0)), (4, "s", Idx(0)), (5, "]", Idx(0)), (6, " ", Default), (7, "g", Default), (8, "a", Default), (9, "p", Default), (10, "[", Idx(8)), (11, "C", Idx(8)), (12, "a", Idx(8)), (13, "n", Idx(8)), (14, "c", Idx(8)), (15, "e", Idx(8)), (16, "l", Idx(8)), (17, "]", Idx(8)), (18, " ", Default), (19, "s", Default), (20, "t", Default)]
+BTN03 Pending:   Menu    Pane 1   x 
+ child text          
+ [Yes] gap[Cancel] st
+                     
+                     
+                     
+               v0.1.8
+cells: [(0, "", Default), (1, "[", Idx(3)), (2, "Y", Idx(3)), (3, "e", Idx(3)), (4, "s", Idx(3)), (5, "]", Idx(3)), (6, " ", Default), (7, "g", Default), (8, "a", Default), (9, "p", Default), (10, "[", Idx(8)), (11, "C", Idx(8)), (12, "a", Idx(8)), (13, "n", Idx(8)), (14, "c", Idx(8)), (15, "e", Idx(8)), (16, "l", Idx(8)), (17, "]", Idx(8)), (18, " ", Default), (19, "s", Default), (20, "t", Default)]
+BTN03 Normal:   Menu    Pane 1   x 
+ child text          
+ [Yes] gap[Cancel] st
+                     
+                     
+                     
+               v0.1.8
+cells: [(0, "", Default), (1, "[", Default), (2, "Y", Default), (3, "e", Default), (4, "s", Default), (5, "]", Default), (6, " ", Default), (7, "g", Default), (8, "a", Default), (9, "p", Default), (10, "[", Default), (11, "C", Default), (12, "a", Default), (13, "n", Default), (14, "c", Default), (15, "e", Default), (16, "l", Default), (17, "]", Default), (18, " ", Default), (19, "s", Default), (20, "t", Default)]
+BTN03 Focus:   Menu    Pane 1   x 
+ child text          
+ [Yes] gap[Cancel] st
+                     
+                     
+                     
+               v0.1.8
+cells: [(0, "", Default), (1, "[", Default), (2, "Y", Default), (3, "e", Default), (4, "s", Default), (5, "]", Default), (6, " ", Default), (7, "g", Default), (8, "a", Default), (9, "p", Default), (10, "[", Default), (11, "C", Default), (12, "a", Default), (13, "n", Default), (14, "c", Default), (15, "e", Default), (16, "l", Default), (17, "]", Default), (18, " ", Default), (19, "s", Default), (20, "t", Default)]
+BTN03 Pressed:   Menu    Pane 1   x 
+ child text          
+ [Yes] gap[Cancel] st
+                     
+                     
+                     
+               v0.1.8
+cells: [(0, "", Default), (1, "[", Default), (2, "Y", Default), (3, "e", Default), (4, "s", Default), (5, "]", Default), (6, " ", Default), (7, "g", Default), (8, "a", Default), (9, "p", Default), (10, "[", Default), (11, "C", Default), (12, "a", Default), (13, "n", Default), (14, "c", Default), (15, "e", Default), (16, "l", Default), (17, "]", Default), (18, " ", Default), (19, "s", Default), (20, "t", Default)]
+BTN03 Disabled:   Menu    Pane 1   x 
+ child text          
+ [Yes] gap[Cancel] st
+                     
+                     
+                     
+               v0.1.8
+cells: [(0, "", Default), (1, "[", Default), (2, "Y", Default), (3, "e", Default), (4, "s", Default), (5, "]", Default), (6, " ", Default), (7, "g", Default), (8, "a", Default), (9, "p", Default), (10, "[", Default), (11, "C", Default), (12, "a", Default), (13, "n", Default), (14, "c", Default), (15, "e", Default), (16, "l", Default), (17, "]", Default), (18, " ", Default), (19, "s", Default), (20, "t", Default)]
+BTN03 Pending:   Menu    Pane 1   x 
+ child text          
+ [Yes] gap[Cancel] st
+                     
+                     
+                     
+               v0.1.8
+cells: [(0, "", Default), (1, "[", Default), (2, "Y", Default), (3, "e", Default), (4, "s", Default), (5, "]", Default), (6, " ", Default), (7, "g", Default), (8, "a", Default), (9, "p", Default), (10, "[", Default), (11, "C", Default), (12, "a", Default), (13, "n", Default), (14, "c", Default), (15, "e", Default), (16, "l", Default), (17, "]", Default), (18, " ", Default), (19, "s", Default), (20, "t", Default)]
+test terminal::compose::tests::overlay_controls_fill_exact_spans_and_style_only_changes_repaint ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 944 filtered out; finished in 0.01s
+

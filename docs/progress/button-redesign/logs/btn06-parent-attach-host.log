@@ -1,0 +1,14 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running tests/p3a_attach_host.rs (/tmp/panelink-btn00-baseline-target/debug/deps/p3a_attach_host-b96662ae0504f263)
+
+running 6 tests
+test a_full_stderr_pipe_never_blocks_errors_or_exit ... ok
+test attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children ... ok
+test ctrl_x_restores_the_terminal_promptly_when_the_server_is_stalled ... ok
+test outer_pty::tests::exit_observation_precedes_a_deliberately_delayed_capture_drain ... ok
+test reattach_after_server_restart_replaces_dead_contexts ... ok
+test seventy_sequential_attach_detach_cycles_do_not_exhaust_leases ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.99s
+

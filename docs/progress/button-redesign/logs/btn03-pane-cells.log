@@ -1,0 +1,67 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.12s
+     Running unittests src/main.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-8766758a03d72d8d)
+
+running 1 test
+BTN03 actual pane menu:
+  Menu  > Pane 1                                                              x  
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                   Pane 1 - Layout: Split / Resize                               
+                   > Split Left [L]                                              
+                     Split Right [R]                                             
+                     Split Up [U]                                                
+                     Split Down [D]                                              
+                     Resize divider                                              
+                   Enter: activate                                               
+                   [More] [Cancel]                                               
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                          v0.1.8 
+control Rect { x: 19, y: 8, rows: 1, columns: 42 }: Idx(6)
+control Rect { x: 19, y: 9, rows: 1, columns: 42 }: Idx(8)
+control Rect { x: 19, y: 10, rows: 1, columns: 42 }: Idx(8)
+control Rect { x: 19, y: 11, rows: 1, columns: 42 }: Idx(8)
+control Rect { x: 19, y: 12, rows: 1, columns: 42 }: Idx(0)
+control Rect { x: 19, y: 14, rows: 1, columns: 6 }: Idx(8)
+control Rect { x: 26, y: 14, rows: 1, columns: 8 }: Idx(8)
+BTN03 actual Cancel-focused confirmation:
+  Menu  > Pane 1                                                              x  
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                  connecting...                                  
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                                                                                 
+                Close pane 1? Ends the workspace. (y/n)                          
+                [Close] >[Cancel]                                         v0.1.8 
+BTN03 actual pressed Close: Idx(4)
+test ui_client::state::tests::btn03_pane_controls_fill_shared_bounds_and_leave_status_plain ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 339 filtered out; finished in 0.17s
+

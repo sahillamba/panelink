@@ -1,0 +1,13 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running tests/p5_workspace_tabs.rs (/tmp/panelink-btn00-baseline-target/debug/deps/p5_workspace_tabs-34f7c23640a0aca6)
+
+running 5 tests
+test workspace_open_keyboard_copy_mode_consumes_child_input_and_restores_terminal ... ok
+test workspace_open_pane_operations_acceptance_uses_attached_keyboard_and_live_ptys ... ok
+test workspace_open_switches_registered_routes_through_nav_and_picker ... ok
+test workspace_pointer_controls_preserve_live_ptys_and_confirm_close ... ok
+test workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.99s
+

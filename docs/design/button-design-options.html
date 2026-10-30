@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Panelink button directions</title>
+<style>
+:root{font-family:var(--font-sans,system-ui);color:var(--foreground);font-weight:400}
+*{box-sizing:border-box}body{margin:0}button,select{font:inherit}button{color:inherit}button:focus-visible,select:focus-visible{outline:2px solid var(--ring);outline-offset:3px}
+.choices{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px}.choice{padding:9px 12px;border:1px solid var(--border);background:var(--secondary);color:var(--secondary-foreground);border-radius:var(--radius,6px)}.choice[aria-pressed=true]{background:var(--primary);color:var(--primary-foreground)}
+.terminal{background:var(--code-background,var(--card));color:var(--foreground);border:1px solid var(--border);font-family:var(--font-mono,monospace);overflow:hidden}
+.strip,.head,.history,.tools{display:flex;align-items:center;gap:1ch;min-height:2em;padding:4px 1ch}.strip{border-bottom:1px solid var(--border);flex-wrap:wrap}.grow{flex:1}.label{color:var(--muted-foreground)}
+.ctl{border:0;background:color-mix(in srgb,var(--foreground) 18%,var(--code-background,var(--card)));color:var(--foreground);padding:0 1ch;min-height:1.6em;border-radius:0;white-space:nowrap}.ctl:hover{background:var(--accent);color:var(--accent-foreground)}.ctl:active{background:var(--primary);color:var(--primary-foreground)}.ctl[aria-current=page],.ctl.main{background:var(--primary);color:var(--primary-foreground)}.ctl.danger{color:var(--destructive)}
+.outline .ctl{border:1px solid var(--border);background:transparent}.outline .ctl.main,.outline .ctl[aria-current=page]{outline:1px solid var(--ring);outline-offset:1px}.outline .ctl:hover{background:var(--accent)}
+.panes{display:grid;grid-template-columns:1fr 1fr}.pane{min-width:0}.pane+.pane{border-left:1px solid var(--border)}.head{border-bottom:1px solid var(--border)}.focused .head{border-bottom-color:var(--ring)}.marker{color:var(--info,var(--foreground))}.output{padding:16px 1ch;height:150px;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere}.history{border-top:1px solid var(--border);flex-wrap:wrap}.tools{border-bottom:1px solid var(--border);display:none;flex-wrap:wrap}.actionbar .tools{display:flex}.actionbar .head .menu{display:none}.dim{color:var(--muted-foreground)}
+.note{margin:12px 0;color:var(--muted-foreground)}.details{margin:12px 0}.samples{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:14px}.sample{display:flex;gap:6px;align-items:center}.sample .ctl{font-family:var(--font-mono,monospace)}.ctl:disabled{opacity:.55}.keyboard{outline:2px solid var(--ring);outline-offset:2px}.pressed{background:var(--primary)!important;color:var(--primary-foreground)!important}
+.popup{margin:12px 0 0;padding:16px;background:var(--popover,var(--card));color:var(--popover-foreground,var(--foreground));border:1px solid var(--border)}.popup[hidden]{display:none}.popup h3{font-size:inherit;font-weight:500;margin:0 0 12px}.popup p{margin:0 0 14px}.actions{display:flex;flex-wrap:wrap;gap:10px}.feedback{min-height:1.5em;margin:12px 0 0;color:var(--muted-foreground)}
+@media(max-width:520px){.panes{grid-template-columns:1fr}.pane+.pane{border-left:0;border-top:1px solid var(--border)}.output{height:100px}.strip .label{display:none}}
+</style></head><body>
+<div id="button-study">
+<div class="choices" role="group" aria-label="Design direction">
+<button class="choice" data-design="filled" aria-pressed="true">A · Filled controls</button>
+<button class="choice" data-design="outline" aria-pressed="false">B · Outlined controls</button>
+<button class="choice" data-design="actionbar" aria-pressed="false">C · Visible action bar</button>
+</div>
+<div class="terminal filled" id="terminal" aria-label="Conceptual Panelink terminal interface">
+<div class="strip"><span class="label">Panelink</span><button class="ctl" data-action="project">Project v</button><button class="ctl" aria-current="page" data-action="tab">Main</button><button class="ctl" data-action="tab">Build</button><span class="grow"></span><button class="ctl main" data-action="new">+ New tab</button><button class="ctl" data-action="tabs">All tabs v</button></div>
+<div class="tools"><span class="dim">Focused pane:</span><button class="ctl" data-action="split">Split v</button><button class="ctl" data-action="resize">Resize</button><button class="ctl" data-action="copy">Copy</button><button class="ctl danger" data-action="close">Close</button></div>
+<div class="panes"><div class="pane focused"><div class="head"><span class="marker">&gt;</span><span>Shell 1</span><span class="grow"></span><button class="ctl menu" data-action="menu">Menu v</button><button class="ctl danger" aria-label="Close Shell 1" data-action="close">x</button></div><div class="output"><span class="dim">~/panelink</span>
+$ cargo check
+    Checking panelink
+    Finished dev profile
+$ _</div><div class="history"><span class="dim" id="history-label">History · New output</span><span class="grow"></span><button class="ctl main" data-action="live">Back to live</button></div></div>
+<div class="pane"><div class="head"><span class="dim">Shell 2</span><span class="grow"></span><button class="ctl menu" data-action="menu">Menu v</button><button class="ctl danger" aria-label="Close Shell 2" data-action="close">x</button></div><div class="output"><span class="dim">~/panelink</span>
+$ git status
+On branch main
+working tree clean
+$ _</div><div class="history"><span class="dim">Live</span></div></div></div></div>
+<p class="note">Concept only · illustrative shell output · HTML spacing approximates terminal cells; C adds a global row.</p>
+<p class="details" id="description">A: Solid rectangular backgrounds and one-cell side padding. Strongest button appearance within the existing header rows.</p>
+<div class="samples" aria-label="Proposed button states"><span class="sample">Rest <button class="ctl">Menu v</button></span><span class="sample">Keyboard focus <button class="ctl keyboard">Menu v</button></span><span class="sample">Pressed <button class="ctl pressed">Menu v</button></span><span class="sample">Unavailable <button class="ctl" disabled>Split</button></span></div>
+<div class="popup" id="popup" hidden></div><p class="feedback" role="status" id="feedback">Try Menu, Close or Back to live. All actions are local demonstrations.</p>
+</div>
+<script>
+const root=document.getElementById('button-study'), terminal=document.getElementById('terminal'), description=document.getElementById('description'), popup=document.getElementById('popup'), feedback=document.getElementById('feedback');
+const descriptions={filled:'A: Solid rectangular backgrounds and one-cell side padding. Strongest button appearance within the existing header rows.',outline:'B: Quiet outlined controls. Less visual weight; single-row terminals would use bracket edges instead of these pixel borders.',actionbar:'C: One global action row exposes Split, Resize and Copy for the focused pane. Easier discovery; costs a terminal row and changes the previous layout direction.'};
+root.querySelectorAll('[data-design]').forEach(b=>b.addEventListener('click',()=>{root.querySelectorAll('[data-design]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));terminal.className='terminal '+b.dataset.design;description.textContent=descriptions[b.dataset.design];popup.hidden=true;}));
+root.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action;popup.hidden=true;
+if(action==='close'){const pane=b.closest('.pane'),name=pane?pane.querySelector('.head').textContent.trim().replace(/\s+/g,' ').replace(/Menu v x$/,'').replace(/^>/,'').trim():'Shell 1';popup.innerHTML='<h3>Close '+name+'?</h3><p>This ends the process in this pane.</p><div class="actions"><button class="ctl" data-action="cancel">Cancel</button><button class="ctl danger" data-action="confirm">Close pane</button></div>';popup.hidden=false;popup.querySelector('[data-action="cancel"]').focus();}
+else if(action==='menu'){popup.innerHTML='<h3>Pane actions</h3><div class="actions"><button class="ctl" data-action="split">Split v</button><button class="ctl" data-action="resize">Resize divider</button><button class="ctl" data-action="copy">Copy</button><button class="ctl danger" data-action="close">Close pane</button></div>';popup.hidden=false;}
+else if(action==='live'){document.getElementById('history-label').textContent='Live';b.disabled=true;feedback.textContent='Demo: pane is following live output.';}
+else if(action==='tab'){terminal.querySelectorAll('[data-action="tab"]').forEach(x=>x.removeAttribute('aria-current'));b.setAttribute('aria-current','page');feedback.textContent='Demo: selected '+b.textContent+' tab.';}
+else{const messages={cancel:'Demo: close canceled.',confirm:'Demo: close confirmed. No process was ended.',copy:'Demo: Copied feedback appears here. Clipboard unchanged.',split:'Demo: split menu would offer Left / Right / Up / Down, with unavailable directions explained.',resize:'Demo: resize dialog would show smaller / larger, Apply and Cancel.',new:'Demo: New tab would create and select a managed shell.',tabs:'Demo: All tabs would open a searchable tab chooser.',project:'Demo: Project would open the project chooser.'};feedback.textContent=messages[action]||'Demo action.';}});
+root.addEventListener('keydown',e=>{if(e.key==='Escape'){popup.hidden=true;feedback.textContent='Demo: dismissed.';}});
+</script></body></html>

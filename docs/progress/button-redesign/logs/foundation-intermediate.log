@@ -1,0 +1,113 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.59s
+     Running unittests src/lib.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-cb36793118f48d00)
+
+running 92 tests
+test terminal::atomic_pty_integration_tests::control_tty_probe_helper ... ok
+test terminal::cleanup_discard::tests::continuously_readable_source_stops_at_sixteen_reads ... ok
+test terminal::cleanup_discard::tests::finite_output_is_discarded_until_eof ... ok
+test terminal::cleanup_discard::tests::fragmented_output_reaches_eof ... ok
+test terminal::cleanup_discard::tests::read_errors_return_without_retrying ... ok
+test terminal::checkpoint_load::tests::checkpoint_load_clears_preexisting_volatile_wraps_without_changing_record ... ok
+test terminal::checkpoint_load::tests::checkpoint_round_trip_reproduces_cells_cursor_and_styles ... ok
+test terminal::compose::tests::focused_chrome_uses_ascii_marker_and_truncates_safe_wide_labels_before_controls ... ok
+test terminal::compose::tests::focus_changes_only_repaint_chrome_and_preserve_child_cells ... FAILED
+test terminal::compose::tests::full_repaint_restores_an_unchanged_header_after_geometry_change ... ok
+test terminal::compose::tests::copy_caret_moves_clears_and_recovers_after_writer_failure ... ok
+test terminal::compose::tests::header_baseline_advances_only_after_commit_or_complete_write ... ok
+test terminal::compose::tests::header_changes_are_incremental_committed_and_removable ... ok
+test terminal::compose::tests::filled_header_padding_has_background_without_leaking_into_content ... ok
+test terminal::compose::tests::header_validates_wide_topology_and_rejects_row_overlap_before_output ... ok
+test terminal::compose::tests::cursor_is_translated_for_focus_and_hidden_for_overlay_or_placeholder ... ok
+test terminal::compose::tests::frozen_selection_drag_updates_clear_incrementally_and_tracks_live_cells ... ok
+test terminal::compose::tests::identical_frame_emits_nothing_and_cursor_only_change_moves_cursor ... ok
+test terminal::compose::tests::invalid_geometry_is_rejected_before_any_byte ... ok
+test terminal::compose::tests::left_right_panes_render_at_translated_positions_with_divider ... ok
+test terminal::compose::tests::malicious_cell_content_is_never_emitted_raw ... ok
+test terminal::compose::tests::incremental_sequences_match_full_renders ... ok
+test terminal::compose::tests::history_controls_share_render_and_hit_geometry_and_avoid_version_badge ... ok
+test terminal::compose::tests::modal_overlay_composes_below_the_persistent_header ... ok
+test terminal::compose::tests::one_cell_scrollbar_track_keeps_a_visible_thumb ... ok
+test terminal::compose::tests::overlay_is_painted_last_with_styles_and_clipped_to_host ... ok
+test terminal::compose::tests::history_label_damage_repaints_and_restores_after_overlay ... ok
+test terminal::compose::tests::pane_controls_partial_write_failure_invalidates_for_full_repaint ... ok
+test terminal::compose::tests::pane_controls_respect_modal_overlay_and_restore_after_it_moves ... ok
+test terminal::compose::tests::one_changed_cell_in_second_pane_emits_only_that_cell ... ok
+test terminal::compose::tests::pane_controls_validate_geometry_and_render_only_in_top_padding ... ok
+test terminal::compose::tests::pointer_content_mapping_uses_inset_geometry_and_clamps_padding ... ok
+test terminal::compose::tests::scrollbar_geometry_has_expected_track_and_thumb_positions ... ok
+test terminal::compose::tests::overlay_removal_or_move_repaints_covered_cells ... ok
+test terminal::compose::tests::placeholder_is_centered_sanitized_and_clipped ... ok
+test terminal::compose::tests::scrollbar_rejects_invalid_slot_geometry_before_output ... ok
+test terminal::atomic_pty_integration_tests::production_child_owns_the_controlling_tty ... ok
+test terminal::compose::tests::scrollbar_partial_write_retries_and_header_keeps_content_offset ... ok
+test terminal::compose::tests::scrollbar_is_clipped_by_menu_and_restored_when_menu_leaves ... ok
+test terminal::compose::tests::scrollbar_updates_removals_and_unchanged_frames_only_touch_margin ... ok
+test terminal::compose::tests::shared_pointer_geometry_uses_exact_half_open_control_thumb_and_divider_edges ... ok
+test terminal::compose::tests::scrollbar_thumb_tracks_live_top_and_zero_history_positions ... ok
+test terminal::compose::tests::rect_or_host_change_and_invalidate_force_full_repaint ... ok
+test terminal::compose::tests::selection_rejects_invalid_geometry_before_output_and_menu_keeps_priority ... ok
+test terminal::compose::tests::selection_preserves_unicode_combining_and_wide_topology_at_edges ... ok
+test terminal::compose::tests::unpadded_render_preserves_minimum_snapshot_without_margin_writes ... ok
+test terminal::compose::tests::top_bottom_panes_render_at_translated_rows_with_horizontal_divider ... ok
+test terminal::controls::tests::filled_layout_includes_padding_and_rejects_clipped_labels ... ok
+test terminal::controls::tests::layout_rejects_multiple_rows_and_coordinate_overflow ... ok
+test terminal::compose::tests::three_and_four_pane_layouts_render_every_divider_and_placeholder ... ok
+test terminal::compose::tests::uncommitted_frame_is_re_emitted_and_writer_failure_invalidates ... ok
+test terminal::controls::tests::semantic_states_have_reduced_color_markers ... ok
+test terminal::pure_history_and_mouse_tests::history_snapshot_never_substitutes_hidden_normal_history_for_alternate_screen ... ok
+test terminal::pure_history_and_mouse_tests::history_snapshot_clips_and_preserves_styled_wide_cells_without_mutating_live_view ... ok
+test terminal::pure_history_and_mouse_tests::wheel_encoding_matches_enabled_mode_and_rejects_disabled_or_unrepresentable_positions ... ok
+test terminal::pty::tests::pair_is_cloexec_with_the_requested_size_and_default_line_discipline ... ok
+test terminal::render::tests::diff_first_frame_uses_full_render_and_rejects_small_viewport_before_write ... ok
+test terminal::render::tests::diff_clears_cells_and_preserves_typed_styles ... ok
+test terminal::compose::tests::version_badge_uses_bottom_margin_and_survives_modal_damage ... ok
+test terminal::render::tests::diff_preserves_unicode_combining_and_matched_wide_cells ... ok
+test terminal::render::tests::diff_repaints_only_the_changed_narrow_cell_and_matches_full_target ... ok
+test terminal::render::tests::diff_noop_writes_nothing_and_cursor_only_update_does_not_repaint ... ok
+test terminal::render::tests::diff_writer_failure_propagates_and_keeps_errors_redacted ... ok
+test terminal::render::tests::diff_revalidates_synthetic_child_controls ... ok
+test terminal::render::tests::diff_resize_uses_full_render_and_matches_target ... ok
+test terminal::render::tests::diff_repaints_rows_for_wide_cell_topology_transitions ... ok
+test terminal::render::tests::renderer_emits_only_typed_style_colors_and_clamped_cursor_controls ... ok
+test terminal::render::tests::engine_snapshot_renders_unicode_combining_wide_cells_and_sanitized_controls ... ok
+test terminal::render::tests::revalidation_falls_back_for_expanding_replacements_and_positions_next_cell ... ok
+test terminal::render::tests::undersized_viewport_rejects_before_the_first_write ... ok
+test terminal::render::tests::wide_and_orphan_continuation_fallbacks_stay_inside_their_rows ... ok
+test terminal::render::tests::writer_failure_propagates_after_partial_output_without_restarting_frame ... ok
+test terminal::unit_tests::clipboard_reads_writes_and_clears_never_queue_child_input ... ok
+test terminal::unit_tests::exact_queries_are_answered_and_malformed_queries_are_dropped ... ok
+test terminal::unit_tests::fixed_osc_storage_survives_chunked_oversize_and_combining_is_capped ... ok
+test terminal::unit_tests::input_queue_is_bounded_atomic_and_preserves_partial_suffix ... ok
+test terminal::compose::tests::wide_cells_stay_inside_the_pane_and_outside_the_overlay ... ok
+test terminal::checkpoint_load::tests::loading_reuses_reserved_storage_and_shrinks_and_grows ... ok
+test terminal::unit_tests::query_reply_rate_and_pending_events_are_bounded ... ok
+test terminal::unit_tests::phased_shutdown_pump_error_does_not_enter_legacy_wait_cleanup ... ok
+test terminal::unit_tests::resize_is_committed_only_after_the_system_operation_succeeds ... ok
+test terminal::unit_tests::snapshot_text_sanitization_and_debug_redaction_hold ... ok
+test terminal::unit_tests::typed_keys_use_engine_cursor_mode_and_reject_control_scalars ... ok
+test terminal::unit_tests::output_bounds_cover_resize_insert_and_grid_count_commands ... ok
+test terminal::atomic_pty_integration_tests::production_child_gets_tty_stdio_and_initial_size ... ok
+test terminal::unit_tests::render_snapshot_cache_copies_without_reallocation_across_viewport_changes ... ok
+test terminal::unit_tests::explicit_shutdown_releases_controller_and_preserves_only_readable_snapshot ... ok
+test terminal::compose::tests::maximum_frame_streams_under_four_mib_without_a_frame_buffer ... ok
+test terminal::render::tests::maximum_snapshot_streams_under_four_mib_without_a_frame_buffer ... ok
+test terminal::atomic_pty_integration_tests::concurrent_production_spawns_keep_distinct_ptys_and_clean_up ... ok
+test terminal::render::tests::maximum_diff_streams_under_four_mib_without_a_frame_buffer ... ok
+test terminal::atomic_pty_integration_tests::shutdown_reports_kill_escalation_only_when_hup_was_ignored ... ok
+
+failures:
+
+---- terminal::compose::tests::focus_changes_only_repaint_chrome_and_preserve_child_cells stdout ----
+
+thread 'terminal::compose::tests::focus_changes_only_repaint_chrome_and_preserve_child_cells' (41693900) panicked at src/terminal/compose.rs:4464:9:
+assertion failed: menu.bold()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    terminal::compose::tests::focus_changes_only_repaint_chrome_and_preserve_child_cells
+
+test result: FAILED. 91 passed; 1 failed; 0 ignored; 0 measured; 847 filtered out; finished in 1.06s
+
+error: test failed, to rerun pass `--lib`

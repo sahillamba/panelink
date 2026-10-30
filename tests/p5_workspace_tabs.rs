@@ -591,7 +591,7 @@ impl Client {
     fn wait_header(&self, project: &str, tab: &str) -> String {
         self.wait_screen(&format!("{project}/{tab} header"), |parser, screen| {
             let header = screen.lines().next().unwrap_or_default();
-            let selected = format!("[{tab}]");
+            let selected = format!(" {tab} ");
             if !parser.screen().alternate_screen()
                 || !header.contains(project)
                 || !header.contains(&selected)
@@ -607,7 +607,7 @@ impl Client {
                 u16::try_from(start_column + offset)
                     .ok()
                     .and_then(|column| parser.screen().cell(0, column))
-                    .is_some_and(|cell| cell.inverse())
+                    .is_some_and(|cell| cell.bgcolor() == vt100::Color::Idx(12))
             })
         })
     }
@@ -1480,7 +1480,9 @@ fn click_cell(client: &mut Client, column: usize, row: usize) {
 }
 
 fn visible_label_position(parser: &vt100::Parser, label: &str) -> Option<(usize, usize)> {
-    (0..ROWS as usize).find_map(|row| {
+    // Pane-close labels also exist in the workspace strip now. Keep pane
+    // fixtures scoped below row zero so they still exercise pane lifecycle.
+    (usize::from(label == " x ")..ROWS as usize).find_map(|row| {
         let line = (0..COLUMNS as usize)
             .map(|column| {
                 let text = pane_cell_text(parser, row, column);
@@ -1520,17 +1522,23 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
 
     // These controls occupy the border below the workspace header. Both are
     // addressed through rendered labels rather than arbitrary content clicks.
-    click_visible_label(&mut client, "[Menu]");
+    click_visible_label(&mut client, " Menu ");
     client.wait_screen("discoverable pane actions", |_, screen| {
-        screen.contains("Split") && screen.contains("Zoom") && screen.contains("More")
+        screen.contains("Split") && screen.contains("Layout") && screen.contains("More")
     });
     click_visible_label(&mut client, "[More");
-    client.wait_screen("remaining pane actions", |_, screen| {
-        screen.contains("Close") && screen.contains("Detach")
+    client.wait_screen("copy and history group", |_, screen| {
+        screen.contains("Copy / History")
+    });
+    click_visible_label(&mut client, "[More");
+    client.wait_screen("close group", |_, screen| screen.contains("Close pane"));
+    click_visible_label(&mut client, "[More");
+    client.wait_screen("secondary pane actions", |_, screen| {
+        screen.contains("Zoom") && screen.contains("Detach")
     });
     click_visible_label(&mut client, "[Cancel]");
     wait_root_shell_prompt(&client);
-    click_visible_label(&mut client, "[x]");
+    click_visible_label(&mut client, " x ");
     client.wait_screen("close confirmation", |_, screen| screen.contains("Cancel"));
     click_visible_label(&mut client, "Cancel");
     wait_root_shell_prompt(&client);
@@ -1671,7 +1679,9 @@ fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
             .contents()
             .lines()
             .next()
-            .is_some_and(|header| header.trim_end().ends_with("[+ New]"))
+            .is_some_and(|header| {
+                header.contains("[+ New]") && header.trim_end().ends_with("[All tabs]")
+            })
     });
     client.click_text("[+ New]");
     client.wait_header("Editors", "Shell 1");

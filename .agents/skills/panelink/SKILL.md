@@ -22,13 +22,22 @@ Prefer direct shell execution for a one-off command that needs no persistent
 PTY or existing pane. Panelink supplies terminal lifetime and control; the
 calling agent remains responsible for delegation, model choice and task success.
 
+## Source button redesign
+
+This checkout implements filled button controls with captured press/release,
+grouped pane menus and separate tab-close targets. A valid release in the same
+control activates once; drag-away or stale UI/target cancels. Inactive-tab close
+requires selecting that tab first. Resolve the actual executable before assuming
+this source behavior is installed. The [interactive guide](references/interactive.md)
+records keyboard focus, reduced colors and exact lifecycle distinctions.
+
 ## Identify the installation and workspace
 
 1. Resolve `panelink` on PATH, including launcher symlinks, and read its
    `--version` and `--help`. For development against a particular checkout,
    use that checkout's absolute `bin/panelink` path. The development launcher
    runs an existing `target/debug/panelink`; rebuild explicitly when needed.
-   Local build 0.1.4 also displays its client package version in the bottom-right
+   The client displays its package version in the bottom-right
    pane margin. An already attached client must be detached and reattached to
    show a rebuilt UI. The version number alone does not distinguish builds
    from different worktrees or identify a running server. Use `build-info --json`

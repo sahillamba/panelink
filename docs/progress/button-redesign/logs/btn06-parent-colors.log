@@ -1,0 +1,14 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.25s
+     Running unittests src/lib.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-cb36793118f48d00)
+
+running 2 tests
+test terminal::compose::tests::btn05_header_history_and_mode_failure_repaint ... ok
+test terminal::compose::tests::btn05_modes_cells_and_successful_baseline ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 943 filtered out; finished in 0.03s
+

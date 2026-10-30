@@ -641,8 +641,8 @@ fn split_layout_focused(screen: &str, panes: &[(PaneRect, bool)]) -> bool {
                 .take(length)
                 .collect::<String>()
         };
-        text_at(controls.menu.x, 6) == "[Menu]"
-            && text_at(controls.close.x, 3) == "[x]"
+        text_at(controls.menu.x, 6) == " Menu "
+            && text_at(controls.close.x, 3) == " x "
             && text_at(controls.focus_marker.x, 1) == if *focused { ">" } else { " " }
     })
 }
@@ -891,7 +891,7 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
     client.click(menu_rect);
     client.write(b"\x02s");
     client.wait_screen("pane actions menu", |screen| {
-        screen.contains("Split pane...")
+        screen.contains("Layout: Split / Resize")
     });
     client.write(b"\r");
     client.wait_screen("pane limit menu reason", |screen| {

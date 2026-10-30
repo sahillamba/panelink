@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/main.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-8766758a03d72d8d)
+
+running 1 test
+test ui_client::state::tests::captured_header_colors_restore_before_release_on_every_invalidation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 327 filtered out; finished in 0.06s
+

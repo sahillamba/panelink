@@ -5,6 +5,22 @@ It runs inside your existing terminal (Apple Terminal first). Your shells live
 in a background workspace, so closing the window does not kill them.
 Panelink's original application code is intended for the MIT license.
 
+## Button controls in this source build
+
+Controls use filled backgrounds with visible focus, pressed, disabled and pending
+states. Press and release inside the same button to activate; dragging away or
+pressing Escape cancels. Keyboard shortcuts remain available. Pane Menu and
+right-click expose grouped Layout, Copy/History, Close and Secondary pages.
+The tab strip has separate select/close targets, with New tab and All tabs pinned
+right. Select an inactive tab before closing it; Close ends its processes after
+confirmation, while Detach leaves them running. Dialog Tab/Shift-Tab moves local
+focus; rename text editing stays in the editor.
+
+`NO_COLOR` presence or `TERM=dumb` selects reduced-color controls at setup.
+This checkout must be built explicitly; it does not replace the installed
+executable or restart its server. Native host/theme acceptance remains separate.
+See [the implementation evidence](docs/progress/button-redesign/PROGRESS.md).
+
 ## Quick start
 
 Build once and put the launcher on your PATH (see [SETUP.md](docs/SETUP.md)
@@ -32,7 +48,7 @@ does not identify that server.
 
 | Action | How |
 | --- | --- |
-| Pane actions | Click `[Menu]` in a pane border, or press Ctrl-B then `s` |
+| Pane actions | Click `Menu` in a pane border, or press Ctrl-B then `s` |
 | Split a pane | Choose Split from its Menu, or right-click it and pick Left/Right/Up/Down |
 | Navigation mode | Press **Control**-B (the Control key, not Command). A `NAV` bar appears at the bottom |
 | Shortcut help | Ctrl-B, then `?`; Esc or `?` closes help |
@@ -48,7 +64,7 @@ does not identify that server.
 | Zoom a pane | Ctrl-B then `z`; the selected pane's PTY resizes to fill the current workspace view |
 | Swap pane locations | Ctrl-B then `m`; choose another pane with arrows or `h`/`j`/`k`/`l`, then Enter; Esc cancels |
 | Resize panes | Drag the divider and release; or Menu → Resize divider → `[-]`/`[+]` → Apply. Ctrl-B then `e` supports keyboard adjustment |
-| Close a pane | Click its `[x]`, then `[Close]` (Cancel is selected by default; `y` also confirms); `[Cancel]`, `n` or Esc dismisses |
+| Close a pane | Click its `x`, then `[Close]` (Cancel is selected by default; `y` also confirms); `[Cancel]`, `n` or Esc dismisses |
 | List/close panes from a shell | `panelink panes`; `panelink close 1` (or `2`) |
 | Detach (shells keep running) | Ctrl-X |
 | Reattach to the legacy Default/Main workspace | `panelink` |
@@ -58,7 +74,7 @@ Normal-history scrolling keeps the last screen visible while the next view is
 fetched. Normal-history wheel reads do not wait for a separate range probe.
 The scrollbar uses the pane's existing right padding; its range is
 refreshed when you scroll. Track clicks page through history, and dragging the
-thumb previews a position before seeking on release. An initial click on an
+thumb updates the displayed normal history continuously while held. An initial click on an
 unknown range reads its extent. Alternate-screen apps such as OpenCode
 keep their own scrolling behavior and do not show a Panelink history scrollbar.
 For mouse-reporting alternate-screen apps, wheel input is sent directly to the
@@ -471,7 +487,7 @@ In Terminal B, using the same three paths:
 - A split launches one new `/bin/zsh`. It uses the attach client's own
   working directory and environment, minus `PANELINK_*`. The new pane gets
   focus.
-- The pane's `[x]`, menu Close action and Ctrl-B then `x` require a separate
+- The pane's `x`, menu Close action and Ctrl-B then `x` require a separate
   `[Close]` click, Enter with Close selected, or `y` confirmation; Cancel is
   the default selection and the opening click/key cannot confirm.
   Closing sends HUP to that pane's process group, then KILL after a bounded

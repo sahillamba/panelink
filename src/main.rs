@@ -712,7 +712,8 @@ fn print_help() {
     println!("  panelink pane read N [--lines K] [--bottom | --scrollback] [--json]");
     println!("  panelink agent read N|REF [--lines K] [--bottom] [--json]");
     println!();
-    println!("In the workspace: right-click a pane to split it; click a pane to focus it.");
+    println!("In the workspace: Menu/right-click opens pane actions; click content to focus.");
+    println!("Buttons activate on release inside the same control; drag away or Esc cancels.");
     println!("Control-B (not Command-B) enters NAV mode: r/l/u/d split, arrows/Tab switch");
     println!("pane, s opens the menu, x closes the pane (asks y/n), Esc leaves.");
     println!("Ctrl-X detaches (shells keep running).");

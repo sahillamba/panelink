@@ -13,9 +13,10 @@ use super::{
 };
 use panelink::split_menu::OverlayStyle as MenuStyle;
 use panelink::terminal::compose::{
-    ComposeFrame, Compositor, OverlayLine, OverlayStyle, OverlayView, PaneChrome, PaneContent,
-    PaneView, Scrollbar,
+    ComposeFrame, Compositor, OverlayControl, OverlayLine, OverlayStyle, OverlayView, PaneChrome,
+    PaneContent, PaneView, Scrollbar,
 };
+use panelink::terminal::controls::{ControlRole, ControlState};
 use panelink::{
     pane_layout::{PaneLayout, Rect},
     pane_operations_protocol::PaneOperationsView,
@@ -25,6 +26,10 @@ use panelink::{
 use std::{io, time::Instant};
 pub(super) struct RenderView<'a> {
     pub source: CopyContext<'a>,
+    pub workspace_pressed: Option<Rect>,
+    pub surface_pressed: Option<(super::SurfaceAction, Rect)>,
+    pub modal_pressed: Option<super::interaction::ModalControl>,
+    pub header_pressed: Option<(panelink::control_protocol::TargetRef, bool)>,
     pub copy: &'a CopyState,
     pub workspace: &'a WorkspaceState,
     pub interaction: &'a Interaction,
@@ -104,6 +109,32 @@ impl<'a> RenderView<'a> {
         now: Instant,
     ) -> io::Result<()> {
         let tabs_layout = self.tabs_layout();
+        let header_cells = tabs_layout.as_ref().map(|layout| {
+            layout
+                .header_cells()
+                .iter()
+                .enumerate()
+                .map(|(column, cell)| {
+                    if layout.hit_test(column as u16, 0)
+                        == Some(panelink::workspace_tabs::TabAction::Create)
+                        && self
+                            .workspace
+                            .pending_create
+                            .is_some_and(|p| !p.awaiting_reconcile)
+                    {
+                        return cell.with_pending();
+                    }
+                    if self.surface_pressed.is_some_and(|(action, bounds)| {
+                        matches!(action, super::SurfaceAction::Strip(_))
+                            && bounds.contains(column as u16, 0)
+                    }) {
+                        cell.with_pressed()
+                    } else {
+                        *cell
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
         let header_enabled = self.workspace.view().workspace_index.is_some();
         let header_offset = if header_enabled { 1 } else { 0 };
         // Both legacy attach and workspace tabs use the bounded render area,
@@ -115,6 +146,7 @@ impl<'a> RenderView<'a> {
         let mut panes = [None; crate::pane_layout::MAX_PANES];
         let mut scrollbars = [None; crate::pane_layout::MAX_PANES];
         let mut history_controls = [None; crate::pane_layout::MAX_PANES];
+        let mut header_pressed = [None; crate::pane_layout::MAX_PANES];
         let mut labels = [None; crate::pane_layout::MAX_PANES];
         let mut divider = None;
         let mut dividers = [None; crate::pane_layout::MAX_PANES - 1];
@@ -213,6 +245,10 @@ impl<'a> RenderView<'a> {
                         });
                     }
                 }
+                header_pressed[index] = self
+                    .header_pressed
+                    .filter(|(target, _)| *target == pane.target)
+                    .map(|(_, close)| close);
                 panes[index] = Some(PaneView {
                     rect: shifted_rect(pane.rect, header_offset),
                     content,
@@ -229,6 +265,7 @@ impl<'a> RenderView<'a> {
 
         let (view_rows, view_columns) = self.viewport;
         let menu_lines = self.interaction.view().menu.overlay_lines();
+        let pressed = self.modal_pressed;
         let confirm = self.confirm_ui_geometry(view_rows, view_columns);
         let confirm_text: String;
         let mut lines = [OverlayLine {
@@ -350,7 +387,15 @@ impl<'a> RenderView<'a> {
             for (index, text) in action_text.iter().enumerate().take(action_count) {
                 lines[index] = OverlayLine {
                     text,
-                    style: if index == 0 {
+                    style: if pressed.is_some_and(|p| {
+                        p.kind == 2
+                            && p.bounds.y
+                                == page.rect.y
+                                    + index as u16
+                                    + u16::from(self.workspace.view().workspace_index.is_some())
+                    }) {
+                        OverlayStyle::Status
+                    } else if index == 0 {
                         OverlayStyle::Selected
                     } else if index == page.reason_row {
                         OverlayStyle::Status
@@ -379,7 +424,9 @@ impl<'a> RenderView<'a> {
             for (index, text) in pane_mode_text.iter().enumerate().take(pane_mode_count) {
                 lines[index] = OverlayLine {
                     text,
-                    style: if index == 0 || text.starts_with('>') {
+                    style: if pressed.is_some_and(|p| p.kind == 3 && p.index / 2 == index) {
+                        OverlayStyle::Status
+                    } else if index == 0 || text.starts_with('>') {
                         OverlayStyle::Selected
                     } else {
                         OverlayStyle::Normal
@@ -403,10 +450,20 @@ impl<'a> RenderView<'a> {
             self.interaction.view().menu.overlay_rect(),
             self.interaction.view().menu.is_open(),
         ) {
-            for (slot, line) in lines.iter_mut().zip(menu_lines.as_slice()) {
+            for (index, (slot, line)) in lines.iter_mut().zip(menu_lines.as_slice()).enumerate() {
                 *slot = OverlayLine {
                     text: line.text(),
-                    style: compose_style(line.style()),
+                    style: if pressed.is_some_and(|p| {
+                        p.kind == 4
+                            && p.bounds.y
+                                == rect.y
+                                    + index as u16
+                                    + u16::from(self.workspace.view().workspace_index.is_some())
+                    }) {
+                        OverlayStyle::Status
+                    } else {
+                        compose_style(line.style())
+                    },
                 };
             }
             Some((rect, menu_lines.len()))
@@ -527,6 +584,142 @@ impl<'a> RenderView<'a> {
                 ))
             })
         };
+        let pane_overlay = action_count > 0
+            || pane_mode_count > 0
+            || confirm.is_some()
+            || self.interaction.view().menu.is_open();
+        let mut overlay_controls: Vec<_> = if action_count > 0
+            || pane_mode_count > 0
+            || confirm.is_some()
+            || self.interaction.view().menu.is_open()
+        {
+            self.interaction
+                .modal_controls(self.interaction_context())
+                .into_iter()
+                .map(|control| {
+                    let mut role = ControlRole::Secondary;
+                    let mut state = ControlState::Normal;
+                    if control.kind == 1 {
+                        role = if control.index == 0 {
+                            ControlRole::Destructive
+                        } else {
+                            ControlRole::Secondary
+                        };
+                        if (control.index == 0) == self.interaction.view().confirm_close_selected {
+                            state = ControlState::Focus;
+                        }
+                    } else if control.kind == 2 {
+                        if let Some(menu) = self.interaction.view().actions_menu {
+                            if control.index == menu.selected
+                                || (control.index == 102 && menu.selected == 12)
+                            {
+                                state = ControlState::Focus;
+                            }
+                            if let Some((action, _, availability)) =
+                                self.local_action_item(menu, control.index)
+                            {
+                                if action == PaneMenuAction::ClosePane {
+                                    role = ControlRole::Destructive;
+                                }
+                                if availability != Availability::Enabled {
+                                    state = ControlState::Disabled;
+                                }
+                            }
+                        }
+                    } else {
+                        let row = usize::from(
+                            control
+                                .bounds
+                                .y
+                                .saturating_sub(header_offset)
+                                .saturating_sub(overlay.map_or(0, |(rect, _)| rect.y)),
+                        );
+                        if lines
+                            .get(row)
+                            .is_some_and(|line| line.style == OverlayStyle::Selected)
+                        {
+                            state = ControlState::Focus;
+                        } else if lines
+                            .get(row)
+                            .is_some_and(|line| line.style == OverlayStyle::Disabled)
+                        {
+                            state = ControlState::Disabled;
+                        }
+                    }
+                    if pressed == Some(control) {
+                        state = ControlState::Pressed;
+                    }
+                    OverlayControl {
+                        bounds: control.bounds,
+                        role,
+                        state,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let workspace_overlay = tab_dialog_count > 0 || picker_count > 0;
+        if workspace_overlay {
+            overlay_controls = self
+                .workspace
+                .workspace_controls(self.viewport)
+                .into_iter()
+                .map(|(control, bounds)| {
+                    let (role, mut state) = self.workspace.control_visual(control);
+                    if self.workspace_pressed == Some(bounds)
+                        && !matches!(state, ControlState::Pending | ControlState::Disabled)
+                    {
+                        state = ControlState::Pressed;
+                    }
+                    OverlayControl {
+                        bounds,
+                        role,
+                        state,
+                    }
+                })
+                .collect();
+        } else if self.is_empty_workspace() {
+            if let Some(geometry) = empty_geometry {
+                for (action, bounds) in [
+                    (super::SurfaceAction::NewTab, geometry.new_tab),
+                    (super::SurfaceAction::Detach, geometry.detach),
+                ] {
+                    let state = if action == super::SurfaceAction::NewTab
+                        && self.workspace.pending_create.is_some()
+                    {
+                        ControlState::Pending
+                    } else if self.surface_pressed == Some((action, bounds)) {
+                        ControlState::Pressed
+                    } else {
+                        ControlState::Normal
+                    };
+                    overlay_controls.push(OverlayControl {
+                        bounds,
+                        role: ControlRole::Secondary,
+                        state,
+                    });
+                }
+            }
+        }
+        if let Some(bounds) = self.interaction.help_control(self.viewport, header_offset) {
+            overlay_controls.push(OverlayControl {
+                bounds,
+                role: ControlRole::Secondary,
+                state: if self.interaction.help_pressed(self.viewport, header_offset) {
+                    ControlState::Pressed
+                } else {
+                    ControlState::Normal
+                },
+            });
+            lines[0].style = OverlayStyle::Normal;
+        }
+
+        if pane_overlay || workspace_overlay || self.is_empty_workspace() {
+            for line in &mut lines {
+                line.style = OverlayStyle::Normal;
+            }
+        }
         let frame = ComposeFrame {
             host_rows,
             host_columns,
@@ -535,6 +728,7 @@ impl<'a> RenderView<'a> {
             dividers,
             focused,
             overlay: overlay.map(|(rect, count)| OverlayView {
+                controls: &overlay_controls,
                 rect: shifted_rect(rect, header_offset),
                 lines: &lines[..count],
             }),
@@ -545,11 +739,22 @@ impl<'a> RenderView<'a> {
             &frame,
             selection,
             caret,
-            tabs_layout.as_ref().map(|layout| layout.header_cells()),
+            header_cells.as_deref(),
             PaneChrome {
                 scrollbars,
                 history: history_controls,
                 labels,
+                header_pressed,
+                history_pressed: std::array::from_fn(|index| {
+                    self.source
+                        .layout
+                        .and_then(|layout| layout.panes[index])
+                        .is_some_and(|pane| {
+                            self.surface_pressed.is_some_and(|(action, _)| {
+                                action == super::SurfaceAction::History(pane.target)
+                            })
+                        })
+                }),
             },
             output,
         )
