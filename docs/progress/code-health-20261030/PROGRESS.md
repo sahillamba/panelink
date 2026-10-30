@@ -28,7 +28,7 @@ User authorized implementing the [plan](README.md) in this new worktree with par
 | 07 server test layout | DONE; committed15369d5 | multi_session.rs and private child test files |
 | 08 integration/docs | DONE; parent reviewed combined canonical8/8 and final docs | all leases released |
 
-All leases are released; no active delegates. Entries below retain the historical dispatch and evidence record. UI changes were serialized. Keep exact target, input nonreplayability, scoped-wheel negotiation/FIFO, metadata, modal, geometry, output commit and host restoration contracts from [SPEC.md](SPEC.md).
+All implementation and review leases are released; no active delegates. User-requested Astra/medium results and limits are consolidated in [ASTRA-SUMMARY.md](ASTRA-SUMMARY.md). Entries retain historical dispatch/evidence. UI changes were serialized. Keep exact target, input nonreplayability, scoped-wheel negotiation/FIFO, metadata, modal, geometry, output commit and host restoration contracts from [SPEC.md](SPEC.md).
 
 ## Environment and evidence
 
@@ -144,3 +144,38 @@ Source committed2b72e81831c9912d12a5cff878b5e34dacaeda03; [combined inventory/re
 Parent independently parsed the full combined log and confirmed all8 gate results,84 Cargo groups totaling1596 passed/0 failed/20 ignored, decoder39/0, Python233run/1skip and component fingerprints. See [canonical evidence](INTEGRATION.md), [inventory/review](INVENTORY.md) and [navigation](NAVIGATION.md). Source remains2b72e81831c9912d12a5cff878b5e34dacaeda03; final edits are documentation only. All00–08 acceptance checklists are complete for the authorized local maintainability scope. Historical failures and incomplete delegated reviews remain explicitly recorded. All agents/leases released.
 
 No protocol/storage/dependency/public-command change, install, live-pane operation, push or tracker publication. Native host, provider, reboot, real clipboard, performance and hosted CI acceptance remain open; this completion does not relabel product phase gates. Final docs/link and diff validation precede the parent completion-evidence commit.
+
+## User-requested Astra review — 2026-10-30
+
+Source frozen at80c9ffb0204c42efafe70a4ca904d4c2ca67541a. GPT-6-Astra/medium reviews the full a1134ec→HEAD implementation diff, read-only source. Sole report write lease ASTRA-REVIEW.md; no builds/tests/live panes/commits or nested agents. Parent review of findings follows completion; no approval is assumed in advance.
+
+Task ID: `node:delegated-task:command%3Amcp%3A796e8479-303f-42d4-81dc-ee85cad64eec%3Adelegate-task%3Acode-health-20261030-astra-medium-review`. Client request `code-health-20261030-astra-medium-review`. Confirmed actual model gpt-6-astra with reasoningEffort medium. Completion wakes parent; do not poll.
+
+First Astra pass stopped incomplete; [report](ASTRA-REVIEW.md) establishes no full-diff approval. It inspected host dispatch, viewport flush scheduling, fixture diffs and immutable render inputs. Parent partitions missing traces into bounded Astra/medium passes, source still frozen; three disjoint report leases are active:
+
+- Copy/clipboard: client request `code-health-astra-medium-copy`, report ASTRA-COPY.md.
+- Modal/captured pane operations: `code-health-astra-medium-interaction`, report ASTRA-INTERACTION.md.
+- Workspace metadata: `code-health-astra-medium-workspace`, report ASTRA-WORKSPACE.md.
+
+Exact task IDs use prefix `node:delegated-task:command%3Amcp%3A796e8479-303f-42d4-81dc-ee85cad64eec%3Adelegate-task%3A` plus the client request above. Completion wakes parent; no polling. Remaining independent coverage after this wave: full viewport reply/cursor/lifecycle, render precedence/commit and mechanical server-test equivalence. Assign bounded follow-ups after these complete, without overlapping report writers. No source edits or builds authorized to reviewers.
+
+Workspace pass returned: [ASTRA-WORKSPACE.md](ASTRA-WORKSPACE.md). No material findings in inspected metadata/catalog/create/close identity and completion paths. Its missing end-to-end event/route-switch and render checks remain cross-module review work; exhaustive inspection of every test is not a completion requirement. This report is not full integration approval.
+
+Viewport completion/cursor/lifecycle follow-up assigned: client request `code-health-astra-medium-viewport` on the exact prefix above, gpt-6-astra/medium, sole ASTRA-VIEWPORT.md lease. Source remains frozen. Copy/interaction passes continue until their completion notifications; do not poll or treat partially written reports as final. Render/commit and server extraction coverage remains to assign as slots release.
+
+Copy and interaction passes returned [copy coverage](ASTRA-COPY.md) and [interaction coverage](ASTRA-INTERACTION.md), no material findings in their completed paths. These are bounded reports with explicit limits, not blanket partition approval. Remaining changed coordinator resets/opening/server-end paths are assigned below; unchanged algorithm audits and exhaustive test-body inspection are outside this refactor review.
+
+Two final bounded Astra/medium assignments, same exact task ID prefix plus client request:
+
+- `code-health-astra-medium-render`: sole ASTRA-RENDER.md lease, full original/current frame/formatting/precedence and output-commit boundary.
+- `code-health-astra-medium-integration`: sole ASTRA-INTEGRATION.md lease, remaining coordinator lifecycle/opening/server-end order and mechanical server-test extraction equivalence proof.
+
+Viewport pass remains active. These three report-only writers are disjoint; source frozen, no builds/tests. Completion wakes parent; no polling. Consolidate actual coverage and residual gaps after all three finish; do not repeatedly expand into audits of unchanged subsystems.
+
+Viewport pass completed: [ASTRA-VIEWPORT.md](ASTRA-VIEWPORT.md), no material findings and no unresolved assigned paths. Parent read its completion/load/cursor/extent/invalidation coverage. Source review only; original canonical evidence remains unchanged. Only render and integration review tasks remain active; source remains frozen and no new tasks are assigned.
+
+## Astra review consolidated
+
+Render pass completed with no material findings or unresolved assigned paths. Integration task terminal failed at the provider usage limit, but its completed ASTRA-INTEGRATION.md artifact was saved beforehand; parent recovered/read it on user continuation. It records completed coordinator comparisons and server-body equivalence, not an unfinished draft. No retry or model substitution was needed. All tasks terminated; no active report leases.
+
+[ASTRA-SUMMARY.md](ASTRA-SUMMARY.md) records actual combined coverage, selective interaction branch comparison, unchanged-algorithm/exhaustive-test exclusions and the failed terminal status. No material findings established, no source fixes made, no blanket full-diff approval claimed. Source remains80c9ffb; existing canonical8/8 unchanged. Parent finalizes review documentation only; no push/install.
