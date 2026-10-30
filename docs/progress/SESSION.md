@@ -1,3 +1,47 @@
+## Button redesign client installed — 2026-10-31
+
+User explicitly requested installation. Rebuilt the verified dirty checkout and
+atomically replaced `~/.local/bin/panelink` with version0.1.8; SHA-256 matches
+the built artifact. Previous binary backed up. Running server identity/generation
+compared equal before/after; no server restart or pane input. Existing attached
+clients load the new UI after Ctrl-X and reopening `panelink`.
+See [installation evidence](button-redesign/INSTALL.md). Earlier no-install
+entries are historical. Native host/provider and broader phase gates remain open.
+
+## Button redesign source complete — 2026-10-31
+
+All BTN-00..06 source packets implemented in `t3/terminal-button-design-research`
+(`t3-baecf477`). Final canonical8/8: Rust1626pass/0fail/20ignored, decoder39,
+Python233run/1skip, docs464/0, fingerprints/fmt/strictClippy/build pass. Parent
+source review and independent bounded safety review complete; in-bounds drag
+and help release findings fixed with regressions. See [integration](button-redesign/BTN06.md)
+and [execution state](button-redesign/PROGRESS.md) for exact logs, fixture changes,
+source/runtime boundaries and remaining gates. Repository spec/help/usage skill
+synchronized. No install, live user panes, server restart, push or commit.
+Native host/theme/clipboard/touch/provider and broader phase gates remain open.
+The earlier entries below preserve historical status and do not supersede this result.
+
+## Button redesign implementation started
+
+User confirmed the complete plan with "start implementation". Follow the
+[execution state](button-redesign/PROGRESS.md): baseline/prototype and shared
+control foundation first, then interaction and surface migration. Existing dirty
+planning files preserved. No installation, server restart or push authorized.
+
+## Button redesign plan ready for final confirmation — 2026-10-30
+
+In `t3/terminal-button-design-research`, checkout `t3-baecf477`, all ten design
+interview questions are answered. The [implementation plan](../design/BUTTON-IMPLEMENTATION-PLAN.md)
+contains source pointers, control inventory, seven ordered packets with ownership,
+interaction contracts and verification/rollout gates. Source baseline observed:
+`fdd8664d3085958430f1fbd91ec066d868c33050`; planning/glossary changes uncommitted.
+The user chose filled buttons and action-workflow changes, keeping Close versus
+Detach semantics and limiting new capabilities to explicit choices. Final
+whole-plan confirmation remains pending before implementation. Links and diff
+checks only; no builds/tests/live panes/install/server restart/push. Prior product
+and host acceptance gates remain open. Resume by obtaining whole-plan confirmation
+then executing BTN-00 against freshly checked source/runtime identities.
+
 ## Code-health plan complete — 2026-10-30
 
 All00–08 maintainability packets are implemented, reviewed and locally verified on

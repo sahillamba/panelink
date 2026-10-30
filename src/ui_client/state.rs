@@ -271,6 +271,47 @@ pub(crate) enum Flow {
 }
 
 /// Client presentation state; PTYs and sessions stay server-owned.
+#[derive(Clone, Copy)]
+struct HeaderPress {
+    focus_generation: u64,
+    target: TargetRef,
+    close: bool,
+    revision: u64,
+    route: Option<WorkspaceRouteId>,
+    host: (u16, u16),
+    canceled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceAction {
+    Strip(TabAction),
+    History(TargetRef),
+    NewTab,
+    Detach,
+}
+
+struct StripPress {
+    layout: Option<panelink::workspace_tabs::TabsLayout>,
+    action: SurfaceAction,
+    bounds: Rect,
+    revision: Option<u64>,
+    button: MouseButton,
+    route: Option<WorkspaceRouteId>,
+    catalog_revision: Option<u64>,
+    host: (u16, u16),
+    focus_generation: u64,
+    canceled: bool,
+}
+
+struct WorkspacePress {
+    control: workspace::WorkspaceControl,
+    bounds: Rect,
+    stamp: workspace::WorkspaceStamp,
+    host: (u16, u16),
+    focus: u64,
+    generation: Option<u64>,
+}
+
 pub(crate) struct App {
     layout: Option<LayoutReply>,
     pane_operations: Option<PaneOperationsView>,
@@ -282,6 +323,10 @@ pub(crate) struct App {
     /// discovery reply applies its final pointer row once, then drops it.
     deferred_thumb_release: Option<PointerSeek>,
     pointer_divider: Option<PointerDivider>,
+    header_press: Option<HeaderPress>,
+    strip_press: Option<StripPress>,
+    workspace_press: Option<WorkspacePress>,
+    modal_press: Option<(interaction::ModalControl, HeaderPress)>,
     pending: [Key; MAX_KEYS],
     pending_len: usize,
     pending_target: Option<TargetRef>,
@@ -667,6 +712,10 @@ impl App {
             pointer_seek: None,
             deferred_thumb_release: None,
             pointer_divider: None,
+            header_press: None,
+            strip_press: None,
+            workspace_press: None,
+            modal_press: None,
             pending: [Key::Enter; MAX_KEYS],
             pending_len: 0,
             pending_target: None,
@@ -717,6 +766,7 @@ impl App {
         index: WorkspaceIndex,
         current: WorkspaceRouteId,
     ) {
+        self.modal_press = None;
         self.workspace.install_workspace_index(index, current);
         self.apply_workspace_feedback();
     }
@@ -1097,7 +1147,6 @@ impl App {
         self.apply_workspace_feedback();
     }
 
-    #[cfg(test)]
     fn begin_tab_close(&mut self, route: WorkspaceRouteId) {
         let generation = self.layout.and_then(|layout| {
             layout
@@ -1121,6 +1170,21 @@ impl App {
         if !self.is_empty_workspace() {
             return None;
         }
+        if let Some(flow) = self.capture_strip_event(event, now) {
+            return Some(flow);
+        }
+        if self.capture_workspace_event(event, now) {
+            return Some(Flow::Continue);
+        }
+
+        if self.workspace.tab_dialog.is_some() {
+            self.handle_tab_dialog_event(event, now);
+            return Some(Flow::Continue);
+        }
+        if self.workspace.picker_open {
+            self.handle_workspace_picker_event(event, now);
+            return Some(Flow::Continue);
+        }
         if matches!(event, Event::Mouse(mouse) if mouse.row == 0) {
             self.handle_header_event(event, now);
             return Some(Flow::Continue);
@@ -1133,15 +1197,6 @@ impl App {
                 let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
                 if plain && matches!(key.code, KeyCode::Char('n' | 'N') | KeyCode::Enter) {
                     self.request_empty_create(now);
-                }
-            }
-            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(geometry) = self.empty_action_geometry() {
-                    if geometry.new_tab.contains(mouse.column, mouse.row) {
-                        self.request_empty_create(now);
-                    } else if geometry.detach.contains(mouse.column, mouse.row) {
-                        return Some(Flow::Quit);
-                    }
                 }
             }
             Event::Resize(_, _) => self.dirty = true,
@@ -1169,6 +1224,7 @@ impl App {
 
     pub(crate) fn set_host(&mut self, rows: u16, columns: u16) {
         if self.host != (rows, columns) {
+            self.modal_press = None;
             self.interaction.replace_mode(None);
             self.interaction.record_mode_exit(None);
             self.interaction.replace_actions(None);
@@ -1285,6 +1341,7 @@ impl App {
         if self.layout == Some(reply) {
             return;
         }
+        self.modal_press = None;
         self.interaction.reconcile_modals(&reply);
         self.apply_interaction_feedback();
         if self.pointer_seek.is_some_and(|drag| {
@@ -2072,6 +2129,215 @@ impl App {
         recovery_availability: Availability,
         effects: &mut impl Effects,
     ) -> Flow {
+        if self.is_empty_workspace() {
+            return self
+                .handle_empty_workspace_event(event, now)
+                .unwrap_or(Flow::Continue);
+        }
+        if let Some(flow) = self.capture_strip_event(event, now) {
+            return flow;
+        }
+        if self.capture_workspace_event(event, now) {
+            return Flow::Continue;
+        }
+
+        if let Some((control, mut press)) = self.modal_press.take() {
+            let valid = self.pane_modal_available()
+                && self.focus_generation == press.focus_generation
+                && self.layout.map(|l| l.revision) == Some(press.revision)
+                && self.workspace.view().current_route == press.route
+                && self.host == press.host
+                && self
+                    .layout
+                    .is_some_and(|l| l.panes.iter().flatten().any(|p| p.target == control.target));
+            self.dirty = true;
+            if let Event::Mouse(mouse) = event {
+                let same = valid
+                    && self.interaction.modal_control_at(
+                        self.interaction_context(),
+                        mouse.column,
+                        mouse.row,
+                    ) == Some(control);
+                if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+                    if same && !press.canceled {
+                        let activation = Event::Mouse(crossterm_input::MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Left),
+                            ..*mouse
+                        });
+                        return self.dispatch_event(
+                            &activation,
+                            now,
+                            recovery_availability,
+                            effects,
+                        );
+                    }
+                    return Flow::Continue;
+                }
+                press.canceled |= !same
+                    || !matches!(
+                        mouse.kind,
+                        MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left)
+                    );
+                self.modal_press = Some((control, press));
+                return Flow::Continue;
+            }
+            if matches!(event,Event::Key(key) if key.code==KeyCode::Esc) {
+                return Flow::Continue;
+            }
+        }
+        if self.pane_modal_available() {
+            if let Event::Mouse(mouse) = event {
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    if let (Some(control), Some(layout)) = (
+                        self.interaction.modal_control_at(
+                            self.interaction_context(),
+                            mouse.column,
+                            mouse.row,
+                        ),
+                        self.layout,
+                    ) {
+                        self.modal_press = Some((
+                            control,
+                            HeaderPress {
+                                focus_generation: self.focus_generation,
+                                target: control.target,
+                                close: false,
+                                revision: layout.revision,
+                                route: self.workspace.view().current_route,
+                                host: self.host,
+                                canceled: false,
+                            },
+                        ));
+                        self.dirty = true;
+                        return Flow::Continue;
+                    }
+                }
+            }
+        }
+        let chrome_available = !self.interaction.view().help_open
+            && !self.interaction.view().confirm.is_open()
+            && !self.interaction.view().menu.is_open()
+            && self.interaction.view().actions_menu.is_none()
+            && self.interaction.view().pane_mode.is_none()
+            && !self.workspace.view().route_switching
+            && self.workspace.view().tab_dialog.is_none()
+            && !self.workspace.view().picker_open
+            && self.pointer_seek.is_none()
+            && self.pointer_divider.is_none();
+        if let Some(mut press) = self.header_press.take() {
+            let valid = chrome_available
+                && self.focus_generation == press.focus_generation
+                && self.layout.map(|layout| layout.revision) == Some(press.revision)
+                && self.workspace.view().current_route == press.route
+                && self.host == press.host;
+            match event {
+                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Up(MouseButton::Left) => {
+                    self.dirty = true;
+                    if valid
+                        && !press.canceled
+                        && self.pane_control_at(mouse.column, mouse.row)
+                            == Some((press.target, press.close))
+                    {
+                        let activation = Event::Mouse(crossterm_input::MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Left),
+                            ..*mouse
+                        });
+                        let flow =
+                            self.dispatch_event(&activation, now, recovery_availability, effects);
+                        // The opener's physical release is already consumed here.
+                        self.interaction.consume_release(event);
+                        return flow;
+                    }
+                    return Flow::Continue;
+                }
+                Event::Mouse(mouse) => {
+                    press.canceled |= !valid
+                        || self.pane_control_at(mouse.column, mouse.row)
+                            != Some((press.target, press.close))
+                        || !matches!(
+                            mouse.kind,
+                            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved
+                        );
+                    self.header_press = Some(press);
+                    self.dirty = true;
+                    return Flow::Continue;
+                }
+                _ => {
+                    self.dirty = true;
+                    if matches!(event, Event::Key(key) if key.code == KeyCode::Esc) {
+                        return Flow::Continue;
+                    }
+                }
+            }
+        }
+        if chrome_available {
+            if let Event::Mouse(mouse) = event {
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    if let (Some((target, close)), Some(layout)) =
+                        (self.pane_control_at(mouse.column, mouse.row), self.layout)
+                    {
+                        self.cancel_selection();
+                        self.header_press = Some(HeaderPress {
+                            focus_generation: self.focus_generation,
+                            target,
+                            close,
+                            revision: layout.revision,
+                            route: self.workspace.view().current_route,
+                            host: self.host,
+                            canceled: false,
+                        });
+                        self.dirty = true;
+                        return Flow::Continue;
+                    }
+                }
+            }
+        }
+        if self.interaction.pane_mode.is_some()
+            && matches!(event, Event::Mouse(m) if m.kind==MouseEventKind::Down(MouseButton::Left))
+        {
+            return Flow::Continue;
+        }
+        self.dispatch_event(event, now, recovery_availability, effects)
+    }
+
+    fn pane_modal_available(&self) -> bool {
+        !self.interaction.help_open
+            && !self.workspace.view().route_switching
+            && self.workspace.view().tab_dialog.is_none()
+            && !self.workspace.view().picker_open
+            && self.pointer_divider.is_none()
+            && self.pointer_seek.is_none()
+    }
+
+    fn visible_modal_press(&self) -> Option<interaction::ModalControl> {
+        let (control, press) = self.modal_press?;
+        if !self.pane_modal_available()
+            || press.canceled
+            || self.focus_generation != press.focus_generation
+            || self.host != press.host
+            || self.workspace.view().current_route != press.route
+            || !self.layout.is_some_and(|l| {
+                l.revision == press.revision
+                    && l.panes.iter().flatten().any(|p| p.target == control.target)
+            })
+        {
+            return None;
+        }
+        (self.interaction.modal_control_at(
+            self.interaction_context(),
+            control.bounds.x,
+            control.bounds.y,
+        ) == Some(control))
+        .then_some(control)
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &Event,
+        now: Instant,
+        recovery_availability: Availability,
+        effects: &mut impl Effects,
+    ) -> Flow {
         let is_wheel = matches!(event, Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown));
         if !is_wheel
             || self.interaction.view().help_open
@@ -2166,13 +2432,6 @@ impl App {
             return Flow::Continue;
         }
         if self.interaction.view().actions_menu.is_some() {
-            if let Event::Mouse(mouse) = event {
-                if let MouseEventKind::Down(button @ (MouseButton::Left | MouseButton::Right)) =
-                    mouse.kind
-                {
-                    self.interaction.record_release(Some(button));
-                }
-            }
             return self.handle_actions_menu_event(event, now, recovery_availability, effects);
         }
         if self.interaction.view().help_open {
@@ -2305,10 +2564,6 @@ impl App {
             }
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(target) = self.history_back_at(mouse.column, mouse.row) {
-                        self.return_to_live(target);
-                        return Flow::Continue;
-                    }
                     if let Some((target, close)) = self.pane_control_at(mouse.column, mouse.row) {
                         self.flush(now, effects);
                         if close {
@@ -2694,6 +2949,233 @@ impl App {
         self.dirty = true;
     }
 
+    fn surface_at(&self, x: u16, y: u16) -> Option<(SurfaceAction, Rect)> {
+        if let Some(layout) = self.tabs_layout() {
+            if let Some(action) = layout.hit_test(x, y) {
+                let mut start = x;
+                while start > 0 && layout.hit_test(start - 1, y) == Some(action) {
+                    start -= 1;
+                }
+                let mut end = x + 1;
+                while end < layout.columns() && layout.hit_test(end, y) == Some(action) {
+                    end += 1;
+                }
+                return Some((
+                    SurfaceAction::Strip(action),
+                    Rect {
+                        x: start,
+                        y,
+                        rows: 1,
+                        columns: end - start,
+                    },
+                ));
+            }
+        }
+        if self.is_empty_workspace() {
+            let geometry = self.empty_action_geometry()?;
+            return [
+                (SurfaceAction::NewTab, geometry.new_tab),
+                (SurfaceAction::Detach, geometry.detach),
+            ]
+            .into_iter()
+            .find(|(_, r)| r.contains(x, y));
+        }
+        let target = self.history_back_at(x, y)?;
+        let mut start = x;
+        while start > 0 && self.history_back_at(start - 1, y) == Some(target) {
+            start -= 1;
+        }
+        let mut end = x + 1;
+        while end < self.screen_viewport().1 && self.history_back_at(end, y) == Some(target) {
+            end += 1;
+        }
+        Some((
+            SurfaceAction::History(target),
+            Rect {
+                x: start,
+                y,
+                rows: 1,
+                columns: end - start,
+            },
+        ))
+    }
+
+    fn surface_capture_available(&self) -> bool {
+        let view = self.interaction.view();
+        !view.help_open
+            && !view.confirm.is_open()
+            && !view.menu.is_open()
+            && view.actions_menu.is_none()
+            && view.pane_mode.is_none()
+            && !self.workspace.view().route_switching
+            && self.workspace.view().tab_dialog.is_none()
+            && !self.workspace.view().picker_open
+            && self.pointer_seek.is_none()
+            && self.pointer_divider.is_none()
+    }
+
+    fn visible_surface_press(&self) -> Option<(SurfaceAction, Rect)> {
+        let press = self.strip_press.as_ref()?;
+        (!press.canceled
+            && self.surface_capture_available()
+            && self.host == press.host
+            && self.focus_generation == press.focus_generation
+            && self.workspace.view().current_route == press.route
+            && self.workspace.view().workspace_revision == press.catalog_revision
+            && self.layout.map(|l| l.revision) == press.revision
+            && self.tabs_layout() == press.layout
+            && self.surface_at(press.bounds.x, press.bounds.y)
+                == Some((press.action, press.bounds)))
+        .then_some((press.action, press.bounds))
+    }
+
+    /// Local strip capture also works in the empty host without a network worker.
+    fn workspace_generation(&self) -> Option<u64> {
+        self.layout
+            .and_then(|l| l.panes.iter().flatten().next().map(|p| p.target.generation))
+    }
+    fn valid_workspace_press(&self) -> Option<Rect> {
+        let p = self.workspace_press.as_ref()?;
+        (p.stamp == self.workspace.control_stamp()
+            && p.host == self.host
+            && p.focus == self.focus_generation
+            && p.generation == self.workspace_generation()
+            && self
+                .workspace
+                .workspace_control_at(self.viewport(), p.bounds.x, p.bounds.y)
+                == Some((p.control, p.bounds)))
+        .then_some(p.bounds)
+    }
+    fn capture_workspace_event(&mut self, event: &Event, now: Instant) -> bool {
+        if self.workspace_press.is_some() {
+            let valid = self.valid_workspace_press().is_some();
+            let p = self.workspace_press.take().unwrap();
+            self.dirty = true;
+            if let Event::Mouse(m) = event {
+                let same = valid
+                    && self
+                        .workspace
+                        .workspace_control_at(self.viewport(), m.column, m.row)
+                        == Some((p.control, p.bounds));
+                if m.kind == MouseEventKind::Up(MouseButton::Left) && same {
+                    self.workspace
+                        .activate_control(p.control, now, p.generation);
+                    self.apply_workspace_feedback();
+                } else if same
+                    && matches!(
+                        m.kind,
+                        MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left)
+                    )
+                {
+                    self.workspace_press = Some(p);
+                }
+                return true;
+            }
+            if matches!(event, Event::Key(k) if k.code == KeyCode::Esc) {
+                return true;
+            }
+        }
+        if self.workspace.tab_dialog.is_some() || self.workspace.picker_open {
+            if let Event::Mouse(m) = event {
+                if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                    if let Some((control, bounds)) =
+                        self.workspace
+                            .workspace_control_at(self.viewport(), m.column, m.row)
+                    {
+                        self.workspace_press = Some(WorkspacePress {
+                            control,
+                            bounds,
+                            stamp: self.workspace.control_stamp(),
+                            host: self.host,
+                            focus: self.focus_generation,
+                            generation: self.workspace_generation(),
+                        });
+                        self.dirty = true;
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    fn capture_strip_event(&mut self, event: &Event, now: Instant) -> Option<Flow> {
+        let available = self.surface_capture_available();
+        if let Some(mut press) = self.strip_press.take() {
+            let valid = available
+                && self.host == press.host
+                && self.focus_generation == press.focus_generation
+                && self.workspace.view().current_route == press.route
+                && self.workspace.view().workspace_revision == press.catalog_revision
+                && self.tabs_layout() == press.layout
+                && self.layout.map(|l| l.revision) == press.revision
+                && self.surface_at(press.bounds.x, press.bounds.y)
+                    == Some((press.action, press.bounds));
+            self.dirty = true;
+            if let Event::Mouse(mouse) = event {
+                let same = valid
+                    && self.surface_at(mouse.column, mouse.row)
+                        == Some((press.action, press.bounds));
+                if mouse.kind == MouseEventKind::Up(press.button) {
+                    if same && !press.canceled {
+                        match press.action {
+                            SurfaceAction::Strip(_) => {
+                                self.handle_header_event(
+                                    &Event::Mouse(crossterm_input::MouseEvent {
+                                        kind: MouseEventKind::Down(press.button),
+                                        ..*mouse
+                                    }),
+                                    now,
+                                );
+                            }
+                            SurfaceAction::History(target) => self.return_to_live(target),
+                            SurfaceAction::NewTab => self.request_empty_create(now),
+                            SurfaceAction::Detach => return Some(Flow::Quit),
+                        }
+                    }
+                    return Some(Flow::Continue);
+                }
+                press.canceled |= !same
+                    || !matches!(mouse.kind, MouseEventKind::Moved)
+                        && mouse.kind != MouseEventKind::Drag(press.button);
+                self.strip_press = Some(press);
+                return Some(Flow::Continue);
+            }
+            if matches!(event, Event::Key(key) if key.code == KeyCode::Esc) {
+                return Some(Flow::Continue);
+            }
+        }
+        if available {
+            if let Event::Mouse(mouse) = event {
+                if let MouseEventKind::Down(button @ (MouseButton::Left | MouseButton::Right)) =
+                    mouse.kind
+                {
+                    if let Some((action, bounds)) = self.surface_at(mouse.column, mouse.row) {
+                        if button == MouseButton::Left || matches!(action, SurfaceAction::Strip(_))
+                        {
+                            self.cancel_selection();
+                            self.strip_press = Some(StripPress {
+                                layout: self.tabs_layout(),
+                                bounds,
+                                revision: self.layout.map(|l| l.revision),
+                                action,
+                                button,
+                                route: self.workspace.view().current_route,
+                                catalog_revision: self.workspace.view().workspace_revision,
+                                host: self.host,
+                                focus_generation: self.focus_generation,
+                                canceled: false,
+                            });
+                            self.dirty = true;
+                            return Some(Flow::Continue);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn handle_header_event(&mut self, event: &Event, now: Instant) -> bool {
         if self.workspace.view().workspace_index.is_some() {
             let (rows, columns) = self.screen_viewport();
@@ -2731,6 +3213,9 @@ impl App {
                     self.request_route(route, now)
                 }
                 (_, Some(TabAction::TabActions(route))) => self.open_tab_actions(route),
+                (MouseEventKind::Down(MouseButton::Left), Some(TabAction::Close(route))) => {
+                    self.begin_tab_close(route)
+                }
                 (MouseEventKind::Down(MouseButton::Left), Some(TabAction::Create)) => {
                     let project = self
                         .workspace
@@ -3948,6 +4433,37 @@ impl App {
         }
     }
 
+    /// Presentation only: stale captures never light a replacement control.
+    fn valid_header_press(&self) -> Option<(TargetRef, bool)> {
+        let press = self.header_press?;
+        let view = self.interaction.view();
+        if !self.pane_modal_available()
+            || press.canceled
+            || self.focus_generation != press.focus_generation
+            || self.layout.map(|layout| layout.revision) != Some(press.revision)
+            || self.workspace.view().current_route != press.route
+            || self.host != press.host
+            || view.help_open
+            || view.confirm.is_open()
+            || view.menu.is_open()
+            || view.actions_menu.is_some()
+            || view.pane_mode.is_some()
+            || self.workspace.view().route_switching
+            || self.workspace.view().tab_dialog.is_some()
+            || self.workspace.view().picker_open
+            || self.pointer_seek.is_some()
+            || self.pointer_divider.is_some()
+        {
+            return None;
+        }
+        self.layout?
+            .panes
+            .iter()
+            .flatten()
+            .any(|pane| pane.target == press.target)
+            .then_some((press.target, press.close))
+    }
+
     /// Compose the current frame into `output` (not committed).
     pub(crate) fn render<W: io::Write>(
         &self,
@@ -3967,6 +4483,10 @@ impl App {
             pointer_seek: self.pointer_seek,
             server_present: self.server_present,
             persistent_status: self.persistent_status,
+            header_pressed: self.valid_header_press(),
+            modal_pressed: self.visible_modal_press(),
+            surface_pressed: self.visible_surface_press(),
+            workspace_pressed: self.valid_workspace_press(),
         }
         .render(compositor, output, now)
     }

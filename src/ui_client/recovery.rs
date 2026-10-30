@@ -128,6 +128,10 @@ fn run_frames(
     let (rows, columns) = host.size().map_err(host_error_message)?;
     let mut compositor =
         Compositor::try_new_unpadded().map_err(|_| "could not compose recovery view")?;
+    compositor.set_reduced_control_color(
+        std::env::var_os("NO_COLOR").is_some()
+            || std::env::var_os("TERM").is_some_and(|term| term == "dumb"),
+    );
     let mut snapshots = [
         ScreenSnapshot::try_new(TerminalSize::new(80, 240).map_err(|_| "invalid frame size")?)
             .map_err(|_| "could not allocate recovery view")?,
@@ -468,6 +472,7 @@ fn compose(
         *slot = Some(add_chrome(divider));
     }
     let overlay = (bounded_rows > 0 && bounded_columns > 0).then_some(OverlayView {
+        controls: &[],
         rect: panelink::pane_layout::Rect {
             x: 0,
             y: bounded_rows.saturating_sub(CHROME_ROWS),

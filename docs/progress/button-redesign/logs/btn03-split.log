@@ -1,0 +1,38 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests src/lib.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-cb36793118f48d00)
+
+running 31 tests
+test split_menu::tests::compact_disabled_reasons_keep_the_decisive_values_within_twenty_two_columns ... ok
+test split_menu::tests::closed_menu_returns_not_open_for_every_input ... ok
+test split_menu::tests::all_four_directions_enabled_in_order_at_a_large_size ... ok
+test split_menu::tests::activation_returns_captured_target_and_revision_after_focus_moves ... ok
+test split_menu::tests::column_threshold_is_45_and_reason_names_both_sizes ... ok
+test split_menu::tests::below_terminal_minimum_viewport_never_activates ... ok
+test split_menu::tests::committed_tree_disables_items_only_when_full_or_too_small ... ok
+test split_menu::tests::activating_a_disabled_item_stays_open_and_shows_its_reason ... ok
+test split_menu::tests::compact_overlay_is_clamped_vertically_in_short_wide_viewport ... ok
+test split_menu::tests::close_item_is_always_enabled_and_requests_confirmation_with_captures ... ok
+test split_menu::tests::confirm_prompt_names_the_pane_and_warns_for_the_last_pane ... ok
+test split_menu::tests::confirm_yes_confirms_buttons_are_consumed_and_cancel_dismisses ... ok
+test split_menu::tests::compact_overlay_uses_six_item_rows_at_7x22_and_adds_status_at_8_rows ... ok
+test split_menu::tests::layout_errors_map_to_fixed_reasons ... ok
+test split_menu::tests::keyboard_open_rejects_target_not_in_layout ... ok
+test split_menu::tests::debug_output_redacts_targets_and_revisions ... ok
+test split_menu::tests::mouse_press_on_close_row_requests_confirmation ... ok
+test split_menu::tests::mouse_press_on_item_activates_and_outside_closes ... ok
+test split_menu::tests::pointer_selects_pane_under_cell_regardless_of_focus_and_divider_opens_nothing ... ok
+test split_menu::tests::navigation_wraps_and_letter_shortcuts_are_case_insensitive ... ok
+test split_menu::tests::set_viewport_replaces_overlay_and_keeps_captures ... ok
+test split_menu::tests::row_threshold_is_15_and_reason_names_both_sizes ... ok
+test split_menu::tests::recovery_row_is_after_close_and_never_closes_a_pane ... ok
+test split_menu::tests::shared_pane_action_model_keeps_items_and_reasons_identical_for_open_paths ... ok
+test split_menu::tests::shrinking_below_minimum_blocks_activation_until_enlarged ... ok
+test split_menu::tests::shared_pane_action_model_uses_back_to_live_label_and_layout_capacity ... ok
+test split_menu::tests::normal_overlay_is_clamped_inside_viewport_at_all_four_corners ... ok
+test split_menu::tests::too_small_viewport_shows_one_status_line_and_only_cancel_closes ... ok
+test split_menu::tests::status_text_is_clipped_with_ellipsis_never_wrapped ... ok
+test split_menu::tests::every_input_while_open_is_owned_by_the_menu ... ok
+test split_menu::tests::menu_availability_agrees_with_layout_can_split_across_a_size_sweep ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 910 filtered out; finished in 0.00s
+

@@ -1,0 +1,72 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.38s
+     Running unittests src/lib.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-cb36793118f48d00)
+
+running 43 tests
+test terminal::compose::tests::header_validates_wide_topology_and_rejects_row_overlap_before_output ... ok
+test terminal::compose::tests::header_baseline_advances_only_after_commit_or_complete_write ... ok
+test terminal::compose::tests::full_repaint_restores_an_unchanged_header_after_geometry_change ... ok
+test terminal::compose::tests::header_changes_are_incremental_committed_and_removable ... ok
+test terminal::compose::tests::focused_chrome_uses_ascii_marker_and_truncates_safe_wide_labels_before_controls ... FAILED
+test terminal::compose::tests::frozen_selection_drag_updates_clear_incrementally_and_tracks_live_cells ... ok
+test terminal::compose::tests::identical_frame_emits_nothing_and_cursor_only_change_moves_cursor ... ok
+test terminal::compose::tests::focus_changes_only_repaint_chrome_and_preserve_child_cells ... FAILED
+test terminal::compose::tests::copy_caret_moves_clears_and_recovers_after_writer_failure ... ok
+test terminal::compose::tests::invalid_geometry_is_rejected_before_any_byte ... ok
+test terminal::compose::tests::malicious_cell_content_is_never_emitted_raw ... ok
+test terminal::compose::tests::history_controls_share_render_and_hit_geometry_and_avoid_version_badge ... ok
+test terminal::compose::tests::cursor_is_translated_for_focus_and_hidden_for_overlay_or_placeholder ... ok
+test terminal::compose::tests::modal_overlay_composes_below_the_persistent_header ... ok
+test terminal::compose::tests::left_right_panes_render_at_translated_positions_with_divider ... ok
+test terminal::compose::tests::one_cell_scrollbar_track_keeps_a_visible_thumb ... ok
+test terminal::compose::tests::incremental_sequences_match_full_renders ... ok
+test terminal::compose::tests::overlay_is_painted_last_with_styles_and_clipped_to_host ... ok
+test terminal::compose::tests::pane_controls_partial_write_failure_invalidates_for_full_repaint ... ok
+test terminal::compose::tests::one_changed_cell_in_second_pane_emits_only_that_cell ... ok
+test terminal::compose::tests::pane_controls_respect_modal_overlay_and_restore_after_it_moves ... ok
+test terminal::compose::tests::pointer_content_mapping_uses_inset_geometry_and_clamps_padding ... ok
+test terminal::compose::tests::pane_controls_validate_geometry_and_render_only_in_top_padding ... ok
+test terminal::compose::tests::scrollbar_geometry_has_expected_track_and_thumb_positions ... ok
+test terminal::compose::tests::scrollbar_is_clipped_by_menu_and_restored_when_menu_leaves ... ok
+test terminal::compose::tests::scrollbar_partial_write_retries_and_header_keeps_content_offset ... ok
+test terminal::compose::tests::rect_or_host_change_and_invalidate_force_full_repaint ... ok
+test terminal::compose::tests::scrollbar_rejects_invalid_slot_geometry_before_output ... ok
+test terminal::compose::tests::scrollbar_thumb_tracks_live_top_and_zero_history_positions ... ok
+test terminal::compose::tests::shared_pointer_geometry_uses_exact_half_open_control_thumb_and_divider_edges ... ok
+test terminal::compose::tests::scrollbar_updates_removals_and_unchanged_frames_only_touch_margin ... ok
+test terminal::compose::tests::history_label_damage_repaints_and_restores_after_overlay ... ok
+test terminal::compose::tests::placeholder_is_centered_sanitized_and_clipped ... ok
+test terminal::compose::tests::selection_rejects_invalid_geometry_before_output_and_menu_keeps_priority ... ok
+test terminal::compose::tests::unpadded_render_preserves_minimum_snapshot_without_margin_writes ... ok
+test terminal::compose::tests::top_bottom_panes_render_at_translated_rows_with_horizontal_divider ... ok
+test terminal::compose::tests::uncommitted_frame_is_re_emitted_and_writer_failure_invalidates ... ok
+test terminal::compose::tests::selection_preserves_unicode_combining_and_wide_topology_at_edges ... ok
+test terminal::compose::tests::version_badge_uses_bottom_margin_and_survives_modal_damage ... ok
+test terminal::compose::tests::three_and_four_pane_layouts_render_every_divider_and_placeholder ... ok
+test terminal::compose::tests::wide_cells_stay_inside_the_pane_and_outside_the_overlay ... ok
+test terminal::compose::tests::overlay_removal_or_move_repaints_covered_cells ... ok
+test terminal::compose::tests::maximum_frame_streams_under_four_mib_without_a_frame_buffer ... ok
+
+failures:
+
+---- terminal::compose::tests::focused_chrome_uses_ascii_marker_and_truncates_safe_wide_labels_before_controls stdout ----
+
+thread 'terminal::compose::tests::focused_chrome_uses_ascii_marker_and_truncates_safe_wide_labels_before_controls' (41692763) panicked at src/terminal/compose.rs:4345:9:
+assertion `left == right` failed
+  left: " Menu "
+ right: "[Menu]"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- terminal::compose::tests::focus_changes_only_repaint_chrome_and_preserve_child_cells stdout ----
+
+thread 'terminal::compose::tests::focus_changes_only_repaint_chrome_and_preserve_child_cells' (41692762) panicked at src/terminal/compose.rs:4419:9:
+assertion failed: menu.bold()
+
+
+failures:
+    terminal::compose::tests::focus_changes_only_repaint_chrome_and_preserve_child_cells
+    terminal::compose::tests::focused_chrome_uses_ascii_marker_and_truncates_safe_wide_labels_before_controls
+
+test result: FAILED. 41 passed; 2 failed; 0 ignored; 0 measured; 894 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `--lib`

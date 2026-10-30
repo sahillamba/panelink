@@ -1,0 +1,242 @@
+$ cargo test --locked --offline --bin panelink workspace_controls_capture_exact_identity_and_render_release_feedback -- --nocapture
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/main.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-8766758a03d72d8d)
+
+running 1 test
+BTN02g surface 0 pressed:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+                                                      
+                            Tab actions               
+                                                      
+                            > [Select tab] [pressed]  
+                              [Rename]                
+                              [Close tab]             
+                                                      
+                            Enter: select  Esc: close 
+                                                      
+released:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+Panelink: terminal too small for the pane layout; enlarge it                     
+BTN02g surface 1 pressed:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+
+
+            Rename tab (Enter saves; Esc cancels)                   
+            Name: Main_                                             
+                                                                    
+            [Save] [Cancel] [pressed]                               
+released:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+
+
+            Rename tab (Enter saves; Esc cancels)                   
+            Name: Main (saving)                                     
+                                                                    
+            [Save] [Cancel]                                         
+BTN02g surface 2 pressed:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+
+
+            Rename tab (Enter saves; Esc cancels)                   
+            Name: Main_                                             
+                                                                    
+            [Save] [Cancel] [pressed]                               
+released:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+Panelink: terminal too small for the pane layout; enlarge it                     
+BTN02g surface 3 pressed:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+
+
+
+                  Cancel selected: close tab                  
+                  Ends all tab processes                      
+                  [Close tab] [Cancel] [pressed]              
+released:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+
+
+
+                  Cancel selected: close tab                  
+                  Closing tab; verifying process stop...      
+                  Close pending                               
+BTN02g surface 4 pressed:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+
+
+
+                  Cancel selected: close tab                  
+                  Ends all tab processes                      
+                  [Close tab] [Cancel] [pressed]              
+released:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+Panelink: terminal too small for the pane layout; enlarge it                     
+BTN02g surface 5 pressed:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+
+
+        [Clear] All tabs:  (Esc closes) [pressed]                       
+        > Editors / Main                                                
+          Editors / Review                                              
+          Tools / Shell                                                 
+released:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+
+
+        [Clear] All tabs:  (Esc closes)                                 
+        > Editors / Main                                                
+          Editors / Review                                              
+          Tools / Shell                                                 
+BTN02g surface 6 pressed:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+
+
+        [Clear] All tabs:  (Esc closes)                                 
+        > Editors / Main [pressed]                                      
+          Editors / Review                                              
+          Tools / Shell                                                 
+released:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+Panelink: terminal too small for the pane layout; enlarge it                     
+BTN02g surface 7 pressed:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+                                                      
+                            Tab actions               
+                                                      
+                            > [Select tab]            
+                              [Rename] [pressed]      
+                              [Close tab]             
+                                                      
+                            Enter: select  Esc: close 
+                                                      
+released:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+
+
+            Rename tab (Enter saves; Esc cancels)                   
+            Name: Main_                                             
+                                                                    
+            [Save] [Cancel]                                         
+BTN02g surface 8 pressed:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+                                                      
+                            Tab actions               
+                                                      
+                            > [Select tab]            
+                              [Rename]                
+                              [Close tab] [pressed]   
+                                                      
+                            Enter: select  Esc: close 
+                                                      
+released:
+ [ Editors ]  [Main]  [Review]                      [<] [>]  [All tabs]  [+ New] 
+
+
+
+
+
+
+
+
+
+
+                  Cancel selected: close tab                  
+                  Ends all tab processes                      
+                  [Close tab] [Cancel]                        
+test ui_client::state::tests::workspace_controls_capture_exact_identity_and_render_release_feedback ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 338 filtered out; finished in 0.34s
+
+
+exit: 0

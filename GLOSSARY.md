@@ -22,3 +22,15 @@ The pane currently receiving keyboard input within the active workspace tab.
 Hovering, scrolling or previewing a drop destination does not itself make that
 pane focused.
 _Avoid_: Selected pane when referring to text selection or a drop destination
+
+**Close pane**:
+End the process in a pane and remove that pane after confirmation.
+_Avoid_: Hide pane, detach pane
+
+**Close workspace tab**:
+End the processes in a workspace tab and remove that tab after confirmation.
+_Avoid_: Hide tab, detach tab
+
+**Detach**:
+Leave a running workspace without ending its panes or their processes.
+_Avoid_: Close, stop

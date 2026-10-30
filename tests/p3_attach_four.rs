@@ -641,8 +641,8 @@ fn split_layout_focused(screen: &str, panes: &[(PaneRect, bool)]) -> bool {
                 .take(length)
                 .collect::<String>()
         };
-        text_at(controls.menu.x, 6) == "[Menu]"
-            && text_at(controls.close.x, 3) == "[x]"
+        text_at(controls.menu.x, 6) == " Menu "
+            && text_at(controls.close.x, 3) == " x "
             && text_at(controls.focus_marker.x, 1) == if *focused { ">" } else { " " }
     })
 }
@@ -768,6 +768,28 @@ fn assert_rendered_divider_partition(
 }
 
 #[test]
+fn marker_wait_requires_shell_execution_instead_of_command_echo() {
+    let fixture = Fixture::new();
+    let Some((_server, target)) = Server::start(&fixture) else {
+        return;
+    };
+    fixture.init_target("pane-0.ctx", &target);
+    let mut client = Client::spawn(&fixture);
+    client.wait_raw_mode();
+    client.wait_screen("shell ready", |screen| screen.contains("PANE1-READY"));
+
+    // Demonstrate the old barrier's false positive without executing a command.
+    client.type_slowly(b"echo ATTACH4_OLD");
+    read_until_contains(&fixture, "pane-0.ctx", &target, "ATTACH4_OLD");
+    client.write(b"\x15"); // discard the unexecuted draft
+    client.type_slowly(b"printf 'ATTACH4_%s\\n' EXECUTED");
+    let draft = read_until_contains(&fixture, "pane-0.ctx", &target, "EXECUTED");
+    assert!(!draft.contains("ATTACH4_EXECUTED"), "{draft}");
+    client.write(b"\r");
+    read_until_contains(&fixture, "pane-0.ctx", &target, "ATTACH4_EXECUTED");
+}
+
+#[test]
 fn real_attach_routes_renders_closes_and_detaches_four_panes() {
     let fixture = Fixture::new();
     let Some((mut server, first)) = Server::start(&fixture) else {
@@ -833,12 +855,14 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
 
     // Exercise actual mouse focus and key routing to each pane, then use the
     // target-scoped control reads to prove every marker stayed isolated.
+    // Build each marker in the shell: echoed command text must not satisfy the
+    // wait before Enter executes it and drains the previous pane's input.
     for (index, target) in pane_targets.iter().enumerate() {
         let layout = fixture.layout("pane-0.ctx");
         let rect = rect_for(&layout, target);
         client.click(rect);
         let marker = format!("ATTACH4_MARKER_{index}");
-        client.type_slowly(format!("echo {marker}\r").as_bytes());
+        client.type_slowly(format!("printf 'ATTACH4_%s\\n' MARKER_{index}\r").as_bytes());
         let own = read_until_contains(&fixture, &contexts[index], target, &marker);
         for (other_index, other) in pane_targets.iter().enumerate() {
             if index != other_index {
@@ -891,7 +915,7 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
     client.click(menu_rect);
     client.write(b"\x02s");
     client.wait_screen("pane actions menu", |screen| {
-        screen.contains("Split pane...")
+        screen.contains("Layout: Split / Resize")
     });
     client.write(b"\r");
     client.wait_screen("pane limit menu reason", |screen| {
@@ -972,7 +996,7 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
         let rect = rect_for(&after_close, target);
         client.click(rect);
         let marker = format!("ATTACH4_AFTER_CLOSE_{index}");
-        client.type_slowly(format!("echo {marker}\r").as_bytes());
+        client.type_slowly(format!("printf 'ATTACH4_%s\\n' AFTER_CLOSE_{index}\r").as_bytes());
         let text = read_until_contains(&fixture, context, target, &marker);
         after_close_reads.push((target, marker, text));
     }

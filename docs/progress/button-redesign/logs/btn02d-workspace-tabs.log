@@ -1,0 +1,18 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.98s
+     Running unittests src/lib.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-cb36793118f48d00)
+
+running 10 tests
+test workspace_tabs::tests::combining_marks_are_grouped_with_the_preceding_glyph ... ok
+test workspace_tabs::tests::navigation_wraps_tabs_and_skips_empty_projects_without_mutating_index ... ok
+test workspace_tabs::tests::zero_and_one_cell_viewports_have_no_invalid_hits_or_half_glyphs ... ok
+test workspace_tabs::tests::navigation_rejects_unknown_route_deterministically ... ok
+test workspace_tabs::tests::hits_are_exact_typed_regions_and_never_cover_pane_rows ... ok
+test workspace_tabs::tests::overflow_keeps_current_route_visible_and_wide_glyphs_whole ... ok
+test workspace_tabs::tests::roomy_header_uses_labelled_buttons_with_spacing ... ok
+test workspace_tabs::tests::geometry_clamps_and_uses_header_plus_existing_outer_minimum ... ok
+test workspace_tabs::tests::narrow_overflow_keeps_active_tab_create_and_navigation_reachable ... ok
+test workspace_tabs::tests::unicode_clusters_keep_compositor_topology_at_every_host_width ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 930 filtered out; finished in 0.01s
+

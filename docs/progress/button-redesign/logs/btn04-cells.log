@@ -1,0 +1,25 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.47s
+     Running unittests src/main.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-8766758a03d72d8d)
+
+running 1 test
+BTN04 Save Rect { x: 12, y: 13, rows: 1, columns: 6 } background=Idx(6)
+BTN04 Cancel Rect { x: 19, y: 13, rows: 1, columns: 8 } background=Idx(8)
+ [ Editors ]   Main   x    Review   x               [<] [>]  [+ New]  [All tabs] 
+
+
+
+
+
+
+
+
+
+            Rename tab (Enter saves; Esc cancels)                   
+            Name: Main_                                             
+                                                                    
+            [Save] [Cancel]                                         
+test ui_client::state::tests::btn04_workspace_individual_fills_and_close_does_not_switch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 340 filtered out; finished in 0.01s
+

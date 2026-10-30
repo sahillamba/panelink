@@ -386,7 +386,7 @@ fn attach_types_right_click_splits_keyboard_menu_and_detaches_leaving_children()
     let before = read_pane(&fixture, "two.ctx", &second);
     client.write(b"\x02s");
     client.wait_screen("pane actions menu", |screen| {
-        screen.contains("Split pane...") && screen.contains("Split Down")
+        screen.contains("Layout: Split / Resize") && screen.contains("Split Down")
     });
     client.write(b"\x1b");
     client.wait_screen("menu closed", |screen| !screen.contains("Split Down"));

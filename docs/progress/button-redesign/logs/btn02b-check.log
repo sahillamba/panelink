@@ -1,0 +1,11 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+error[E0425]: cannot find type `TargetRef` in module `panelink::protocol`
+  --> src/ui_client/state/render.rs:28:53
+   |
+28 |     pub header_pressed: Option<(panelink::protocol::TargetRef, bool)>,
+   |                                                     ^^^^^^^^^ not found in `panelink::protocol`
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `panelink` (bin "panelink") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `panelink` (bin "panelink" test) due to 1 previous error

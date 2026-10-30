@@ -1,5 +1,11 @@
 # Panelink UI/UX outcome and implementation plan
 
+Button redesign follow-up: the user confirmed the [2026-10-30 control plan](design/BUTTON-IMPLEMENTATION-PLAN.md)
+and requested implementation. Its compact filled styles, captured release
+activation, grouped menus, separate tab-close targets and local dialog focus
+supersede earlier button-presentation defaults in this document. Source evidence
+and remaining host gates are in [execution state](progress/button-redesign/PROGRESS.md).
+
 Status: confirmed by the user on 2026-10-27 and implementation requested
 (parent orchestration with GPT-6-Luna / Claude Haiku 5.5 subagents).
 Packet progress is tracked in [SESSION](progress/SESSION.md); no packet is complete

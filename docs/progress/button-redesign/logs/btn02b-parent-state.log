@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/main.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-8766758a03d72d8d)
+
+running 4 tests
+test ui_client::state::tests::header_press_duplicate_release_does_not_activate_confirmation ... ok
+test ui_client::state::tests::header_press_waits_for_valid_release_and_does_not_leak_to_child ... ok
+test ui_client::state::tests::header_press_cancels_on_drag_away_escape_and_layout_change ... ok
+test ui_client::state::tests::header_press_rejects_replacement_focus_loss_focus_change_and_wrong_release ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 324 filtered out; finished in 0.01s
+

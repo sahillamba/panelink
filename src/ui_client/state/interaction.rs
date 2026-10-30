@@ -92,6 +92,16 @@ pub(super) struct InteractionFeedback {
     pub cancel_selection: bool,
     pub status: Option<(&'static str, Instant)>,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ModalControl {
+    pub kind: u8,
+    pub index: usize,
+    pub bounds: Rect,
+    pub target: TargetRef,
+    pub revision: u64,
+    pub instance: u64,
+}
+
 pub(super) struct Interaction {
     pub(super) pane_mode: Option<PaneMode>,
     pub(super) menu: MenuState,
@@ -104,6 +114,8 @@ pub(super) struct Interaction {
     pub(super) help_open: bool,
     pub(super) prefix: Option<Instant>,
     pub(super) pane_mode_exit_key: Option<(KeyCode, KeyModifiers)>,
+    modal_instance: u64,
+    help_press: Option<(Rect, (u16, u16))>,
     feedback: InteractionFeedback,
     operation: Option<PaneAction>,
     flush: Option<Instant>,
@@ -236,11 +248,169 @@ impl Interaction {
             help_open: false,
             prefix: None,
             pane_mode_exit_key: None,
+            modal_instance: 0,
+            help_press: None,
             feedback: InteractionFeedback::default(),
             operation: None,
             flush: None,
         }
     }
+    pub(super) fn modal_controls_inner(
+        &self,
+        context: InteractionContext<'_>,
+        controls: &mut Vec<ModalControl>,
+    ) -> Option<()> {
+        let make = |kind, index, bounds, target, revision| ModalControl {
+            kind,
+            index,
+            bounds,
+            target,
+            revision,
+            instance: self.modal_instance,
+        };
+        if let Some(intent) = self.confirm.intent() {
+            let g = self.confirm_ui_geometry(
+                context.viewport.0,
+                context.viewport.1,
+                context.header_offset,
+            )?;
+            for (i, r) in [g.close, g.cancel].into_iter().enumerate() {
+                controls.push(make(
+                    1,
+                    i,
+                    r,
+                    intent.target,
+                    intent.expected_layout_revision,
+                ));
+            }
+            return None;
+        }
+        if let Some(menu) = self.actions_menu {
+            let p = self.actions_page_geometry(context, menu)?;
+            let top = p.rect.y + context.header_offset;
+            for row in p.action_row..p.reason_row {
+                let r = Rect {
+                    x: p.rect.x,
+                    y: top + row as u16,
+                    columns: p.rect.columns,
+                    rows: 1,
+                };
+                controls.push(make(
+                    2,
+                    p.start + row - p.action_row,
+                    r,
+                    menu.target,
+                    menu.revision,
+                ));
+            }
+            for (i, col, width) in [
+                (100, p.back_column, 6),
+                (101, p.more_column, 6),
+                (102, Some(p.cancel_column), 8),
+            ] {
+                if let Some(col) = col {
+                    let r = Rect {
+                        x: p.rect.x + col,
+                        y: top + p.navigation_row as u16,
+                        columns: width.min(p.rect.columns.saturating_sub(col)),
+                        rows: 1,
+                    };
+                    controls.push(make(2, i, r, menu.target, menu.revision));
+                }
+            }
+            return None;
+        }
+        if let Some(mode) = self.pane_mode {
+            let (target, revision, count, adjust) = match mode {
+                PaneMode::Swap {
+                    source,
+                    revision,
+                    choices,
+                    ..
+                } => (source, revision, choices.iter().flatten().count(), 0),
+                PaneMode::Divider {
+                    target,
+                    revision,
+                    indices,
+                    ..
+                } => (target, revision, indices.iter().flatten().count(), 1),
+            };
+            let rows = (1 + count + adjust + 2).min(context.viewport.0 as usize) as u16;
+            let width = context.viewport.1.min(76);
+            let left = context.viewport.1.saturating_sub(width) / 2;
+            let top = context.viewport.0.saturating_sub(rows) / 2 + context.header_offset;
+            for row in 1..rows {
+                let ranges: &[(u16, u16)] = if adjust == 1 && row as usize == 1 + count {
+                    &[(0, 3), (4, 3)]
+                } else if row as usize == 1 + count + adjust {
+                    &[(0, 7)]
+                } else if row as usize == 2 + count + adjust {
+                    &[(0, 8)]
+                } else {
+                    &[(0, width)]
+                };
+                for (col, w) in ranges {
+                    let r = Rect {
+                        x: left + col,
+                        y: top + row,
+                        columns: (*w).min(width.saturating_sub(*col)),
+                        rows: 1,
+                    };
+                    controls.push(make(
+                        3,
+                        row as usize * 2 + usize::from(*col > 0),
+                        r,
+                        target,
+                        revision,
+                    ));
+                }
+            }
+            return None;
+        }
+        if self.menu.mode() == Some(panelink::split_menu::OverlayMode::TooSmall) {
+            return None;
+        }
+        let target = self.menu.captured_target()?;
+        let mut r = self.menu.overlay_rect()?;
+        r.y += context.header_offset;
+        let normal = self.menu.mode() == Some(panelink::split_menu::OverlayMode::Normal);
+        for index in 0..panelink::split_menu::ROW_COUNT {
+            let y = r.y + index as u16 + u16::from(normal);
+            if y >= r.y + r.rows {
+                break;
+            }
+            controls.push(make(
+                4,
+                index,
+                Rect {
+                    x: r.x + u16::from(normal),
+                    y,
+                    columns: r.columns.saturating_sub(2 * u16::from(normal)),
+                    rows: 1,
+                },
+                target,
+                self.menu_revision,
+            ));
+        }
+        Some(())
+    }
+    /// One geometry owner supplies rendering, hit testing and captured bounds.
+    pub(super) fn modal_controls(&self, context: InteractionContext<'_>) -> Vec<ModalControl> {
+        let mut controls = Vec::new();
+        self.modal_controls_inner(context, &mut controls);
+        controls
+    }
+    pub(super) fn modal_control_at(
+        &self,
+        context: InteractionContext<'_>,
+        x: u16,
+        y: u16,
+    ) -> Option<ModalControl> {
+        self.modal_controls(context)
+            .into_iter()
+            .find(|control| control.bounds.contains(x, y))
+    }
+
     pub(super) const fn view(&self) -> &Self {
         self
     }
@@ -284,26 +454,59 @@ impl Interaction {
         }
         false
     }
+    pub(super) fn help_control(&self, viewport: (u16, u16), header_offset: u16) -> Option<Rect> {
+        let (rows, columns) = viewport;
+        if !self.help_open || rows == 0 || columns == 0 {
+            return None;
+        }
+        let width = columns.min(72);
+        Some(Rect {
+            x: columns.saturating_sub(width) / 2,
+            y: rows.saturating_sub(rows.min(HELP_LINES.len() as u16)) / 2 + header_offset,
+            rows: 1,
+            columns: width,
+        })
+    }
+    pub(super) fn help_pressed(&self, viewport: (u16, u16), header_offset: u16) -> bool {
+        self.help_press.is_some_and(|(bounds, original)| {
+            original == viewport && self.help_control(viewport, header_offset) == Some(bounds)
+        })
+    }
     pub(super) fn handle_help_event(
         &mut self,
         event: &Event,
         viewport: (u16, u16),
         header_offset: u16,
     ) -> Flow {
+        let previous = self.help_press.take();
+        if previous.is_some() {
+            self.feedback.dirty = true;
+        }
         if let Event::Mouse(mouse) = event {
-            let (rows, columns) = viewport;
-            let height = rows.min(HELP_LINES.len() as u16);
-            let width = columns.min(72);
-            let left = columns.saturating_sub(width) / 2;
-            let top = rows.saturating_sub(height) / 2 + header_offset;
-            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                && mouse.row == top
-                && mouse.column >= left
-                && mouse.column < left.saturating_add(width)
-            {
-                self.help_open = false;
-                self.feedback.dirty = true;
+            let bounds = self.help_control(viewport, header_offset);
+            if let Some((captured, original)) = previous {
+                if original == viewport
+                    && bounds == Some(captured)
+                    && captured.contains(mouse.column, mouse.row)
+                {
+                    match mouse.kind {
+                        MouseEventKind::Up(MouseButton::Left) => self.help_open = false,
+                        MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
+                            self.help_press = previous;
+                        }
+                        _ => {}
+                    }
+                }
+            } else if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some(bounds) = bounds.filter(|r| r.contains(mouse.column, mouse.row)) {
+                    self.help_press = Some((bounds, viewport));
+                    self.feedback.dirty = true;
+                }
             }
+            return Flow::Continue;
+        }
+        if previous.is_some() && matches!(event, Event::Key(key) if key.code == KeyCode::Esc) {
+            return Flow::Continue;
         }
         if let Event::Key(key) = event {
             match map_key(*key) {
@@ -366,7 +569,12 @@ impl Interaction {
                 }
             }
         }
-        match self.confirm.handle(confirm_input(event)) {
+        let input = if matches!(event, Event::Key(k) if k.is_press() && k.code==KeyCode::BackTab) {
+            panelink::split_menu::ConfirmInput::Toggle
+        } else {
+            confirm_input(event)
+        };
+        match self.confirm.handle(input) {
             ConfirmResponse::Confirmed(intent) => {
                 self.dismiss_close_confirmation();
                 return Some(intent);
@@ -377,7 +585,7 @@ impl Interaction {
             }
             ConfirmResponse::Consumed | ConfirmResponse::NotOpen => {}
         }
-        match confirm_input(event) {
+        match input {
             panelink::split_menu::ConfirmInput::Toggle => {
                 self.confirm_close_selected = !self.confirm_close_selected;
             }
@@ -403,13 +611,6 @@ impl Interaction {
         event: &Event,
         header_offset: u16,
     ) -> MenuResponse {
-        if let Event::Mouse(mouse) = event {
-            if let MouseEventKind::Down(button @ (MouseButton::Left | MouseButton::Right)) =
-                mouse.kind
-            {
-                self.menu_release_latch = Some(button);
-            }
-        }
         let mut input =
             if header_offset > 0 && matches!(event, Event::Mouse(mouse) if mouse.row == 0) {
                 panelink::split_menu::MenuInput::Other
@@ -491,12 +692,14 @@ impl Interaction {
         Some(action)
     }
     pub(super) fn open_close_confirmation(&mut self, intent: CloseIntent) {
+        self.modal_instance = self.modal_instance.wrapping_add(1);
         self.confirm.open(intent);
         self.confirm_close_selected = false;
         self.confirm_open_key = None;
         self.feedback.dirty = true;
     }
     pub(super) fn dismiss_close_confirmation(&mut self) {
+        self.modal_instance = self.modal_instance.wrapping_add(1);
         self.confirm = CloseConfirm::new();
         self.confirm_close_selected = false;
         self.confirm_open_key = None;
@@ -964,8 +1167,15 @@ impl Interaction {
         let rect = self.actions_menu_rect(context)?;
         let capacity = usize::from(rect.rows.saturating_sub(3)).max(1);
         let last_action = LOCAL_ACTIONS.len() - 1;
-        let start = menu.selected.min(last_action) / capacity * capacity;
-        let end = (start + capacity).min(last_action + 1);
+        let selected = menu.selected.min(last_action);
+        let (group_start, group_end) = match selected {
+            0..=4 => (0, 5),
+            5 => (5, 6),
+            6 => (6, 7),
+            _ => (7, LOCAL_ACTIONS.len()),
+        };
+        let start = group_start + (selected - group_start) / capacity * capacity;
+        let end = (start + capacity).min(group_end);
         let reason_row = 1 + end - start;
         let navigation_row = reason_row + 1;
         let back = start > 0;
@@ -1010,11 +1220,11 @@ impl Interaction {
                 if key.code == KeyCode::Esc && key.modifiers.is_empty() {
                     self.actions_menu = None;
                     self.menu.close();
-                } else if key.code == KeyCode::Up {
+                } else if matches!(key.code, KeyCode::Up | KeyCode::BackTab) {
                     menu.selected =
                         (menu.selected + LOCAL_ACTIONS.len()) % (LOCAL_ACTIONS.len() + 1);
                     self.actions_menu = Some(menu);
-                } else if key.code == KeyCode::Down {
+                } else if matches!(key.code, KeyCode::Down | KeyCode::Tab) {
                     menu.selected = (menu.selected + 1) % (LOCAL_ACTIONS.len() + 1);
                     self.actions_menu = Some(menu);
                 } else if key.code == KeyCode::Enter {
@@ -1202,6 +1412,7 @@ impl Interaction {
         true
     }
     pub(super) fn replace_mode(&mut self, mode: Option<PaneMode>) {
+        self.modal_instance = self.modal_instance.wrapping_add(1);
         self.pane_mode = mode;
     }
     pub(super) fn take_mode(&mut self) -> Option<PaneMode> {
@@ -1211,12 +1422,14 @@ impl Interaction {
         self.pane_mode_exit_key = key;
     }
     pub(super) fn replace_actions(&mut self, menu: Option<ActionsMenu>) {
+        self.modal_instance = self.modal_instance.wrapping_add(1);
         self.actions_menu = menu;
     }
     pub(super) fn record_release(&mut self, button: Option<MouseButton>) {
         self.menu_release_latch = button;
     }
     pub(super) fn show_help(&mut self, show: bool) {
+        self.help_press = None;
         self.help_open = show;
     }
     pub(super) fn set_prefix(&mut self, at: Option<Instant>) {
@@ -1229,9 +1442,11 @@ impl Interaction {
         self.confirm_open_key = key;
     }
     pub(super) fn cancel_menu(&mut self) {
+        self.modal_instance = self.modal_instance.wrapping_add(1);
         self.menu.handle(panelink::split_menu::MenuInput::Cancel);
     }
     pub(super) fn close_menu(&mut self) {
+        self.modal_instance = self.modal_instance.wrapping_add(1);
         self.menu.close();
     }
     pub(super) fn set_menu_viewport(&mut self, rows: u16, columns: u16) {
@@ -1249,6 +1464,7 @@ impl Interaction {
         columns: u16,
         recovery: Availability,
     ) -> Result<(), panelink::split_menu::MenuOpenError> {
+        self.modal_instance = self.modal_instance.wrapping_add(1);
         self.menu
             .open_at_pointer_with_recovery(local, x, y, rows, columns, recovery)
     }
@@ -1261,6 +1477,7 @@ impl Interaction {
         columns: u16,
         recovery: Availability,
     ) -> Result<(), panelink::split_menu::MenuOpenError> {
+        self.modal_instance = self.modal_instance.wrapping_add(1);
         self.menu
             .open_for_focused_with_recovery(local, target, rows, columns, recovery)
     }
@@ -1379,11 +1596,13 @@ impl Interaction {
             })
             .map_or(1, |index| index + 1);
         let (start, end) = (page.start, page.end);
-        action_text[0] = if end < LOCAL_ACTIONS.len() {
-            format!("Pane {pane} actions: Split pane... (More: Zoom)")
-        } else {
-            format!("Pane {pane} actions (Esc cancels)")
+        let group = match start {
+            0..=4 => "Layout: Split / Resize",
+            5 => "Copy / History",
+            6 => "Close",
+            _ => "Secondary: Zoom / Swap / Help / Saved / Detach",
         };
+        action_text[0] = format!("Pane {pane} - {group}");
         for (row, index) in (start..end).enumerate() {
             let (action, label, availability) = self
                 .local_action_item(menu, index)
@@ -1413,7 +1632,7 @@ impl Interaction {
             action_text[page.reason_row] = "Cancel menu".into();
         }
         action_text[page.navigation_row] = if menu.selected == LOCAL_ACTIONS.len() {
-            "> [Cancel]".into()
+            "[Cancel]".into()
         } else {
             match (start > 0, end < LOCAL_ACTIONS.len()) {
                 (true, true) => "[Back] [More] [Cancel]".into(),

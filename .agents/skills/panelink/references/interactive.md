@@ -1,10 +1,27 @@
 # Interactive pane controls
 
-Implemented in source on branch `t3/panelink-ui-ux-plan` (UX-02..UX-07,
-uncommitted, parent-reviewed, private-PTY tested). Host acceptance (Apple
-Terminal, real clipboard, touch) has not been run for this redesign. Rebuild
-and reattach to display updated controls; [CLI workflows](cli.md) describes the
-same source baseline. Resolve the selected binary before explaining support.
+Button redesign is implemented in this source checkout, branch
+`t3/terminal-button-design-research`; [execution evidence](../../../../docs/progress/button-redesign/PROGRESS.md)
+tracks automated checks and remaining acceptance. Resolve the selected executable
+before explaining support. Building this checkout does not install it or restart
+its server. Native Apple Terminal, real clipboard, touch and host-theme acceptance
+remain separate from source/private-PTY verification.
+
+## Buttons and local keyboard focus
+
+- Controls have filled resting backgrounds and distinct focus/pressed/disabled/
+  pending states. Informational titles, filters and status text remain plain.
+- Press and release in the same valid control to activate once. Drag-away,
+  Escape, lost focus or stale target/layout/route/catalog/modal cancels.
+- Menus use arrows/Enter and local Tab/Shift-Tab; dialogs cycle local controls
+  with Tab/Shift-Tab and Escape cancels. Rename edits text only in its editor.
+  Ordinary shell Tab/Space retains its existing meaning.
+- Close confirmations initially focus Cancel and identify their process-ending
+  consequence. Pending Save/Close prevents another mutation; uncertain outcomes
+  retain their existing explicit reconciliation rules.
+- NO_COLOR presence (including empty) or TERM=dumb chooses reduced control
+  colors once at setup. Reverse fill and attributes distinguish controls without
+  a special font; this is not terminal-native theme detection.
 
 Input ownership is per admitted batch: the UI holds no idle-pane claims, and a
 short batch lock does not protect a human's unfinished draft between keystrokes.
@@ -18,7 +35,7 @@ size can differ; discover pane dimensions through the matching executable's CLI.
 
 ## Focus chrome
 
-- The focused pane gets a **bold/cyan header** and an ASCII **`>`** focus marker after `[Menu]`.
+- The focused pane gets a **bold/cyan header** and an ASCII **`>`** focus marker after the filled Menu control.
 - A **contrasting padding rail** around the pane border distinguishes it from unfocused panes.
 - Child terminal text is **not dimmed** in unfocused panes; only the header/border chrome changes.
 
@@ -57,16 +74,15 @@ size can differ; discover pane dimensions through the matching executable's CLI.
 
 ## Shared pane menu
 
-`[Menu]`, **right-click**, and **Ctrl-B `s`** all show the same `PaneActionModel` with identical:
+`Menu`, **right-click**, and **Ctrl-B `s`** all show the same `PaneActionModel` with identical:
 
 - captured target/revision,
 - action **order** and **labels**,
 - **enabled/disabled** state and reasons.
 
 The four split directions are separate rows; an unavailable direction stays
-visible with its reason (size, four-pane capacity, disconnected). Order:
-Split Right/Left/Up/Down → Resize divider → Copy mode / Back to live → Close
-pane → Zoom/Unzoom → Swap pane → Saved layout → Shortcut help → Detach. Short
+visible with its reason (size, four-pane capacity, disconnected). Pages group Layout (Split Left/Right/Up/Down and Resize), Copy/History, Close,
+and Secondary (Zoom/Unzoom, Swap, Saved layout, Shortcut help and Detach). Short
 viewports page with Back/More; Cancel stays reachable. Clicking a disabled
 item selects it and shows its reason.
 
@@ -88,9 +104,13 @@ item selects it and shows its reason.
 `panelink` with no arguments opens the **selected visible tab** with the project/tab row at the top.
 
 - **Zero visible tabs** shows an interactive **empty state** with clickable `[ New tab (N) ]` and `[ Detach (Ctrl-X) ]`. No process is started. On a non-TTY it prints a notice and exits.
-- **`[+ New]`** (right end of the tab row; `[+]` or `+` on narrow hosts) or Ctrl-B `+` creates one managed **"Shell N"** tab and switches to it.
+- **`[+ New]`** (before All tabs at the right of the tab row; `[+]` or `+` on narrow hosts) or Ctrl-B `+` creates one managed **"Shell N"** tab and switches to it.
 - **Capacity**: eight tabs per project.
-- **Tab row**: `[ Project ]  [Tab]  [Tab] ... [<] [>]  [All tabs]  [+ New]` with a one-cell margin on hosts at least 60 columns wide; narrower hosts use `<` `>`, `[All]`/`All` and `[+]`/`+`. `[<] [>]` appear with more than one tab; `[All tabs]` opens a searchable chooser. Active tab and create stay reachable.
+- **Tab row**: project left, filled tabs and separate close targets in the middle,
+  New tab then All tabs pinned right. Names shorten before controls disappear.
+  Previous/next buttons appear on roomy hosts (at least 60 columns) with multiple
+  tabs; use All tabs or keyboard navigation for narrow-host overflow.
+
 - **Scrollbar**: the right-margin column stays blank until the pane has retained history; then a dim track and `#` thumb appear.
 - **Rename**: right-click or Ctrl-B `t` → Rename opens a text field with Save/Cancel. Enter saves, Esc cancels. On conflict the edit is preserved and an error is shown.
 - **Close tab**: confirmation with **Cancel** as the default. Close ends the tab's processes. The last tab closed returns to the empty state.
@@ -117,7 +137,7 @@ panelink workspace tab close <project-id> <tab-id>
   clipboard confirms success, the source pane shows `Copied` for about 1.5 s.
   Failures show `Copy failed`, `Clipboard unavailable` or `Copy too large`,
   never `Copied`. Copied text is never shown in labels, status or logs.
-- Pane close (`[x]`, menu, `Ctrl-B x`) opens a confirmation naming the captured
+- Pane close (`x`, menu, `Ctrl-B x`) opens a confirmation naming the captured
   pane with "Ends this process" (the last pane explains the workspace ends) and
   clickable `[Close]` `[Cancel]`. Cancel is selected by default: Enter on the
   default cancels; Left/Right/Tab move the selection; `y` confirms explicitly;
@@ -133,3 +153,16 @@ panelink workspace tab close <project-id> <tab-id>
 - Pointer gestures require the host terminal to report mouse press/motion/release.
 - Touch works only through that translation; native multitouch compatibility is not established.
 - Keep host acceptance, real clipboard acceptance, and private-PTY evidence separate from source claims.
+
+## Separate tab-close targets
+
+The project selector is left, tabs occupy the middle, and New tab/All tabs stay
+right. Each visible tab has a disjoint close target. Clicking close never selects
+a different tab. An inactive tab reports `open this tab first to close it` until
+its runtime generation can be bound by selecting it. Rename is in Tab actions;
+active-tab click and right-click retain menu access. The final tab leaves an empty
+workspace with New tab/Detach and no automatically spawned replacement shell.
+
+Help's filled close row follows the same release/cancel rule. The startup
+saved-layout prompt remains line mode, and the offline recovery viewer remains
+key-only; key hints on those surfaces are not newly clickable buttons.

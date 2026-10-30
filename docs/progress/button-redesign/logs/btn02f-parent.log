@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/main.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-8766758a03d72d8d)
+
+running 2 tests
+test ui_client::state::tests::surface_pressed_cells_restore_and_failed_output_retries ... ok
+test ui_client::state::tests::surface_capture_invalidations_do_not_activate_or_retarget ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 335 filtered out; finished in 0.05s
+

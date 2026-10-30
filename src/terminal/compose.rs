@@ -7,6 +7,7 @@
 
 use std::io::{self, Write};
 
+use super::controls::{layout_filled, style, ControlRole, ControlState};
 use super::render::{paint_row, paint_row_diff, validate_snapshot, Placement};
 use super::{io_error, ScreenSnapshot, SnapshotCell, TerminalError, TerminalSize};
 use crate::pane_layout::{content_rect, Rect};
@@ -35,6 +36,9 @@ pub struct HeaderCell {
     len: u8,
     width: u8,
     selected: bool,
+    pressed: bool,
+    filled: bool,
+    pending: bool,
     continuation: bool,
 }
 
@@ -50,6 +54,23 @@ impl std::fmt::Debug for HeaderCell {
 }
 
 impl HeaderCell {
+    /// Apply local pressed presentation without changing semantic strip geometry.
+    pub fn with_pressed(mut self) -> Self {
+        self.pressed = true;
+        self
+    }
+
+    pub fn with_pending(mut self) -> Self {
+        self.pending = true;
+        self
+    }
+
+    /// Fill a semantic strip control, including its padding.
+    pub fn with_filled(mut self) -> Self {
+        self.filled = true;
+        self
+    }
+
     /// Construct a sanitized single- or double-width UTF-8 glyph.
     pub fn glyph(text: &str, selected: bool) -> Option<Self> {
         if text.is_empty() || text.len() > 32 || text.chars().any(char::is_control) {
@@ -73,6 +94,9 @@ impl HeaderCell {
             len: text.len() as u8,
             width: width as u8,
             selected,
+            pressed: false,
+            filled: false,
+            pending: false,
             continuation: false,
         })
     }
@@ -84,6 +108,9 @@ impl HeaderCell {
             len: 0,
             width: 1,
             selected,
+            pressed: false,
+            filled: false,
+            pending: false,
             continuation: false,
         }
     }
@@ -95,6 +122,9 @@ impl HeaderCell {
             len: 0,
             width: 0,
             selected,
+            pressed: false,
+            filled: false,
+            pending: false,
             continuation: true,
         }
     }
@@ -152,6 +182,9 @@ pub struct PaneChrome<'a> {
     pub scrollbars: [Option<Scrollbar>; crate::pane_layout::MAX_PANES],
     /// Optional normal-history state and Back to live control for each slot.
     pub history: [Option<HistoryLabelKind>; crate::pane_layout::MAX_PANES],
+    /// Captured header control: false for Menu, true for close.
+    pub header_pressed: [Option<bool>; crate::pane_layout::MAX_PANES],
+    pub history_pressed: [bool; crate::pane_layout::MAX_PANES],
     /// Optional concise pane labels. Missing labels use safe `Pane N` labels.
     pub labels: [Option<&'a str>; crate::pane_layout::MAX_PANES],
 }
@@ -162,6 +195,8 @@ impl PaneChrome<'_> {
         Self {
             scrollbars: [None; crate::pane_layout::MAX_PANES],
             history: [None; crate::pane_layout::MAX_PANES],
+            header_pressed: [None; crate::pane_layout::MAX_PANES],
+            history_pressed: [false; crate::pane_layout::MAX_PANES],
             labels: [None; crate::pane_layout::MAX_PANES],
         }
     }
@@ -170,9 +205,9 @@ impl PaneChrome<'_> {
 /// Hitboxes for the always-visible controls in a padded pane's top margin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PaneControls {
-    /// Six-cell `[Menu]` hitbox.
+    /// Six-cell ` Menu ` hitbox.
     pub menu: Rect,
-    /// Three-cell `[x]` hitbox.
+    /// Three-cell ` x ` hitbox.
     pub close: Rect,
     /// One-cell focus marker, immediately after the Menu control.
     pub focus_marker: Rect,
@@ -436,9 +471,20 @@ pub struct OverlayLine<'a> {
     pub style: OverlayStyle,
 }
 
+/// Presentation of one actionable overlay rectangle, independent of row text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OverlayControl {
+    pub bounds: Rect,
+    pub role: ControlRole,
+    pub state: ControlState,
+}
+const MAX_OVERLAY_CONTROLS: usize = MAX_ROWS * 2;
+
 /// An opaque overlay painted above every pane and the divider.
 #[derive(Clone, Copy, Debug)]
 pub struct OverlayView<'a> {
+    /// Absolute screen-space actionable control paint spans.
+    pub controls: &'a [OverlayControl],
     /// Host cells covered by the overlay. Every cell is painted.
     pub rect: Rect,
     /// Rows from the top of `rect`; missing rows are blank and extra rows are
@@ -483,6 +529,8 @@ struct SlotMeta {
     label: [u8; MAX_PANE_LABEL_BYTES],
     label_len: u16,
     label_truncated: bool,
+    header_pressed: Option<bool>,
+    history_pressed: bool,
 }
 
 impl SlotMeta {
@@ -496,6 +544,8 @@ impl SlotMeta {
         label: [0; MAX_PANE_LABEL_BYTES],
         label_len: 0,
         label_truncated: false,
+        header_pressed: None,
+        history_pressed: false,
     };
 
     fn placeholder_text(&self) -> &[u8] {
@@ -520,6 +570,7 @@ struct FrameMeta {
     header_present: bool,
     focused: Option<usize>,
     overlay_styles: [OverlayStyle; MAX_ROWS],
+    overlay_controls: [Option<OverlayControl>; MAX_OVERLAY_CONTROLS],
     cursor: CursorState,
 }
 
@@ -534,6 +585,7 @@ impl FrameMeta {
         header_present: false,
         focused: None,
         overlay_styles: [OverlayStyle::Normal; MAX_ROWS],
+        overlay_controls: [None; MAX_OVERLAY_CONTROLS],
         cursor: CursorState::Hidden,
     };
 }
@@ -565,6 +617,7 @@ pub struct Compositor {
     valid: bool,
     pending_ready: bool,
     padded: bool,
+    reduced_control_color: bool,
 }
 
 impl std::fmt::Debug for Compositor {
@@ -602,7 +655,21 @@ impl Compositor {
             valid: false,
             pending_ready: false,
             padded,
+            reduced_control_color: false,
         })
+    }
+
+    /// Select reduced-color chrome without consulting the process environment.
+    /// A change discards staged output and repaints against a fresh baseline.
+    pub fn set_reduced_control_color(&mut self, reduced: bool) {
+        if self.reduced_control_color != reduced {
+            self.reduced_control_color = reduced;
+            self.invalidate();
+        }
+    }
+
+    pub fn reduced_control_color(&self) -> bool {
+        self.reduced_control_color
     }
 
     /// Force the next rendered frame to clear and repaint the whole host.
@@ -712,6 +779,8 @@ impl Compositor {
             PaneChrome {
                 scrollbars,
                 history: [None; crate::pane_layout::MAX_PANES],
+                header_pressed: [None; crate::pane_layout::MAX_PANES],
+                history_pressed: [false; crate::pane_layout::MAX_PANES],
                 labels: [None; crate::pane_layout::MAX_PANES],
             },
             output,
@@ -803,6 +872,8 @@ impl Compositor {
             slot_meta.rect = Some(pane.rect);
             slot_meta.scrollbar = chrome.scrollbars[slot];
             slot_meta.history = chrome.history[slot];
+            slot_meta.header_pressed = chrome.header_pressed[slot];
+            slot_meta.history_pressed = chrome.history_pressed[slot];
             let label = chrome.labels[slot].unwrap_or(PANE_LABELS[slot]);
             store_pane_label(slot_meta, label);
             match pane.content {
@@ -854,6 +925,9 @@ impl Compositor {
             .map(|overlay| (overlay, clip_to_host(overlay.rect, frame)));
         if let Some((overlay, rect)) = overlay {
             meta.overlay = Some(rect);
+            for (slot, control) in meta.overlay_controls.iter_mut().zip(overlay.controls) {
+                *slot = Some(*control);
+            }
             let columns = usize::from(rect.columns);
             for row in 0..usize::from(rect.rows) {
                 let line = overlay.lines.get(row);
@@ -921,7 +995,8 @@ impl Compositor {
         };
         let rows = usize::from(rect.rows);
         let cells = rows * usize::from(rect.columns);
-        pending.overlay_styles[..rows] == displayed.overlay_styles[..rows]
+        pending.overlay_controls == displayed.overlay_controls
+            && pending.overlay_styles[..rows] == displayed.overlay_styles[..rows]
             && self.target_overlay[..cells] == self.displayed_overlay[..cells]
     }
 
@@ -983,9 +1058,11 @@ impl Compositor {
             });
         let history_changed: [bool; crate::pane_layout::MAX_PANES] = std::array::from_fn(|slot| {
             pending.slots[slot].history != displayed.slots[slot].history
+                || pending.slots[slot].history_pressed != displayed.slots[slot].history_pressed
         });
         let label_changed: [bool; crate::pane_layout::MAX_PANES] = std::array::from_fn(|slot| {
-            !same_pane_label(&pending.slots[slot], &displayed.slots[slot])
+            pending.slots[slot].header_pressed != displayed.slots[slot].header_pressed
+                || !same_pane_label(&pending.slots[slot], &displayed.slots[slot])
         });
         let focus_changed = pending.focused != displayed.focused;
         let controls_repaint: [bool; crate::pane_layout::MAX_PANES] = std::array::from_fn(|slot| {
@@ -1246,24 +1323,41 @@ impl Compositor {
                 .flatten()
                 .any(|rect| rect.contains(column, row))
         };
-        for (hitbox, label) in [
-            (controls.menu, b"[Menu]".as_slice()),
-            (controls.close, b"[x]".as_slice()),
+        for (hitbox, label, role) in [
+            (controls.menu, b"Menu".as_slice(), ControlRole::Secondary),
+            (controls.close, b"x".as_slice(), ControlRole::Destructive),
         ] {
-            output.write_all(if focused { b"\x1b[1;36m" } else { b"\x1b[0m" })?;
+            let semantic = if meta.header_pressed == Some(hitbox == controls.close) {
+                ControlState::Pressed
+            } else {
+                ControlState::Normal
+            };
+            let Some(layout) = layout_filled(hitbox, label.len() as u16) else {
+                continue;
+            };
+            let colors = style(role, semantic, self.reduced_control_color);
+            colors.write(output)?;
             write_ascii_run(
                 output,
-                hitbox.y,
-                hitbox.x,
-                hitbox.columns,
+                layout.bounds.y,
+                layout.bounds.x,
+                layout.bounds.columns,
                 |column| {
                     (!repaint_all && !damaged(hitbox.y, column))
                         || excluded(self.pending_meta.overlay, hitbox.y, column)
                 },
-                |offset| label[usize::from(offset)],
+                |offset| {
+                    if offset >= layout.label.x - layout.bounds.x
+                        && offset < layout.label.x - layout.bounds.x + layout.label.columns
+                    {
+                        label[usize::from(offset - (layout.label.x - layout.bounds.x))]
+                    } else {
+                        b' '
+                    }
+                },
             )?;
         }
-        output.write_all(if focused { b"\x1b[1;36m" } else { b"\x1b[0m" })?;
+        output.write_all(if focused { b"\x1b[0;1;36m" } else { b"\x1b[0m" })?;
         write_ascii_run(
             output,
             controls.focus_marker.y,
@@ -1403,7 +1497,36 @@ impl Compositor {
                     b' '
                 }
             },
-        )
+        )?;
+        if let Some(controls) = controls {
+            let pressed = self.pending_meta.slots[slot].history_pressed;
+            style(
+                ControlRole::Secondary,
+                if pressed {
+                    ControlState::Pressed
+                } else {
+                    ControlState::Normal
+                },
+                self.reduced_control_color,
+            )
+            .write(output)?;
+            write_ascii_run(
+                output,
+                row,
+                controls.back.x,
+                controls.back.columns,
+                |column| excluded(self.pending_meta.overlay, row, column),
+                |offset| {
+                    if pressed && offset == 0 {
+                        b'*'
+                    } else {
+                        controls.back_text[usize::from(offset)]
+                    }
+                },
+            )?;
+            output.write_all(b"\x1b[0m")?;
+        }
+        Ok(())
     }
 
     /// Paint a scrollbar in the right interior padding cell of one snapshot
@@ -1543,6 +1666,30 @@ impl Compositor {
                 |offset| cells[usize::from(offset)],
             )?;
         }
+        for control in self.pending_meta.overlay_controls.iter().flatten() {
+            let bounds = control.bounds;
+            let left = bounds.x.max(rect.x);
+            let right = bounds
+                .x
+                .saturating_add(bounds.columns)
+                .min(rect.x + rect.columns);
+            if bounds.y < rect.y || bounds.y >= rect.y + rect.rows || left >= right {
+                continue;
+            }
+            let paint = style(control.role, control.state, self.reduced_control_color);
+            paint.write(output)?;
+            let start = usize::from(bounds.y - rect.y) * columns;
+            write_ascii_run(
+                output,
+                bounds.y,
+                left,
+                right - left,
+                |_| false,
+                |offset| self.target_overlay[start + usize::from(left - rect.x + offset)],
+            )?;
+            output.write_all(b"\x1b[0m")?;
+        }
+        output.write_all(b"\x1b[0m")?;
         Ok(())
     }
 
@@ -1561,7 +1708,25 @@ impl Compositor {
             }
             let selected = active && self.target_header[column].selected();
             write_position(output, 0, column as u16)?;
-            output.write_all(if selected { b"\x1b[0;7m" } else { b"\x1b[0m" })?;
+            if active && self.target_header[column].filled {
+                let state = if self.target_header[column].pending {
+                    ControlState::Pending
+                } else if self.target_header[column].pressed {
+                    ControlState::Pressed
+                } else {
+                    ControlState::Normal
+                };
+                let role = if selected {
+                    ControlRole::Primary
+                } else {
+                    ControlRole::Secondary
+                };
+                let style =
+                    crate::terminal::controls::style(role, state, self.reduced_control_color);
+                style.write(output)?;
+            } else {
+                output.write_all(if selected { b"\x1b[0;7m" } else { b"\x1b[0m" })?;
+            }
             let cell = self.target_header[column];
             if active && !cell.is_continuation() && !cell.text().is_empty() {
                 output.write_all(cell.text().as_bytes())?;
@@ -2091,6 +2256,19 @@ fn validate_frame(frame: &ComposeFrame<'_>, padded: bool, header: bool) -> io::R
         }
     }
     if let Some(overlay) = frame.overlay {
+        if overlay.controls.len() > MAX_OVERLAY_CONTROLS
+            || overlay.controls.iter().any(|control| {
+                control.bounds.rows != 1
+                    || control
+                        .bounds
+                        .x
+                        .checked_add(control.bounds.columns)
+                        .is_none()
+                    || control.bounds.y.checked_add(1).is_none()
+            })
+        {
+            return Err(invalid("overlay control geometry exceeds bounds"));
+        }
         let clipped = clip_to_host(overlay.rect, frame);
         if overlay.rect.x >= host_columns
             || overlay.rect.y >= host_rows
@@ -2256,6 +2434,8 @@ mod tests {
                 PaneChrome {
                     scrollbars: [None; crate::pane_layout::MAX_PANES],
                     history,
+                    header_pressed: [None; crate::pane_layout::MAX_PANES],
+                    history_pressed: [false; crate::pane_layout::MAX_PANES],
                     labels: [None; crate::pane_layout::MAX_PANES],
                 },
                 &mut bytes,
@@ -2434,8 +2614,8 @@ mod tests {
         for (row, column) in [(0, 0), (1, 0), (11, 21), (1, 21)] {
             assert_blank(&parser, row, column);
         }
-        assert_eq!(label_at(&parser, 0, 1, 6), "[Menu]");
-        assert_eq!(label_at(&parser, 0, 18, 3), "[x]");
+        assert_eq!(label_at(&parser, 0, 1, 6), " Menu ");
+        assert_eq!(label_at(&parser, 0, 18, 3), " x ");
         for row in 0..12 {
             assert_eq!(cell_text(&parser, row, 22), "|");
         }
@@ -2661,8 +2841,8 @@ mod tests {
         let mut compositor = Compositor::try_new().unwrap();
         let output = rendered_committed(&mut compositor, &frame);
         let parser = screen(&output, &frame);
-        assert_eq!(label_at(&parser, 0, 1, 6), "[Menu]");
-        assert_eq!(label_at(&parser, 0, 18, 3), "[x]");
+        assert_eq!(label_at(&parser, 0, 1, 6), " Menu ");
+        assert_eq!(label_at(&parser, 0, 18, 3), " x ");
         assert_eq!(cell_text(&parser, 1, 1), "C");
         assert_eq!(cell_text(&parser, 1, 7), "T");
         assert_eq!(pane.rows(), 5);
@@ -2677,8 +2857,8 @@ mod tests {
         });
         let placeholder_output = fresh_render(&placeholder);
         let parser = screen(&placeholder_output, &placeholder);
-        assert_eq!(label_at(&parser, 0, 1, 6), "[Menu]");
-        assert_eq!(label_at(&parser, 0, 18, 3), "[x]");
+        assert_eq!(label_at(&parser, 0, 1, 6), " Menu ");
+        assert_eq!(label_at(&parser, 0, 18, 3), " x ");
 
         let mut unpadded = Compositor::try_new_unpadded().unwrap();
         let mut recovery = frame;
@@ -2688,8 +2868,8 @@ mod tests {
         let recovery_output = rendered(&mut unpadded, &recovery);
         let parser = screen(&recovery_output, &recovery);
         assert_eq!(cell_text(&parser, 0, 0), "C");
-        assert!(!contains(&recovery_output, b"[Menu]"));
-        assert!(!contains(&recovery_output, b"[x]"));
+        assert!(!contains(&recovery_output, b" Menu "));
+        assert!(!contains(&recovery_output, b" x "));
     }
 
     #[test]
@@ -2702,6 +2882,7 @@ mod tests {
         }];
         let mut covered = base;
         covered.overlay = Some(OverlayView {
+            controls: &[],
             rect: rect(0, 2, 1, 5),
             lines: &lines,
         });
@@ -2712,8 +2893,8 @@ mod tests {
         assert_eq!(label_at(&covered_parser, 0, 2, 5), "MODAL");
         stream.extend(rendered_committed(&mut compositor, &base));
         let restored = screen(&stream, &base);
-        assert_eq!(label_at(&restored, 0, 1, 6), "[Menu]");
-        assert_eq!(label_at(&restored, 0, 18, 3), "[x]");
+        assert_eq!(label_at(&restored, 0, 1, 6), " Menu ");
+        assert_eq!(label_at(&restored, 0, 18, 3), " x ");
         assert_eq!(cell_text(&restored, 1, 1), "c");
     }
 
@@ -2739,6 +2920,7 @@ mod tests {
         }];
         let mut covered = base;
         covered.overlay = Some(OverlayView {
+            controls: &[],
             rect: rect(row, column, 1, VERSION_LABEL.len() as u16),
             lines: &lines,
         });
@@ -2885,6 +3067,7 @@ mod tests {
         }];
         let mut covered = base;
         covered.overlay = Some(OverlayView {
+            controls: &[],
             rect: rect(23, 0, 1, base.host_columns),
             lines: &modal,
         });
@@ -2898,6 +3081,8 @@ mod tests {
                 PaneChrome {
                     scrollbars: [None; crate::pane_layout::MAX_PANES],
                     history: [Some(HistoryLabelKind::NewOutput), None, None, None],
+                    header_pressed: [None; crate::pane_layout::MAX_PANES],
+                    history_pressed: [false; crate::pane_layout::MAX_PANES],
                     labels: [None; crate::pane_layout::MAX_PANES],
                 },
                 &mut overlay_bytes,
@@ -2948,7 +3133,7 @@ mod tests {
         let pane = snapshot_from("body", 5, 20);
         let frame = single_pane(&pane);
         let expected = fresh_render(&frame);
-        for label in [b"[Menu]".as_slice(), VERSION_LABEL.as_bytes()] {
+        for label in [b"Menu".as_slice(), VERSION_LABEL.as_bytes()] {
             let offset = expected
                 .windows(label.len())
                 .position(|window| window == label)
@@ -2963,8 +3148,8 @@ mod tests {
             let retry = rendered_committed(&mut compositor, &frame);
             assert!(contains(&retry, b"\x1b[2J"));
             let parser = screen(&retry, &frame);
-            assert_eq!(label_at(&parser, 0, 1, 6), "[Menu]");
-            assert_eq!(label_at(&parser, 0, 18, 3), "[x]");
+            assert_eq!(label_at(&parser, 0, 1, 6), " Menu ");
+            assert_eq!(label_at(&parser, 0, 18, 3), " x ");
             assert_eq!(cell_text(&parser, 1, 1), "b");
             assert_eq!(
                 label_at(
@@ -3088,6 +3273,7 @@ mod tests {
         }];
         let mut covered = base;
         covered.overlay = Some(OverlayView {
+            controls: &[],
             rect: rect(2, 21, 1, 1),
             lines: &lines,
         });
@@ -3362,6 +3548,7 @@ mod tests {
         ];
         let mut frame = side_by_side(&left, &right);
         frame.overlay = Some(OverlayView {
+            controls: &[],
             rect: rect(1, 30, 4, 20),
             lines: &lines,
         });
@@ -3405,11 +3592,13 @@ mod tests {
         let base = side_by_side(&left, &right);
         let mut with_overlay = base;
         with_overlay.overlay = Some(OverlayView {
+            controls: &[],
             rect: rect(0, 15, 3, 12),
             lines: &lines,
         });
         let mut moved = base;
         moved.overlay = Some(OverlayView {
+            controls: &[],
             rect: rect(5, 2, 2, 8),
             lines: &lines,
         });
@@ -3441,6 +3630,7 @@ mod tests {
         let mut overlaid = frame;
         let lines: [OverlayLine<'_>; 0] = [];
         overlaid.overlay = Some(OverlayView {
+            controls: &[],
             rect: rect(0, 0, 2, 5),
             lines: &lines,
         });
@@ -3656,6 +3846,7 @@ mod tests {
         }];
         let mut overlaid = frame;
         overlaid.overlay = Some(OverlayView {
+            controls: &[],
             rect: rect(1, 25, 1, 4),
             lines: &lines,
         });
@@ -3681,6 +3872,7 @@ mod tests {
         focused.focused = Some(0);
         let mut overlaid = side_by_side(&b, &c);
         overlaid.overlay = Some(OverlayView {
+            controls: &[],
             rect: rect(3, 18, 3, 10),
             lines: &lines,
         });
@@ -3956,6 +4148,7 @@ mod tests {
         }];
         let mut menu = frame;
         menu.overlay = Some(OverlayView {
+            controls: &[],
             rect: rect(1, 1, 1, 4),
             lines: &lines,
         });
@@ -4027,6 +4220,7 @@ mod tests {
             style: OverlayStyle::Selected,
         }];
         let modal_at_header = header_frame(Some(OverlayView {
+            controls: &[],
             rect: rect(0, 1, 1, 14),
             lines: &lines,
         }));
@@ -4077,6 +4271,7 @@ mod tests {
             style: OverlayStyle::Selected,
         }];
         let frame = header_frame(Some(OverlayView {
+            controls: &[],
             rect: rect(2, 1, 1, 14),
             lines: &lines,
         }));
@@ -4145,6 +4340,7 @@ mod tests {
         }];
         let overlapping_modal = ComposeFrame {
             overlay: Some(OverlayView {
+                controls: &[],
                 rect: rect(0, 0, 1, 5),
                 lines: &lines,
             }),
@@ -4299,6 +4495,45 @@ mod tests {
     }
 
     #[test]
+    fn filled_header_padding_has_background_without_leaking_into_content() {
+        for width in [22, 60] {
+            let pane = snapshot_from("child", 5, width - 2);
+            let mut frame = single_pane(&pane);
+            frame.host_columns = width;
+            frame.panes[0].as_mut().unwrap().rect.columns = width;
+            for focused in [None, Some(0)] {
+                frame.focused = focused;
+                let bytes = fresh_render(&frame);
+                let parser = screen(&bytes, &frame);
+                let controls = pane_controls(frame.panes[0].unwrap().rect).unwrap();
+                for (bounds, expected) in [
+                    (controls.menu, vt100::Color::Idx(8)),
+                    (controls.close, vt100::Color::Idx(1)),
+                ] {
+                    for x in bounds.x..bounds.x + bounds.columns {
+                        let cell = parser.screen().cell(bounds.y, x).unwrap();
+                        assert_eq!(cell.bgcolor(), expected);
+                        assert!(!cell.bold());
+                    }
+                    println!("width={width} focused={focused:?} bounds={bounds:?} label={:?} background={expected:?}", label_at(&parser, bounds.y, bounds.x, bounds.columns));
+                }
+                assert_eq!(
+                    parser.screen().cell(1, 1).unwrap().bgcolor(),
+                    vt100::Color::Default
+                );
+                assert_eq!(
+                    parser
+                        .screen()
+                        .cell(0, controls.focus_marker.x)
+                        .unwrap()
+                        .bgcolor(),
+                    vt100::Color::Default
+                );
+            }
+        }
+    }
+
+    #[test]
     fn focused_chrome_uses_ascii_marker_and_truncates_safe_wide_labels_before_controls() {
         let pane = snapshot_from("content", 5, 20);
         let mut frame = single_pane(&pane);
@@ -4306,6 +4541,8 @@ mod tests {
         let chrome = PaneChrome {
             scrollbars: [None; crate::pane_layout::MAX_PANES],
             history: [None; crate::pane_layout::MAX_PANES],
+            header_pressed: [None; crate::pane_layout::MAX_PANES],
+            history_pressed: [false; crate::pane_layout::MAX_PANES],
             labels: [Some("界界界long"), None, None, None],
         };
         let mut compositor = Compositor::try_new().unwrap();
@@ -4332,11 +4569,11 @@ mod tests {
         );
         assert_eq!(
             label_at(&parser, controls.menu.y, controls.menu.x, 6),
-            "[Menu]"
+            " Menu "
         );
         assert_eq!(
             label_at(&parser, controls.close.y, controls.close.x, 3),
-            "[x]"
+            " x "
         );
         assert_eq!(
             controls.label.x + controls.label.columns + 1,
@@ -4404,7 +4641,7 @@ mod tests {
             .screen()
             .cell(controls.menu.y, controls.menu.x)
             .unwrap();
-        assert!(menu.bold());
+        assert!(!menu.bold());
         assert_ne!(menu.fgcolor(), vt100::Color::Default);
         assert!(!menu.inverse());
         let inactive_menu = before
@@ -4412,7 +4649,461 @@ mod tests {
             .cell(controls.menu.y, controls.menu.x)
             .unwrap();
         assert!(!inactive_menu.bold());
-        assert_eq!(inactive_menu.fgcolor(), vt100::Color::Default);
+        assert_eq!(inactive_menu.fgcolor(), menu.fgcolor());
+        assert_eq!(inactive_menu.bgcolor(), menu.bgcolor());
+        assert_eq!(menu.bgcolor(), vt100::Color::Idx(8));
         assert!(!inactive_menu.inverse());
+    }
+    #[test]
+    fn captured_chrome_damage_overlay_and_partial_write_commit() {
+        struct FailAfter(usize);
+        impl Write for FailAfter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::other("injected"));
+                }
+                let count = bytes.len().min(self.0);
+                self.0 -= count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let pane = snapshot_from("child text", 5, 20);
+        let frame = single_pane(&pane);
+        let controls = pane_controls(frame.panes[0].unwrap().rect).unwrap();
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut stream = rendered_committed(&mut compositor, &frame);
+        let mut chrome = PaneChrome::empty();
+        chrome.header_pressed[0] = Some(false);
+        for limit in [0, 12] {
+            assert!(compositor
+                .render_with_history_controls(
+                    &frame,
+                    None,
+                    None,
+                    None,
+                    chrome,
+                    &mut FailAfter(limit)
+                )
+                .is_err());
+            assert!(!compositor.commit());
+        }
+        let mut bytes = Vec::new();
+        compositor
+            .render_with_history_controls(&frame, None, None, None, chrome, &mut bytes)
+            .unwrap();
+        assert!(!contains(&bytes, b"child text"));
+        assert!(compositor.commit());
+        stream.extend(bytes);
+        let parser = screen(&stream, &frame);
+        let mut evidence = String::new();
+        for col in controls.menu.x..controls.menu.x + controls.menu.columns {
+            let cell = parser.screen().cell(controls.menu.y, col).unwrap();
+            assert_eq!(cell.bgcolor(), vt100::Color::Idx(4));
+            evidence.push_str(&format!(
+                "{},{} {:?} fg={:?} bg={:?}\n",
+                controls.menu.y,
+                col,
+                cell.contents(),
+                cell.fgcolor(),
+                cell.bgcolor()
+            ));
+        }
+        println!("{evidence}");
+        let mut noop = Vec::new();
+        compositor
+            .render_with_history_controls(&frame, None, None, None, chrome, &mut noop)
+            .unwrap();
+        assert!(noop.is_empty());
+        assert!(compositor.commit());
+        let lines = [OverlayLine {
+            text: "MODAL",
+            style: OverlayStyle::Selected,
+        }];
+        let covered = ComposeFrame {
+            overlay: Some(OverlayView {
+                controls: &[],
+                rect: controls.menu,
+                lines: &lines,
+            }),
+            ..frame
+        };
+        let mut bytes = Vec::new();
+        compositor
+            .render_with_history_controls(
+                &covered,
+                None,
+                None,
+                None,
+                PaneChrome::empty(),
+                &mut bytes,
+            )
+            .unwrap();
+        assert!(compositor.commit());
+        stream.extend(bytes);
+        assert_eq!(
+            label_at(
+                &screen(&stream, &covered),
+                controls.menu.y,
+                controls.menu.x,
+                5
+            ),
+            "MODAL"
+        );
+        stream.extend(rendered_committed(&mut compositor, &frame));
+        let parser = screen(&stream, &frame);
+        for col in controls.menu.x..controls.menu.x + controls.menu.columns {
+            assert_eq!(
+                parser
+                    .screen()
+                    .cell(controls.menu.y, col)
+                    .unwrap()
+                    .bgcolor(),
+                vt100::Color::Idx(8)
+            );
+        }
+    }
+    #[test]
+    fn overlay_controls_fill_exact_spans_and_style_only_changes_repaint() {
+        struct FailAfter(usize);
+        impl Write for FailAfter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::other("injected"));
+                }
+                let count = bytes.len().min(self.0);
+                self.0 -= count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        for reduced in [false, true] {
+            let pane = snapshot_from("child text", 5, 20);
+            let base = single_pane(&pane);
+            let lines = [OverlayLine {
+                text: "[Yes] gap[Cancel] status",
+                style: OverlayStyle::Normal,
+            }];
+            let mut compositor = Compositor::try_new().unwrap();
+            compositor.set_reduced_control_color(reduced);
+            let mut stream = Vec::new();
+            for state in [
+                ControlState::Normal,
+                ControlState::Focus,
+                ControlState::Pressed,
+                ControlState::Disabled,
+                ControlState::Pending,
+            ] {
+                let controls = [
+                    OverlayControl {
+                        bounds: Rect {
+                            x: 1,
+                            y: 2,
+                            rows: 1,
+                            columns: 5,
+                        },
+                        role: ControlRole::Destructive,
+                        state,
+                    },
+                    OverlayControl {
+                        bounds: Rect {
+                            x: 10,
+                            y: 2,
+                            rows: 1,
+                            columns: 8,
+                        },
+                        role: ControlRole::Secondary,
+                        state: ControlState::Normal,
+                    },
+                ];
+                let mut frame = base;
+                frame.overlay = Some(OverlayView {
+                    rect: Rect {
+                        x: 1,
+                        y: 2,
+                        rows: 1,
+                        columns: 20,
+                    },
+                    lines: &lines,
+                    controls: &controls,
+                });
+                let bytes = rendered_committed(&mut compositor, &frame);
+                assert!(!bytes.is_empty());
+                stream.extend(bytes);
+                let parser = screen(&stream, &frame);
+                let paint = style(ControlRole::Destructive, state, reduced);
+                for x in 1..6 {
+                    assert_eq!(
+                        parser.screen().cell(2, x).unwrap().bgcolor(),
+                        if reduced {
+                            vt100::Color::Default
+                        } else {
+                            vt100::Color::Idx(if paint.background >= 100 {
+                                paint.background - 100 + 8
+                            } else {
+                                paint.background - 40
+                            })
+                        }
+                    );
+                }
+                for x in 6..10 {
+                    assert_eq!(
+                        parser.screen().cell(2, x).unwrap().bgcolor(),
+                        vt100::Color::Default
+                    );
+                }
+                for x in 10..18 {
+                    assert_eq!(
+                        parser.screen().cell(2, x).unwrap().bgcolor(),
+                        if reduced {
+                            vt100::Color::Default
+                        } else {
+                            vt100::Color::Idx(8)
+                        }
+                    );
+                }
+                for x in 18..21 {
+                    assert_eq!(
+                        parser.screen().cell(2, x).unwrap().bgcolor(),
+                        vt100::Color::Default
+                    );
+                }
+                println!("BTN03 {state:?}: {}", parser.screen().contents());
+                println!(
+                    "cells: {:?}",
+                    (0..21)
+                        .map(|x| (
+                            x,
+                            parser.screen().cell(2, x).unwrap().contents(),
+                            parser.screen().cell(2, x).unwrap().bgcolor()
+                        ))
+                        .collect::<Vec<_>>()
+                );
+                assert!(rendered_committed(&mut compositor, &frame).is_empty());
+                let mut moved = frame;
+                moved.overlay.as_mut().unwrap().rect.y += 1;
+                for limit in [0, 12] {
+                    assert!(compositor.render(&moved, &mut FailAfter(limit)).is_err());
+                    assert!(!compositor.commit(), "partial writes cannot commit spans");
+                }
+                // Retry the original frame after invalidation, then remove the overlay.
+                stream.extend(rendered_committed(&mut compositor, &frame));
+            }
+            stream.extend(rendered_committed(&mut compositor, &base));
+            let restored = screen(&stream, &base);
+            let mut fresh_compositor = Compositor::try_new().unwrap();
+            fresh_compositor.set_reduced_control_color(reduced);
+            let fresh = screen(&rendered_committed(&mut fresh_compositor, &base), &base);
+            assert_eq!(restored.screen().contents(), fresh.screen().contents());
+            for y in 0..base.host_rows {
+                for x in 0..base.host_columns {
+                    assert_eq!(
+                        restored.screen().cell(y, x).unwrap().bgcolor(),
+                        fresh.screen().cell(y, x).unwrap().bgcolor()
+                    );
+                    assert_eq!(restored.screen().cell(y, x), fresh.screen().cell(y, x));
+                }
+            }
+        }
+    }
+    #[test]
+    fn overlay_control_admission_rejects_truncation_and_invalid_rows_before_output() {
+        let pane = snapshot_from("child", 5, 20);
+        let base = single_pane(&pane);
+        let control = OverlayControl {
+            bounds: rect(0, 1, 1, 3),
+            role: ControlRole::Secondary,
+            state: ControlState::Normal,
+        };
+        for controls in [
+            vec![control; MAX_OVERLAY_CONTROLS + 1],
+            vec![OverlayControl {
+                bounds: rect(0, 1, 2, 3),
+                ..control
+            }],
+            vec![OverlayControl {
+                bounds: rect(0, u16::MAX, 1, 3),
+                ..control
+            }],
+        ] {
+            let frame = ComposeFrame {
+                overlay: Some(OverlayView {
+                    rect: rect(0, 0, 3, 20),
+                    lines: &[],
+                    controls: &controls,
+                }),
+                ..base
+            };
+            let mut compositor = Compositor::try_new().unwrap();
+            let mut bytes = Vec::new();
+            assert!(compositor.render(&frame, &mut bytes).is_err());
+            assert!(bytes.is_empty());
+        }
+    }
+    #[test]
+    fn btn05_modes_cells_and_successful_baseline() {
+        let pane = snapshot_from("child", 5, 20);
+        let base = single_pane(&pane);
+        let lines = [OverlayLine {
+            text: "[Run] gap status",
+            style: OverlayStyle::Normal,
+        }];
+        for initial in [b"\x1b[30;47m".as_slice(), b"\x1b[37;40m".as_slice()] {
+            let mut compositor = Compositor::try_new().unwrap();
+            let mut stream = initial.to_vec();
+            for reduced in [false, true, false] {
+                compositor.set_reduced_control_color(reduced);
+                assert!(!compositor.commit());
+                for role in [
+                    ControlRole::Secondary,
+                    ControlRole::Primary,
+                    ControlRole::Destructive,
+                ] {
+                    for state in [
+                        ControlState::Normal,
+                        ControlState::Focus,
+                        ControlState::Pressed,
+                        ControlState::Disabled,
+                        ControlState::Pending,
+                    ] {
+                        let controls = [OverlayControl {
+                            bounds: rect(2, 1, 1, 5),
+                            role,
+                            state,
+                        }];
+                        let frame = ComposeFrame {
+                            overlay: Some(OverlayView {
+                                rect: rect(2, 1, 1, 18),
+                                lines: &lines,
+                                controls: &controls,
+                            }),
+                            ..base
+                        };
+                        stream.extend(rendered_committed(&mut compositor, &frame));
+                        let parser = screen(&stream, &frame);
+                        let expected = style(role, state, reduced);
+                        for x in 1..6 {
+                            let cell = parser.screen().cell(2, x).unwrap();
+                            assert_eq!(cell.inverse(), reduced);
+                            assert_eq!(
+                                cell.bold(),
+                                expected.attributes.split(';').any(|a| a == "1")
+                            );
+                            assert_eq!(
+                                cell.italic(),
+                                expected.attributes.split(';').any(|a| a == "3")
+                            );
+                            assert_eq!(
+                                cell.underline(),
+                                expected.attributes.split(';').any(|a| a == "4")
+                            );
+                            assert_eq!(
+                                cell.bgcolor(),
+                                if reduced {
+                                    vt100::Color::Default
+                                } else {
+                                    vt100::Color::Idx(if expected.background >= 100 {
+                                        expected.background - 100 + 8
+                                    } else {
+                                        expected.background - 40
+                                    })
+                                }
+                            );
+                        }
+                        for x in 6..19 {
+                            let cell = parser.screen().cell(2, x).unwrap();
+                            assert!(!cell.inverse());
+                            assert!(!cell.bold());
+                            assert!(!cell.underline());
+                            assert_eq!(cell.bgcolor(), vt100::Color::Default);
+                        }
+                        println!("BTN05 initial={initial:?} reduced={reduced} {role:?}/{state:?} attrs={} cells={}", expected.attributes, parser.screen().contents());
+                        assert!(rendered_committed(&mut compositor, &frame).is_empty());
+                        compositor.set_reduced_control_color(reduced);
+                        assert!(rendered_committed(&mut compositor, &frame).is_empty());
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn btn05_header_history_and_mode_failure_repaint() {
+        struct Fail;
+        impl Write for Fail {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("injected"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let pane = snapshot_from("child", 5, 40);
+        let mut frame = single_pane(&pane);
+        frame.host_rows += 1;
+        frame.panes[0].as_mut().unwrap().rect.y += 1;
+        let bounds = frame.panes[0].unwrap().rect;
+        let mut header = vec![HeaderCell::blank(false); usize::from(frame.host_columns)];
+        header[0] = HeaderCell::glyph("T", true).unwrap().with_filled();
+        let mut chrome = PaneChrome::empty();
+        chrome.history[0] = Some(HistoryLabelKind::History);
+        let controls = pane_controls(bounds).unwrap();
+        let history = pane_history_controls(
+            bounds,
+            HistoryLabelKind::History,
+            pane_version_badge(bounds, frame.host_rows, frame.host_columns),
+        )
+        .unwrap();
+        let mut compositor = Compositor::try_new().unwrap();
+        let mut stream = Vec::new();
+        for reduced in [false, true, false] {
+            compositor.set_reduced_control_color(reduced);
+            assert!(compositor
+                .render_with_history_controls(&frame, None, None, Some(&header), chrome, &mut Fail)
+                .is_err());
+            assert!(!compositor.commit());
+            for pressed in [false, true] {
+                chrome.header_pressed[0] = pressed.then_some(false);
+                chrome.history_pressed[0] = pressed;
+                compositor
+                    .render_with_history_controls(
+                        &frame,
+                        None,
+                        None,
+                        Some(&header),
+                        chrome,
+                        &mut stream,
+                    )
+                    .unwrap();
+                assert!(compositor.commit());
+                let parser = screen(&stream, &frame);
+                for (y, x) in [
+                    (0, 0),
+                    (controls.menu.y, controls.menu.x),
+                    (history.back.y, history.back.x),
+                ] {
+                    let cell = parser.screen().cell(y, x).unwrap();
+                    assert_eq!(cell.inverse(), reduced);
+                    assert_eq!(cell.bold(), reduced && (y == 0 || pressed));
+                    println!("BTN05 chrome reduced={reduced} pressed={pressed} ({y},{x}) text={} fg={:?} bg={:?} inverse={} bold={} underline={}",cell.contents(),cell.fgcolor(),cell.bgcolor(),cell.inverse(),cell.bold(),cell.underline());
+                }
+                let mut noop = Vec::new();
+                compositor
+                    .render_with_history_controls(
+                        &frame,
+                        None,
+                        None,
+                        Some(&header),
+                        chrome,
+                        &mut noop,
+                    )
+                    .unwrap();
+                assert!(noop.is_empty());
+                assert!(compositor.commit());
+            }
+        }
     }
 }

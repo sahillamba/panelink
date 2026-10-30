@@ -1,0 +1,9 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.69s
+     Running unittests src/main.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-8766758a03d72d8d)
+
+running 1 test
+test ui_client::state::tests::btn03_pane_controls_fill_shared_bounds_and_leave_status_plain ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 339 filtered out; finished in 0.16s
+

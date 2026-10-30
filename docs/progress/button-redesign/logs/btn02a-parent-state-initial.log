@@ -1,0 +1,220 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.18s
+     Running unittests src/main.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-8766758a03d72d8d)
+
+running 151 tests
+test ui_client::state::tests::auto_collapse_cancels_a_prompt_for_the_removed_pane ... ok
+test ui_client::state::tests::active_tab_click_and_keyboard_menu_open_rename_and_close_actions ... ok
+test ui_client::state::tests::all_tabs_keyboard_search_selects_the_filtered_route ... ok
+test ui_client::state::tests::actions_keyboard_cancel_highlight_matches_its_behavior ... ok
+test ui_client::state::tests::alternate_live_screen_and_same_target_resize_invalidate_history_replies ... ok
+test ui_client::state::tests::alternate_wheel_capacity_and_individual_expiry_are_bounded ... ok
+test ui_client::state::tests::all_tabs_search_reports_empty_results_and_supports_mouse_selection ... ok
+test ui_client::state::tests::alternate_output_keeps_fifo_and_failed_admission_is_not_retried ... ok
+test ui_client::state::tests::choosing_current_route_closes_picker_without_freezing_or_requesting ... ok
+test ui_client::state::tests::catalog_refresh_preserves_route_freeze_request_and_valid_chooser ... ok
+test ui_client::state::tests::alternate_screen_wheels_queue_fifo_with_coordinates_and_direction ... ok
+test ui_client::state::tests::close_confirmation_defaults_to_cancel_and_enter_closes_only_after_selection ... ok
+test ui_client::state::tests::close_confirmation_opening_key_repeats_and_confirmation_repeats_cannot_close ... ok
+test ui_client::state::tests::close_confirmation_mouse_buttons_are_explicit_and_consumed ... ok
+test ui_client::state::tests::close_confirmation_cancels_when_the_captured_occupant_changes_without_revision_change ... ok
+test ui_client::state::tests::back_to_live_click_returns_only_that_pane_without_focus_change ... ok
+test ui_client::state::tests::close_tab_defaults_to_cancel_and_confirmation_captures_one_exact_route ... ok
+test ui_client::state::tests::closing_pane_discards_late_history_reply ... ok
+test ui_client::state::tests::ctrl_x_quits_after_flushing_and_paste_goes_to_focus ... ok
+test ui_client::state::tests::ctrl_b_x_asks_for_confirmation_and_y_closes_the_focused_pane ... ok
+test ui_client::state::tests::ctrl_b_enters_navigation_mode_with_a_visible_banner ... ok
+test ui_client::state::tests::ctrl_x_quits_even_when_a_key_batch_is_retained ... ok
+test ui_client::state::tests::confirmed_copy_shows_only_a_source_pane_label_and_expires_after_the_feedback_window ... ok
+test ui_client::state::tests::disabled_recovery_menu_item_reports_status_and_never_forwards_bytes ... ok
+test ui_client::state::tests::detach_from_empty_workspace_exits_locally_without_effects ... ok
+test ui_client::state::tests::disconnected_state_is_visible_and_blocks_pane_mutations_until_authoritative_reconciliation ... ok
+test ui_client::state::tests::disabled_split_click_keeps_selection_so_its_reason_remains_visible ... FAILED
+test ui_client::state::tests::conservative_wheel_extent_does_not_cap_seeks_and_track_discovers_range ... ok
+test ui_client::state::tests::divider_preview_cancels_on_host_resize_and_ctrl_x_still_detaches ... ok
+test ui_client::state::tests::empty_workspace_create_intent_is_admitted_once_under_rapid_repeats ... ok
+test ui_client::state::tests::divider_mode_commits_one_absolute_pure_preview ... ok
+test ui_client::state::tests::close_results_map_to_fixed_status_messages_and_never_retry ... ok
+test ui_client::state::tests::cursor_epoch_change_marks_history_truncated ... ok
+test ui_client::state::tests::divider_release_rejects_a_revision_that_changed_after_preview ... ok
+test ui_client::state::tests::flush_during_route_freeze_discards_stale_pending_keys ... ok
+test ui_client::state::tests::empty_workspace_header_plus_requests_one_default_project_tab ... ok
+test ui_client::state::tests::divider_menu_has_pointer_adjust_apply_and_cancel_controls ... ok
+test ui_client::state::tests::empty_workspace_renders_new_tab_and_detach_without_spawn_effects ... ok
+test ui_client::state::tests::every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height ... FAILED
+test ui_client::state::tests::four_directional_split_rows_show_their_reasons_and_page_through_to_cancel ... ok
+test ui_client::state::tests::header_row_zero_has_no_pane_row_or_child_effects ... ok
+test ui_client::state::tests::evicted_history_anchor_marks_truncation_when_server_clamps_offset ... ok
+test ui_client::state::tests::help_can_be_closed_by_its_rendered_control_without_shell_input ... ok
+test ui_client::state::tests::inactive_tab_close_requires_opening_the_tab_so_generation_is_bound ... ok
+test ui_client::state::tests::header_composes_at_screen_row_zero_and_selection_uses_root_coordinates ... ok
+test ui_client::state::tests::help_ctrl_x_detaches_and_esc_dismisses ... ok
+test ui_client::state::tests::help_overlay_clips_on_resize_and_unchanged_frames_write_nothing ... ok
+test ui_client::state::tests::clipboard_failure_labels_are_truthful_and_never_leave_a_stale_copied_indicator ... ok
+test ui_client::state::tests::invalid_and_oversized_rename_drafts_never_queue_metadata ... ok
+test ui_client::state::tests::confirmation_keys_and_cancel_keys_never_reach_the_child ... ok
+test ui_client::state::tests::keyboard_copy_requires_wrap_metadata_and_cancels_on_resize_or_focus_change ... ok
+test ui_client::state::tests::keyboard_copy_empty_selection_and_escape_queue_nothing ... ok
+test ui_client::state::tests::keyboard_copy_caret_respects_the_workspace_header_offset ... ok
+test ui_client::state::tests::frames_build_for_one_and_two_panes_with_placeholders_and_overlays ... ok
+test ui_client::state::tests::keyboard_copy_cancels_before_buffer_route_or_modal_identity_changes ... ok
+test ui_client::state::tests::late_rename_result_cannot_change_a_replacement_route ... ok
+test ui_client::state::tests::keyboard_copy_preserves_unicode_and_hard_or_soft_line_boundaries ... ok
+test ui_client::state::tests::keyboard_copy_swallows_exit_key_repeat_until_release_but_allows_new_presses ... ok
+test ui_client::state::tests::keyboard_fallback_ctrl_b_s_opens_for_focused_and_esc_closes_without_bytes ... ok
+test ui_client::state::tests::alternate_wheel_queue_cancels_on_input_and_view_changes ... ok
+test ui_client::state::tests::keyboard_copy_consumes_input_and_copies_the_frozen_live_view_once ... ok
+test ui_client::state::tests::keyboard_copy_uses_the_visible_history_snapshot ... ok
+test ui_client::state::tests::late_rename_success_does_not_close_a_newer_dialog ... ok
+test ui_client::state::tests::menu_close_item_uses_captured_target_and_server_revision_after_confirmation ... ok
+test ui_client::state::tests::keyboard_copy_skips_recovery_probe_and_keeps_caret_visible_under_worker_status ... ok
+test ui_client::state::tests::layout_shrink_repairs_focus_drops_stale_keys_and_frees_the_screen_cache ... ok
+test ui_client::state::tests::more_hit_region_starts_on_the_rendered_label_boundary ... ok
+test ui_client::state::tests::navigation_help_is_modal_persistent_and_has_no_hidden_pane_effects ... ok
+test ui_client::state::tests::metadata_result_for_another_route_is_ignored ... ok
+test ui_client::state::tests::menu_close_on_single_pane_warns_that_the_workspace_ends ... ok
+test ui_client::state::tests::menu_split_focus_waits_for_success_and_preserves_the_old_focus_on_failure ... ok
+test ui_client::state::tests::navigation_mode_ctrl_x_still_detaches ... ok
+test ui_client::state::tests::navigation_mode_split_at_four_pane_capacity_reports_without_effect ... ok
+test ui_client::state::tests::legacy_attach_clamps_large_hosts_before_initial_and_incremental_render ... ok
+test ui_client::state::tests::navigation_mode_moves_focus_between_panes_and_stays_active ... ok
+test ui_client::state::tests::navigation_history_keys_use_read_only_absolute_seek_effects ... ok
+test ui_client::state::tests::navigation_mode_times_out ... ok
+test ui_client::state::tests::pane_close_confirmation_mouse_buttons_capture_target_and_ignore_opening_release ... FAILED
+test ui_client::state::tests::negotiated_row_wraps_follow_the_exact_live_and_history_checkpoint ... ok
+test ui_client::state::tests::no_cursor_server_marks_new_output_without_compensation ... ok
+test ui_client::state::tests::pane_menu_and_close_route_the_exact_shared_control_edges ... FAILED
+test ui_client::state::tests::output_during_history_shifts_offset_by_cursor_delta_without_extra_read ... ok
+test ui_client::state::tests::ordinary_alternate_screen_revision_preserves_frozen_selection_and_view_epoch ... ok
+test ui_client::state::tests::pane_menu_entry_points_share_captured_model_without_stealing_focus ... FAILED
+test ui_client::state::tests::pane_menu_opening_release_and_outside_click_are_consumed_without_focus_change ... FAILED
+test ui_client::state::tests::pane_menu_remains_pointer_reachable_during_keyboard_copy_mode ... FAILED
+test ui_client::state::tests::pending_zoom_and_divider_preview_never_compose_wrong_sized_snapshots ... ok
+test ui_client::state::tests::picker_open_coalesces_catalog_refresh_and_clears_navigation_prefix ... ok
+test ui_client::state::tests::plus_creates_one_intent_and_returns_the_exact_ready_route ... ok
+test ui_client::state::tests::pointer_divider_clamps_sparse_motion_and_unchanged_release_does_nothing ... ok
+test ui_client::state::tests::navigation_mode_direct_split_keys ... ok
+test ui_client::state::tests::picker_scroll_tracks_short_viewport_and_hit_rows ... ok
+test ui_client::state::tests::plus_explains_eight_tab_capacity_without_admitting_a_create ... ok
+test ui_client::state::tests::queue_full_pane_operation_keeps_view_and_swallows_enter_repeat ... ok
+test ui_client::state::tests::keyboard_divider_mode_cancels_on_focus_resize_layout_route_and_buffer_changes ... ok
+test ui_client::state::tests::recovery_menu_and_navigation_request_viewer_without_forwarding_keys ... ok
+test ui_client::state::tests::rename_conflict_keeps_the_edit_and_uses_the_new_revision ... ok
+test ui_client::state::tests::resize_pending_flag_is_reported ... ok
+test ui_client::state::tests::pointer_menu_cancel_is_mouse_only_and_never_sends_child_input ... FAILED
+test ui_client::state::tests::remembered_focus_is_restored_only_for_an_exact_live_pane_target ... ok
+test ui_client::state::tests::recovery_availability_skips_picker_header_help_and_preparing_events ... ok
+test ui_client::state::tests::rendered_confirmation_labels_share_click_geometry_across_routes_and_widths ... FAILED
+test ui_client::state::tests::releases_do_not_cancel_the_prompt ... ok
+test ui_client::state::tests::right_click_opens_menu_for_pane_under_pointer_and_menu_inputs_never_reach_panes ... ok
+test ui_client::state::tests::retained_key_batch_stays_pinned_and_blocks_later_paste_and_mutation ... ok
+test ui_client::state::tests::route_selection_freezes_unsent_effects_copy_and_allows_local_detach_resize ... ok
+test ui_client::state::tests::route_switch_clears_old_operation_view_and_accepts_lower_workspace_revision ... ok
+test ui_client::state::tests::reordered_keyboard_menu_reaches_close_after_split_resize_and_copy ... ok
+test ui_client::state::tests::pointer_divider_cancellation_clears_preview_and_cannot_later_commit_it ... ok
+test ui_client::state::tests::scrollbar_hit_testing_matches_resize_placeholder_rendering ... ok
+test ui_client::state::tests::rename_enter_saves_once_and_mouse_cancel_discards_the_draft ... ok
+test ui_client::state::tests::scrollbar_is_in_right_padding_and_selection_cannot_copy_it ... ok
+test ui_client::state::tests::scrollbar_press_drag_release_keep_keyboard_focus ... ok
+test ui_client::state::tests::pointer_dividers_on_both_axes_and_nested_trees_submit_once_on_release ... ok
+test ui_client::state::tests::scrollbar_track_pages_with_read_only_history_seek ... ok
+test ui_client::state::tests::selection_drag_is_frozen_local_and_cancelled_by_layout_change ... ok
+test ui_client::state::tests::split_completion_waits_for_newer_validated_layout_before_focusing_target ... ok
+test ui_client::state::tests::split_failure_shows_status_and_keeps_focus ... ok
+test ui_client::state::tests::split_intent_uses_captured_target_and_server_revision_then_focuses_new_pane ... ok
+test ui_client::state::tests::scrollbar_drag_previews_and_seeks_during_motion ... ok
+test ui_client::state::tests::split_works_again_after_a_close_shrinks_the_layout ... ok
+test ui_client::state::tests::shared_menu_close_uses_its_captured_pane_and_revision_without_refocusing ... ok
+test ui_client::state::tests::stale_split_completion_cannot_override_focus_moved_before_layout_update ... ok
+test ui_client::state::tests::tab_modals_stay_compact_and_ignore_clicks_outside_their_bounds ... ok
+test ui_client::state::tests::swap_mode_captures_exact_targets_and_consumes_all_local_input ... ok
+test ui_client::state::tests::tab_switch_discards_buffered_input_instead_of_forwarding_it_to_the_new_tab ... ok
+test ui_client::state::tests::stale_swap_chooser_cancels_without_retargeting_and_old_server_is_local ... ok
+test ui_client::state::tests::too_small_host_keeps_layout_and_shows_notice ... ok
+test ui_client::state::tests::thumb_drag_seeks_continuously_with_one_inflight_and_latest_queued ... ok
+test ui_client::state::tests::scrollbar_capture_cancels_on_invalidation_without_committing_latest_intent ... ok
+test ui_client::state::tests::thumb_release_before_extent_discovery_is_applied_once_when_it_returns ... ok
+test ui_client::state::tests::unknown_create_outcome_waits_for_explicit_new_tab_and_reuses_intent ... ok
+test ui_client::state::tests::typed_keys_batch_to_the_focused_pane_and_flush_on_focus_change ... ok
+test ui_client::state::tests::typing_in_history_returns_focused_pane_live_and_sends_once ... ok
+test ui_client::state::tests::transient_success_does_not_hide_persistent_unknown_outcome ... ok
+test ui_client::state::tests::unknown_operation_result_and_escape_never_auto_submit_again ... ok
+test ui_client::state::tests::thumb_escape_restores_start_offset_and_cancels_capture ... ok
+test ui_client::state::tests::stale_history_reply_cannot_override_newer_drag_position ... ok
+test ui_client::state::tests::wheel_burst_coalesces_normal_motion_without_changing_inflight_epoch ... ok
+test ui_client::state::tests::wheel_down_at_live_offset_still_queries_mode_and_pending_bursts_do_not_invalidate ... ok
+test ui_client::state::tests::wheel_on_unfocused_pane_keeps_keyboard_focus ... ok
+test ui_client::state::tests::typing_resize_and_failure_discard_queued_scroll_without_replay ... ok
+test ui_client::state::tests::wheel_pointer_maps_to_content_cells_from_shared_inset_geometry ... ok
+test ui_client::state::tests::unpadded_old_server_snapshot_has_an_actionable_upgrade_notice ... ok
+test ui_client::state::tests::wheel_routes_to_outer_pane_with_content_local_coordinates_and_typing_invalidates_reply ... ok
+test ui_client::state::tests::zoom_request_and_completion_require_the_exact_admitted_action ... ok
+test ui_client::state::tests::unknown_extent_press_keeps_view_and_starts_capture ... ok
+test ui_client::state::tests::wheel_scrollbar_and_divider_on_unfocused_pane_keep_typing_focus ... ok
+test ui_client::state::tests::workspace_header_picker_and_root_rows_stay_local_and_aligned ... ok
+test ui_client::state::tests::wheel_keeps_live_and_history_content_visible_while_waiting ... ok
+test ui_client::state::tests::zoom_projection_keeps_full_target_registry_and_hidden_screen_updates ... ok
+
+failures:
+
+---- ui_client::state::tests::disabled_split_click_keeps_selection_so_its_reason_remains_visible stdout ----
+
+thread 'ui_client::state::tests::disabled_split_click_keeps_selection_so_its_reason_remains_visible' (41713309) panicked at src/ui_client/state_tests.rs:4575:72:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- ui_client::state::tests::every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height stdout ----
+
+thread 'ui_client::state::tests::every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height' (41713318) panicked at src/ui_client/state_tests.rs:4436:86:
+called `Option::unwrap()` on a `None` value
+
+---- ui_client::state::tests::pane_close_confirmation_mouse_buttons_capture_target_and_ignore_opening_release stdout ----
+
+thread 'ui_client::state::tests::pane_close_confirmation_mouse_buttons_capture_target_and_ignore_opening_release' (41713361) panicked at src/ui_client/state_tests.rs:2615:9:
+assertion failed: app.confirm_open()
+
+---- ui_client::state::tests::pane_menu_and_close_route_the_exact_shared_control_edges stdout ----
+
+thread 'ui_client::state::tests::pane_menu_and_close_route_the_exact_shared_control_edges' (41713362) panicked at src/ui_client/state_tests.rs:4891:5:
+assertion failed: app.interaction.actions_menu.is_some()
+
+---- ui_client::state::tests::pane_menu_entry_points_share_captured_model_without_stealing_focus stdout ----
+
+thread 'ui_client::state::tests::pane_menu_entry_points_share_captured_model_without_stealing_focus' (41713363) panicked at src/ui_client/state_tests.rs:5057:14:
+every entry point opens actions
+
+---- ui_client::state::tests::pane_menu_opening_release_and_outside_click_are_consumed_without_focus_change stdout ----
+
+thread 'ui_client::state::tests::pane_menu_opening_release_and_outside_click_are_consumed_without_focus_change' (41713364) panicked at src/ui_client/state_tests.rs:5084:5:
+assertion failed: app.interaction.actions_menu.is_some()
+
+---- ui_client::state::tests::pane_menu_remains_pointer_reachable_during_keyboard_copy_mode stdout ----
+
+thread 'ui_client::state::tests::pane_menu_remains_pointer_reachable_during_keyboard_copy_mode' (41713365) panicked at src/ui_client/state_tests.rs:4713:5:
+assertion failed: !app.copy.copy_mode && app.interaction.actions_menu.is_some()
+
+---- ui_client::state::tests::pointer_menu_cancel_is_mouse_only_and_never_sends_child_input stdout ----
+
+thread 'ui_client::state::tests::pointer_menu_cancel_is_mouse_only_and_never_sends_child_input' (41713374) panicked at src/ui_client/state_tests.rs:4065:5:
+assertion failed: app.interaction.actions_menu.is_some()
+
+---- ui_client::state::tests::rendered_confirmation_labels_share_click_geometry_across_routes_and_widths stdout ----
+
+thread 'ui_client::state::tests::rendered_confirmation_labels_share_click_geometry_across_routes_and_widths' (41713382) panicked at src/ui_client/state_tests.rs:3987:17:
+width=22 workspace=false
+
+
+failures:
+    ui_client::state::tests::disabled_split_click_keeps_selection_so_its_reason_remains_visible
+    ui_client::state::tests::every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height
+    ui_client::state::tests::pane_close_confirmation_mouse_buttons_capture_target_and_ignore_opening_release
+    ui_client::state::tests::pane_menu_and_close_route_the_exact_shared_control_edges
+    ui_client::state::tests::pane_menu_entry_points_share_captured_model_without_stealing_focus
+    ui_client::state::tests::pane_menu_opening_release_and_outside_click_are_consumed_without_focus_change
+    ui_client::state::tests::pane_menu_remains_pointer_reachable_during_keyboard_copy_mode
+    ui_client::state::tests::pointer_menu_cancel_is_mouse_only_and_never_sends_child_input
+    ui_client::state::tests::rendered_confirmation_labels_share_click_geometry_across_routes_and_widths
+
+test result: FAILED. 142 passed; 9 failed; 0 ignored; 0 measured; 172 filtered out; finished in 0.14s
+
+error: test failed, to rerun pass `--bin panelink`

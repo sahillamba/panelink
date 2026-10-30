@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/main.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-8766758a03d72d8d)
+
+running 3 tests
+test ui_client::state::tests::navigation_help_is_modal_persistent_and_has_no_hidden_pane_effects ... ok
+test ui_client::state::tests::keyboard_copy_cancels_before_buffer_route_or_modal_identity_changes ... ok
+test ui_client::state::tests::modal_raw_release_capture_cancels_without_leaking_or_retargeting ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 328 filtered out; finished in 0.04s
+

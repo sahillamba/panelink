@@ -1,12 +1,29 @@
 # Panelink: working implementation specification
 
-Planned UI/UX direction (2026-10-27): [the consolidated plan](UI-UX-PLAN.md)
-records six interview rounds selecting smooth anchored history, continuous
-scrollbar updates, focus-preserving gestures, full tab controls, managed new
-shells, button confirmations and a last-tab empty state. Four panes remain;
-no sidebar, pane drag or zoom expansion. Final shared-understanding confirmation
-is pending. This is future design intent; the implemented prototype contracts
-and evidence below remain current until their respective changes are delivered.
+Button/control source update (2026-10-31): the user confirmed the
+[button implementation plan](design/BUTTON-IMPLEMENTATION-PLAN.md) and requested
+implementation. Compact filled controls use one shared action geometry for
+painting and captured release activation. Header, pane menus/confirmation,
+tab/project/chooser dialogs, history, empty workspace and help controls activate
+once on a valid release in the original control; drag-away, Escape, focus/host,
+route/catalog/layout/target or modal changes cancel as applicable. Input remains
+local to the owning UI. Keyboard focus, pane typing focus and active tab remain
+distinct. Pending/unknown operation receipts keep their existing authority.
+
+The strip keeps project left, tabs centrally, New tab/All tabs right, with
+separate tab close bounds. Inactive-tab close requires selecting that tab first
+so runtime generation is known; it never silently switches and closes. Close
+ends the confirmed target's processes; Detach leaves them running. Pane menus
+paginate by Layout, Copy/History, Close and Secondary groups. Informational
+status/filter text is plain; actionable controls have independent filled styles.
+NO_COLOR presence or TERM=dumb selects reduced control colors at host setup,
+using reverse fill and structural attributes; child content is preserved.
+This is ANSI styling, not host-theme detection. The
+[execution evidence](progress/button-redesign/PROGRESS.md) separates automated
+source checks from pending native host/theme/clipboard/touch/provider acceptance.
+No installation or server restart is implied by source changes. Earlier
+[UX decisions](UI-UX-PLAN.md) retain four panes, stable history, focus-preserving
+resize/scrolling and no permanent sidebar or whole-pane dragging.
 
 Revision: 0.27, 2026-10-27. Status: draft for product discovery and security review planning; not implementation-ready until open decisions and feasibility gates are resolved. Bounded prototype checkpoints record current code without converting assumptions into product requirements. This revision combines four-pane layout and agent CLI work, four-pane relaunch/attach and pane exit status, saved-layout persistence with legacy migration, client IO isolation, tick-driven close, and serialized live-split launch/journal isolation. Reviewed contracts for retries, agent identity, history, child environments and clipboard requests remain in force. Provider resume and full reboot recovery remain unproved.
 

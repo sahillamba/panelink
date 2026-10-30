@@ -360,7 +360,7 @@ fn wide_terminal_starts_and_reattaches_without_losing_the_shell() {
             let mut parser = vt100::Parser::new(64, 269, 0);
             parser.process(&client.capture());
             let screen = parser.screen().contents();
-            screen.contains("[Menu]") && (screen.contains('%') || screen.contains('$'))
+            screen.contains(" Menu ") && (screen.contains('%') || screen.contains('$'))
         });
         if original_target.is_none() {
             let (code, output) = fixture.control("wide-reader", &["init"]);

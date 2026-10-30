@@ -1,0 +1,46 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.04s
+     Running tests/p5_workspace_tabs.rs (/tmp/panelink-btn00-baseline-target/debug/deps/p5_workspace_tabs-34f7c23640a0aca6)
+
+running 1 test
+test workspace_pointer_controls_preserve_live_ptys_and_confirm_close ... FAILED
+
+failures:
+
+---- workspace_pointer_controls_preserve_live_ptys_and_confirm_close stdout ----
+
+thread 'workspace_pointer_controls_preserve_live_ptys_and_confirm_close' (41704899) panicked at tests/p5_workspace_tabs.rs:575:13:
+timed out waiting for [Menu]:
+ [ Pointer ]  [Main]                                                            [All tabs]  [+ New] 
+  Menu  > Pane 1                                                                                 x 
+ sahillamba@HyperMac ~ % PS1='P5T$ '; printf 'PTR_READY\n'                                          
+ PTR_READY                                                                                          
+ P5T$                                                                                               
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                             v0.1.8
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    workspace_pointer_controls_preserve_live_ptys_and_confirm_close
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 13.07s
+
+error: test failed, to rerun pass `--test p5_workspace_tabs`

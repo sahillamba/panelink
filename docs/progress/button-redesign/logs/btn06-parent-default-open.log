@@ -1,0 +1,17 @@
+   Compiling panelink v0.1.8 (/Users/sahillamba/.t3/worktrees/panelink/t3-baecf477)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running tests/p3a_default_open.rs (/tmp/panelink-btn00-baseline-target/debug/deps/p3a_default_open-9ec39a9456b82343)
+
+running 9 tests
+test attached_client_exits_cleanly_when_the_workspace_is_stopped_and_restarted ... ok
+test bare_panelink_starts_splits_detaches_reattaches_and_stops ... ok
+test concurrent_opens_share_one_server ... ok
+test ctrl_b_navigation_mode_banner_split_and_focus_keys ... ok
+test killed_server_leaves_a_stale_socket_that_the_next_open_recovers ... ok
+test last_shell_exit_closes_the_workspace_and_the_client ... ok
+test outer_pty::tests::exit_observation_precedes_a_deliberately_delayed_capture_drain ... ok
+test real_environment_smoke ... ignored, uses the invoking user's real shell configuration
+test wide_terminal_starts_and_reattaches_without_losing_the_shell ... ok
+
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 12.81s
+

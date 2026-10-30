@@ -396,6 +396,9 @@ fn run_inner(directory: PathBuf, context_dir: PathBuf, workspace: Option<Workspa
         Ok(compositor) => compositor,
         Err(_) => return fail(HostError::Frame.message()),
     };
+    let reduced_control_color = std::env::var_os("NO_COLOR").is_some()
+        || std::env::var_os("TERM").is_some_and(|term| term == "dumb");
+    compositor.set_reduced_control_color(reduced_control_color);
     let mut output = match Output::new() {
         Ok(output) => output,
         Err(error) => return fail(error.message()),
@@ -1337,8 +1340,10 @@ fn event_loop(
                                 next_app.prefer_focus_when_valid(target);
                             }
                         }
-                        let fresh_compositor =
+                        let mut fresh_compositor =
                             Compositor::try_new().map_err(|_| HostError::Frame)?;
+                        fresh_compositor
+                            .set_reduced_control_color(compositor.reduced_control_color());
                         let fresh_output = Output::new()?;
                         app.cancel_for_detach();
                         let abandoned = app.abandon_pending_keys();

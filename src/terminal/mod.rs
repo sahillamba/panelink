@@ -6,6 +6,7 @@
 mod checkpoint_load;
 mod cleanup_discard;
 pub mod compose;
+pub mod controls;
 pub mod render;
 
 /// Bounded parser-only host decoder; callers own raw input IO and restoration.

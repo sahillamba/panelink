@@ -1,0 +1,657 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/lib.rs (/tmp/panelink-btn00-baseline-target/debug/deps/panelink-cb36793118f48d00)
+
+running 2 tests
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Secondary/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 chrome reduced=false pressed=false (0,0) text=T fg=Idx(15) bg=Idx(12) inverse=false bold=false underline=false
+BTN05 chrome reduced=false pressed=false (1,1) text=  fg=Idx(15) bg=Idx(8) inverse=false bold=false underline=false
+BTN05 chrome reduced=false pressed=false (7,20) text=[ fg=Idx(15) bg=Idx(8) inverse=false bold=false underline=false
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Secondary/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Secondary/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 chrome reduced=false pressed=true (0,0) text=T fg=Idx(15) bg=Idx(12) inverse=false bold=false underline=false
+BTN05 chrome reduced=false pressed=true (1,1) text=  fg=Idx(15) bg=Idx(4) inverse=false bold=false underline=false
+BTN05 chrome reduced=false pressed=true (7,20) text=* fg=Idx(15) bg=Idx(4) inverse=false bold=false underline=false
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Secondary/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Secondary/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Primary/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Primary/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 chrome reduced=true pressed=false (0,0) text=T fg=Default bg=Default inverse=true bold=true underline=false
+BTN05 chrome reduced=true pressed=false (1,1) text=  fg=Default bg=Default inverse=true bold=false underline=false
+BTN05 chrome reduced=true pressed=false (7,20) text=[ fg=Default bg=Default inverse=true bold=false underline=false
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Primary/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Primary/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Primary/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 chrome reduced=true pressed=true (0,0) text=T fg=Default bg=Default inverse=true bold=true underline=false
+BTN05 chrome reduced=true pressed=true (1,1) text=  fg=Default bg=Default inverse=true bold=true underline=true
+BTN05 chrome reduced=true pressed=true (7,20) text=* fg=Default bg=Default inverse=true bold=true underline=true
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Destructive/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Destructive/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Destructive/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Destructive/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 chrome reduced=false pressed=false (0,0) text=T fg=Idx(15) bg=Idx(12) inverse=false bold=false underline=false
+BTN05 chrome reduced=false pressed=false (1,1) text=  fg=Idx(15) bg=Idx(8) inverse=false bold=false underline=false
+BTN05 chrome reduced=false pressed=false (7,20) text=[ fg=Idx(15) bg=Idx(8) inverse=false bold=false underline=false
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Destructive/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Secondary/Normal attrs=7 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 chrome reduced=false pressed=true (0,0) text=T fg=Idx(15) bg=Idx(12) inverse=false bold=false underline=false
+BTN05 chrome reduced=false pressed=true (1,1) text=  fg=Idx(15) bg=Idx(4) inverse=false bold=false underline=false
+BTN05 chrome reduced=false pressed=true (7,20) text=* fg=Idx(15) bg=Idx(4) inverse=false bold=false underline=false
+test terminal::compose::tests::btn05_header_history_and_mode_failure_repaint ... ok
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Secondary/Focus attrs=7;1;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Secondary/Pressed attrs=7;1;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Secondary/Disabled attrs=7;3 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Secondary/Pending attrs=7;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Primary/Normal attrs=7;1 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Primary/Focus attrs=7;1;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Primary/Pressed attrs=7;1;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Primary/Disabled attrs=7;3 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Primary/Pending attrs=7;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Destructive/Normal attrs=7;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Destructive/Focus attrs=7;1;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Destructive/Pressed attrs=7;1;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Destructive/Disabled attrs=7;3 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=true Destructive/Pending attrs=7;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Secondary/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Secondary/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Secondary/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Secondary/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Secondary/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Primary/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Primary/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Primary/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Primary/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Primary/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Destructive/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Destructive/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Destructive/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Destructive/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 48, 59, 52, 55, 109] reduced=false Destructive/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Secondary/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Secondary/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Secondary/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Secondary/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Secondary/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Primary/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Primary/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Primary/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Primary/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Primary/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Destructive/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Destructive/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Destructive/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Destructive/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Destructive/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Secondary/Normal attrs=7 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Secondary/Focus attrs=7;1;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Secondary/Pressed attrs=7;1;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Secondary/Disabled attrs=7;3 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Secondary/Pending attrs=7;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Primary/Normal attrs=7;1 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Primary/Focus attrs=7;1;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Primary/Pressed attrs=7;1;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Primary/Disabled attrs=7;3 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Primary/Pending attrs=7;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Destructive/Normal attrs=7;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Destructive/Focus attrs=7;1;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Destructive/Pressed attrs=7;1;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Destructive/Disabled attrs=7;3 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=true Destructive/Pending attrs=7;3;4 cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Secondary/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Secondary/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Secondary/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Secondary/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Secondary/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Primary/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Primary/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Primary/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Primary/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Primary/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Destructive/Normal attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Destructive/Focus attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Destructive/Pressed attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Destructive/Disabled attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+BTN05 initial=[27, 91, 51, 55, 59, 52, 48, 109] reduced=false Destructive/Pending attrs= cells=  Menu    Pane 1   x 
+ child               
+ [Run] gap status    
+                     
+                     
+                     
+               v0.1.8
+test terminal::compose::tests::btn05_modes_cells_and_successful_baseline ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 943 filtered out; finished in 0.02s
+
