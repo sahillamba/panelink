@@ -1,5 +1,12 @@
 # Panelink implementation roadmap
 
+Code-health maintenance (2026-10-30): user authorized the nine-packet plan in
+isolated `refactor/code-health-20261030`, based on `a1134ec`. Parent orchestration
+uses GPT-6-Luna for bounded tasks. Fresh repaired baseline passes8/8; packets00–08 are complete; the fresh combined verifier passes8/8.
+Original checkout and installed runtime are untouched. See the
+[execution state](docs/progress/code-health-20261030/PROGRESS.md). Product phase
+gates remain unchanged; no push or install is authorized.
+
 Scoped wheel follow-up (2026-10-29): source0.1.8 implements optional capability1024
 for one keyed vacancy-scoped wheel operation. Parent codec/handshake/server/client
 focused tests pass. Controlled private receiver observes final20-event count at

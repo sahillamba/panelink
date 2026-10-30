@@ -1,3 +1,96 @@
+## Code-health plan complete — 2026-10-30
+
+All00–08 maintainability packets are implemented, reviewed and locally verified on
+refactor/code-health-20261030. Source2b72e81831c9912d12a5cff878b5e34dacaeda03 passes
+canonical8/8: root Rust1596/0/20ignored, decoder39/0, Python233run/1skip;
+format, strict Clippy, build, component fingerprints and docs pass. Parent checked
+the full log and finalized the evidence/checklists. See [execution state](code-health-20261030/PROGRESS.md),
+[canonical report](code-health-20261030/INTEGRATION.md) and [navigation](code-health-20261030/NAVIGATION.md).
+All leases released. Original checkout/installed runtime untouched; no push/install.
+Native host/provider/reboot/real clipboard/performance/hosted CI gates remain open.
+Earlier dated entries below are historical progress snapshots.
+
+## Code-health packet05 verified; combined gate next — 2026-10-30
+
+Frame assembly now uses immutable RenderView; modal labels and selection overlays
+live with their state owners. Parent review, binary323/0, compositor43/0, private
+PTY7/0 and strict checks pass. See [packet05 evidence](code-health-20261030/PACKET05.md)
+and [navigation](code-health-20261030/NAVIGATION.md). All implementation packets
+are verified;08 fresh combined canonical gate and final evidence remain pending.
+No install, live panes or push.
+
+## Code-health packet04 verified — 2026-10-30
+
+CopyState owns frozen selection and clipboard request/result state; Interaction
+owns pane modes, captured menus, confirmations and local modal consumption.
+Parent completed the transition review after the delegated review stopped incomplete.
+Binary323/0, compositor43/0, private PTY13/0 and strict checks pass. See
+[packet04 evidence](code-health-20261030/PACKET04.md).05 rendering and combined08
+remain; no install, live panes or push.
+
+## Code-health packet03 verified — 2026-10-30
+
+WorkspaceState owns tab catalog, picker/dialog/filter state and request-scoped
+metadata/create completion rules. Full binary323/0, workspace tabs5/0, lifecycle10/0,
+recovery chooser7/0 and strict all-target Clippy pass. Independent scoped review
+has no material findings. See [packet03 evidence](code-health-20261030/PACKET03.md).
+Parent continues04 pane interaction ownership;05 and combined08 remain pending.
+No install, live pane use or push.
+
+## Code-health packet02 verified — 2026-10-30
+
+Private Viewports now owns pane cache/history/request/queue transitions with
+immutable production access; App retains modal/selection/pointer coordination.
+Existing state151/0, full binary323/0, protocol3/0 and strict all-target Clippy
+pass; independent transition review has no material finding. A further fixture
+header/old-modal readiness gap was guarded by restored-cursor barriers; workspace
+PTY5/0 and final focused scenario1/0 pass. Original failure is retained, not
+relabeled. See [packet02 evidence](code-health-20261030/PACKET02.md). No live install.
+
+## Code-health packets01/07 verified — 2026-10-30
+
+Shared host event dispatch preserves handler/effect order; parent host unit6/0
+and workspace PTY5/0 pass. Three embedded multi-session test modules moved to
+private children; parent verified exact rustfmt-normalized bodies, byte-identical
+production prefix and85/0 scoped tests. Test names remain unchanged.
+[Execution state](code-health-20261030/PROGRESS.md) records details and worker
+report discrepancies. Packet02 is parent-owned after a no-edit worker handback.
+
+## Code-health packet06 verified — 2026-10-30
+
+Parent replaced the four-pane fixture's300ms/negative-status wait with expected
+layout chrome and unique new-target focus checks using shared pane geometry.
+Each previous captured screen is explicitly rejected; all three split completions
+are observed. Private-PTY integration2/0, strict target Clippy, fmt and diff checks
+pass. See [execution state](code-health-20261030/PROGRESS.md). No runtime changes.
+
+## Code-health baseline verified — 2026-10-30
+
+Fresh canonical verifier passes8/8 after the bounded positive-cancel fixture
+repair; parent reviewed the independent report and exact marker/PID checks.
+The original failing baseline log is preserved. Packet00 is complete; host and
+server-test organization lanes are next. See [execution state](code-health-20261030/PROGRESS.md).
+Product/native/provider/clipboard/reboot/performance gates remain separate.
+
+## Code-health baseline fixture repair — 2026-10-30
+
+New worktree baseline recorded 7/8 checks: the tab-create/rename/close fixture
+could accept its first, still-captured close confirmation as the second one
+after clicking Cancel. Parent added fresh child acknowledgment and same-PID
+verification before reopening. Focused test passes; affected-target and canonical
+verification remain pending. See [execution state](code-health-20261030/PROGRESS.md).
+No production source, timeout contract, live runtime or installed binary changed.
+
+## Code-health implementation started — 2026-10-30 (current worktree)
+
+User authorized parent orchestration in the new
+`refactor/code-health-20261030` worktree at `a1134ec4bc69e8a97b27ba2b0b61f2e446257440`.
+The portable plan is now [durable in this worktree](code-health-20261030/README.md);
+[PROGRESS.md](code-health-20261030/PROGRESS.md) records blockers, exclusive leases
+and verification. GPT-6-Luna will run the fresh serial canonical baseline first.
+No source changes, live pane use, installed-binary changes or push. Existing
+product acceptance gates and historical results below remain separate.
+
 ## PR #13 CI fixture repair — 2026-10-29
 
 Confirmed clean PR branch/head `t3/compact-modal-layouts` / `7a91f45`;

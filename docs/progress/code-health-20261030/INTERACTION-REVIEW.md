@@ -1,0 +1,15 @@
+# Packet04 parent transition review
+
+The delegated Luna review confirmed checkout/index identity but stopped before completing the review or writing a report. It supplies no independent behavioral approval. Parent completed the review against8ba6672; no material regression found in that scope.
+
+Reviewed all moved copy and pane-mode method bodies against the original, including normalized comparisons which retain conditions, operators, effect counts and ordering. Remaining changes are explicit immutable context, feedback and one-way captured intent dispatch. Inspected the root event/lifecycle diff, modal blocks, command adapters and test diff separately rather than assuming relocated text alone establishes behavior.
+
+- Frozen source selection still validates exact target/slot/epoch/buffer/geometry/history identity; wrap availability, caret normalization, wide-cell movement, reanchor, empty/large/unknown-wrap outcomes and frozen extraction match. Copy request IDs remain nonzero/wrapping and per-source results reject superseded attempts. Pending text is not duplicated; route/detach reset scopes and expiry match.
+- Copy feedback clears only the clipboard-failure status checked by the original success path. Dirty/status/prefix changes are applied synchronously before the next event or effect. No branch reads a changed coordinator field before the returned feedback is applied. No screen cache clone or mutable viewport escape was added.
+- Release consumption remains menu then pane-mode then copy. The root priority remains the documented pre-extraction order, including global detach, route freeze, pointer capture and copy-mode pane-control exception. Ordinary input cannot fall through a consumed modal.
+- Confirmation retains Cancel default, captured identity and opening repeat/release handling. CloseConfirm::handle only confirms Yes; Activate/Toggle are consumed there and retain their explicit button logic. Returning a confirmed intent early therefore cannot skip an additional action. Shared confirmation/page/header geometry is unchanged.
+- Swap/divider event and pointer selection, feasible-span search and target/revision validation match. Nested pointer Apply produces one captured operation; the root consumes it immediately through the existing request-ID/effect/pending-operation path. Flush and cancellation remain synchronous; no replay/retry path was introduced.
+- Layout invalidation keeps menu/confirmation/action order and last-status precedence. Scrollbar capture/extent coordination remains in App and uses named owner invalidation; focus, route, resize and buffer resets preserve their original scopes.
+- Existing test assertions/scenarios remain, with owner paths/imports and one test call moved to InteractionContext. Constructor defaults match. Production owner reads are immutable and writes use explicit transitions.
+
+Evidence is [PACKET04.md](PACKET04.md): full binary323/0, compositor43/0, private PTY13/0, strict all-target Clippy/fmt/diff/docs pass. Parent review is not independent third-party review, hosted CI, or native/provider acceptance. Combined canonical verification is still required in08.

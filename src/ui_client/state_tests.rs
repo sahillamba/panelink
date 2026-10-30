@@ -1,4 +1,6 @@
+use super::copy::COPY_FEEDBACK_TTL;
 use super::*;
+use crate::workspace_lifecycle::{CreateShellTab, CreateStatus, LifecycleError, RenameOutcome};
 use crossterm_input::Decoder;
 use crossterm_input::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -10,6 +12,7 @@ use panelink::screen_checkpoint::{
     SCREEN_CHECKPOINT_HEADER_BYTES,
 };
 use panelink::split_menu::DisabledReason;
+use panelink::terminal_selection::Point;
 use panelink::ui_protocol::{UiPane, WireHistoryCursor};
 use panelink::workspace_index::{ProjectId, WorkspaceIndex, WorkspaceTabId};
 use panelink::workspace_tabs::{TabAction, WorkspaceRouteId};
@@ -427,7 +430,7 @@ fn right_click_opens_menu_for_pane_under_pointer_and_menu_inputs_never_reach_pan
     app.focus_target(target(2));
     feed(&mut app, &mut fake, b"\x1b[<2;5;5M");
     assert!(app.menu_open());
-    assert_eq!(app.menu.captured_target(), Some(target(1)));
+    assert_eq!(app.interaction.menu.captured_target(), Some(target(1)));
     // Every kind of input while open is consumed: keys, Enter on a disabled
     // item (Split Left: a 40-column pane is too narrow), paste, Ctrl-X,
     // mouse, arrows. Home selects the first (disabled) item.
@@ -499,7 +502,7 @@ fn disabled_recovery_menu_item_reports_status_and_never_forwards_bytes() {
     assert!(flows.iter().all(|flow| *flow == Flow::Continue));
     assert!(app.menu_open());
     assert_eq!(
-        app.menu.recovery_availability(),
+        app.interaction.menu.recovery_availability(),
         Some(Availability::Disabled(
             DisabledReason::NoPreviousLayoutSaved
         ))
@@ -546,7 +549,10 @@ fn keyboard_fallback_ctrl_b_s_opens_for_focused_and_esc_closes_without_bytes() {
     app.set_layout(one_pane(1));
     feed(&mut app, &mut fake, b"\x02s");
     assert!(app.menu_open());
-    assert_eq!(app.actions_menu.map(|menu| menu.target), Some(target(1)));
+    assert_eq!(
+        app.interaction.actions_menu.map(|menu| menu.target),
+        Some(target(1))
+    );
     feed(&mut app, &mut fake, b"\x1b");
     assert!(!app.menu_open());
     // Ctrl-B followed by another key is dropped locally.
@@ -746,7 +752,7 @@ fn confirmed_copy_shows_only_a_source_pane_label_and_expires_after_the_feedback_
         "copied text never enters chrome: {visible}"
     );
     assert!(
-        app.copied_feedback[0].is_some_and(|(pane, until)| {
+        app.copy.copied_feedback[0].is_some_and(|(pane, until)| {
             pane == source && until == copied_at + COPY_FEEDBACK_TTL
         }),
         "feedback belongs to the exact source pane and has the short TTL"
@@ -874,7 +880,7 @@ fn selection_drag_is_frozen_local_and_cancelled_by_layout_change() {
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
-    assert!(app.selection.is_some());
+    assert!(app.copy.selection.is_some());
     app.handle_event(
         &event(MouseEventKind::Drag(MouseButton::Left), 2, 1),
         now,
@@ -885,14 +891,14 @@ fn selection_drag_is_frozen_local_and_cancelled_by_layout_change() {
     // A live output revision does not replace the frozen drag source.
     app.load_screen_with_wraps(target(1), 2, &decoded, Some(&wraps))
         .unwrap();
-    assert!(app.selection.is_some());
+    assert!(app.copy.selection.is_some());
     app.handle_event(
         &event(MouseEventKind::Up(MouseButton::Left), 2, 1),
         now,
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
-    assert!(app.selection.is_none());
+    assert!(app.copy.selection.is_none());
     assert!(app.take_copy_text().is_none()); // blank cells trim to an empty copy
     assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.scrolls.is_empty());
 
@@ -902,12 +908,12 @@ fn selection_drag_is_frozen_local_and_cancelled_by_layout_change() {
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
-    assert!(app.selection.is_some());
+    assert!(app.copy.selection.is_some());
     let mut resized = one_pane(2);
     resized.columns -= 1;
     resized.panes[0].as_mut().unwrap().rect.columns -= 1;
     app.set_layout(resized);
-    assert!(app.selection.is_none());
+    assert!(app.copy.selection.is_none());
 
     app.set_layout(one_pane(3));
     app.load_screen_with_wraps(target(1), 3, &decoded, Some(&wraps))
@@ -918,9 +924,9 @@ fn selection_drag_is_frozen_local_and_cancelled_by_layout_change() {
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
-    assert!(app.selection.is_some());
+    assert!(app.copy.selection.is_some());
     app.load_screen(target(1), 4, &decoded).unwrap();
-    assert!(app.selection.is_none()); // loss of negotiated wrap metadata cancels
+    assert!(app.copy.selection.is_none()); // loss of negotiated wrap metadata cancels
 }
 
 #[test]
@@ -934,7 +940,7 @@ fn keyboard_copy_consumes_input_and_copies_the_frozen_live_view_once() {
     app.load_screen_with_wraps(target(1), 1, &original, Some(&wraps))
         .unwrap();
     feed(&mut app, &mut fake, b"\x02c");
-    assert!(app.copy_mode);
+    assert!(app.copy.copy_mode);
 
     let now = Instant::now();
     app.handle_event(
@@ -982,8 +988,8 @@ fn keyboard_copy_consumes_input_and_copies_the_frozen_live_view_once() {
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
-    assert!(app.copy_mode, "repeat must not complete one-shot copy");
-    assert!(app.pending_copy.is_none());
+    assert!(app.copy.copy_mode, "repeat must not complete one-shot copy");
+    assert!(app.copy.pending_copy.is_none());
     feed(&mut app, &mut fake, b"y");
     assert_eq!(app.take_copy_text().as_deref(), Some("abc"));
     assert!(app.take_copy_text().is_none());
@@ -1002,7 +1008,7 @@ fn keyboard_copy_swallows_exit_key_repeat_until_release_but_allows_new_presses()
         .unwrap();
 
     feed(&mut app, &mut fake, b"\x02c ly");
-    assert!(!app.copy_mode);
+    assert!(!app.copy.copy_mode);
     assert_eq!(app.take_copy_text().as_deref(), Some("ab"));
     let now = Instant::now();
     for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
@@ -1045,7 +1051,7 @@ fn keyboard_copy_skips_recovery_probe_and_keeps_caret_visible_under_worker_statu
     app.load_screen_with_wraps(target(1), 1, &snapshot, Some(&wraps))
         .unwrap();
     feed(&mut app, &mut fake, b"\x02c");
-    assert!(app.copy_mode);
+    assert!(app.copy.copy_mode);
 
     let right_click = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Right),
@@ -1088,14 +1094,14 @@ fn keyboard_copy_empty_selection_and_escape_queue_nothing() {
         .unwrap();
 
     feed(&mut app, &mut fake, b"\x02c\r");
-    assert!(!app.copy_mode);
+    assert!(!app.copy.copy_mode);
     assert!(app.take_copy_text().is_none());
     feed(&mut app, &mut fake, b"\x02c\x1b");
-    assert!(!app.copy_mode);
+    assert!(!app.copy.copy_mode);
     assert!(app.take_copy_text().is_none());
     feed(&mut app, &mut fake, b"\x02c");
     assert_eq!(feed(&mut app, &mut fake, b"\x18"), Flow::Quit);
-    assert!(!app.copy_mode);
+    assert!(!app.copy.copy_mode);
     assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.scrolls.is_empty());
 }
 
@@ -1108,16 +1114,16 @@ fn keyboard_copy_requires_wrap_metadata_and_cancels_on_resize_or_focus_change() 
     let snapshot = decode(&checkpoint).unwrap();
     app.load_screen(target(1), 1, &snapshot).unwrap();
     feed(&mut app, &mut fake, b"\x02c");
-    assert!(!app.copy_mode);
+    assert!(!app.copy.copy_mode);
     assert_eq!(app.status.map(|(label, _)| label), Some("Copy unavailable"));
 
     let wraps = vec![false; usize::from(snapshot.rows())];
     app.load_screen_with_wraps(target(1), 2, &snapshot, Some(&wraps))
         .unwrap();
     feed(&mut app, &mut fake, b"\x02c");
-    assert!(app.copy_mode);
+    assert!(app.copy.copy_mode);
     app.set_host(25, 82);
-    assert!(!app.copy_mode);
+    assert!(!app.copy.copy_mode);
     assert!(app.take_copy_text().is_none());
 
     app.set_host(24, 81);
@@ -1128,20 +1134,20 @@ fn keyboard_copy_requires_wrap_metadata_and_cancels_on_resize_or_focus_change() 
     app.load_screen_with_wraps(target(1), 3, &narrow, Some(&narrow_wraps))
         .unwrap();
     feed(&mut app, &mut fake, b"\x02c");
-    assert!(app.copy_mode);
+    assert!(app.copy.copy_mode);
     app.focus_target(target(2));
-    assert!(!app.copy_mode);
+    assert!(!app.copy.copy_mode);
     assert!(app.take_copy_text().is_none());
     assert!(fake.keys.is_empty() && fake.pastes.is_empty());
 
     app.focus_target(target(1));
     feed(&mut app, &mut fake, b"\x02c");
-    assert!(app.copy_mode);
+    assert!(app.copy.copy_mode);
     let mut changed_wraps = narrow_wraps.clone();
     changed_wraps[0] = true;
     app.load_screen_with_wraps(target(1), 4, &narrow, Some(&changed_wraps))
         .unwrap();
-    assert!(!app.copy_mode);
+    assert!(!app.copy.copy_mode);
 }
 
 #[test]
@@ -1179,7 +1185,7 @@ fn keyboard_copy_uses_the_visible_history_snapshot() {
         Instant::now(),
     );
     feed(&mut app, &mut fake, b"\x02c");
-    assert!(app.selection.as_ref().unwrap().source_history);
+    assert!(app.copy.selection.as_ref().unwrap().source_history);
     let visible = screen_text(&app);
     assert!(
         visible.contains("HIST"),
@@ -1265,13 +1271,13 @@ fn keyboard_copy_cancels_before_buffer_route_or_modal_identity_changes() {
     app.load_screen_with_wraps(target(1), 1, &normal, Some(&wraps))
         .unwrap();
     feed(&mut app, &mut fake, b"\x02c");
-    assert!(app.copy_mode);
+    assert!(app.copy.copy_mode);
     let mut alternate_bytes = text_checkpoint("alternate", 1);
     alternate_bytes[80] = 1;
     let alternate = decode(&alternate_bytes).unwrap();
     app.load_screen_with_wraps(target(1), 2, &alternate, Some(&wraps))
         .unwrap();
-    assert!(!app.copy_mode);
+    assert!(!app.copy.copy_mode);
 
     let mut tab_layout = one_pane(3);
     tab_layout.rows = 23;
@@ -1285,20 +1291,20 @@ fn keyboard_copy_cancels_before_buffer_route_or_modal_identity_changes() {
     let (index, route, _) = workspace_catalog();
     app.install_workspace_index(index, route);
     feed(&mut app, &mut fake, b"\x02c");
-    assert!(app.copy_mode);
+    assert!(app.copy.copy_mode);
     let (next_index, _, next_route) = workspace_catalog();
     app.install_workspace_index(next_index, next_route);
-    assert!(!app.copy_mode);
+    assert!(!app.copy.copy_mode);
 
     let (base_index, base_route, _) = workspace_catalog();
     app.install_workspace_index(base_index, base_route);
     feed(&mut app, &mut fake, b"\x02c");
-    assert!(app.copy_mode);
+    assert!(app.copy.copy_mode);
     app.open_for_focused(
         Instant::now(),
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
     );
-    assert!(!app.copy_mode);
+    assert!(!app.copy.copy_mode);
     assert!(app.menu_open());
     assert!(app.take_copy_text().is_none());
     assert!(fake.keys.is_empty() && fake.pastes.is_empty());
@@ -1334,11 +1340,11 @@ fn ordinary_alternate_screen_revision_preserves_frozen_selection_and_view_epoch(
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
-    assert!(app.selection.is_some());
+    assert!(app.copy.selection.is_some());
 
     app.load_screen_with_wraps(target(1), 2, &decoded, Some(&wraps))
         .unwrap();
-    assert!(app.selection.is_some());
+    assert!(app.copy.selection.is_some());
     assert_eq!(
         app.screens
             .iter()
@@ -1613,7 +1619,7 @@ fn zoom_projection_keeps_full_target_registry_and_hidden_screen_updates() {
         .unwrap();
     feed(&mut app, &mut Fake::default(), b"\x1b[<0;2;2M");
     assert_eq!(
-        app.selection.as_ref().map(|drag| drag.anchor),
+        app.copy.selection.as_ref().map(|drag| drag.anchor),
         Some(Point { row: 0, column: 0 })
     );
     app.cancel_selection();
@@ -1692,7 +1698,7 @@ fn disconnected_state_is_visible_and_blocks_pane_mutations_until_authoritative_r
     assert!(!app.confirm_open());
 
     feed(&mut app, &mut fake, b"\x02s");
-    let menu = app.actions_menu.unwrap();
+    let menu = app.interaction.actions_menu.unwrap();
     assert_eq!(
         menu.model.item(0).unwrap().availability,
         Availability::Disabled(DisabledReason::Disconnected)
@@ -1780,7 +1786,7 @@ fn unknown_operation_result_and_escape_never_auto_submit_again() {
     install_operations_view(&mut app, operations_view(two_panes(), None));
     feed(&mut app, &mut fake, b"\x02m\x1b");
     assert!(fake.pane_operations.is_empty());
-    assert_eq!(app.pane_mode, None);
+    assert_eq!(app.interaction.pane_mode, None);
 
     feed(&mut app, &mut fake, b"\x02z");
     let (id, action) = app.pending_pane_operation.unwrap();
@@ -1826,9 +1832,9 @@ fn divider_preview_cancels_on_host_resize_and_ctrl_x_still_detaches() {
     let mut fake = Fake::default();
     install_operations_view(&mut app, operations_view(two_panes(), None));
     feed(&mut app, &mut fake, b"\x02e\x1b[C");
-    assert!(app.pane_mode.is_some());
+    assert!(app.interaction.pane_mode.is_some());
     app.set_host(30, 100);
-    assert!(app.pane_mode.is_none());
+    assert!(app.interaction.pane_mode.is_none());
     assert!(fake.pane_operations.is_empty());
     assert_eq!(feed(&mut app, &mut fake, b"\x18"), Flow::Quit);
     assert!(fake.pane_operations.is_empty());
@@ -1840,9 +1846,9 @@ fn route_switch_clears_old_operation_view_and_accepts_lower_workspace_revision()
     let mut fake = Fake::default();
     install_operations_view(&mut app, operations_view(two_panes(), None));
     feed(&mut app, &mut fake, b"\x02m");
-    assert!(app.pane_mode.is_some());
+    assert!(app.interaction.pane_mode.is_some());
     app.begin_route_switch(Instant::now());
-    assert!(app.pane_mode.is_none());
+    assert!(app.interaction.pane_mode.is_none());
     assert!(app.pane_operations.is_none());
     assert!(app.pending_pane_operation.is_none());
 
@@ -2118,20 +2124,20 @@ fn workspace_header_picker_and_root_rows_stay_local_and_aligned() {
     // Header click opens the chooser and never focuses a pane or sends keys.
     feed(&mut app, &mut fake, b"\x1b[<0;2;1M\x1b[<0;2;1m");
     assert_eq!(app.focus(), Some(target(1)));
-    assert!(app.picker_selection.is_some());
+    assert!(app.workspace.picker_selection.is_some());
     assert!(fake.keys.is_empty());
     assert!(fake.pastes.is_empty());
 
     // Picker rows are local and Enter requests the typed project/tab pair.
     feed(&mut app, &mut fake, b"\x1b[B\r");
     assert_eq!(app.take_route_request(), Some(next));
-    assert!(app.route_switching);
+    assert!(app.workspace.route_switching);
     assert!(fake.keys.is_empty());
     assert!(fake.pastes.is_empty());
 
     // A controller preparation failure keeps the same App usable.
     app.finish_route_switch(true, Instant::now());
-    assert!(!app.route_switching);
+    assert!(!app.workspace.route_switching);
     assert!(!app.nav_active());
     feed(&mut app, &mut fake, b"z");
     app.flush(Instant::now(), &mut fake);
@@ -2155,7 +2161,7 @@ fn route_selection_freezes_unsent_effects_copy_and_allows_local_detach_resize() 
     app.install_workspace_index(index, current);
     app.set_layout(two_panes());
     feed(&mut app, &mut fake, b"unsent");
-    app.pending_copy = Some("private selection".to_owned());
+    app.copy.pending_copy = Some("private selection".to_owned());
 
     let column = (0..81)
         .find(|column| {
@@ -2167,10 +2173,10 @@ fn route_selection_freezes_unsent_effects_copy_and_allows_local_detach_resize() 
     let click = format!("\x1b[<0;{};1M\x1b[<0;{};1m", column + 1, column + 1);
     feed(&mut app, &mut fake, click.as_bytes());
     assert_eq!(app.take_route_request(), Some(next));
-    assert!(app.route_switching);
+    assert!(app.workspace.route_switching);
     assert_eq!(app.pending_len, 0);
-    assert!(app.selection.is_none());
-    assert!(app.pending_copy.is_none());
+    assert!(app.copy.selection.is_none());
+    assert!(app.copy.pending_copy.is_none());
     assert!(
         fake.keys.is_empty(),
         "unsent keys are abandoned before effects"
@@ -2200,9 +2206,9 @@ fn choosing_current_route_closes_picker_without_freezing_or_requesting() {
     let mut fake = Fake::default();
     app.install_workspace_index(index, current);
     feed(&mut app, &mut fake, b"\x02w\r");
-    assert!(app.picker_selection.is_none());
+    assert!(app.workspace.picker_selection.is_none());
     assert_eq!(app.take_route_request(), None);
-    assert!(!app.route_switching);
+    assert!(!app.workspace.route_switching);
     assert!(!app.nav_active());
     assert!(fake.keys.is_empty());
 }
@@ -2225,7 +2231,7 @@ fn header_row_zero_has_no_pane_row_or_child_effects() {
     );
     assert!(fake.keys.is_empty() && fake.pastes.is_empty());
     assert!(fake.splits.is_empty() && fake.closes.is_empty() && fake.scrolls.is_empty());
-    assert!(app.selection.is_none());
+    assert!(app.copy.selection.is_none());
 }
 
 #[test]
@@ -2250,7 +2256,7 @@ fn picker_scroll_tracks_short_viewport_and_hit_rows() {
     app.install_workspace_index(index, current);
     app.set_host(6, 30); // short, narrow host: four route rows below the title
     feed(&mut app, &mut fake, b"\x02w\x1b[B\x1b[B\x1b[B\x1b[B");
-    assert_eq!(app.picker_selection, Some(selected));
+    assert_eq!(app.workspace.picker_selection, Some(selected));
     let (top, rows) = app.picker_screen_geometry().unwrap();
     assert_eq!(rows, 5);
     assert_eq!(app.picker_route_at_row(rows - 2), Some(selected));
@@ -2264,13 +2270,13 @@ fn catalog_refresh_preserves_route_freeze_request_and_valid_chooser() {
     let (index, current, next) = workspace_catalog();
     let mut app = App::new(24, 81).unwrap();
     app.install_workspace_index(index.clone(), current);
-    app.picker_selection = Some(next);
-    app.route_request = Some(next);
-    app.route_switching = true;
+    app.workspace.picker_selection = Some(next);
+    app.workspace.route_request = Some(next);
+    app.workspace.route_switching = true;
 
     assert!(app.update_workspace_catalog(index));
-    assert_eq!(app.picker_selection, Some(next));
-    assert_eq!(app.route_request, Some(next));
+    assert_eq!(app.workspace.picker_selection, Some(next));
+    assert_eq!(app.workspace.route_request, Some(next));
     assert!(app.route_switching());
 
     let mut refreshed = WorkspaceIndex::new();
@@ -2278,9 +2284,9 @@ fn catalog_refresh_preserves_route_freeze_request_and_valid_chooser() {
         .add_project(current.project, "Editors", current.tab, "Main")
         .unwrap();
     assert!(app.update_workspace_catalog(refreshed));
-    assert_eq!(app.current_route, Some(current));
-    assert_eq!(app.picker_selection, Some(current));
-    assert_eq!(app.route_request, Some(next));
+    assert_eq!(app.workspace.current_route, Some(current));
+    assert_eq!(app.workspace.picker_selection, Some(current));
+    assert_eq!(app.workspace.route_request, Some(next));
     assert!(app.route_switching());
 
     // Invalid active-route snapshots do not replace the last valid catalog.
@@ -2337,7 +2343,7 @@ fn recovery_availability_skips_picker_header_help_and_preparing_events() {
     feed(&mut app, &mut fake, b"\x1b[<2;2;1M");
     assert_eq!(fake.recovery_checks, 0);
     feed(&mut app, &mut fake, b"\x1b");
-    app.picker_selection = Some(next);
+    app.workspace.picker_selection = Some(next);
     feed(&mut app, &mut fake, b"\r");
     assert!(app.route_switching());
     feed(&mut app, &mut fake, b"\x1b[<2;2;1M");
@@ -2373,7 +2379,10 @@ fn header_composes_at_screen_row_zero_and_selection_uses_root_coordinates() {
     feed(&mut app, &mut fake, b"\x02?");
     feed(&mut app, &mut fake, b"\x1b[<0;2;1M\x1b[<0;2;1m");
     assert!(app.help_open());
-    assert!(app.picker_selection.is_none(), "help owns header clicks");
+    assert!(
+        app.workspace.picker_selection.is_none(),
+        "help owns header clicks"
+    );
     let rendered = screen_text(&app);
     let lines: Vec<_> = rendered.lines().collect();
     assert!(lines[0].contains("Editors"), "{}", lines[0]);
@@ -2385,10 +2394,11 @@ fn header_composes_at_screen_row_zero_and_selection_uses_root_coordinates() {
     // Screen row 0 is reserved; screen row 2 is content row 0 after the
     // one-row header and one-cell pane inset are both removed.
     feed(&mut app, &mut fake, b"\x1b[<0;2;1M\x1b[<0;2;1m");
-    assert!(app.selection.is_none());
+    assert!(app.copy.selection.is_none());
     feed(&mut app, &mut fake, b"\x1b");
     feed(&mut app, &mut fake, b"\x1b[<0;2;3M");
     let drag = app
+        .copy
         .selection
         .as_ref()
         .expect("content click starts selection");
@@ -3712,7 +3722,7 @@ fn scrollbar_is_in_right_padding_and_selection_cannot_copy_it() {
     assert!(parser.screen().contents().contains("history text"));
     assert_eq!(app.screens[0].history.columns(), 79);
     app.begin_selection(target(1), 80, 10, Instant::now());
-    assert!(app.selection.is_none());
+    assert!(app.copy.selection.is_none());
 }
 
 #[test]
@@ -4052,7 +4062,7 @@ fn pointer_menu_cancel_is_mouse_only_and_never_sends_child_input() {
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
-    assert!(app.actions_menu.is_some());
+    assert!(app.interaction.actions_menu.is_some());
     let cancel = parsed_label_position(&app, "Cancel").unwrap();
     let event = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -4066,7 +4076,7 @@ fn pointer_menu_cancel_is_mouse_only_and_never_sends_child_input() {
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
-    assert!(app.actions_menu.is_none());
+    assert!(app.interaction.actions_menu.is_none());
     assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
 }
 
@@ -4192,7 +4202,7 @@ fn pointer_divider_cancellation_clears_preview_and_cannot_later_commit_it() {
             Availability::Enabled,
             &mut fake,
         );
-        assert!(app.pointer_divider.is_none() && app.pane_mode.is_none());
+        assert!(app.pointer_divider.is_none() && app.interaction.pane_mode.is_none());
         feed(&mut app, &mut fake, b"\x1b[<0;44;6m");
         assert!(fake.pane_operations.is_empty());
     }
@@ -4207,7 +4217,7 @@ fn pointer_divider_cancellation_clears_preview_and_cannot_later_commit_it() {
     alternate[80] = 1;
     app.load_screen(target(1), 2, &decode(&alternate).unwrap())
         .unwrap();
-    assert!(app.pointer_divider.is_none() && app.pane_mode.is_none());
+    assert!(app.pointer_divider.is_none() && app.interaction.pane_mode.is_none());
     feed(&mut app, &mut fake, b"\r");
     assert!(
         fake.pane_operations.is_empty(),
@@ -4223,7 +4233,10 @@ fn pointer_divider_clamps_sparse_motion_and_unchanged_release_does_nothing() {
     feed(&mut app, &mut fake, b"\x1b[<0;41;6M\x1b[<0;41;6m");
     assert!(fake.pane_operations.is_empty());
     for requested in [0, 80, u16::MAX] {
-        let span = app.clamp_divider_span(target(1), 2, 0, requested).unwrap();
+        let span = app
+            .interaction_context()
+            .clamp_divider_span(target(1), 2, 0, requested)
+            .unwrap();
         assert!((22..=58).contains(&span));
         assert!(app.divider_value_valid(target(1), 2, 0, span));
     }
@@ -4420,7 +4433,7 @@ fn every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height() {
                 );
                 let mut visited = std::collections::BTreeSet::new();
                 for _ in 0..4 {
-                    let (start, end) = app.actions_page(app.actions_menu.unwrap());
+                    let (start, end) = app.actions_page(app.interaction.actions_menu.unwrap());
                     visited.extend(start..end);
                     assert!(parsed_label_position(&app, "[Cancel]").is_some());
                     if start <= 9 && 9 < end {
@@ -4462,7 +4475,7 @@ fn every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height() {
                     x + 1,
                     y,
                 );
-                assert!(app.actions_menu.is_none());
+                assert!(app.interaction.actions_menu.is_none());
                 assert!(
                     fake.keys.is_empty()
                         && fake.pastes.is_empty()
@@ -4568,7 +4581,7 @@ fn disabled_split_click_keeps_selection_so_its_reason_remains_visible() {
         split_y,
     );
 
-    assert_eq!(app.actions_menu.unwrap().selected, 0);
+    assert_eq!(app.interaction.actions_menu.unwrap().selected, 0);
     assert!(screen_text(&app).contains("Need 45 cols; have 40"));
     assert!(fake.splits.is_empty());
 }
@@ -4588,7 +4601,7 @@ fn more_hit_region_starts_on_the_rendered_label_boundary() {
         first_more_x,
         first_more_y,
     );
-    assert_eq!(app.actions_menu.unwrap().selected, 4);
+    assert_eq!(app.interaction.actions_menu.unwrap().selected, 4);
 
     let (more_x, more_y) = parsed_label_position(&app, "[More]").unwrap();
     gesture(
@@ -4599,7 +4612,7 @@ fn more_hit_region_starts_on_the_rendered_label_boundary() {
         more_y,
     );
     assert_eq!(
-        app.actions_menu.unwrap().selected,
+        app.interaction.actions_menu.unwrap().selected,
         4,
         "preceding space is not More"
     );
@@ -4611,7 +4624,7 @@ fn more_hit_region_starts_on_the_rendered_label_boundary() {
         more_y,
     );
     assert_eq!(
-        app.actions_menu.unwrap().selected,
+        app.interaction.actions_menu.unwrap().selected,
         8,
         "first label cell pages forward"
     );
@@ -4628,7 +4641,7 @@ fn actions_keyboard_cancel_highlight_matches_its_behavior() {
     }
     assert!(render_text(&app).contains("> [Cancel]"));
     feed(&mut app, &mut fake, b"\r");
-    assert!(app.actions_menu.is_none());
+    assert!(app.interaction.actions_menu.is_none());
     assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
 }
 
@@ -4688,7 +4701,7 @@ fn pane_menu_remains_pointer_reachable_during_keyboard_copy_mode() {
     app.load_screen_with_wraps(target(1), 1, &decode(&data).unwrap(), Some(&[false; 22]))
         .unwrap();
     feed(&mut app, &mut fake, b"\x02c");
-    assert!(app.copy_mode);
+    assert!(app.copy.copy_mode);
     let (x, y) = parsed_label_position(&app, "[Menu]").unwrap();
     gesture(
         &mut app,
@@ -4697,7 +4710,7 @@ fn pane_menu_remains_pointer_reachable_during_keyboard_copy_mode() {
         x + 1,
         y,
     );
-    assert!(!app.copy_mode && app.actions_menu.is_some());
+    assert!(!app.copy.copy_mode && app.interaction.actions_menu.is_some());
     assert!(fake.keys.is_empty() && fake.pastes.is_empty() && app.take_copy_text().is_none());
 }
 
@@ -4771,8 +4784,8 @@ fn metadata_result_for_another_route_is_ignored() {
 
     assert!(!app.accept_metadata_result(request_id, other, 5));
     assert_eq!(app.current_route(), Some(current));
-    assert_eq!(app.workspace_revision, Some(4));
-    assert!(app.pending_metadata.is_some());
+    assert_eq!(app.workspace.workspace_revision, Some(4));
+    assert!(app.workspace.pending_metadata.is_some());
 }
 
 #[test]
@@ -4858,7 +4871,7 @@ fn pane_menu_and_close_route_the_exact_shared_control_edges() {
         controls.menu.x - 1,
         controls.menu.y,
     );
-    assert!(app.actions_menu.is_none());
+    assert!(app.interaction.actions_menu.is_none());
     gesture(
         &mut app,
         &mut fake,
@@ -4866,7 +4879,7 @@ fn pane_menu_and_close_route_the_exact_shared_control_edges() {
         controls.menu.x + controls.menu.columns,
         controls.menu.y,
     );
-    assert!(app.actions_menu.is_none());
+    assert!(app.interaction.actions_menu.is_none());
 
     gesture(
         &mut app,
@@ -4875,14 +4888,14 @@ fn pane_menu_and_close_route_the_exact_shared_control_edges() {
         controls.menu.x + controls.menu.columns - 1,
         controls.menu.y,
     );
-    assert!(app.actions_menu.is_some());
+    assert!(app.interaction.actions_menu.is_some());
     app.handle_event(
         &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         Instant::now(),
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         &mut fake,
     );
-    assert!(app.actions_menu.is_none());
+    assert!(app.interaction.actions_menu.is_none());
 
     gesture(
         &mut app,
@@ -4891,7 +4904,7 @@ fn pane_menu_and_close_route_the_exact_shared_control_edges() {
         controls.close.x - 1,
         controls.close.y,
     );
-    assert!(!app.confirm.is_open());
+    assert!(!app.interaction.confirm.is_open());
     gesture(
         &mut app,
         &mut fake,
@@ -4899,7 +4912,7 @@ fn pane_menu_and_close_route_the_exact_shared_control_edges() {
         controls.close.x + controls.close.columns,
         controls.close.y,
     );
-    assert!(!app.confirm.is_open());
+    assert!(!app.interaction.confirm.is_open());
     gesture(
         &mut app,
         &mut fake,
@@ -4907,8 +4920,8 @@ fn pane_menu_and_close_route_the_exact_shared_control_edges() {
         controls.close.x + controls.close.columns - 1,
         controls.close.y,
     );
-    assert!(app.confirm.is_open());
-    assert_eq!(app.confirm.intent().unwrap().target, target(1));
+    assert!(app.interaction.confirm.is_open());
+    assert_eq!(app.interaction.confirm.intent().unwrap().target, target(1));
     assert!(fake.closes.is_empty());
 }
 
@@ -5038,7 +5051,10 @@ fn pane_menu_entry_points_share_captured_model_without_stealing_focus() {
                 feed(&mut app, &mut fake, b"\x02s");
             }
         }
-        let menu = app.actions_menu.expect("every entry point opens actions");
+        let menu = app
+            .interaction
+            .actions_menu
+            .expect("every entry point opens actions");
         assert_eq!(menu.target, target(2));
         assert_eq!(menu.revision, 2);
         models.push(menu.model);
@@ -5065,7 +5081,7 @@ fn pane_menu_opening_release_and_outside_click_are_consumed_without_focus_change
         controls.menu.x + 1,
         controls.menu.y,
     );
-    assert!(app.actions_menu.is_some());
+    assert!(app.interaction.actions_menu.is_some());
     gesture(
         &mut app,
         &mut fake,
@@ -5074,7 +5090,7 @@ fn pane_menu_opening_release_and_outside_click_are_consumed_without_focus_change
         controls.menu.y,
     );
     assert!(
-        app.actions_menu.is_some(),
+        app.interaction.actions_menu.is_some(),
         "opening release cannot dismiss or activate"
     );
     assert!(fake.splits.is_empty() && fake.pane_operations.is_empty());
@@ -5088,7 +5104,7 @@ fn pane_menu_opening_release_and_outside_click_are_consumed_without_focus_change
         8,
         20,
     );
-    assert!(app.actions_menu.is_none());
+    assert!(app.interaction.actions_menu.is_none());
     gesture(
         &mut app,
         &mut fake,
@@ -5097,7 +5113,7 @@ fn pane_menu_opening_release_and_outside_click_are_consumed_without_focus_change
         20,
     );
     assert_eq!(app.focus(), Some(target(1)));
-    assert!(app.selection.is_none());
+    assert!(app.copy.selection.is_none());
     assert!(fake.keys.is_empty() && fake.pastes.is_empty());
 }
 
@@ -5113,7 +5129,10 @@ fn keyboard_divider_mode_cancels_on_focus_resize_layout_route_and_buffer_changes
                 .unwrap();
         }
         app.open_divider_mode(Instant::now(), &mut fake);
-        assert!(matches!(app.pane_mode, Some(PaneMode::Divider { .. })));
+        assert!(matches!(
+            app.interaction.pane_mode,
+            Some(PaneMode::Divider { .. })
+        ));
         match invalidation {
             0 => {
                 app.handle_event(
@@ -5151,7 +5170,7 @@ fn keyboard_divider_mode_cancels_on_focus_resize_layout_route_and_buffer_changes
                 app.set_layout(replacement);
             }
         }
-        assert!(app.pane_mode.is_none());
+        assert!(app.interaction.pane_mode.is_none());
         assert!(app.pointer_divider.is_none());
         app.handle_event(
             &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -5196,7 +5215,7 @@ fn divider_release_rejects_a_revision_that_changed_after_preview() {
         44,
         5,
     );
-    assert!(app.pointer_divider.is_none() && app.pane_mode.is_none());
+    assert!(app.pointer_divider.is_none() && app.interaction.pane_mode.is_none());
     assert!(fake.pane_operations.is_empty());
     assert!(fake.keys.is_empty() && fake.pastes.is_empty());
 }
@@ -5294,7 +5313,11 @@ fn shared_menu_close_uses_its_captured_pane_and_revision_without_refocusing() {
         x + 1,
         y,
     );
-    let intent = app.confirm.intent().expect("captured close confirmation");
+    let intent = app
+        .interaction
+        .confirm
+        .intent()
+        .expect("captured close confirmation");
     assert_eq!(intent.target, target(2));
     assert_eq!(intent.expected_layout_revision, 2);
     assert_eq!(intent.position, 2);
@@ -5314,6 +5337,7 @@ fn reordered_keyboard_menu_reaches_close_after_split_resize_and_copy() {
         b"\x02s\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r",
     );
     let intent = app
+        .interaction
         .confirm
         .intent()
         .expect("Close pane follows the core actions");
@@ -5337,7 +5361,7 @@ fn plus_creates_one_intent_and_returns_the_exact_ready_route() {
     let project = current.project;
     assert_eq!(app.take_create_request(), Some((project, None)));
     assert!(app.take_create_request().is_none());
-    assert!(app.pending_create.is_some());
+    assert!(app.workspace.pending_create.is_some());
 
     let ready_route = WorkspaceRouteId {
         project,
@@ -5407,7 +5431,7 @@ fn plus_explains_eight_tab_capacity_without_admitting_a_create() {
 
     feed(&mut app, &mut fake, b"\x02+");
 
-    assert_eq!(app.pending_create, None);
+    assert_eq!(app.workspace.pending_create, None);
     assert_eq!(
         app.status.map(|(message, _)| message),
         Some("project tab limit reached (8)")
@@ -5436,13 +5460,17 @@ fn active_tab_click_and_keyboard_menu_open_rename_and_close_actions() {
         column,
         0,
     );
-    assert!(matches!(app.tab_dialog, Some(TabDialog::Actions { route, .. }) if route == current));
+    assert!(
+        matches!(app.workspace.tab_dialog, Some(TabDialog::Actions { route, .. }) if route == current)
+    );
     assert!(fake.keys.is_empty());
 
     feed(&mut app, &mut fake, b"r");
-    assert!(matches!(app.tab_dialog, Some(TabDialog::Rename { route, .. }) if route == current));
+    assert!(
+        matches!(app.workspace.tab_dialog, Some(TabDialog::Rename { route, .. }) if route == current)
+    );
     feed(&mut app, &mut fake, b"\x1b");
-    assert_eq!(app.tab_dialog, None);
+    assert_eq!(app.workspace.tab_dialog, None);
 }
 
 #[test]
@@ -5463,7 +5491,7 @@ fn rename_enter_saves_once_and_mouse_cancel_discards_the_draft() {
         }) if route == current && name == "MainReview"
     ));
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Rename { saving: true, .. })
     ));
     assert!(app.take_workspace_metadata_mutation().is_none());
@@ -5497,7 +5525,7 @@ fn rename_enter_saves_once_and_mouse_cancel_discards_the_draft() {
         geometry.x + 10,
         geometry.y + 4,
     );
-    assert_eq!(cancel.tab_dialog, None);
+    assert_eq!(cancel.workspace.tab_dialog, None);
     assert!(cancel.take_workspace_metadata_mutation().is_none());
 }
 
@@ -5511,7 +5539,7 @@ fn invalid_and_oversized_rename_drafts_never_queue_metadata() {
     feed(&mut app, &mut fake, b"\x02tr\x7f\x7f\x7f\x7f \r");
     assert!(app.take_workspace_metadata_mutation().is_none());
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Rename { error: Some(_), .. })
     ));
 
@@ -5519,7 +5547,7 @@ fn invalid_and_oversized_rename_drafts_never_queue_metadata() {
     feed(&mut app, &mut fake, b"\r");
     assert!(app.take_workspace_metadata_mutation().is_none());
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Rename {
             draft,
             error: Some("Tab names are limited to 64 UTF-8 bytes"),
@@ -5557,7 +5585,7 @@ fn rename_conflict_keeps_the_edit_and_uses_the_new_revision() {
         Instant::now(),
     ));
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Rename {
             route,
             expected_revision: 6,
@@ -5566,7 +5594,7 @@ fn rename_conflict_keeps_the_edit_and_uses_the_new_revision() {
             ..
         }) if route == current && draft == "MainLocal"
     ));
-    assert_eq!(app.workspace_revision, Some(6));
+    assert_eq!(app.workspace.workspace_revision, Some(6));
 }
 
 #[test]
@@ -5580,7 +5608,7 @@ fn close_tab_defaults_to_cancel_and_confirmation_captures_one_exact_route() {
 
     feed(&mut app, &mut fake, b"\x02tx");
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Close {
             close_selected: false,
             ..
@@ -5594,12 +5622,12 @@ fn close_tab_defaults_to_cancel_and_confirmation_captures_one_exact_route() {
         geometry.x + 15,
         geometry.y + 3,
     );
-    assert_eq!(app.tab_dialog, None);
+    assert_eq!(app.workspace.tab_dialog, None);
     assert!(app.take_workspace_metadata_mutation().is_none());
 
     feed(&mut app, &mut fake, b"\x02tx");
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Close {
             close_selected: false,
             ..
@@ -5607,11 +5635,11 @@ fn close_tab_defaults_to_cancel_and_confirmation_captures_one_exact_route() {
     ));
     feed(&mut app, &mut fake, b"\r");
     assert_eq!(app.take_workspace_metadata_mutation(), None);
-    assert_eq!(app.tab_dialog, None);
+    assert_eq!(app.workspace.tab_dialog, None);
 
     feed(&mut app, &mut fake, b"\x02tx\t");
     assert!(matches!(
-        app.tab_dialog,
+        app.workspace.tab_dialog,
         Some(TabDialog::Close {
             close_selected: true,
             ..
@@ -5679,7 +5707,7 @@ fn all_tabs_search_reports_empty_results_and_supports_mouse_selection() {
     feed(&mut app, &mut fake, b"\x15");
     assert!(!app.picker_routes().is_empty());
     feed(&mut app, &mut fake, &[b'x'; 100]);
-    assert_eq!(app.picker_filter.len(), TAB_FILTER_MAX_BYTES);
+    assert_eq!(app.workspace.picker_filter.len(), TAB_FILTER_MAX_BYTES);
 
     let (top, _) = app.picker_screen_geometry().unwrap();
     let clear = app.picker_clear_rect().unwrap();
@@ -5690,7 +5718,7 @@ fn all_tabs_search_reports_empty_results_and_supports_mouse_selection() {
         clear.x,
         top,
     );
-    assert!(app.picker_filter.is_empty());
+    assert!(app.workspace.picker_filter.is_empty());
 
     let (top, _) = app.picker_screen_geometry().unwrap();
     gesture(
@@ -5744,7 +5772,7 @@ fn late_rename_result_cannot_change_a_replacement_route() {
         Instant::now(),
     ));
     assert_eq!(app.current_route(), Some(replacement));
-    assert_eq!(app.workspace_revision, Some(5));
+    assert_eq!(app.workspace.workspace_revision, Some(5));
 }
 
 #[test]
@@ -5825,11 +5853,11 @@ fn inactive_tab_close_requires_opening_the_tab_so_generation_is_bound() {
     app.set_workspace_revision(4);
     app.set_layout(one_pane(1));
     app.begin_tab_close(other);
-    assert!(app.tab_dialog.is_none());
+    assert!(app.workspace.tab_dialog.is_none());
     assert_eq!(status(&app), Some("open this tab first to close it"));
 
     app.begin_tab_close(current);
-    match app.tab_dialog {
+    match app.workspace.tab_dialog {
         Some(TabDialog::Close { expected, .. }) => {
             assert_eq!(expected.route, current);
             assert!(expected.generation.is_some());
@@ -5847,7 +5875,7 @@ fn late_rename_success_does_not_close_a_newer_dialog() {
     let request_id = MetadataRequestId(9);
     app.track_metadata_request(request_id, current, 4);
     // The user dismissed the saving rename and opened tab actions instead.
-    app.tab_dialog = Some(TabDialog::Actions {
+    app.workspace.tab_dialog = Some(TabDialog::Actions {
         route: current,
         selected: 0,
     });
@@ -5863,7 +5891,10 @@ fn late_rename_success_does_not_close_a_newer_dialog() {
         Instant::now(),
     );
     assert!(applied);
-    assert!(matches!(app.tab_dialog, Some(TabDialog::Actions { .. })));
+    assert!(matches!(
+        app.workspace.tab_dialog,
+        Some(TabDialog::Actions { .. })
+    ));
 }
 
 #[test]
@@ -5888,7 +5919,10 @@ fn tab_modals_stay_compact_and_ignore_clicks_outside_their_bounds() {
         0,
         bounds.y + 2,
     );
-    assert!(matches!(app.tab_dialog, Some(TabDialog::Actions { .. })));
+    assert!(matches!(
+        app.workspace.tab_dialog,
+        Some(TabDialog::Actions { .. })
+    ));
     gesture(
         &mut app,
         &mut fake,
@@ -5896,7 +5930,10 @@ fn tab_modals_stay_compact_and_ignore_clicks_outside_their_bounds() {
         bounds.x + 2,
         bounds.y + 5,
     );
-    assert!(matches!(app.tab_dialog, Some(TabDialog::Rename { .. })));
+    assert!(matches!(
+        app.workspace.tab_dialog,
+        Some(TabDialog::Rename { .. })
+    ));
     assert_eq!(app.tab_dialog_geometry().unwrap().columns, 56);
     feed(&mut app, &mut fake, b"\x1b");
     feed(&mut app, &mut fake, b"\x02w");
