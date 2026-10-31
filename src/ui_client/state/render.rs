@@ -5,6 +5,7 @@ use super::{
     history_label_kind,
     interaction::{
         ActionsMenu, ActionsMenuPage, ConfirmUiGeometry, Interaction, InteractionContext,
+        CONFIRM_PADDED_BUTTON_ROW, CONFIRM_PADDED_ROWS,
     },
     shifted_rect,
     workspace::WorkspaceState,
@@ -48,7 +49,9 @@ impl<'a> RenderView<'a> {
             local: self.local,
             pane_operations: self.pane_operations,
             viewport: self.viewport,
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         }
     }
     fn tabs_layout(&self) -> Option<TabsLayout> {
@@ -58,7 +61,7 @@ impl<'a> RenderView<'a> {
         self.interaction.confirm_ui_geometry(
             rows,
             columns,
-            u16::from(self.workspace.view().workspace_index.is_some()),
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some()),
         )
     }
     fn actions_page_geometry(&self, menu: ActionsMenu) -> Option<ActionsMenuPage> {
@@ -136,7 +139,7 @@ impl<'a> RenderView<'a> {
                 .collect::<Vec<_>>()
         });
         let header_enabled = self.workspace.view().workspace_index.is_some();
-        let header_offset = if header_enabled { 1 } else { 0 };
+        let header_offset = panelink::workspace_tabs::header_rows(header_enabled);
         // Both legacy attach and workspace tabs use the bounded render area,
         // even when the physical terminal is larger than the screen caches.
         let (host_rows, host_columns) = self.screen_viewport;
@@ -267,7 +270,8 @@ impl<'a> RenderView<'a> {
         let menu_lines = self.interaction.view().menu.overlay_lines();
         let pressed = self.modal_pressed;
         let confirm = self.confirm_ui_geometry(view_rows, view_columns);
-        let confirm_text: String;
+        let mut confirm_text: [String; CONFIRM_PADDED_ROWS as usize] =
+            std::array::from_fn(|_| String::new());
         let mut lines = [OverlayLine {
             text: "",
             style: OverlayStyle::Normal,
@@ -387,33 +391,12 @@ impl<'a> RenderView<'a> {
             for (index, text) in action_text.iter().enumerate().take(action_count) {
                 lines[index] = OverlayLine {
                     text,
-                    style: if pressed.is_some_and(|p| {
-                        p.kind == 2
-                            && p.bounds.y
-                                == page.rect.y
-                                    + index as u16
-                                    + u16::from(self.workspace.view().workspace_index.is_some())
-                    }) {
-                        OverlayStyle::Status
-                    } else if index == 0 {
-                        OverlayStyle::Selected
+                    style: if page.bordered
+                        && (index == 0 || index + 1 == action_count || index == 5)
+                    {
+                        OverlayStyle::Border
                     } else if index == page.reason_row {
                         OverlayStyle::Status
-                    } else if text.starts_with('>') {
-                        OverlayStyle::Selected
-                    } else if self.interaction.view().actions_menu.is_some_and(|menu| {
-                        (page.start..page.end)
-                            .contains(&(page.start + index.saturating_sub(page.action_row)))
-                            && self
-                                .local_action_item(
-                                    menu,
-                                    page.start + index.saturating_sub(page.action_row),
-                                )
-                                .is_some_and(|(_, _, availability)| {
-                                    availability != Availability::Enabled
-                                })
-                    }) {
-                        OverlayStyle::Disabled
                     } else {
                         OverlayStyle::Normal
                     },
@@ -458,7 +441,9 @@ impl<'a> RenderView<'a> {
                             && p.bounds.y
                                 == rect.y
                                     + index as u16
-                                    + u16::from(self.workspace.view().workspace_index.is_some())
+                                    + panelink::workspace_tabs::header_rows(
+                                        self.workspace.view().workspace_index.is_some(),
+                                    )
                     }) {
                         OverlayStyle::Status
                     } else {
@@ -468,22 +453,39 @@ impl<'a> RenderView<'a> {
             }
             Some((rect, menu_lines.len()))
         } else if let Some(geometry) = confirm {
-            confirm_text = format!(
-                "Close pane {}? {}. (y/n)",
-                geometry.position, geometry.consequence
-            );
-            lines[0] = OverlayLine {
-                text: &confirm_text,
-                style: OverlayStyle::Status,
-            };
-            lines[1] = OverlayLine {
-                text: if self.interaction.view().confirm_close_selected {
-                    "[Close]> [Cancel]"
-                } else {
-                    "[Close] >[Cancel]"
-                },
-                style: OverlayStyle::Normal,
-            };
+            let close_selected = self.interaction.view().confirm_close_selected;
+            if geometry.padded {
+                format_padded_confirm(&geometry, close_selected, &mut confirm_text);
+                for (index, (line, text)) in lines.iter_mut().zip(&confirm_text).enumerate() {
+                    *line = OverlayLine {
+                        text,
+                        style: if index == 0 || index + 1 == confirm_text.len() {
+                            OverlayStyle::Border
+                        } else if index == 2 {
+                            OverlayStyle::Status
+                        } else {
+                            OverlayStyle::Normal
+                        },
+                    };
+                }
+            } else {
+                confirm_text[0] = format!(
+                    "Close pane {}? {}. (y/n)",
+                    geometry.position, geometry.consequence
+                );
+                lines[0] = OverlayLine {
+                    text: &confirm_text[0],
+                    style: OverlayStyle::Status,
+                };
+                lines[1] = OverlayLine {
+                    text: if close_selected {
+                        "[Close]> [Cancel]"
+                    } else {
+                        "[Close] >[Cancel]"
+                    },
+                    style: OverlayStyle::Normal,
+                };
+            }
             Some((geometry.overlay, usize::from(geometry.overlay.rows)))
         } else if let (Some((top, rows)), true) = (
             self.picker_screen_geometry(),
@@ -492,7 +494,7 @@ impl<'a> RenderView<'a> {
             Some((
                 Rect {
                     x: self.picker_horizontal_bounds().start,
-                    y: top.saturating_sub(1),
+                    y: top.saturating_sub(panelink::workspace_tabs::HEADER_ROWS),
                     rows,
                     columns: self.picker_horizontal_bounds().len() as u16,
                 },
@@ -610,9 +612,7 @@ impl<'a> RenderView<'a> {
                         }
                     } else if control.kind == 2 {
                         if let Some(menu) = self.interaction.view().actions_menu {
-                            if control.index == menu.selected
-                                || (control.index == 102 && menu.selected == 12)
-                            {
+                            if control.index == menu.selected {
                                 state = ControlState::Focus;
                             }
                             if let Some((action, _, availability)) =
@@ -770,6 +770,57 @@ fn compose_style(style: MenuStyle) -> OverlayStyle {
         MenuStyle::Status => OverlayStyle::Status,
     }
 }
+/// Fill the bordered, padded pane-close dialog rows. Button columns come from
+/// the same geometry used for hit-testing so pointer targets match the text.
+fn format_padded_confirm(
+    geometry: &ConfirmUiGeometry,
+    close_selected: bool,
+    rows: &mut [String; CONFIRM_PADDED_ROWS as usize],
+) {
+    let width = usize::from(geometry.overlay.columns);
+    if width < 2 {
+        return;
+    }
+    let inner = width - 2;
+    let border = format!("+{}+", "-".repeat(inner));
+    let boxed = |text: &str| -> String {
+        let mut row = vec![b' '; width];
+        row[0] = b'|';
+        row[width - 1] = b'|';
+        for (cell, byte) in row[CONFIRM_TEXT_INDENT..width - 1]
+            .iter_mut()
+            .zip(text.bytes())
+        {
+            *cell = byte;
+        }
+        String::from_utf8(row).unwrap_or_default()
+    };
+    rows[0] = border.clone();
+    rows[1] = boxed("");
+    rows[2] = boxed(&format!("Close pane {}?", geometry.position));
+    rows[3] = boxed(&format!("{}.", geometry.consequence));
+    rows[4] = boxed("");
+    let mut buttons = boxed("").into_bytes();
+    let place = |row: &mut [u8], x: u16, marker: bool, label: &str| {
+        let start = usize::from(x - geometry.overlay.x);
+        if start == 0 || start + label.len() >= width {
+            return;
+        }
+        row[start - 1] = if marker { b'>' } else { b' ' };
+        row[start..start + label.len()].copy_from_slice(label.as_bytes());
+    };
+    place(&mut buttons, geometry.close.x, close_selected, "[Close]");
+    place(&mut buttons, geometry.cancel.x, !close_selected, "[Cancel]");
+    rows[CONFIRM_PADDED_BUTTON_ROW as usize] = String::from_utf8(buttons).unwrap_or_default();
+    rows[6] = boxed("");
+    rows[7] = boxed(CONFIRM_KEY_HINT);
+    rows[8] = border;
+}
+
+/// Columns from the dialog's left border to its text.
+const CONFIRM_TEXT_INDENT: usize = 4;
+const CONFIRM_KEY_HINT: &str = "y: close   n/Esc: cancel   Tab: switch";
+
 fn centered_ascii(text: &str, columns: u16) -> String {
     let padding = usize::from(columns).saturating_sub(text.len()) / 2;
     format!("{}{}", " ".repeat(padding), text)

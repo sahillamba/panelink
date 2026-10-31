@@ -32,6 +32,10 @@ The client version (for example `v0.1.6`) is shown in the bottom-right pane
 margin, matching `--version`; it does not identify the running server. The
 render area is bounded to 80 rows by 240 columns, so host size and child PTY
 size can differ; discover pane dimensions through the matching executable's CLI.
+With the project/tab strip (plain `panelink`), the top two host rows are the
+strip and a blank spacer, so the pane root is two rows shorter than the host.
+From 120 columns the strip uses wider margins and gaps; panes at least 40
+columns wide inset their Menu and close controls two cells from the edges.
 
 ## Focus chrome
 
@@ -80,11 +84,16 @@ size can differ; discover pane dimensions through the matching executable's CLI.
 - action **order** and **labels**,
 - **enabled/disabled** state and reasons.
 
-The four split directions are separate rows; an unavailable direction stays
-visible with its reason (size, four-pane capacity, disconnected). Pages group Layout (Split Left/Right/Up/Down and Resize), Copy/History, Close,
-and Secondary (Zoom/Unzoom, Swap, Saved layout, Shortcut help and Detach). Short
-viewports page with Back/More; Cancel stays reachable. Clicking a disabled
-item selects it and shows its reason.
+The menu is one page (no Back/More/Cancel). It opens at the right-click cell,
+below the pane's Menu button, or centred for Ctrl-B `s`. Rows: **Split** with
+Left/Right/Up/Down on one row (one-letter L/R/U/D on narrow views), Zoom pane,
+Swap pane, Copy mode (Back to live in history), a separator, and Close pane.
+Up/Down move between rows, Left/Right between split directions, Tab through
+every item; `l`/`r`/`u`/`d` split directly and `v` still opens the saved
+layout. An unavailable item stays visible and dimmed; selecting or clicking it
+shows its reason in the bottom border (or bottom row on small views).
+Resize divider, Saved layout, Shortcut help and Detach are not pane-menu rows:
+use divider drag or Ctrl-B `e`, and the strip's `≡` menu.
 
 - Opening the menu (press or click) **never activates** an item.
 - Click **outside** dismisses and is **consumed**; it cannot affect content behind it.
@@ -95,8 +104,8 @@ item selects it and shows its reason.
 - A divider drag **previews** locally.
 - Release applies **one absolute resize**; if the position is unchanged, **zero** effect is sent.
 - Host/layout/route changes, Esc and focus loss cancel the gesture; a later
-  Enter cannot commit a cancelled value. Menu → Resize divider and `Ctrl-B e`
-  give keyboard adjustment with the same limits. Never resend an uncertain
+  Enter cannot commit a cancelled value. `Ctrl-B e` gives keyboard and
+  `[-]`/`[+]`/Apply pointer adjustment with the same limits. Never resend an uncertain
   mutation with a new key.
 
 ## Tabs (UX-05c + UX-06)
@@ -104,14 +113,16 @@ item selects it and shows its reason.
 `panelink` with no arguments opens the **selected visible tab** with the project/tab row at the top.
 
 - **Zero visible tabs** shows an interactive **empty state** with clickable `[ New tab (N) ]` and `[ Detach (Ctrl-X) ]`. No process is started. On a non-TTY it prints a notice and exits.
-- **`[+ New]`** (before All tabs at the right of the tab row; `[+]` or `+` on narrow hosts) or Ctrl-B `+` creates one managed **"Shell N"** tab and switches to it.
+- **` + `** (right after the last visible tab) or Ctrl-B `+` creates one managed **"Shell N"** tab and switches to it.
+- **`≡`** (pinned right) opens the global menu: All tabs, Saved layout, Keys & help, Detach.
 - **Capacity**: eight tabs per project.
-- **Tab row**: project left, filled tabs and separate close targets in the middle,
-  New tab then All tabs pinned right. Names shorten before controls disappear.
-  Previous/next buttons appear on roomy hosts (at least 60 columns) with multiple
-  tabs; use All tabs or keyboard navigation for narrow-host overflow.
+- **Tab row**: project left, filled tabs with separate close targets in the
+  middle, `+` after them and `≡` pinned right. Names shorten before controls
+  disappear. Previous/next buttons appear only when tabs overflow (30 or more
+  columns); All tabs in `≡` and Ctrl-B `w`/`n`/`p` also reach hidden tabs.
 
 - **Scrollbar**: the right-margin column stays blank until the pane has retained history; then a dim track and `#` thumb appear.
+- **Tab right-click** or Ctrl-B `t`: New tab, Rename, Close tab.
 - **Rename**: right-click or Ctrl-B `t` → Rename opens a text field with Save/Cancel. Enter saves, Esc cancels. On conflict the edit is preserved and an error is shown.
 - **Close tab**: confirmation with **Cancel** as the default. Close ends the tab's processes. The last tab closed returns to the empty state.
 - Closing a tab requires it to be **open** (the active route). An inactive tab shows: "open this tab first to close it".
@@ -139,7 +150,9 @@ panelink workspace tab close <project-id> <tab-id>
   never `Copied`. Copied text is never shown in labels, status or logs.
 - Pane close (`x`, menu, `Ctrl-B x`) opens a confirmation naming the captured
   pane with "Ends this process" (the last pane explains the workspace ends) and
-  clickable `[Close]` `[Cancel]`. Cancel is selected by default: Enter on the
+  clickable `[Close]` `[Cancel]`. On views of at least 11 rows and 44 columns
+  it is a centred, bordered, padded box (up to 52 columns) with centred buttons
+  and a key hint; smaller views use a compact two-row prompt at the bottom. Cancel is selected by default: Enter on the
   default cancels; Left/Right/Tab move the selection; `y` confirms explicitly;
   `n`/Esc cancel. The opening click/key and key repeats cannot confirm. A layout
   or occupant change cancels the prompt; it never closes a replacement.
@@ -156,8 +169,8 @@ panelink workspace tab close <project-id> <tab-id>
 
 ## Separate tab-close targets
 
-The project selector is left, tabs occupy the middle, and New tab/All tabs stay
-right. Each visible tab has a disjoint close target. Clicking close never selects
+The project selector is left, tabs occupy the middle with `+` after them, and
+the `≡` global menu stays right. Each visible tab has a disjoint close target. Clicking close never selects
 a different tab. An inactive tab reports `open this tab first to close it` until
 its runtime generation can be bound by selecting it. Rename is in Tab actions;
 active-tab click and right-click retain menu access. The final tab leaves an empty

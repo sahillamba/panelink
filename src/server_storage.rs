@@ -112,10 +112,17 @@ fn verify_named_lock(directory: &File, lock: &File) -> io::Result<()> {
     let mut bytes = [0; 24];
     lock.read_exact_at(&mut bytes, 0)?;
     if &bytes[..8] != b"PLLOCK01"
-        || u64::from_be_bytes(bytes[8..16].try_into().unwrap()) != metadata.dev()
         || u64::from_be_bytes(bytes[16..24].try_into().unwrap()) != metadata.ino()
     {
         return Err(invalid());
+    }
+    // macOS assigns `st_dev` when a volume mounts, so the same lock inode can
+    // report a different device number after a reboot. The inode check above
+    // still rejects a copied or replaced lock file; the caller holds the
+    // exclusive lock, so refresh the recorded device in place.
+    if u64::from_be_bytes(bytes[8..16].try_into().unwrap()) != metadata.dev() {
+        lock.write_all_at(&metadata.dev().to_be_bytes(), 8)?;
+        flush(lock)?;
     }
     let named = open_file(directory, "server.lock")?;
     let a = lock.metadata()?;
@@ -761,6 +768,34 @@ mod tests {
         assert_eq!(
             fs::metadata(fixture.0.join("generation")).unwrap().mode() & 0o7777,
             0o600
+        );
+    }
+
+    #[test]
+    fn reboot_device_change_is_refreshed_but_a_foreign_inode_is_rejected() {
+        let fixture = Fixture::new();
+        drop(ServerStorage::initialize_for_test(&fixture.0).unwrap());
+        let path = fixture.0.join("server.lock");
+        let metadata = fs::metadata(&path).unwrap();
+        let lock = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        // Simulate a remount that assigned the volume a new device number.
+        lock.write_all_at(&metadata.dev().wrapping_add(3).to_be_bytes(), 8)
+            .unwrap();
+        drop(lock);
+        let reopened = reopen_after_drop(&fixture.0).unwrap();
+        assert_eq!(reopened.generation(), 2);
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes[8..16], metadata.dev().to_be_bytes());
+        drop(reopened);
+
+        // A different inode still fails closed.
+        let lock = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        lock.write_all_at(&metadata.ino().wrapping_add(1).to_be_bytes(), 16)
+            .unwrap();
+        drop(lock);
+        assert_eq!(
+            reopen_after_drop(&fixture.0).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
         );
     }
 

@@ -215,20 +215,29 @@ pub struct PaneControls {
     pub label: Rect,
 }
 
+/// Pane width from which the Menu and close controls get a two-cell inset.
+pub const SPACIOUS_PANE_CONTROL_COLUMNS: u16 = 40;
+
 /// Returns the menu and close hitboxes for a valid padded pane rectangle.
 ///
 /// The controls occupy only the top padding row and do not change content
 /// geometry. Unpadded recovery panes should not expose controls.
 pub fn pane_controls(rect: Rect) -> Option<PaneControls> {
     content_rect(rect)?;
+    // Wide panes inset both controls one extra cell from the pane edges.
+    let inset = if rect.columns >= SPACIOUS_PANE_CONTROL_COLUMNS {
+        2
+    } else {
+        1
+    };
     let menu = Rect {
-        x: rect.x.checked_add(1)?,
+        x: rect.x.checked_add(inset)?,
         y: rect.y,
         rows: 1,
         columns: 6,
     };
     let close = Rect {
-        x: rect.x.checked_add(rect.columns.checked_sub(4)?)?,
+        x: rect.x.checked_add(rect.columns.checked_sub(3 + inset)?)?,
         y: rect.y,
         rows: 1,
         columns: 3,
@@ -2835,6 +2844,19 @@ mod tests {
         assert_eq!(controls.close, rect(5, 21, 1, 3));
         assert!(pane_controls(rect(0, 0, 6, 22)).is_none());
         assert!(pane_controls(rect(0, u16::MAX - 20, 7, 22)).is_none());
+        // Wide panes inset Menu and close two cells from the pane edges.
+        let wide = pane_controls(rect(0, 10, 7, SPACIOUS_PANE_CONTROL_COLUMNS)).unwrap();
+        assert_eq!(wide.menu, rect(0, 12, 1, 6));
+        assert_eq!(
+            wide.close,
+            rect(0, 10 + SPACIOUS_PANE_CONTROL_COLUMNS - 5, 1, 3)
+        );
+        let narrow = pane_controls(rect(0, 10, 7, SPACIOUS_PANE_CONTROL_COLUMNS - 1)).unwrap();
+        assert_eq!(narrow.menu, rect(0, 11, 1, 6));
+        assert_eq!(
+            narrow.close,
+            rect(0, 10 + SPACIOUS_PANE_CONTROL_COLUMNS - 1 - 4, 1, 3)
+        );
 
         let pane = snapshot_from("CONTENT", 5, 20);
         let frame = single_pane(&pane);

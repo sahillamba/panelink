@@ -694,6 +694,9 @@ fn copy_mode_caret(parser: &vt100::Parser) -> Option<(u16, u16)> {
     None
 }
 
+/// Strip row plus the blank spacer row beneath it.
+const HEADER_ROWS: usize = panelink::workspace_tabs::HEADER_ROWS as usize;
+
 fn inverse_cells_below_header(parser: &vt100::Parser) -> usize {
     (1..ROWS)
         .flat_map(|row| (0..COLUMNS).map(move |column| (row, column)))
@@ -708,9 +711,10 @@ fn inverse_cells_below_header(parser: &vt100::Parser) -> usize {
 
 fn rendered_divider_column(parser: &vt100::Parser) -> Option<usize> {
     (1..COLUMNS.saturating_sub(1) as usize).find(|&column| {
-        // A divider crosses the top pane border. Scrollbar tracks occupy
-        // content-height padding only and must not be mistaken for a divider.
-        pane_cell_text(parser, 1, column) == "|"
+        // A divider crosses the top pane border below the strip and spacer.
+        // Scrollbar tracks occupy content-height padding only and must not be
+        // mistaken for a divider.
+        pane_cell_text(parser, HEADER_ROWS, column) == "|"
             && (1..ROWS as usize)
                 .filter(|&row| pane_cell_text(parser, row, column) == "|")
                 .count()
@@ -747,9 +751,9 @@ fn screen_label_position(parser: &vt100::Parser, label: &str) -> Option<(u16, u1
 }
 
 fn pane_content_rows() -> (usize, usize) {
-    // The workspace header consumes row zero; pane borders consume one row
-    // above and below the PTY's content area.
-    (2, ROWS.saturating_sub(1) as usize)
+    // The workspace strip and its spacer consume rows zero and one; pane
+    // borders consume one row above and below the PTY's content area.
+    (HEADER_ROWS + 1, ROWS.saturating_sub(1) as usize)
 }
 
 fn whole_root_cells() -> PaneCells {
@@ -1523,20 +1527,20 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
     // These controls occupy the border below the workspace header. Both are
     // addressed through rendered labels rather than arbitrary content clicks.
     click_visible_label(&mut client, " Menu ");
-    client.wait_screen("discoverable pane actions", |_, screen| {
-        screen.contains("Split") && screen.contains("Layout") && screen.contains("More")
+    client.wait_screen("discoverable pane actions on one page", |_, screen| {
+        ["Split", "Zoom pane", "Swap pane", "Copy mode", "Close pane"]
+            .iter()
+            .all(|label| screen.contains(label))
+            && !screen.contains("[More")
     });
-    click_visible_label(&mut client, "[More");
-    client.wait_screen("copy and history group", |_, screen| {
-        screen.contains("Copy / History")
+    client.write(b"\x1b");
+    wait_root_shell_prompt(&client);
+    // Saved layout, help and detach live in the strip's global menu.
+    click_visible_label(&mut client, "\u{2261}");
+    client.wait_screen("global menu", |_, screen| {
+        screen.contains("All tabs") && screen.contains("Keys & help") && screen.contains("Detach")
     });
-    click_visible_label(&mut client, "[More");
-    client.wait_screen("close group", |_, screen| screen.contains("Close pane"));
-    click_visible_label(&mut client, "[More");
-    client.wait_screen("secondary pane actions", |_, screen| {
-        screen.contains("Zoom") && screen.contains("Detach")
-    });
-    click_visible_label(&mut client, "[Cancel]");
+    client.write(b"\x1b");
     wait_root_shell_prompt(&client);
     click_visible_label(&mut client, " x ");
     client.wait_screen("close confirmation", |_, screen| screen.contains("Cancel"));
@@ -1594,26 +1598,32 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
     pointer_event(&mut client, 64, COLUMNS as usize - 5, 8, false);
     client.wait_screen("normal history thumb", |parser, _| {
         parser.screen().hide_cursor()
-            && (2..ROWS as usize - 1)
+            && (HEADER_ROWS + 1..ROWS as usize - 1)
                 .any(|row| pane_cell_text(parser, row, COLUMNS as usize - 1) == "#")
     });
-    let thumb_row = (2..ROWS as usize - 1)
+    let thumb_row = (HEADER_ROWS + 1..ROWS as usize - 1)
         .find(|&row| pane_cell_text(&client.parser(), row, COLUMNS as usize - 1) == "#")
         .expect("visible right history thumb");
     pointer_event(&mut client, 0, COLUMNS as usize - 1, thumb_row, false);
-    pointer_event(&mut client, 32, COLUMNS as usize - 1, 2, false);
-    pointer_event(&mut client, 0, COLUMNS as usize - 1, 2, true);
+    pointer_event(
+        &mut client,
+        32,
+        COLUMNS as usize - 1,
+        HEADER_ROWS + 1,
+        false,
+    );
+    pointer_event(&mut client, 0, COLUMNS as usize - 1, HEADER_ROWS + 1, true);
     // The press began before the real extent was known. The view stays put
     // until discovery returns, then the deferred release seeks the oldest
     // rows; wait for that content rather than a conservative thumb frame.
     client.wait_screen("oldest history through scrollbar drag", |parser, _| {
-        pane_cell_text(parser, 2, COLUMNS as usize - 1) == "#"
+        pane_cell_text(parser, HEADER_ROWS + 1, COLUMNS as usize - 1) == "#"
             && split_pane_cells(parser).is_some_and(|(_, right)| {
                 pane_marker_position(parser, right, "PTR_TAIL").is_none()
                     && pane_marker_position(parser, right, "PTR_ROW_001").is_some()
             })
     });
-    pointer_event(&mut client, 0, COLUMNS as usize - 1, 2, false);
+    pointer_event(&mut client, 0, COLUMNS as usize - 1, HEADER_ROWS + 1, false);
     pointer_event(
         &mut client,
         32,
@@ -1638,7 +1648,7 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
     // Click the right pane's own close control; a later click confirms. The
     // left pane survives and expands, proving the click did not close focus's
     // replacement or become shell input.
-    click_cell(&mut client, COLUMNS as usize - 3, 1);
+    click_cell(&mut client, COLUMNS as usize - 3, HEADER_ROWS);
     client.wait_screen("right close confirmation", |_, screen| {
         screen.contains("Cancel")
     });
@@ -1679,11 +1689,9 @@ fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
             .contents()
             .lines()
             .next()
-            .is_some_and(|header| {
-                header.contains("[+ New]") && header.trim_end().ends_with("[All tabs]")
-            })
+            .is_some_and(|header| header.contains(" + ") && header.trim_end().ends_with('\u{2261}'))
     });
-    client.click_text("[+ New]");
+    client.click_text("+");
     client.wait_header("Editors", "Shell 1");
     let shell = fixture.tab_id("Editors", "Shell 1");
     fixture.own_route(project, shell);

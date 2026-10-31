@@ -10,8 +10,8 @@ mod interaction;
 use interaction::ConfirmUiGeometry;
 mod render;
 use interaction::{
-    ActionsMenu, ActionsMenuPage, Interaction, InteractionContext, LocalAction, MenuDispatch,
-    PaneMode, LOCAL_ACTIONS,
+    ActionsMenu, Interaction, InteractionContext, LocalAction, MenuDispatch, PaneMode,
+    LOCAL_ACTIONS,
 };
 mod viewport;
 use copy::{CopyContext, CopyState};
@@ -93,8 +93,8 @@ const WORKSPACE_HELP_LINES: [&str; 8] = [
     "Ctrl-B ?: help | s: menu | c: copy | z: zoom | m: swap | e: divider",
     "Ctrl-B l/r/u/d: split | arrows/Tab/o: focus | PgUp/PgDn: history",
     "Ctrl-B n/p tabs | [/] projects | w searchable All tabs",
-    "Click tab to switch; active/right-click tab for Rename/Close",
-    "[+] / Ctrl-B + new | t actions | All: type, Backspace, Enter, [Clear]",
+    "Click tab to switch; right-click tab: New tab/Rename/Close",
+    "+ after tabs / Ctrl-B + new | right menu: All tabs/Saved/Help/Detach",
     "Rename Enter saves/Esc cancels | Close ends processes; Cancel default",
     "Click [Menu]/[x], drag divider/scrollbar | Ctrl-B x pane | Ctrl-X detach",
 ];
@@ -322,6 +322,9 @@ pub(crate) struct App {
     /// A thumb gesture released before its extent discovery returned. The
     /// discovery reply applies its final pointer row once, then drops it.
     deferred_thumb_release: Option<PointerSeek>,
+    /// Global menu item activated by the workspace owner, applied after the
+    /// event with the event's recovery availability.
+    pending_global: Option<usize>,
     pointer_divider: Option<PointerDivider>,
     header_press: Option<HeaderPress>,
     strip_press: Option<StripPress>,
@@ -355,7 +358,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         }
     }
     fn apply_interaction_feedback(&mut self) {
@@ -389,7 +394,7 @@ impl App {
         self.interaction.confirm_ui_geometry(
             rows,
             columns,
-            u16::from(self.workspace.view().workspace_index.is_some()),
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some()),
         )
     }
     fn handle_pane_mode_event(&mut self, event: &Event, now: Instant, effects: &mut impl Effects) {
@@ -398,7 +403,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         self.interaction.handle_pane_mode_event(context, event, now);
         self.apply_interaction_feedback();
@@ -419,7 +426,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         self.interaction
             .open_swap_mode_for_target(context, source, revision, now);
@@ -440,14 +449,17 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         self.interaction
             .open_divider_mode_for_target(context, target, revision, now);
         self.apply_interaction_feedback();
     }
 
-    fn actions_page_geometry(&self, menu: ActionsMenu) -> Option<ActionsMenuPage> {
+    #[cfg(test)]
+    fn actions_page_geometry(&self, menu: ActionsMenu) -> Option<interaction::ActionsMenuPage> {
         self.interaction
             .actions_page_geometry(self.interaction_context(), menu)
     }
@@ -463,7 +475,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         let result =
             self.interaction
@@ -698,6 +712,9 @@ impl App {
         if let Some(now) = feedback.begin_switch {
             self.begin_route_switch(now);
         }
+        if let Some(index) = feedback.global {
+            self.pending_global = Some(index);
+        }
     }
 
     /// Preallocate both screen caches for the largest supported pane.
@@ -711,6 +728,7 @@ impl App {
             focus: None,
             pointer_seek: None,
             deferred_thumb_release: None,
+            pending_global: None,
             pointer_divider: None,
             header_press: None,
             strip_press: None,
@@ -1024,6 +1042,13 @@ impl App {
     }
 
     pub(crate) fn needs_recovery_availability(&self, event: &Event) -> bool {
+        // Any key or release inside the global menu may activate Saved layout.
+        if matches!(
+            self.workspace.view().tab_dialog,
+            Some(workspace::TabDialog::Global { .. })
+        ) {
+            return matches!(event, Event::Key(_) | Event::Mouse(_));
+        }
         if let Some(menu) = self.interaction.view().actions_menu {
             return match event {
                 Event::Key(key)
@@ -1031,22 +1056,13 @@ impl App {
                 {
                     LOCAL_ACTIONS.get(menu.selected) == Some(&LocalAction::SavedLayout)
                 }
-                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    self.actions_page_geometry(menu).is_some_and(|page| {
-                        page.start <= 9
-                            && 9 < page.end
-                            && mouse.row
-                                == page
-                                    .rect
-                                    .y
-                                    .saturating_add(page.action_row as u16)
-                                    .saturating_add(u16::from(
-                                        self.workspace.view().workspace_index.is_some(),
-                                    ))
-                                    .saturating_add((9 - page.start) as u16)
-                            && mouse.column >= page.rect.x
-                            && mouse.column < page.rect.x.saturating_add(page.rect.columns)
-                    })
+                // Saved layout is no longer a pane-menu row; only the
+                // retained `v` shortcut can request it from this menu.
+                Event::Key(key)
+                    if matches!(key.code, KeyCode::Char('v' | 'V'))
+                        && (key.is_press() || key.is_repeat()) =>
+                {
+                    true
                 }
                 _ => false,
             };
@@ -1059,7 +1075,7 @@ impl App {
             || self.workspace.view().picker_open
             || self.workspace.view().tab_dialog.is_some()
             || (self.workspace.view().workspace_index.is_some()
-                && matches!(event, Event::Mouse(mouse) if mouse.row == 0))
+                && matches!(event, Event::Mouse(mouse) if mouse.row < panelink::workspace_tabs::HEADER_ROWS))
             || self.interaction.view().confirm.is_open()
             || self.interaction.view().menu.is_open()
         {
@@ -1107,7 +1123,10 @@ impl App {
             (root.rows, root.columns)
         } else if self.workspace.view().workspace_index.is_some() {
             let (rows, columns) = self.screen_viewport();
-            (rows.saturating_sub(if rows > 0 { 1 } else { 0 }), columns)
+            (
+                rows.saturating_sub(panelink::workspace_tabs::HEADER_ROWS),
+                columns,
+            )
         } else {
             self.screen_viewport()
         }
@@ -1185,7 +1204,8 @@ impl App {
             self.handle_workspace_picker_event(event, now);
             return Some(Flow::Continue);
         }
-        if matches!(event, Event::Mouse(mouse) if mouse.row == 0) {
+        if matches!(event, Event::Mouse(mouse) if mouse.row < panelink::workspace_tabs::HEADER_ROWS)
+        {
             self.handle_header_event(event, now);
             return Some(Flow::Continue);
         }
@@ -1825,7 +1845,7 @@ impl App {
         drag.total_rows = slot.history_total.max(slot.history_offset);
         let rect = shifted_rect(
             drag.pane_rect,
-            u16::from(self.workspace.view().workspace_index.is_some()),
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some()),
         );
         let Some(geometry) = scrollbar_geometry(
             rect,
@@ -1866,7 +1886,7 @@ impl App {
         let total_rows = slot.history_total.max(slot.history_offset);
         let rect = shifted_rect(
             drag.pane_rect,
-            u16::from(self.workspace.view().workspace_index.is_some()),
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some()),
         );
         let Some(geometry) = scrollbar_geometry(
             rect,
@@ -1970,7 +1990,7 @@ impl App {
         };
         let content = shifted_rect(
             content,
-            u16::from(self.workspace.view().workspace_index.is_some()),
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some()),
         );
         let point = pointer_content_point(content, screen_x, screen_y);
         let (column, row) = (point.column, point.row);
@@ -2120,9 +2140,58 @@ impl App {
         self.apply_copy_feedback();
     }
 
-    /// Route one decoded host event. While the menu is open every event is
-    /// consumed by the menu and nothing reaches a pane.
+    /// Route one decoded host event, then apply any global menu action it
+    /// activated. While a menu is open every event is consumed by it.
     pub(crate) fn handle_event(
+        &mut self,
+        event: &Event,
+        now: Instant,
+        recovery_availability: Availability,
+        effects: &mut impl Effects,
+    ) -> Flow {
+        let flow = self.handle_event_inner(event, now, recovery_availability, effects);
+        match self.pending_global.take() {
+            Some(index) if flow == Flow::Continue => {
+                self.activate_global(index, now, recovery_availability, effects)
+            }
+            _ => flow,
+        }
+    }
+
+    fn activate_global(
+        &mut self,
+        index: usize,
+        now: Instant,
+        recovery_availability: Availability,
+        effects: &mut impl Effects,
+    ) -> Flow {
+        self.dirty = true;
+        match index {
+            0 => self.open_workspace_picker(),
+            1 if recovery_availability == Availability::Enabled => {
+                self.flush(now, effects);
+                return Flow::ViewRecovery;
+            }
+            1 => self.set_status("No previous layout saved", now),
+            2 => {
+                self.flush(now, effects);
+                self.interaction.show_help(true);
+            }
+            3 => {
+                self.flush(now, effects);
+                return Flow::Quit;
+            }
+            _ => {}
+        }
+        Flow::Continue
+    }
+
+    fn open_global_menu(&mut self) {
+        self.workspace.open_global_menu();
+        self.apply_workspace_feedback();
+    }
+
+    fn handle_event_inner(
         &mut self,
         event: &Event,
         now: Instant,
@@ -2436,7 +2505,9 @@ impl App {
         }
         if self.interaction.view().help_open {
             let viewport = self.viewport();
-            let header = u16::from(self.workspace.view().workspace_index.is_some());
+            let header = panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            );
             let flow = self.interaction.handle_help_event(event, viewport, header);
             self.apply_interaction_feedback();
             if flow == Flow::Quit {
@@ -2446,7 +2517,9 @@ impl App {
         }
         if self.interaction.view().confirm.is_open() {
             let viewport = self.viewport();
-            let header = u16::from(self.workspace.view().workspace_index.is_some());
+            let header = panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            );
             let intent = self
                 .interaction
                 .handle_confirm_event(event, now, viewport, header);
@@ -2457,7 +2530,9 @@ impl App {
             return Flow::Continue;
         }
         if self.interaction.view().menu.is_open() {
-            let header = u16::from(self.workspace.view().workspace_index.is_some());
+            let header = panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            );
             let response = self.interaction.handle_split_menu_event(event, header);
             self.apply_interaction_feedback();
             match response {
@@ -2492,6 +2567,7 @@ impl App {
                         } else {
                             self.open_actions_menu(
                                 target,
+                                self.pane_menu_anchor(target),
                                 Some(MouseButton::Left),
                                 recovery_availability,
                                 now,
@@ -2575,6 +2651,7 @@ impl App {
                         } else {
                             self.open_actions_menu(
                                 target,
+                                self.pane_menu_anchor(target),
                                 Some(MouseButton::Left),
                                 recovery_availability,
                                 now,
@@ -2788,7 +2865,14 @@ impl App {
                     self.set_status("pane operation pending", now);
                 } else {
                     if let Some(target) = self.focus {
-                        self.open_actions_menu(target, None, recovery_availability, now, effects);
+                        self.open_actions_menu(
+                            target,
+                            None,
+                            None,
+                            recovery_availability,
+                            now,
+                            effects,
+                        );
                     }
                 }
             }
@@ -3230,6 +3314,9 @@ impl App {
                 (MouseEventKind::Down(MouseButton::Left), Some(TabAction::AllTabs)) => {
                     self.open_workspace_picker();
                 }
+                (MouseEventKind::Down(MouseButton::Left), Some(TabAction::GlobalMenu)) => {
+                    self.open_global_menu();
+                }
                 (MouseEventKind::Down(MouseButton::Left), Some(TabAction::PreviousTab)) => {
                     self.navigate_workspace(TabNavigation::PreviousTab, now)
                 }
@@ -3600,7 +3687,8 @@ impl App {
         if !self.fits() {
             return None;
         }
-        let header_offset = u16::from(self.workspace.view().workspace_index.is_some());
+        let header_offset =
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some());
         let layout = self.display_layout()?;
         layout.panes.iter().flatten().find_map(|pane| {
             let slot = self
@@ -3646,7 +3734,8 @@ impl App {
             return None;
         }
         let (host_rows, host_columns) = self.screen_viewport();
-        let header_offset = u16::from(self.workspace.view().workspace_index.is_some());
+        let header_offset =
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some());
         self.display_layout()?
             .panes
             .iter()
@@ -3702,7 +3791,9 @@ impl App {
                 .map(|pane| {
                     shifted_rect(
                         pane.rect,
-                        u16::from(self.workspace.view().workspace_index.is_some()),
+                        panelink::workspace_tabs::header_rows(
+                            self.workspace.view().workspace_index.is_some(),
+                        ),
                     )
                 })
         });
@@ -3971,8 +4062,9 @@ impl App {
         let layout = self.display_layout()?;
         let local = self.local.as_ref()?;
         let revision = self.layout?.revision;
-        let root_y =
-            screen_y.checked_sub(u16::from(self.workspace.view().workspace_index.is_some()))?;
+        let root_y = screen_y.checked_sub(panelink::workspace_tabs::header_rows(
+            self.workspace.view().workspace_index.is_some(),
+        ))?;
         let (index, _) = divider_at(layout.dividers, x, root_y)?;
         for pane in layout.panes.iter().flatten() {
             if let Ok(info) = local.divider_info(pane.target, revision, index as u8) {
@@ -3991,7 +4083,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         if !self
             .interaction
@@ -4006,7 +4100,8 @@ impl App {
         if !self.fits() {
             return None;
         }
-        let header_offset = u16::from(self.workspace.view().workspace_index.is_some());
+        let header_offset =
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some());
         self.display_layout()?
             .panes
             .iter()
@@ -4025,9 +4120,21 @@ impl App {
             })
     }
 
+    /// Root cell just below a pane's Menu control, where its menu opens.
+    fn pane_menu_anchor(&self, target: TargetRef) -> Option<(u16, u16)> {
+        let pane = self
+            .display_layout()?
+            .panes
+            .into_iter()
+            .flatten()
+            .find(|pane| pane.target == target)?;
+        let controls = pane_controls(pane.rect)?;
+        Some((controls.menu.x, controls.menu.y.saturating_add(1)))
+    }
+
     fn pane_row(&self, screen_row: u16) -> Option<u16> {
         if self.workspace.view().workspace_index.is_some() {
-            screen_row.checked_sub(1)
+            screen_row.checked_sub(panelink::workspace_tabs::HEADER_ROWS)
         } else {
             Some(screen_row)
         }
@@ -4058,6 +4165,7 @@ impl App {
             if let Some(target) = self.interaction.view().menu.captured_target() {
                 self.open_actions_menu(
                     target,
+                    Some((x, y)),
                     Some(MouseButton::Right),
                     recovery_availability,
                     now,
@@ -4116,6 +4224,7 @@ impl App {
     fn open_actions_menu(
         &mut self,
         target: TargetRef,
+        anchor: Option<(u16, u16)>,
         opening_release: Option<MouseButton>,
         recovery_availability: Availability,
         now: Instant,
@@ -4148,6 +4257,7 @@ impl App {
             revision: layout.revision,
             selected: 0,
             model,
+            anchor,
         }));
         self.interaction.record_release(opening_release);
         self.dirty = true;
@@ -4287,14 +4397,6 @@ impl App {
         .ok()
     }
 
-    /// Leave room for a title, page navigation and Cancel even at minimum
-    /// pane height. Keyboard selection and pointer pages use this same slice.
-    #[cfg(test)]
-    fn actions_page(&self, menu: ActionsMenu) -> (usize, usize) {
-        self.actions_page_geometry(menu)
-            .map_or((0, 0), |page| (page.start, page.end))
-    }
-
     fn activate_local_action(
         &mut self,
         menu: ActionsMenu,
@@ -4307,7 +4409,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         let action = self.interaction.capture_action(menu, context, now);
         self.apply_interaction_feedback();

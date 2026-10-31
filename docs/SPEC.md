@@ -10,11 +10,23 @@ route/catalog/layout/target or modal changes cancel as applicable. Input remains
 local to the owning UI. Keyboard focus, pane typing focus and active tab remain
 distinct. Pending/unknown operation receipts keep their existing authority.
 
-The strip keeps project left, tabs centrally, New tab/All tabs right, with
-separate tab close bounds. Inactive-tab close requires selecting that tab first
+The strip keeps the project left and tabs with separate close bounds in the
+middle; a ` + ` New tab button follows the last visible tab, and a global menu
+button (`≡`) is pinned right. The global menu holds All tabs, Saved layout,
+Keys & help and Detach. Previous/next (`[<] [>]`) appear beside it only when
+the tabs overflow. Right-clicking a tab offers New tab, Rename and Close tab.
+Strip spacing has three width tiers: below 60 columns it is compact; from 60
+it uses one-cell outer margins and two-cell gaps; from 120 it uses two-cell
+margins, a four-cell gap after the project, three-cell gaps between tabs and
+four-cell gaps between button groups. Inactive-tab close requires selecting that tab first
 so runtime generation is known; it never silently switches and closes. Close
-ends the confirmed target's processes; Detach leaves them running. Pane menus
-paginate by Layout, Copy/History, Close and Secondary groups. Informational
+ends the confirmed target's processes; Detach leaves them running. The pane
+menu is a single page that opens at the pointer (or below the pane's Menu
+button): one Split row with Left, Right, Up and Down, then Zoom, Swap, Copy
+mode (Back to live while in history) and, below a separator, Close pane.
+Unavailable items stay visible and dimmed; the selected item's reason shows in
+the bottom border. Resize divider (drag or Ctrl-B e), saved layout, help and
+detach are no longer pane-menu rows. Informational
 status/filter text is plain; actionable controls have independent filled styles.
 NO_COLOR presence or TERM=dumb selects reduced control colors at host setup,
 using reverse fill and structural attributes; child content is preserved.
@@ -114,8 +126,9 @@ Each pane reserves a one-cell margin on all four sides of its outer rectangle.
 The bottom-right pane margin displays the client package version, without
 changing PTY dimensions; modal notices temporarily cover it. Unpadded saved
 recovery views do not show this badge.
-The top margin carries pane Menu and close controls; normal-history scrollbars
-use the right margin. The shared compositor geometry defines their hitboxes.
+The top margin carries pane Menu and close controls, inset one cell from the
+pane edges, or two cells on panes at least 40 columns wide; normal-history
+scrollbars use the right margin. The shared compositor geometry defines their hitboxes.
 Its PTY and snapshots use the inset content size, with a minimum of 5 rows by
 20 columns (7 by 22 outer cells). Root limits remain 80 by 240 outer cells.
 Pointer coordinates sent to a child are relative to that content rectangle.
@@ -252,10 +265,12 @@ and [tab integration evidence](progress/P5-TAB-INTEGRATION-2026-10-25.md).
 ### Interactive client tab behavior
 
 Plain `panelink` on a TTY reserves row zero for a persistent project/tab
-strip. Clicking the project control opens its chooser; clicking a tab requests
+strip and row one as a blank, non-interactive spacer; the pane root starts at
+row two, so PTYs are two rows shorter than the host. Clicks on the spacer
+reach no pane. Clicking the project control opens its chooser; clicking a tab requests
 that route. The `+` button and `Ctrl-B +` admit one create intent and open one
 managed "Shell N" tab, then switch to it. `Ctrl-B t` opens tab actions
-(Rename/Close) for the active tab. `Ctrl-B w` opens the searchable All tabs
+(New tab/Rename/Close) for the active tab. `Ctrl-B w` opens the searchable All tabs
 chooser; `n`/`p` navigate tabs and `[`/`]` navigate projects. When no tabs are
 visible the client shows an empty state with New tab / Detach controls; no
 process is started. Closing requires the tab to be open (active route) so the
@@ -701,14 +716,14 @@ See [implementation and verification](progress/P3-LIVE-SCROLLBACK-RESULT.md).
 ## Bounded pointer controls prototype — 2026-10-27
 
 The attached client renders Menu and close controls in each pane's top margin.
-Menu and Ctrl-B s open the same captured-target actions, with viewport-bounded
-pages and Back/More/Cancel controls. Right-click retains the split context menu.
+Menu, right-click and Ctrl-B s open the same captured-target single-page menu;
+Esc or a click outside closes it.
 Close requires a separate explicit Close click or keyboard y. The last-pane
 warning stays visible, and stale layout changes cancel the confirmation.
 
 Divider dragging previews locally and submits one absolute schema-13 request
-on release. The menu also exposes divider selection, minus/plus adjustment and
-Apply/Cancel controls; Ctrl-B e preserves keyboard operation. Minimum subtree
+on release. Ctrl-B e opens divider selection with minus/plus adjustment and
+Apply/Cancel controls for keyboard and pointer operation. Minimum subtree
 sizes constrain motion. Escape, focus loss, host resize, stale layout/route and
 buffer changes cancel captured gestures; uncertain mutations are not replayed.
 
@@ -1270,7 +1285,10 @@ Every future task must identify owned modules, required protocol changes, observ
 Tab action, rename and tab-close dialogs are centered and capped at 28, 56
 and 44 terminal columns respectively. All tabs is capped at 64 columns and
 12 rows (including its search header); keyboard navigation scrolls the list.
-Pane-close confirmation is capped at 48 columns at the bottom of the view.
+Pane-close confirmation is a centred, bordered 9-row box capped at 52 columns
+with three columns of inner padding, blank rows around its content, centred
+`[Close]` `[Cancel]` buttons and a key hint footer. Views smaller than 11 rows
+or 44 columns use a compact two-row prompt capped at 48 columns at the bottom.
 Widths shrink to fit smaller viewports. Pointer targets follow the visible
 dialog bounds; clicks beside a dialog do not activate its actions.
 

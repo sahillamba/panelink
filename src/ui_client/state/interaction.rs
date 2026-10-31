@@ -22,7 +22,26 @@ pub(super) struct ConfirmUiGeometry {
     pub(super) cancel: Rect,
     pub(super) position: u8,
     pub(super) consequence: &'static str,
+    /// Centred bordered dialog with padding; `false` is the compact
+    /// two-row fallback pinned to the bottom of small viewports.
+    pub(super) padded: bool,
 }
+
+/// Width cap of the padded pane-close dialog, borders included.
+pub(super) const CONFIRM_PADDED_WIDTH: u16 = 52;
+/// Rows of the padded dialog: border, blank, heading, consequence, blank,
+/// buttons, blank, key hint, border.
+pub(super) const CONFIRM_PADDED_ROWS: u16 = 9;
+/// Row of the button pair inside the padded dialog.
+pub(super) const CONFIRM_PADDED_BUTTON_ROW: u16 = 5;
+/// Smallest viewport that keeps at least one pane row above and below.
+const CONFIRM_PADDED_MIN_ROWS: u16 = CONFIRM_PADDED_ROWS + 2;
+/// Narrowest viewport that fits the key hint without clipping.
+const CONFIRM_PADDED_MIN_COLUMNS: u16 = 44;
+/// Blank cells between `[Close]` and the Cancel focus marker.
+pub(super) const CONFIRM_BUTTON_GAP: u16 = 6;
+pub(super) const CONFIRM_CLOSE_COLUMNS: u16 = 7;
+pub(super) const CONFIRM_CANCEL_COLUMNS: u16 = 8;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PaneMode {
     Swap {
@@ -45,20 +64,24 @@ pub(super) struct ActionsMenu {
     pub(super) revision: u64,
     pub(super) selected: usize,
     pub(super) model: PaneActionModel,
+    /// Root-coordinate cell the menu opens at (pointer or Menu button);
+    /// `None` centres it, as for the keyboard opener.
+    pub(super) anchor: Option<(u16, u16)>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ActionsMenuPage {
+    /// Overlay rectangle in root coordinates.
     pub(super) rect: Rect,
-    pub(super) start: usize,
-    pub(super) end: usize,
-    pub(super) action_row: usize,
+    /// Bordered layout with title, separator and a reason border; small
+    /// viewports drop the borders.
+    pub(super) bordered: bool,
+    /// One-letter split directions for narrow viewports.
+    pub(super) short: bool,
+    /// Root-coordinate hit rectangle of each shown `LOCAL_ACTIONS` index.
+    pub(super) items: [Option<Rect>; panelink::split_menu::PANE_ACTION_COUNT],
+    /// Row showing the selected item's disabled reason.
     pub(super) reason_row: usize,
-    pub(super) navigation_row: usize,
-    pub(super) cancel_row: usize,
     pub(super) line_count: usize,
-    pub(super) back_column: Option<u16>,
-    pub(super) more_column: Option<u16>,
-    pub(super) cancel_column: u16,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LocalAction {
@@ -287,35 +310,10 @@ impl Interaction {
         }
         if let Some(menu) = self.actions_menu {
             let p = self.actions_page_geometry(context, menu)?;
-            let top = p.rect.y + context.header_offset;
-            for row in p.action_row..p.reason_row {
-                let r = Rect {
-                    x: p.rect.x,
-                    y: top + row as u16,
-                    columns: p.rect.columns,
-                    rows: 1,
-                };
-                controls.push(make(
-                    2,
-                    p.start + row - p.action_row,
-                    r,
-                    menu.target,
-                    menu.revision,
-                ));
-            }
-            for (i, col, width) in [
-                (100, p.back_column, 6),
-                (101, p.more_column, 6),
-                (102, Some(p.cancel_column), 8),
-            ] {
-                if let Some(col) = col {
-                    let r = Rect {
-                        x: p.rect.x + col,
-                        y: top + p.navigation_row as u16,
-                        columns: width.min(p.rect.columns.saturating_sub(col)),
-                        rows: 1,
-                    };
-                    controls.push(make(2, i, r, menu.target, menu.revision));
+            for (index, rect) in p.items.iter().enumerate() {
+                if let Some(mut rect) = *rect {
+                    rect.y += context.header_offset;
+                    controls.push(make(2, index, rect, menu.target, menu.revision));
                 }
             }
             return None;
@@ -611,17 +609,18 @@ impl Interaction {
         event: &Event,
         header_offset: u16,
     ) -> MenuResponse {
-        let mut input =
-            if header_offset > 0 && matches!(event, Event::Mouse(mouse) if mouse.row == 0) {
-                panelink::split_menu::MenuInput::Other
-            } else {
-                menu_input(event)
-            };
+        let mut input = if header_offset > 0
+            && matches!(event, Event::Mouse(mouse) if mouse.row < header_offset)
+        {
+            panelink::split_menu::MenuInput::Other
+        } else {
+            menu_input(event)
+        };
         if header_offset > 0 {
             match &mut input {
                 panelink::split_menu::MenuInput::MousePress { y, .. }
                 | panelink::split_menu::MenuInput::MouseRelease { y, .. } => {
-                    *y = y.saturating_sub(1);
+                    *y = y.saturating_sub(header_offset);
                 }
                 _ => {}
             }
@@ -715,11 +714,44 @@ impl Interaction {
         if rows == 0 || columns == 0 {
             return None;
         }
-        let width = columns.min(48);
+        let consequence = if intent.last_pane {
+            "Ends the workspace"
+        } else {
+            "Ends this process"
+        };
+        let padded = rows >= CONFIRM_PADDED_MIN_ROWS && columns >= CONFIRM_PADDED_MIN_COLUMNS;
+        let (width, overlay_rows, button_row, close_offset) = if padded {
+            let width = columns.min(CONFIRM_PADDED_WIDTH);
+            // One focus-marker cell precedes each button; the pair is
+            // centred as a group inside the bordered box.
+            let group = 1 + CONFIRM_CLOSE_COLUMNS + CONFIRM_BUTTON_GAP + 1 + CONFIRM_CANCEL_COLUMNS;
+            (
+                width,
+                CONFIRM_PADDED_ROWS,
+                CONFIRM_PADDED_BUTTON_ROW,
+                width.saturating_sub(group) / 2 + 1,
+            )
+        } else {
+            (
+                columns.min(48),
+                rows.min(2),
+                rows.min(2).saturating_sub(1),
+                0,
+            )
+        };
         let left = columns.saturating_sub(width) / 2;
-        let overlay_rows = rows.min(2);
-        let top = rows.saturating_sub(overlay_rows);
-        let button_y = top.saturating_add(overlay_rows.saturating_sub(1));
+        let top = if padded {
+            rows.saturating_sub(overlay_rows) / 2
+        } else {
+            rows.saturating_sub(overlay_rows)
+        };
+        let button_y = top.saturating_add(button_row).saturating_add(header_offset);
+        let close_x = left + close_offset;
+        let cancel_x = if padded {
+            close_x + CONFIRM_CLOSE_COLUMNS + CONFIRM_BUTTON_GAP + 1
+        } else {
+            left + 9
+        };
         Some(ConfirmUiGeometry {
             overlay: Rect {
                 x: left,
@@ -728,23 +760,20 @@ impl Interaction {
                 columns: width,
             },
             close: Rect {
-                x: left,
-                y: button_y.saturating_add(header_offset),
+                x: close_x,
+                y: button_y,
                 rows: 1,
-                columns: 7,
+                columns: CONFIRM_CLOSE_COLUMNS,
             },
             cancel: Rect {
-                x: left + 9,
-                y: button_y.saturating_add(header_offset),
+                x: cancel_x,
+                y: button_y,
                 rows: 1,
-                columns: 8,
+                columns: CONFIRM_CANCEL_COLUMNS,
             },
             position: intent.position,
-            consequence: if intent.last_pane {
-                "Ends the workspace"
-            } else {
-                "Ends this process"
-            },
+            consequence,
+            padded,
         })
     }
     pub(super) fn handle_pane_mode_event(
@@ -1134,17 +1163,6 @@ impl Interaction {
         self.prefix = None;
         self.feedback.dirty = true;
     }
-    pub(super) fn actions_menu_rect(&self, context: InteractionContext<'_>) -> Option<Rect> {
-        let (root_rows, root_columns) = context.viewport;
-        let rows = root_rows.min(panelink::split_menu::MAX_OVERLAY_ROWS as u16);
-        let columns = root_columns.min(42);
-        (rows > 0 && columns > 0).then_some(Rect {
-            x: root_columns.saturating_sub(columns) / 2,
-            y: root_rows.saturating_sub(rows) / 2,
-            rows,
-            columns,
-        })
-    }
     pub(super) fn local_action_item(
         &self,
         menu: ActionsMenu,
@@ -1152,58 +1170,93 @@ impl Interaction {
     ) -> Option<(PaneMenuAction, &'static str, Availability)> {
         LOCAL_ACTIONS.get(index).copied()?;
         let item = menu.model.item(index)?;
-        let label = if item.action == PaneMenuAction::ClosePane {
-            "--- Close pane"
-        } else {
-            item.label
-        };
-        Some((item.action, label, item.availability))
+        Some((item.action, item.label, item.availability))
     }
+    /// One geometry owner for the single-page pane menu: rendering, hit
+    /// testing and keyboard rows all use these rectangles.
     pub(super) fn actions_page_geometry(
         &self,
         context: InteractionContext<'_>,
         menu: ActionsMenu,
     ) -> Option<ActionsMenuPage> {
-        let rect = self.actions_menu_rect(context)?;
-        let capacity = usize::from(rect.rows.saturating_sub(3)).max(1);
-        let last_action = LOCAL_ACTIONS.len() - 1;
-        let selected = menu.selected.min(last_action);
-        let (group_start, group_end) = match selected {
-            0..=4 => (0, 5),
-            5 => (5, 6),
-            6 => (6, 7),
-            _ => (7, LOCAL_ACTIONS.len()),
-        };
-        let start = group_start + (selected - group_start) / capacity * capacity;
-        let end = (start + capacity).min(group_end);
-        let reason_row = 1 + end - start;
-        let navigation_row = reason_row + 1;
-        let back = start > 0;
-        let more = end < LOCAL_ACTIONS.len();
-        let (back_column, more_column, cancel_column) = if menu.selected == LOCAL_ACTIONS.len() {
-            (None, None, 0)
+        let (root_rows, root_columns) = context.viewport;
+        let bordered = root_rows >= PANE_MENU_BORDERED_ROWS && root_columns >= PANE_MENU_WIDTH;
+        let short = root_columns < PANE_MENU_WIDTH;
+        let line_count: u16 = if bordered { 8 } else { 6 };
+        let width = if short {
+            PANE_MENU_SHORT_WIDTH
         } else {
-            match (back, more) {
-                (true, true) => (Some(0), Some(7), 14),
-                (true, false) => (Some(0), None, 7),
-                (false, true) => (None, Some(0), 7),
-                (false, false) => (None, None, 0),
-            }
+            PANE_MENU_WIDTH
         };
-        let cancel_row = navigation_row;
+        if root_rows < line_count || root_columns < width {
+            return None;
+        }
+        let (x, y) = match menu.anchor {
+            Some((x, y)) => (x.min(root_columns - width), y.min(root_rows - line_count)),
+            None => ((root_columns - width) / 2, (root_rows - line_count) / 2),
+        };
+        let rect = Rect {
+            x,
+            y,
+            rows: line_count,
+            columns: width,
+        };
+        let inner = u16::from(bordered);
+        let first = u16::from(bordered);
+        let row_rect = |row: u16| Rect {
+            x: x + inner,
+            y: y + row,
+            rows: 1,
+            columns: width - 2 * inner,
+        };
+        let mut items = [None; panelink::split_menu::PANE_ACTION_COUNT];
+        let mut column = x + inner + PANE_MENU_SPLIT_START;
+        for (index, word) in split_words(short).iter().enumerate() {
+            let columns = 1 + word.len() as u16;
+            items[index] = Some(Rect {
+                x: column,
+                y: y + first,
+                rows: 1,
+                columns,
+            });
+            column += columns + 1;
+        }
+        // Zoom, Swap, Copy/Back to live, then Close below a separator.
+        items[7] = Some(row_rect(first + 1));
+        items[8] = Some(row_rect(first + 2));
+        items[5] = Some(row_rect(first + 3));
+        items[6] = Some(row_rect(first + if bordered { 5 } else { 4 }));
         Some(ActionsMenuPage {
             rect,
-            start,
-            end,
-            action_row: 1,
-            reason_row,
-            navigation_row,
-            cancel_row,
-            line_count: cancel_row + 1,
-            back_column,
-            more_column,
-            cancel_column,
+            bordered,
+            short,
+            items,
+            reason_row: usize::from(line_count - 1),
+            line_count: usize::from(line_count),
         })
+    }
+    /// Next selection for keyboard navigation: Up/Down move between rows,
+    /// Left/Right between split directions, Tab through every item.
+    fn pane_menu_step(selected: usize, key: KeyCode) -> usize {
+        let order = PANE_MENU_ORDER;
+        let position = order
+            .iter()
+            .position(|index| *index == selected)
+            .unwrap_or(0);
+        let split = position < 4;
+        match key {
+            KeyCode::Tab => order[(position + 1) % order.len()],
+            KeyCode::BackTab => order[(position + order.len() - 1) % order.len()],
+            KeyCode::Right if split => order[(position + 1) % 4],
+            KeyCode::Left if split => order[(position + 3) % 4],
+            KeyCode::Down if split => order[4],
+            KeyCode::Down if position + 1 == order.len() => order[0],
+            KeyCode::Down => order[position + 1],
+            KeyCode::Up if split => order[order.len() - 1],
+            KeyCode::Up if position == 4 => order[0],
+            KeyCode::Up => order[position - 1],
+            _ => selected,
+        }
     }
     pub(super) fn handle_actions_menu_event(
         &mut self,
@@ -1220,12 +1273,16 @@ impl Interaction {
                 if key.code == KeyCode::Esc && key.modifiers.is_empty() {
                     self.actions_menu = None;
                     self.menu.close();
-                } else if matches!(key.code, KeyCode::Up | KeyCode::BackTab) {
-                    menu.selected =
-                        (menu.selected + LOCAL_ACTIONS.len()) % (LOCAL_ACTIONS.len() + 1);
-                    self.actions_menu = Some(menu);
-                } else if matches!(key.code, KeyCode::Down | KeyCode::Tab) {
-                    menu.selected = (menu.selected + 1) % (LOCAL_ACTIONS.len() + 1);
+                } else if matches!(
+                    key.code,
+                    KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::Left
+                        | KeyCode::Right
+                        | KeyCode::Tab
+                        | KeyCode::BackTab
+                ) {
+                    menu.selected = Self::pane_menu_step(menu.selected, key.code);
                     self.actions_menu = Some(menu);
                 } else if key.code == KeyCode::Enter {
                     return MenuDispatch::Activate(menu);
@@ -1291,34 +1348,15 @@ impl Interaction {
                         self.feedback.dirty = true;
                         return MenuDispatch::Continue;
                     }
-                    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                        && mouse.row >= rect.y.saturating_add(1 + offset)
-                    {
-                        let row = usize::from(mouse.row - rect.y - offset);
-                        if (page.action_row..page.reason_row).contains(&row) {
-                            menu.selected = page.start + row - page.action_row;
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        let row = mouse.row - offset;
+                        if let Some(index) = page
+                            .items
+                            .iter()
+                            .position(|item| item.is_some_and(|r| r.contains(mouse.column, row)))
+                        {
+                            menu.selected = index;
                             return MenuDispatch::Activate(menu);
-                        } else if row == page.navigation_row {
-                            let column = mouse.column.saturating_sub(rect.x);
-                            if column >= page.cancel_column
-                                && column < page.cancel_column.saturating_add(8)
-                            {
-                                self.actions_menu = None;
-                                self.menu.close();
-                                self.feedback.dirty = true;
-                            } else if page.back_column.is_some_and(|start| {
-                                column >= start && column < start.saturating_add(6)
-                            }) {
-                                menu.selected = page.start.saturating_sub(1);
-                                self.actions_menu = Some(menu);
-                                self.feedback.dirty = true;
-                            } else if page.more_column.is_some_and(|start| {
-                                column >= start && column < start.saturating_add(6)
-                            }) {
-                                menu.selected = page.end;
-                                self.actions_menu = Some(menu);
-                                self.feedback.dirty = true;
-                            }
                         }
                     }
                 }
@@ -1595,62 +1633,98 @@ impl Interaction {
                     .position(|pane| pane.is_some_and(|pane| pane.target == menu.target))
             })
             .map_or(1, |index| index + 1);
-        let (start, end) = (page.start, page.end);
-        let group = match start {
-            0..=4 => "Layout: Split / Resize",
-            5 => "Copy / History",
-            6 => "Close",
-            _ => "Secondary: Zoom / Swap / Help / Saved / Detach",
+        let width = usize::from(page.rect.columns);
+        let inner = usize::from(page.bordered);
+        let blank = || {
+            let mut row = vec![b' '; width];
+            if inner == 1 {
+                row[0] = b'|';
+                row[width - 1] = b'|';
+            }
+            row
         };
-        action_text[0] = format!("Pane {pane} - {group}");
-        for (row, index) in (start..end).enumerate() {
-            let (action, label, availability) = self
-                .local_action_item(menu, index)
-                .expect("bounded local action index");
-            let marker = if menu.selected == index { "> " } else { "  " };
-            action_text[page.action_row + row] = match (action, availability) {
-                (PaneMenuAction::Split(direction), Availability::Disabled(reason)) => {
-                    format!(
-                        "{marker}{} - {}",
-                        split_menu_direction(direction),
-                        reason.compact_label()
-                    )
-                }
-                _ => format!("{marker}{label}"),
-            };
-            if menu.selected == index {
-                action_text[page.reason_row] = match availability {
-                    Availability::Enabled => String::from("Enter: activate"),
-                    Availability::Disabled(reason) if page.rect.columns < 36 => {
-                        reason.compact_label()
+        let place = |row: &mut Vec<u8>, column: usize, text: &str| {
+            for (offset, byte) in text.bytes().enumerate() {
+                if let Some(cell) = row.get_mut(column + offset) {
+                    if column + offset + inner < width {
+                        *cell = byte;
                     }
-                    Availability::Disabled(reason) => reason.to_string(),
-                };
-            }
-        }
-        if menu.selected == LOCAL_ACTIONS.len() {
-            action_text[page.reason_row] = "Cancel menu".into();
-        }
-        action_text[page.navigation_row] = if menu.selected == LOCAL_ACTIONS.len() {
-            "[Cancel]".into()
-        } else {
-            match (start > 0, end < LOCAL_ACTIONS.len()) {
-                (true, true) => "[Back] [More] [Cancel]".into(),
-                (true, false) if start > 3 => "[Back] [Cancel] Close on prior page".into(),
-                (true, false) => "[Back] [Cancel]".into(),
-                (false, true) => "[More] [Cancel]".into(),
-                (false, false) => "[Cancel]".into(),
+                }
             }
         };
+        let marker = |index: usize| if menu.selected == index { ">" } else { " " };
+        let mut rows: Vec<Vec<u8>> = (0..page.line_count).map(|_| blank()).collect();
+        let first = inner;
+        // Split row: all four directions stay visible; disabled ones dim.
+        place(&mut rows[first], inner + 2, "Split");
+        for (index, word) in split_words(page.short).iter().enumerate() {
+            if let Some(rect) = page.items[index] {
+                let column = usize::from(rect.x - page.rect.x);
+                place(&mut rows[first], column, marker(index));
+                place(&mut rows[first], column + 1, word);
+            }
+        }
+        for index in [7, 8, 5, 6] {
+            if let (Some(rect), Some((_, label, _))) =
+                (page.items[index], self.local_action_item(menu, index))
+            {
+                let row = usize::from(rect.y - page.rect.y);
+                place(&mut rows[row], inner + 1, marker(index));
+                place(&mut rows[row], inner + 2, label);
+            }
+        }
+        let reason =
+            self.local_action_item(menu, menu.selected)
+                .and_then(|(_, _, availability)| match availability {
+                    Availability::Enabled => None,
+                    Availability::Disabled(reason) => Some(reason.compact_label()),
+                });
+        if page.bordered {
+            let border = |title: Option<&str>| {
+                let mut row = vec![b'-'; width];
+                row[0] = b'+';
+                row[width - 1] = b'+';
+                if let Some(title) = title {
+                    let text = format!(" {title} ");
+                    for (offset, byte) in text.bytes().take(width.saturating_sub(4)).enumerate() {
+                        row[2 + offset] = byte;
+                    }
+                }
+                row
+            };
+            rows[0] = border(Some(&format!("Pane {pane}")));
+            rows[first + 4] = {
+                let mut row = vec![b'-'; width];
+                row[0] = b'|';
+                row[width - 1] = b'|';
+                row
+            };
+            rows[page.reason_row] = border(reason.as_deref());
+        } else if let Some(reason) = reason.as_deref() {
+            place(&mut rows[page.reason_row], 0, reason);
+        }
+        for (slot, row) in action_text.iter_mut().zip(rows) {
+            *slot = String::from_utf8(row).unwrap_or_default();
+        }
         Some(page)
     }
 }
 
-fn split_menu_direction(direction: SplitDirection) -> &'static str {
-    match direction {
-        SplitDirection::Left => "Split Left",
-        SplitDirection::Right => "Split Right",
-        SplitDirection::Up => "Split Up",
-        SplitDirection::Down => "Split Down",
+/// Bordered pane-menu width; narrower viewports use one-letter splits.
+const PANE_MENU_WIDTH: u16 = 34;
+const PANE_MENU_SHORT_WIDTH: u16 = 21;
+/// Root rows needed for the bordered layout (title, separator, reason).
+const PANE_MENU_BORDERED_ROWS: u16 = 8;
+/// First split marker column after the inner border.
+const PANE_MENU_SPLIT_START: u16 = 9;
+/// Single-page menu order: split directions, Zoom, Swap, Copy/Back to live,
+/// Close. Resize divider, saved layout, help and detach live elsewhere.
+pub(super) const PANE_MENU_ORDER: [usize; 8] = [0, 1, 2, 3, 7, 8, 5, 6];
+
+fn split_words(short: bool) -> [&'static str; 4] {
+    if short {
+        ["L", "R", "U", "D"]
+    } else {
+        ["Left", "Right", "Up", "Down"]
     }
 }

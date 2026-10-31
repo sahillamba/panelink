@@ -1,3 +1,74 @@
+## Herdr-inspired pane menu and top bar — 2026-11-01
+
+The user asked for Herdr-style changes. We read Herdr TUI's `tabs.rs`,
+`context_menu.rs` and `global_menu.rs` (Apache-2.0) for design ideas only; no
+Herdr code was copied. User decisions: keep all four split directions, keep the per-tab `x`,
+keep the pane `Menu`/`x` row for now, and move items into a global menu.
+- **Pane menu.** One page, no Back/More/Cancel. It opens at the pointer or below
+  the Menu button. Rows: a Split row (Left/Right/Up/Down), Zoom, Swap, Copy/Back
+  to live, a separator, then Close pane. Disabled items dim, and the reason
+  shows in the bottom border. Resize divider moved to divider drag or Ctrl-B e.
+  Saved layout, Help and Detach moved to the global menu; `v` still works.
+- **Strip.** Tabs keep their `x`. A ` + ` button follows the last tab, and a
+  `≡` global menu (All tabs, Saved layout, Keys & help, Detach) is pinned
+  right. `[<] [>]` appear only when the tabs overflow. Tab actions are now New
+  tab / Rename / Close.
+- **Tests.** Paged-menu tests were rewritten or removed, and new tests cover
+  the single page, the pointer anchor, the split row and the global menu.
+  Integration tests now look for the new labels.
+- **Checks.** A serial `cargo test --no-fail-fast` passed in about 398 s.
+  Strict clippy, fmt and docs pass. In `verify_non_ui.py` the cargo step hit its
+  420 s timeout under load; the direct serial run above passed. The Python
+  step has the same 13 pre-existing OpenCode bridge errors.
+
+## Fix: server start failed after reboot (stale lock device) — 2026-10-31
+
+The user's `panelink` failed with "could not start the panelink server". The
+route's `server.log` showed `server_storage_unavailable`. `server/server.lock` recorded device
+16777231 while the same inode (213108535) now reports device 16777234. macOS
+had assigned a new `st_dev` at mount. `verify_named_lock` required an exact
+dev+ino match, so every route's storage was rejected after the reboot. It now requires the
+inode to match and refreshes the recorded device under the exclusive lock. A
+different inode still fails closed. New test:
+`reboot_device_change_is_refreshed_but_a_foreign_inode_is_rejected`. The full
+serial `cargo test` and strict clippy pass. Rebuilt `target/debug/panelink`,
+which the symlinked launcher runs. User data was not edited by hand.
+
+## Chrome spacing installed — 2026-10-31
+
+User requested installation. `~/.local/bin/panelink` is a symlink to this
+checkout's `bin/panelink` launcher, which runs `target/debug/panelink`. Ran
+`cargo build --locked` at `e3dacda`. `build-info --json` now reports revision `e3dacdadf43e`,
+`dirty: false`; it reported `8af1ba4fc674` dirty before the build. `server-info --json` returned
+`control_unavailable` (transport connect) from this session both before and
+after, so server identity was not compared. No server restart or pane input.
+Attached clients show the new UI after Ctrl-X and reopening `panelink`.
+
+## Chrome spacing step 1: centred pane-close dialog — 2026-10-31
+
+User approved a three-step chrome spacing plan (centred close dialog; wider
+header spacing at >=120 columns; blank row under the tab strip) with centred
+buttons. Step 1 is done: `confirm_ui_geometry` returns a centred, bordered 9-row box
+(<=52 columns, centred `[Close]` `[Cancel]`, key hint) on views of at least 11×44.
+Smaller views keep the compact bottom prompt. Hit rectangles share the render
+offsets; a new state test covers centring, label/hit agreement and fallback.
+`p3_attach_four` now waits for "Close pane" instead of "(y/n)". Checks:
+`RUST_TEST_THREADS=1 cargo test --no-fail-fast` all pass; fmt/clippy/build/docs
+pass in `verify_non_ui.py`. Its Python step has 13
+`test_opencode_bridge_plugin` listener timeouts, reproduced identically on the
+unmodified tree (pre-existing, unrelated).
+
+Step 2 (`8af1ba4`): `HeaderSpacing` tiers in `workspace_tabs.rs`. Hosts of 120 or
+more columns get 2-cell margins, a 4-cell gap after the project, 3-cell gaps
+between tabs, 4-cell gaps between button groups and `[<]  [>]`. `pane_controls` insets Menu/x
+two cells on panes of at least 40 columns. Step 3: `workspace_tabs::HEADER_ROWS = 2` (strip and
+blank spacer). Header offsets now use `header_rows()`; spacer clicks reach no
+pane. Tests that hard-coded a one-row header were updated. Checks after step 3:
+`RUST_TEST_THREADS=1 cargo test --no-fail-fast` passes. `verify_non_ui.py` passes
+everything except the same 13 pre-existing OpenCode bridge Python errors. An
+earlier parallel run showed three integration-target failures that did not
+reproduce in two serial runs. No push.
+
 ## Button redesign client installed — 2026-10-31
 
 User explicitly requested installation. Rebuilt the verified dirty checkout and
