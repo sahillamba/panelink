@@ -1,3 +1,16 @@
+## Fix: server start failed after reboot (stale lock device) — 2026-10-31
+
+The user's `panelink` failed with "could not start the panelink server". The
+route's `server.log` showed `server_storage_unavailable`. `server/server.lock` recorded device
+16777231 while the same inode (213108535) now reports device 16777234. macOS
+had assigned a new `st_dev` at mount. `verify_named_lock` required an exact
+dev+ino match, so every route's storage was rejected after the reboot. It now requires the
+inode to match and refreshes the recorded device under the exclusive lock. A
+different inode still fails closed. New test:
+`reboot_device_change_is_refreshed_but_a_foreign_inode_is_rejected`. The full
+serial `cargo test` and strict clippy pass. Rebuilt `target/debug/panelink`,
+which the symlinked launcher runs. User data was not edited by hand.
+
 ## Chrome spacing installed — 2026-10-31
 
 User requested installation. `~/.local/bin/panelink` is a symlink to this
