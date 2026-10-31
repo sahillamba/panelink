@@ -915,7 +915,7 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
     client.click(menu_rect);
     client.write(b"\x02s");
     client.wait_screen("pane actions menu", |screen| {
-        screen.contains("Layout: Split / Resize")
+        screen.contains("Close pane") && screen.contains("Split")
     });
     client.write(b"\r");
     client.wait_screen("pane limit menu reason", |screen| {

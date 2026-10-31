@@ -10,15 +10,23 @@ route/catalog/layout/target or modal changes cancel as applicable. Input remains
 local to the owning UI. Keyboard focus, pane typing focus and active tab remain
 distinct. Pending/unknown operation receipts keep their existing authority.
 
-The strip keeps project left, tabs centrally, New tab/All tabs right, with
-separate tab close bounds. Strip spacing has three width tiers: below 60
-columns it is compact; from 60 it uses one-cell outer margins, two-cell gaps
-and `[<] [>]`; from 120 it uses two-cell margins, a four-cell gap after the
-project, three-cell gaps between tabs, four-cell gaps between the `[<]  [>]`,
-`[+ New]` and `[All tabs]` groups, and two cells between previous and next. Inactive-tab close requires selecting that tab first
+The strip keeps the project left and tabs with separate close bounds in the
+middle; a ` + ` New tab button follows the last visible tab, and a global menu
+button (`≡`) is pinned right. The global menu holds All tabs, Saved layout,
+Keys & help and Detach. Previous/next (`[<] [>]`) appear beside it only when
+the tabs overflow. Right-clicking a tab offers New tab, Rename and Close tab.
+Strip spacing has three width tiers: below 60 columns it is compact; from 60
+it uses one-cell outer margins and two-cell gaps; from 120 it uses two-cell
+margins, a four-cell gap after the project, three-cell gaps between tabs and
+four-cell gaps between button groups. Inactive-tab close requires selecting that tab first
 so runtime generation is known; it never silently switches and closes. Close
-ends the confirmed target's processes; Detach leaves them running. Pane menus
-paginate by Layout, Copy/History, Close and Secondary groups. Informational
+ends the confirmed target's processes; Detach leaves them running. The pane
+menu is a single page that opens at the pointer (or below the pane's Menu
+button): one Split row with Left, Right, Up and Down, then Zoom, Swap, Copy
+mode (Back to live while in history) and, below a separator, Close pane.
+Unavailable items stay visible and dimmed; the selected item's reason shows in
+the bottom border. Resize divider (drag or Ctrl-B e), saved layout, help and
+detach are no longer pane-menu rows. Informational
 status/filter text is plain; actionable controls have independent filled styles.
 NO_COLOR presence or TERM=dumb selects reduced control colors at host setup,
 using reverse fill and structural attributes; child content is preserved.
@@ -262,7 +270,7 @@ row two, so PTYs are two rows shorter than the host. Clicks on the spacer
 reach no pane. Clicking the project control opens its chooser; clicking a tab requests
 that route. The `+` button and `Ctrl-B +` admit one create intent and open one
 managed "Shell N" tab, then switch to it. `Ctrl-B t` opens tab actions
-(Rename/Close) for the active tab. `Ctrl-B w` opens the searchable All tabs
+(New tab/Rename/Close) for the active tab. `Ctrl-B w` opens the searchable All tabs
 chooser; `n`/`p` navigate tabs and `[`/`]` navigate projects. When no tabs are
 visible the client shows an empty state with New tab / Detach controls; no
 process is started. Closing requires the tab to be open (active route) so the
@@ -708,14 +716,14 @@ See [implementation and verification](progress/P3-LIVE-SCROLLBACK-RESULT.md).
 ## Bounded pointer controls prototype — 2026-10-27
 
 The attached client renders Menu and close controls in each pane's top margin.
-Menu and Ctrl-B s open the same captured-target actions, with viewport-bounded
-pages and Back/More/Cancel controls. Right-click retains the split context menu.
+Menu, right-click and Ctrl-B s open the same captured-target single-page menu;
+Esc or a click outside closes it.
 Close requires a separate explicit Close click or keyboard y. The last-pane
 warning stays visible, and stale layout changes cancel the confirmation.
 
 Divider dragging previews locally and submits one absolute schema-13 request
-on release. The menu also exposes divider selection, minus/plus adjustment and
-Apply/Cancel controls; Ctrl-B e preserves keyboard operation. Minimum subtree
+on release. Ctrl-B e opens divider selection with minus/plus adjustment and
+Apply/Cancel controls for keyboard and pointer operation. Minimum subtree
 sizes constrain motion. Escape, focus loss, host resize, stale layout/route and
 buffer changes cancel captured gestures; uncertain mutations are not replayed.
 

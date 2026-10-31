@@ -475,9 +475,9 @@ fn recovery_menu_and_navigation_request_viewer_without_forwarding_keys() {
     app.set_layout(one_pane(1));
 
     let flows = feed_events(
-        &mut app,
-        &mut fake,
-        b"\x02s\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r",
+        &mut app, &mut fake,
+        // Saved layout left the pane menu; its `v` shortcut remains.
+        b"\x02sv",
     );
     assert_eq!(flows.last(), Some(&Flow::ViewRecovery));
     assert!(!app.menu_open());
@@ -560,7 +560,8 @@ fn keyboard_fallback_ctrl_b_s_opens_for_focused_and_esc_closes_without_bytes() {
     assert!(!app.menu_open());
     app.flush(Instant::now(), &mut fake);
     assert!(fake.keys.is_empty());
-    feed(&mut app, &mut fake, b"\x02s\x1b[B\x1b[B\r");
+    // Right moves along the split row: Left -> Right -> Up.
+    feed(&mut app, &mut fake, b"\x02s\x1b[C\x1b[C\r");
     assert_eq!(fake.splits.len(), 1);
     assert_eq!(fake.splits[0].direction, SplitDirection::Up);
     assert_eq!(fake.splits[0].rows, 9);
@@ -1710,7 +1711,7 @@ fn disconnected_state_is_visible_and_blocks_pane_mutations_until_authoritative_r
         visible.contains("Disconnected"),
         "persistent connection state: {visible}"
     );
-    assert!(visible.contains("Shortcut help") || visible.contains("Split Left"));
+    assert!(visible.contains("Split"), "{visible}");
 
     app.apply_net_update(
         NetUpdate {
@@ -1889,8 +1890,7 @@ fn frames_build_for_one_and_two_panes_with_placeholders_and_overlays() {
     let mut fake = Fake::default();
     feed(&mut app, &mut fake, b"\x1b[<2;50;5M");
     let text = render_text(&app);
-    assert!(text.contains("Split Right"), "{text}");
-    assert!(text.contains("Split Right"), "{text}");
+    assert!(text.contains("Split  >Left  Right  Up  Down"), "{text}");
 }
 
 #[test]
@@ -1958,18 +1958,6 @@ fn control_background(app: &App, x: u16, y: u16) -> vt100::Color {
     let mut parser = vt100::Parser::new(app.host.0, app.host.1, 0);
     parser.process(&bytes);
     parser.screen().cell(y, x).unwrap().bgcolor()
-}
-
-fn page_to_label(app: &mut App, fake: &mut Fake, label: &str) {
-    for _ in 0..panelink::split_menu::PANE_ACTION_COUNT {
-        if parsed_label_position(app, label).is_some() {
-            return;
-        }
-        let (x, y) = parsed_label_position(app, "[More]").expect("next action group");
-        gesture(app, fake, MouseEventKind::Down(MouseButton::Left), x, y);
-        gesture(app, fake, MouseEventKind::Up(MouseButton::Left), x, y);
-    }
-    panic!("unreachable action {label}");
 }
 
 fn parsed_label_position(app: &App, label: &str) -> Option<(u16, u16)> {
@@ -2840,28 +2828,12 @@ fn menu_close_item_uses_captured_target_and_server_revision_after_confirmation()
     assert!(app.menu_open());
     let text = render_text(&app);
     assert!(
-        text.contains("[More]"),
-        "the close action is paged after six rows: {text}"
+        text.contains("Close pane") && !text.contains("[More]"),
+        "close is on the single menu page: {text}"
     );
     // No letter shortcut reaches the close row: x is consumed.
     feed(&mut app, &mut fake, b"x");
     assert!(app.menu_open() && !app.confirm_open());
-    // Page forward to the close row after the four split and two core actions.
-    let (more_x, more_y) = parsed_label_position(&app, "[More]").unwrap();
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Down(MouseButton::Left),
-        more_x,
-        more_y,
-    );
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Up(MouseButton::Left),
-        more_x,
-        more_y,
-    );
     while app.interaction.actions_menu.unwrap().selected != 6 {
         feed(&mut app, &mut fake, b"\x1b[B");
     }
@@ -2885,12 +2857,8 @@ fn menu_close_on_single_pane_warns_that_the_workspace_ends() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     app.set_layout(one_pane(4));
-    // Four directional splits precede Resize, Copy mode and Close pane.
-    feed(
-        &mut app,
-        &mut fake,
-        b"\x02s\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r",
-    );
+    // Close pane is the last row: Up from the split row wraps to it.
+    feed(&mut app, &mut fake, b"\x02s\x1b[A\r");
     assert!(app.confirm_open());
     let text = screen_text(&app);
     assert!(text.contains("Close pane 1?"), "{text}");
@@ -3064,7 +3032,7 @@ fn split_works_again_after_a_close_shrinks_the_layout() {
     app.set_layout(survivor_only());
     feed(&mut app, &mut fake, b"\x1b[<2;5;5M");
     let text = render_text(&app);
-    assert!(text.contains("Split Right"), "{text}");
+    assert!(text.contains("Split  >Left  Right"), "{text}");
     assert!(!text.contains("Pane limit"), "{text}");
     feed(&mut app, &mut fake, b"\x1b");
     fake.split_reply = Some(Ok(target(3)));
@@ -4236,7 +4204,7 @@ fn rendered_confirmation_labels_share_click_geometry_across_routes_and_widths() 
 }
 
 #[test]
-fn pointer_menu_cancel_is_mouse_only_and_never_sends_child_input() {
+fn pointer_menu_outside_click_cancels_and_never_sends_child_input() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     app.set_layout(one_pane(2));
@@ -4265,11 +4233,15 @@ fn pointer_menu_cancel_is_mouse_only_and_never_sends_child_input() {
         &mut fake,
     );
     assert!(app.interaction.actions_menu.is_some());
-    let cancel = parsed_label_position(&app, "Cancel").unwrap();
+    // The menu opens below its Menu button; a click outside it cancels.
+    let page = app
+        .actions_page_geometry(app.interaction.actions_menu.unwrap())
+        .unwrap();
+    assert_eq!((page.rect.x, page.rect.y), (2, 1));
     let event = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: cancel.0 + 1,
-        row: cancel.1,
+        column: 60,
+        row: 20,
         modifiers: KeyModifiers::NONE,
     });
     app.handle_event(
@@ -4633,15 +4605,12 @@ fn help_can_be_closed_by_its_rendered_control_without_shell_input() {
 }
 
 #[test]
-fn every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height() {
+fn every_pane_menu_item_is_on_one_page_and_pointer_reachable_at_minimum_height() {
     for rows in [7, 8, 24] {
         for columns in [22, 81] {
             for header in [false, true] {
-                let mut app = App::new(
-                    rows + panelink::workspace_tabs::header_rows(header),
-                    columns,
-                )
-                .unwrap();
+                let offset = panelink::workspace_tabs::header_rows(header);
+                let mut app = App::new(rows + offset, columns).unwrap();
                 let mut fake = Fake::default();
                 if header {
                     let (index, route, _) = workspace_catalog();
@@ -4650,85 +4619,45 @@ fn every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height() {
                 let tree = PaneLayout::new(target(1), rows, columns).unwrap();
                 app.set_layout(reply_from_tree(&tree));
                 let (x, y) = parsed_label_position(&app, " Menu ").unwrap();
-                gesture(
-                    &mut app,
-                    &mut fake,
+                for kind in [
                     MouseEventKind::Down(MouseButton::Left),
-                    x + 1,
-                    y,
-                );
-                gesture(
-                    &mut app,
-                    &mut fake,
                     MouseEventKind::Up(MouseButton::Left),
-                    x + 1,
-                    y,
-                );
-                gesture(
-                    &mut app,
-                    &mut fake,
-                    MouseEventKind::Up(MouseButton::Left),
-                    x + 1,
-                    y,
-                );
-                let mut visited = std::collections::BTreeSet::new();
-                for _ in 0..panelink::split_menu::PANE_ACTION_COUNT {
-                    let (start, end) = app.actions_page(app.interaction.actions_menu.unwrap());
-                    visited.extend(start..end);
-                    assert!(parsed_label_position(&app, "[Cancel]").is_some());
-                    if start <= 9 && 9 < end {
-                        let (x, y) = parsed_label_position(&app, "Saved layout").unwrap();
-                        let event = Event::Mouse(MouseEvent {
-                            kind: MouseEventKind::Down(MouseButton::Left),
-                            column: x + 1,
-                            row: y,
-                            modifiers: KeyModifiers::NONE,
-                        });
-                        assert!(app.needs_recovery_availability(&event));
-                    }
-                    if start <= 10 && 10 < end {
-                        assert!(parsed_label_position(&app, "Shortcut help").is_some());
-                    }
-                    if start <= 11 && 11 < end {
-                        assert!(parsed_label_position(&app, "Detach").is_some());
-                    }
-                    let Some((x, y)) = parsed_label_position(&app, "[More]") else {
-                        break;
-                    };
-                    gesture(
-                        &mut app,
-                        &mut fake,
-                        MouseEventKind::Down(MouseButton::Left),
-                        x + 1,
-                        y,
-                    );
-                    gesture(
-                        &mut app,
-                        &mut fake,
-                        MouseEventKind::Up(MouseButton::Left),
-                        x + 1,
-                        y,
+                ] {
+                    gesture(&mut app, &mut fake, kind, x + 1, y);
+                }
+                let menu = app.interaction.actions_menu.unwrap();
+                let page = app.actions_page_geometry(menu).unwrap();
+                let text = screen_text(&app);
+                // Every item is visible at once: no Back/More/Cancel paging.
+                for label in ["Split", "Zoom pane", "Swap pane", "Copy mode", "Close pane"] {
+                    assert!(text.contains(label), "{rows}x{columns}: {label}\n{text}");
+                }
+                for removed in ["[More]", "[Back]", "[Cancel]", "Saved layout", "Detach"] {
+                    assert!(
+                        !text.contains(removed),
+                        "{rows}x{columns}: {removed}\n{text}"
                     );
                 }
-                assert_eq!(
-                    visited.into_iter().collect::<Vec<_>>(),
-                    (0..panelink::split_menu::PANE_ACTION_COUNT).collect::<Vec<_>>()
-                );
-                let (x, y) = parsed_label_position(&app, "[Cancel]").unwrap();
-                gesture(
-                    &mut app,
-                    &mut fake,
+                let lines: Vec<_> = text.lines().collect();
+                for index in super::interaction::PANE_MENU_ORDER {
+                    let rect = page.items[index].expect("shown item");
+                    assert!(rect.x + rect.columns <= columns && rect.y < rows);
+                    let line = lines[usize::from(rect.y + offset)];
+                    let cells: String = line
+                        .chars()
+                        .skip(usize::from(rect.x))
+                        .take(usize::from(rect.columns))
+                        .collect();
+                    assert!(!cells.trim().is_empty(), "item {index} has visible text");
+                }
+                // An outside click closes the menu without any pane effect.
+                let outside = if page.rect.x > 0 { 0 } else { columns - 1 };
+                for kind in [
                     MouseEventKind::Down(MouseButton::Left),
-                    x + 1,
-                    y,
-                );
-                gesture(
-                    &mut app,
-                    &mut fake,
                     MouseEventKind::Up(MouseButton::Left),
-                    x + 1,
-                    y,
-                );
+                ] {
+                    gesture(&mut app, &mut fake, kind, outside, rows + offset - 1);
+                }
                 assert!(app.interaction.actions_menu.is_none());
                 assert!(
                     fake.keys.is_empty()
@@ -4742,24 +4671,15 @@ fn every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height() {
 }
 
 #[test]
-fn four_directional_split_rows_show_their_reasons_and_page_through_to_cancel() {
+fn four_split_directions_share_one_row_and_show_the_selected_reason() {
     let mut app = App::new(7, 22).unwrap();
     let mut fake = Fake::default();
     let tree = PaneLayout::new(target(1), 7, 22).unwrap();
     app.set_layout(reply_from_tree(&tree));
     feed(&mut app, &mut fake, b"\x02s");
-
-    let first_page = screen_text(&app);
-    for direction in ["Split Left", "Split Right", "Split Up", "Split Down"] {
-        assert!(first_page.contains(direction), "{direction}: {first_page}");
-    }
-    assert!(first_page.contains("Need 45 cols; have 22"), "{first_page}");
-    assert!(
-        !first_page.contains("Split pane..."),
-        "no grouped split row: {first_page}"
-    );
-
-    for (index, reason) in [
+    let text = screen_text(&app);
+    assert!(text.contains("Split  >L  R  U  D"), "{text}");
+    for (step, reason) in [
         "Need 45 cols; have 22",
         "Need 45 cols; have 22",
         "Need 15 rows; have 7",
@@ -4768,63 +4688,39 @@ fn four_directional_split_rows_show_their_reasons_and_page_through_to_cancel() {
     .into_iter()
     .enumerate()
     {
-        assert!(
-            screen_text(&app).contains(reason),
-            "split row {index}: {reason}"
-        );
-        if index < 3 {
-            feed(&mut app, &mut fake, b"\x1b[B");
-        }
+        assert_eq!(app.interaction.actions_menu.unwrap().selected, step);
+        assert!(screen_text(&app).contains(reason), "split {step}: {reason}");
+        feed(&mut app, &mut fake, b"\x1b[C");
     }
+    // Right wraps within the split row; Down moves to the next row.
+    assert_eq!(app.interaction.actions_menu.unwrap().selected, 0);
+    feed(&mut app, &mut fake, b"\x1b[B");
+    assert_eq!(app.interaction.actions_menu.unwrap().selected, 7);
+    feed(&mut app, &mut fake, b"\x1b[A\x1b[A");
+    assert_eq!(app.interaction.actions_menu.unwrap().selected, 6);
+    assert!(fake.splits.is_empty());
+}
 
-    let (more_x, more_y) = parsed_label_position(&app, "[More]").unwrap();
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Down(MouseButton::Left),
-        more_x,
-        more_y,
-    );
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Up(MouseButton::Left),
-        more_x,
-        more_y,
-    );
-    assert!(screen_text(&app).contains("[Back] [More] [Cancel]"));
-
-    for _ in 0..2 {
-        feed(&mut app, &mut fake, b"\x1b[B");
-    }
-    let (more_x, more_y) = parsed_label_position(&app, "[More]").unwrap();
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Down(MouseButton::Left),
-        more_x,
-        more_y,
-    );
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Up(MouseButton::Left),
-        more_x,
-        more_y,
-    );
-    page_to_label(&mut app, &mut fake, "Shortcut help");
-    assert!(screen_text(&app).contains("Shortcut help"));
-    page_to_label(&mut app, &mut fake, "Detach");
-    let last_page = screen_text(&app);
+#[test]
+fn wide_pane_menu_is_a_bordered_box_at_the_pointer() {
+    let mut app = App::new(24, 81).unwrap();
+    let mut fake = Fake::default();
+    app.set_layout(two_panes());
+    feed(&mut app, &mut fake, b"\x1b[<2;61;6M\x1b[<2;61;6m");
+    let menu = app.interaction.actions_menu.unwrap();
+    assert_eq!(menu.target, target(2));
+    let page = app.actions_page_geometry(menu).unwrap();
+    assert!(page.bordered);
+    // Opened at the pointer cell (root column 60, row 5), clamped inside.
+    assert_eq!((page.rect.x, page.rect.y), (81 - 34, 5));
+    let text = screen_text(&app);
+    assert!(text.contains("+- Pane 2 ---"), "{text}");
     assert!(
-        last_page.contains("[Cancel]"),
-        "Cancel remains reachable: {last_page}"
+        text.contains("|  Split  >Left  Right  Up  Down |"),
+        "{text}"
     );
-
-    assert!(
-        last_page.contains("Detach"),
-        "Detach remains reachable: {last_page}"
-    );
+    assert!(text.contains("+- Need 45 cols; have 40 ---"), "{text}");
+    assert!(text.contains("|  Close pane"), "{text}");
 }
 
 #[test]
@@ -4847,14 +4743,15 @@ fn disabled_split_click_keeps_selection_so_its_reason_remains_visible() {
         menu_x + 1,
         menu_y,
     );
-    let (split_x, split_y) = parsed_label_position(&app, "Split Left").unwrap();
-    gesture(
-        &mut app,
-        &mut fake,
+    feed(&mut app, &mut fake, b"\x1b[B");
+    assert_eq!(app.interaction.actions_menu.unwrap().selected, 7);
+    let (split_x, split_y) = parsed_label_position(&app, "Left").unwrap();
+    for kind in [
         MouseEventKind::Down(MouseButton::Left),
-        split_x,
-        split_y,
-    );
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        gesture(&mut app, &mut fake, kind, split_x, split_y);
+    }
 
     assert_eq!(app.interaction.actions_menu.unwrap().selected, 0);
     assert!(screen_text(&app).contains("Need 45 cols; have 40"));
@@ -4862,89 +4759,25 @@ fn disabled_split_click_keeps_selection_so_its_reason_remains_visible() {
 }
 
 #[test]
-fn more_hit_region_starts_on_the_rendered_label_boundary() {
-    let mut app = App::new(7, 22).unwrap();
-    let mut fake = Fake::default();
-    let tree = PaneLayout::new(target(1), 7, 22).unwrap();
-    app.set_layout(reply_from_tree(&tree));
-    feed(&mut app, &mut fake, b"\x02s");
-    let (first_more_x, first_more_y) = parsed_label_position(&app, "[More]").unwrap();
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Down(MouseButton::Left),
-        first_more_x,
-        first_more_y,
-    );
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Up(MouseButton::Left),
-        first_more_x,
-        first_more_y,
-    );
-    assert_eq!(app.interaction.actions_menu.unwrap().selected, 4);
-
-    let (more_x, more_y) = parsed_label_position(&app, "[More]").unwrap();
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Down(MouseButton::Left),
-        more_x - 1,
-        more_y,
-    );
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Up(MouseButton::Left),
-        more_x - 1,
-        more_y,
-    );
-    assert_eq!(
-        app.interaction.actions_menu.unwrap().selected,
-        4,
-        "preceding space is not More"
-    );
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Down(MouseButton::Left),
-        more_x,
-        more_y,
-    );
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Up(MouseButton::Left),
-        more_x,
-        more_y,
-    );
-    assert_eq!(
-        app.interaction.actions_menu.unwrap().selected,
-        5,
-        "first label cell pages to the Copy / History group"
-    );
-}
-
-#[test]
-fn actions_keyboard_cancel_highlight_matches_its_behavior() {
+fn actions_keyboard_focus_highlight_follows_the_selected_item() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     app.set_layout(one_pane(1));
     feed(&mut app, &mut fake, b"\x02s");
-    for _ in 0..panelink::split_menu::PANE_ACTION_COUNT {
-        feed(&mut app, &mut fake, b"\x1b[B");
-    }
-    let (cancel_x, cancel_y) = parsed_label_position(&app, "[Cancel]").unwrap();
+    feed(&mut app, &mut fake, b"\x1b[C");
+    assert_eq!(app.interaction.actions_menu.unwrap().selected, 1);
+    let (right_x, right_y) = parsed_label_position(&app, "Right").unwrap();
     assert_eq!(
-        control_background(&app, cancel_x, cancel_y),
+        control_background(&app, right_x, right_y),
         vt100::Color::Idx(6)
     );
-    assert_eq!(
-        control_background(&app, cancel_x + 7, cancel_y),
+    let (left_x, left_y) = parsed_label_position(&app, "Left").unwrap();
+    assert_ne!(
+        control_background(&app, left_x, left_y),
         vt100::Color::Idx(6)
     );
-    feed(&mut app, &mut fake, b"\r");
+    // Esc closes; there is no separate Cancel row to select.
+    feed(&mut app, &mut fake, b"\x1b");
     assert!(app.interaction.actions_menu.is_none());
     assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
 }
@@ -4973,8 +4806,9 @@ fn divider_menu_has_pointer_adjust_apply_and_cancel_controls() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     install_operations_view(&mut app, operations_view(two_panes(), None));
-    feed(&mut app, &mut fake, b"\x02s");
-    for label in ["Resize divider", "[-]", "[+]", "[-]", "[Apply]"] {
+    // Resize divider left the pane menu; Ctrl-B e and divider drags remain.
+    feed(&mut app, &mut fake, b"\x02e");
+    for label in ["[-]", "[+]", "[-]", "[Apply]"] {
         let (x, y) = parsed_label_position(&app, label).unwrap();
         gesture(
             &mut app,
@@ -5600,6 +5434,7 @@ fn menu_split_focus_waits_for_success_and_preserves_the_old_focus_on_failure() {
     app.open_actions_menu(
         target(2),
         None,
+        None,
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         Instant::now(),
         &mut fake,
@@ -5626,6 +5461,7 @@ fn menu_split_focus_waits_for_success_and_preserves_the_old_focus_on_failure() {
     app.open_actions_menu(
         target(2),
         None,
+        None,
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         Instant::now(),
         &mut fake,
@@ -5647,26 +5483,11 @@ fn shared_menu_close_uses_its_captured_pane_and_revision_without_refocusing() {
     app.open_actions_menu(
         target(2),
         None,
+        None,
         Availability::Disabled(DisabledReason::NoPreviousLayoutSaved),
         Instant::now(),
         &mut fake,
     );
-    let (more_x, more_y) = parsed_label_position(&app, "[More]").unwrap();
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Down(MouseButton::Left),
-        more_x,
-        more_y,
-    );
-    gesture(
-        &mut app,
-        &mut fake,
-        MouseEventKind::Up(MouseButton::Left),
-        more_x,
-        more_y,
-    );
-    page_to_label(&mut app, &mut fake, "Close pane");
     let (x, y) = parsed_label_position(&app, "Close pane").unwrap();
     gesture(
         &mut app,
@@ -5696,15 +5517,12 @@ fn shared_menu_close_uses_its_captured_pane_and_revision_without_refocusing() {
 }
 
 #[test]
-fn reordered_keyboard_menu_reaches_close_after_split_resize_and_copy() {
+fn keyboard_menu_reaches_close_after_split_zoom_swap_and_copy_rows() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     app.set_layout(one_pane(4));
-    feed(
-        &mut app,
-        &mut fake,
-        b"\x02s\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r",
-    );
+    // Split row, Zoom, Swap, Copy mode, then Close pane.
+    feed(&mut app, &mut fake, b"\x02s\x1b[B\x1b[B\x1b[B\x1b[B\r");
     let intent = app
         .interaction
         .confirm
@@ -6937,7 +6755,8 @@ fn action_row_press_has_distinct_rendering_and_cannot_transfer_to_another_row() 
     feed(&mut app, &mut fake, b"\x02s");
     let menu = app.interaction.actions_menu.unwrap();
     let page = app.actions_page_geometry(menu).unwrap();
-    let (x, y) = (page.rect.x, page.rect.y + page.action_row as u16);
+    let first = page.items[0].unwrap();
+    let (x, y) = (first.x, first.y);
     gesture(
         &mut app,
         &mut fake,
@@ -6993,7 +6812,8 @@ fn disabled_action_release_selects_reason_and_confirmation_cycles_locally() {
         Availability::Disabled(_)
     ));
     let page = app.actions_page_geometry(menu).unwrap();
-    let (x, y) = (page.rect.x, page.rect.y + page.action_row as u16);
+    let first = page.items[0].unwrap();
+    let (x, y) = (first.x, first.y);
     gesture(
         &mut app,
         &mut fake,
@@ -7099,6 +6919,67 @@ fn tab_actions_cycle_both_directions_and_ignore_repeat_shortcuts() {
 }
 
 #[test]
+fn global_menu_holds_all_tabs_saved_layout_help_and_detach() {
+    let open = |app: &mut App, fake: &mut Fake| {
+        let strip = app.tabs_layout().unwrap();
+        let x = (0..81)
+            .find(|x| strip.hit_test(*x, 0) == Some(TabAction::GlobalMenu))
+            .unwrap();
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            gesture(app, fake, kind, x, 0);
+        }
+        assert!(matches!(
+            app.workspace.tab_dialog,
+            Some(TabDialog::Global { .. })
+        ));
+    };
+    let (index, current, _) = workspace_catalog();
+    let mut app = App::new(26, 81).unwrap();
+    let mut fake = Fake {
+        recovery_available: true,
+        ..Fake::default()
+    };
+    app.install_workspace_index(index, current);
+    app.set_layout(two_panes());
+
+    open(&mut app, &mut fake);
+    let text = screen_text(&app);
+    for label in ["All tabs", "Saved layout", "Keys & help", "Detach"] {
+        assert!(text.contains(label), "{label}: {text}");
+    }
+    // The dropdown sits directly below the strip, at the right edge.
+    let (_, y) = parsed_label_position(&app, "All tabs").unwrap();
+    assert_eq!(y, panelink::workspace_tabs::HEADER_ROWS + 1);
+    // A click on All tabs opens the searchable picker.
+    let (x, y) = parsed_label_position(&app, "All tabs").unwrap();
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        gesture(&mut app, &mut fake, kind, x, y);
+    }
+    assert!(app.workspace.picker_open);
+    feed(&mut app, &mut fake, b"\x1b");
+
+    open(&mut app, &mut fake);
+    let flows = feed_events(&mut app, &mut fake, b"\x1b[B\r");
+    assert_eq!(flows.last(), Some(&Flow::ViewRecovery));
+
+    open(&mut app, &mut fake);
+    feed(&mut app, &mut fake, b"\x1b[B\x1b[B\r");
+    assert!(app.help_open());
+    feed(&mut app, &mut fake, b"\x1b");
+
+    open(&mut app, &mut fake);
+    let flows = feed_events(&mut app, &mut fake, b"\x1b[A\r");
+    assert_eq!(flows.last(), Some(&Flow::Quit));
+    assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
+}
+
+#[test]
 fn strip_capture_waits_for_release_and_cancels_stale_catalog_or_drag_away() {
     for scenario in 0..3 {
         let (index, current, _) = workspace_catalog();
@@ -7108,7 +6989,7 @@ fn strip_capture_waits_for_release_and_cancels_stale_catalog_or_drag_away() {
         app.set_layout(two_panes());
         let strip = app.tabs_layout().unwrap();
         let x = (0..81)
-            .find(|x| strip.hit_test(*x, 0) == Some(TabAction::AllTabs))
+            .find(|x| strip.hit_test(*x, 0) == Some(TabAction::GlobalMenu))
             .unwrap();
         gesture(
             &mut app,
@@ -7117,7 +6998,7 @@ fn strip_capture_waits_for_release_and_cancels_stale_catalog_or_drag_away() {
             x,
             0,
         );
-        assert!(!app.workspace.picker_open);
+        assert!(app.workspace.tab_dialog.is_none());
         match scenario {
             1 => {
                 app.set_workspace_revision(999);
@@ -7138,7 +7019,10 @@ fn strip_capture_waits_for_release_and_cancels_stale_catalog_or_drag_away() {
             x,
             0,
         );
-        assert_eq!(app.workspace.picker_open, scenario == 0);
+        assert_eq!(
+            matches!(app.workspace.tab_dialog, Some(TabDialog::Global { .. })),
+            scenario == 0
+        );
         assert!(fake.keys.is_empty() && fake.pastes.is_empty() && fake.closes.is_empty());
     }
 }
@@ -7250,7 +7134,7 @@ fn surface_pressed_cells_restore_and_failed_output_retries() {
             let layout = app.tabs_layout().unwrap();
             (
                 (0..81)
-                    .find(|x| layout.hit_test(*x, 0) == Some(TabAction::AllTabs))
+                    .find(|x| layout.hit_test(*x, 0) == Some(TabAction::GlobalMenu))
                     .unwrap(),
                 0,
             )

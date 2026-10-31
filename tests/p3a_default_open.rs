@@ -394,7 +394,9 @@ fn bare_panelink_starts_splits_detaches_reattaches_and_stops() {
 
     // Right-click opens the split menu; `r` splits right.
     client.write(b"\x1b[<2;10;5M\x1b[<2;10;5m");
-    client.wait_screen("split menu", |screen| screen.contains("Split Right"));
+    client.wait_screen("split menu", |screen| {
+        screen.contains("Split") && screen.contains("Close pane")
+    });
     client.write(b"r");
     let (code, init) = fixture.control("probe.ctx", &["init"]);
     assert_eq!(code, 0, "control init: {init}");
@@ -701,7 +703,7 @@ fn real_environment_smoke() {
     println!("--- after echo ---\n{}", client.screen());
     client.write(b"\x1b[<2;10;5M\x1b[<2;10;5m");
     client.wait_screen("real-environment split menu", |screen| {
-        screen.contains("Split Right")
+        screen.contains("Split") && screen.contains("Close pane")
     });
     println!("--- menu ---\n{}", client.screen());
     client.write(b"r");

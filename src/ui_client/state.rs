@@ -10,8 +10,8 @@ mod interaction;
 use interaction::ConfirmUiGeometry;
 mod render;
 use interaction::{
-    ActionsMenu, ActionsMenuPage, Interaction, InteractionContext, LocalAction, MenuDispatch,
-    PaneMode, LOCAL_ACTIONS,
+    ActionsMenu, Interaction, InteractionContext, LocalAction, MenuDispatch, PaneMode,
+    LOCAL_ACTIONS,
 };
 mod viewport;
 use copy::{CopyContext, CopyState};
@@ -93,8 +93,8 @@ const WORKSPACE_HELP_LINES: [&str; 8] = [
     "Ctrl-B ?: help | s: menu | c: copy | z: zoom | m: swap | e: divider",
     "Ctrl-B l/r/u/d: split | arrows/Tab/o: focus | PgUp/PgDn: history",
     "Ctrl-B n/p tabs | [/] projects | w searchable All tabs",
-    "Click tab to switch; active/right-click tab for Rename/Close",
-    "[+] / Ctrl-B + new | t actions | All: type, Backspace, Enter, [Clear]",
+    "Click tab to switch; right-click tab: New tab/Rename/Close",
+    "+ after tabs / Ctrl-B + new | right menu: All tabs/Saved/Help/Detach",
     "Rename Enter saves/Esc cancels | Close ends processes; Cancel default",
     "Click [Menu]/[x], drag divider/scrollbar | Ctrl-B x pane | Ctrl-X detach",
 ];
@@ -322,6 +322,9 @@ pub(crate) struct App {
     /// A thumb gesture released before its extent discovery returned. The
     /// discovery reply applies its final pointer row once, then drops it.
     deferred_thumb_release: Option<PointerSeek>,
+    /// Global menu item activated by the workspace owner, applied after the
+    /// event with the event's recovery availability.
+    pending_global: Option<usize>,
     pointer_divider: Option<PointerDivider>,
     header_press: Option<HeaderPress>,
     strip_press: Option<StripPress>,
@@ -455,7 +458,8 @@ impl App {
         self.apply_interaction_feedback();
     }
 
-    fn actions_page_geometry(&self, menu: ActionsMenu) -> Option<ActionsMenuPage> {
+    #[cfg(test)]
+    fn actions_page_geometry(&self, menu: ActionsMenu) -> Option<interaction::ActionsMenuPage> {
         self.interaction
             .actions_page_geometry(self.interaction_context(), menu)
     }
@@ -708,6 +712,9 @@ impl App {
         if let Some(now) = feedback.begin_switch {
             self.begin_route_switch(now);
         }
+        if let Some(index) = feedback.global {
+            self.pending_global = Some(index);
+        }
     }
 
     /// Preallocate both screen caches for the largest supported pane.
@@ -721,6 +728,7 @@ impl App {
             focus: None,
             pointer_seek: None,
             deferred_thumb_release: None,
+            pending_global: None,
             pointer_divider: None,
             header_press: None,
             strip_press: None,
@@ -1034,6 +1042,13 @@ impl App {
     }
 
     pub(crate) fn needs_recovery_availability(&self, event: &Event) -> bool {
+        // Any key or release inside the global menu may activate Saved layout.
+        if matches!(
+            self.workspace.view().tab_dialog,
+            Some(workspace::TabDialog::Global { .. })
+        ) {
+            return matches!(event, Event::Key(_) | Event::Mouse(_));
+        }
         if let Some(menu) = self.interaction.view().actions_menu {
             return match event {
                 Event::Key(key)
@@ -1041,22 +1056,13 @@ impl App {
                 {
                     LOCAL_ACTIONS.get(menu.selected) == Some(&LocalAction::SavedLayout)
                 }
-                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    self.actions_page_geometry(menu).is_some_and(|page| {
-                        page.start <= 9
-                            && 9 < page.end
-                            && mouse.row
-                                == page
-                                    .rect
-                                    .y
-                                    .saturating_add(page.action_row as u16)
-                                    .saturating_add(panelink::workspace_tabs::header_rows(
-                                        self.workspace.view().workspace_index.is_some(),
-                                    ))
-                                    .saturating_add((9 - page.start) as u16)
-                            && mouse.column >= page.rect.x
-                            && mouse.column < page.rect.x.saturating_add(page.rect.columns)
-                    })
+                // Saved layout is no longer a pane-menu row; only the
+                // retained `v` shortcut can request it from this menu.
+                Event::Key(key)
+                    if matches!(key.code, KeyCode::Char('v' | 'V'))
+                        && (key.is_press() || key.is_repeat()) =>
+                {
+                    true
                 }
                 _ => false,
             };
@@ -2134,9 +2140,58 @@ impl App {
         self.apply_copy_feedback();
     }
 
-    /// Route one decoded host event. While the menu is open every event is
-    /// consumed by the menu and nothing reaches a pane.
+    /// Route one decoded host event, then apply any global menu action it
+    /// activated. While a menu is open every event is consumed by it.
     pub(crate) fn handle_event(
+        &mut self,
+        event: &Event,
+        now: Instant,
+        recovery_availability: Availability,
+        effects: &mut impl Effects,
+    ) -> Flow {
+        let flow = self.handle_event_inner(event, now, recovery_availability, effects);
+        match self.pending_global.take() {
+            Some(index) if flow == Flow::Continue => {
+                self.activate_global(index, now, recovery_availability, effects)
+            }
+            _ => flow,
+        }
+    }
+
+    fn activate_global(
+        &mut self,
+        index: usize,
+        now: Instant,
+        recovery_availability: Availability,
+        effects: &mut impl Effects,
+    ) -> Flow {
+        self.dirty = true;
+        match index {
+            0 => self.open_workspace_picker(),
+            1 if recovery_availability == Availability::Enabled => {
+                self.flush(now, effects);
+                return Flow::ViewRecovery;
+            }
+            1 => self.set_status("No previous layout saved", now),
+            2 => {
+                self.flush(now, effects);
+                self.interaction.show_help(true);
+            }
+            3 => {
+                self.flush(now, effects);
+                return Flow::Quit;
+            }
+            _ => {}
+        }
+        Flow::Continue
+    }
+
+    fn open_global_menu(&mut self) {
+        self.workspace.open_global_menu();
+        self.apply_workspace_feedback();
+    }
+
+    fn handle_event_inner(
         &mut self,
         event: &Event,
         now: Instant,
@@ -2512,6 +2567,7 @@ impl App {
                         } else {
                             self.open_actions_menu(
                                 target,
+                                self.pane_menu_anchor(target),
                                 Some(MouseButton::Left),
                                 recovery_availability,
                                 now,
@@ -2595,6 +2651,7 @@ impl App {
                         } else {
                             self.open_actions_menu(
                                 target,
+                                self.pane_menu_anchor(target),
                                 Some(MouseButton::Left),
                                 recovery_availability,
                                 now,
@@ -2808,7 +2865,14 @@ impl App {
                     self.set_status("pane operation pending", now);
                 } else {
                     if let Some(target) = self.focus {
-                        self.open_actions_menu(target, None, recovery_availability, now, effects);
+                        self.open_actions_menu(
+                            target,
+                            None,
+                            None,
+                            recovery_availability,
+                            now,
+                            effects,
+                        );
                     }
                 }
             }
@@ -3249,6 +3313,9 @@ impl App {
                 }
                 (MouseEventKind::Down(MouseButton::Left), Some(TabAction::AllTabs)) => {
                     self.open_workspace_picker();
+                }
+                (MouseEventKind::Down(MouseButton::Left), Some(TabAction::GlobalMenu)) => {
+                    self.open_global_menu();
                 }
                 (MouseEventKind::Down(MouseButton::Left), Some(TabAction::PreviousTab)) => {
                     self.navigate_workspace(TabNavigation::PreviousTab, now)
@@ -4053,6 +4120,18 @@ impl App {
             })
     }
 
+    /// Root cell just below a pane's Menu control, where its menu opens.
+    fn pane_menu_anchor(&self, target: TargetRef) -> Option<(u16, u16)> {
+        let pane = self
+            .display_layout()?
+            .panes
+            .into_iter()
+            .flatten()
+            .find(|pane| pane.target == target)?;
+        let controls = pane_controls(pane.rect)?;
+        Some((controls.menu.x, controls.menu.y.saturating_add(1)))
+    }
+
     fn pane_row(&self, screen_row: u16) -> Option<u16> {
         if self.workspace.view().workspace_index.is_some() {
             screen_row.checked_sub(panelink::workspace_tabs::HEADER_ROWS)
@@ -4086,6 +4165,7 @@ impl App {
             if let Some(target) = self.interaction.view().menu.captured_target() {
                 self.open_actions_menu(
                     target,
+                    Some((x, y)),
                     Some(MouseButton::Right),
                     recovery_availability,
                     now,
@@ -4144,6 +4224,7 @@ impl App {
     fn open_actions_menu(
         &mut self,
         target: TargetRef,
+        anchor: Option<(u16, u16)>,
         opening_release: Option<MouseButton>,
         recovery_availability: Availability,
         now: Instant,
@@ -4176,6 +4257,7 @@ impl App {
             revision: layout.revision,
             selected: 0,
             model,
+            anchor,
         }));
         self.interaction.record_release(opening_release);
         self.dirty = true;
@@ -4313,14 +4395,6 @@ impl App {
             },
         )
         .ok()
-    }
-
-    /// Leave room for a title, page navigation and Cancel even at minimum
-    /// pane height. Keyboard selection and pointer pages use this same slice.
-    #[cfg(test)]
-    fn actions_page(&self, menu: ActionsMenu) -> (usize, usize) {
-        self.actions_page_geometry(menu)
-            .map_or((0, 0), |page| (page.start, page.end))
     }
 
     fn activate_local_action(

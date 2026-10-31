@@ -40,6 +40,8 @@ pub enum TabAction {
     Create,
     /// Open the searchable all-tabs overlay.
     AllTabs,
+    /// Open the global menu (All tabs, saved layout, help, detach).
+    GlobalMenu,
     /// Navigate to the previous tab in the current project.
     PreviousTab,
     /// Navigate to the next tab in the current project.
@@ -233,16 +235,38 @@ pub fn layout(
     let mut hits = Vec::with_capacity(16);
     let screen_width = cells.len();
 
-    // New tab and All tabs stay pinned right. Narrow hosts shorten names
-    // and omit optional previous/next controls before losing active-tab access.
+    // The global menu stays pinned right. Previous/next appear only when the
+    // tabs overflow; New tab follows the last visible tab.
     let spacing = HeaderSpacing::for_width(screen_width);
-    let controls_start = place_right_controls(&mut cells, &mut hits, tabs.len() > 1);
+    let menu_start = place_global_menu(&mut cells, &mut hits);
 
     let project_name = project.display_name();
     let project_cap = MAX_LABEL_CELLS.min((screen_width / 5).max(3));
     let project_label = bracketed_label("[ ", project_name, " ]", project_cap);
-    // Left margin grows with the host width tier.
     let left = spacing.margin;
+    let labels: Vec<Vec<Glyph>> = tabs
+        .iter()
+        .map(|tab| bracketed_label(" ", tab.display_name, " ", MAX_LABEL_CELLS))
+        .collect();
+    let total_width = labels
+        .iter()
+        .map(|label| label_width(label) + 4 + spacing.tab_gap)
+        .sum::<usize>()
+        - spacing.tab_gap;
+    let reserved_create = CREATE_TAB_LABEL.len() + spacing.tab_gap;
+    let tabs_space = menu_start.saturating_sub(
+        spacing.group_gap
+            + left
+            + label_width(&project_label).min(project_cap)
+            + spacing.project_gap,
+    );
+    let overflow = tabs.len() > 1 && total_width + reserved_create > tabs_space;
+    let controls_start = if overflow {
+        place_navigation(&mut cells, &mut hits, menu_start, spacing)
+    } else {
+        menu_start
+    };
+
     let project_budget = controls_start.saturating_sub(spacing.project_gap + left);
     let project_width = place_label(
         &mut cells,
@@ -264,22 +288,15 @@ pub fn layout(
     } else {
         left
     };
-    let tab_end = controls_start.saturating_sub(spacing.group_gap.saturating_sub(1).max(1));
+    let tab_end = controls_start
+        .saturating_sub(spacing.group_gap.saturating_sub(1).max(1))
+        .saturating_sub(reserved_create);
     if cursor < tab_end {
         let remaining = (tab_end - cursor).saturating_sub(4);
-        let labels: Vec<Vec<Glyph>> = tabs
-            .iter()
-            .map(|tab| bracketed_label(" ", tab.display_name, " ", MAX_LABEL_CELLS))
-            .collect();
         let current_index = tabs
             .iter()
             .position(|tab| tab.id == current.tab)
             .ok_or(TabsError::InvalidRoute)?;
-        let total_width = labels
-            .iter()
-            .map(|label| label_width(label) + 4 + spacing.tab_gap)
-            .sum::<usize>()
-            - spacing.tab_gap;
         let (start, end) = if total_width <= remaining {
             (0, labels.len())
         } else {
@@ -325,6 +342,16 @@ pub fn layout(
             }
         }
     }
+    // New tab sits right after the last visible tab, inside its reserve.
+    let create_end =
+        (cursor + spacing.tab_gap + CREATE_TAB_LABEL.len()).min(controls_start.saturating_sub(1));
+    place_button(
+        &mut cells,
+        &mut hits,
+        create_end,
+        CREATE_TAB_LABEL,
+        TabAction::Create,
+    );
 
     for hit in &hits {
         for cell in &mut cells[usize::from(hit.start)..usize::from(hit.end)] {
@@ -576,10 +603,14 @@ impl HeaderSpacing {
         }
     }
 }
+/// New tab button placed directly after the tabs.
+const CREATE_TAB_LABEL: &str = " + ";
+/// Empty-workspace and narrow-host create label.
 const CREATE_LABEL: &str = "[+ New]";
-const ALL_LABEL: &str = "[All tabs]";
+/// Global menu button pinned to the right edge.
+const MENU_LABEL: &str = " \u{2261} ";
 
-/// Place an ASCII button and its hit region; returns its start column.
+/// Place a button and its hit region ending at `end`; returns its start.
 fn place_button(
     cells: &mut [HeaderCell],
     hits: &mut Vec<HitRegion>,
@@ -587,7 +618,14 @@ fn place_button(
     text: &str,
     action: TabAction,
 ) -> Option<usize> {
-    let start = end.checked_sub(text.len())?;
+    let start = end.checked_sub(text.chars().count())?;
+    if end > cells.len()
+        || hits
+            .iter()
+            .any(|hit| usize::from(hit.end) > start && usize::from(hit.start) < end)
+    {
+        return None;
+    }
     place_ascii(cells, start, text);
     hits.push(HitRegion {
         start: start as u16,
@@ -597,8 +635,8 @@ fn place_button(
     Some(start)
 }
 
-/// The create button, right-aligned inside the tier's margin on roomy hosts.
-/// Returns its first column.
+/// The create button for the empty workspace, right-aligned inside the
+/// tier's margin on roomy hosts. Returns its first column.
 fn place_create(cells: &mut [HeaderCell], hits: &mut Vec<HitRegion>) -> usize {
     let width = cells.len();
     if width >= ROOMY_HEADER_COLUMNS {
@@ -616,63 +654,37 @@ fn place_create(cells: &mut [HeaderCell], hits: &mut Vec<HitRegion>) -> usize {
     width - 1
 }
 
-/// All tabs, New tab and previous/next controls from the right edge. Returns
-/// the first column used by the controls.
-fn place_right_controls(
+/// The global menu button at the right edge. Returns its first column.
+fn place_global_menu(cells: &mut [HeaderCell], hits: &mut Vec<HitRegion>) -> usize {
+    let width = cells.len();
+    let end = width - HeaderSpacing::for_width(width).margin;
+    place_button(cells, hits, end, MENU_LABEL, TabAction::GlobalMenu).unwrap_or(width)
+}
+
+/// Previous/next controls left of `end` when tabs overflow. Returns the first
+/// column used, or `end` when there is no room.
+fn place_navigation(
     cells: &mut [HeaderCell],
     hits: &mut Vec<HitRegion>,
-    navigation: bool,
+    end: usize,
+    spacing: HeaderSpacing,
 ) -> usize {
     let width = cells.len();
+    if width < 30 {
+        return end;
+    }
     let roomy = width >= ROOMY_HEADER_COLUMNS;
-    let spacing = HeaderSpacing::for_width(width);
-    let gap = spacing.group_gap;
-    let mut start = if width >= ROOMY_HEADER_COLUMNS {
-        place_button(
-            cells,
-            hits,
-            width - spacing.margin,
-            ALL_LABEL,
-            TabAction::AllTabs,
-        )
-        .unwrap()
-    } else if width >= 18 {
-        place_button(cells, hits, width, " All ", TabAction::AllTabs).unwrap()
-    } else {
-        place_create(cells, hits)
+    let (previous, next) = if roomy { ("[<]", "[>]") } else { ("<", ">") };
+    let Some(next_start) = end
+        .checked_sub(spacing.group_gap)
+        .and_then(|end| place_button(cells, hits, end, next, TabAction::NextTab))
+    else {
+        return end;
     };
-    if width >= 18 {
-        let label = if roomy {
-            CREATE_LABEL
-        } else if width >= 30 {
-            " New "
-        } else {
-            " + "
-        };
-        if let Some(next) = start
-            .checked_sub(gap)
-            .and_then(|end| place_button(cells, hits, end, label, TabAction::Create))
-        {
-            start = next;
-        }
-    }
-    if width >= 60 && navigation {
-        let (previous, next) = if roomy { ("[<]", "[>]") } else { ("<", ">") };
-        let inner = spacing.nav_gap;
-        if let Some(next_start) = start
-            .checked_sub(gap)
-            .and_then(|end| place_button(cells, hits, end, next, TabAction::NextTab))
-        {
-            start = next_start;
-            if let Some(previous_start) = start
-                .checked_sub(inner)
-                .and_then(|end| place_button(cells, hits, end, previous, TabAction::PreviousTab))
-            {
-                start = previous_start;
-            }
-        }
-    }
-    start
+    next_start
+        .checked_sub(spacing.nav_gap)
+        .and_then(|end| place_button(cells, hits, end, previous, TabAction::PreviousTab))
+        .unwrap_or(next_start)
 }
 
 fn place_ascii(cells: &mut [HeaderCell], start: usize, text: &str) {
@@ -773,7 +785,7 @@ mod tests {
             for action in [
                 TabAction::Select(route(4, 5)),
                 TabAction::Create,
-                TabAction::AllTabs,
+                TabAction::GlobalMenu,
                 TabAction::Close(route(4, 5)),
             ] {
                 assert!(
@@ -972,7 +984,11 @@ mod tests {
         assert!(overflow
             .hit_regions
             .iter()
-            .any(|r| r.action == TabAction::AllTabs));
+            .any(|r| r.action == TabAction::GlobalMenu));
+        assert!(overflow
+            .hit_regions
+            .iter()
+            .any(|r| r.action == TabAction::Create));
         let narrow = super::layout(&index, route(4, 5), 4, 30).expect("clipped");
         assert_eq!(narrow.header_cells().len(), 30);
         assert_header_topology(narrow.header_cells());
@@ -1080,24 +1096,18 @@ mod tests {
                 Some(TabAction::Select(current))
             );
             assert!(rendered.header_cells()[usize::from(selected.start)].selected());
-            // Create is the rightmost control; roomy hosts keep a one-cell
-            // right margin after its button.
-            let create_end = columns
-                - if usize::from(columns) >= ROOMY_HEADER_COLUMNS {
-                    HeaderSpacing::for_width(usize::from(columns)).margin as u16
-                } else {
-                    0
-                };
+            // The global menu is the rightmost control inside the margin.
+            let menu_end = columns - HeaderSpacing::for_width(usize::from(columns)).margin as u16;
             assert_eq!(
-                rendered.hit_test(create_end - 1, 0),
-                Some(TabAction::AllTabs),
-                "All tabs is the rightmost control at width {columns}"
+                rendered.hit_test(menu_end - 1, 0),
+                Some(TabAction::GlobalMenu),
+                "the global menu is the rightmost control at width {columns}"
             );
-            assert_eq!(rendered.hit_test(create_end, 0), None);
+            assert_eq!(rendered.hit_test(menu_end, 0), None);
             assert!(rendered
                 .hit_regions
                 .iter()
-                .any(|region| region.action == TabAction::AllTabs));
+                .any(|region| region.action == TabAction::Create));
             if columns >= 60 {
                 assert!(rendered
                     .hit_regions
@@ -1119,9 +1129,10 @@ mod tests {
         let index = index();
         let rendered = super::layout(&index, route(4, 5), 24, 100).expect("layout");
         let text = header_text(&rendered);
-        assert!(text.ends_with("[All tabs] "), "{text:?}");
-        assert!(text.contains("[+ New]  [All tabs]"), "{text:?}");
-        assert!(text.contains("[<] [>]  [+ New]"), "{text:?}");
+        // Overflowing tabs: + follows the last visible tab, and previous/next
+        // sit beside the right-hand menu.
+        assert!(text.ends_with("[<] [>]   \u{2261}  "), "{text:?}");
+        assert!(text.contains("x    +  "), "{text:?}");
         assert!(text.starts_with(" [ "), "{text:?}");
     }
 
@@ -1151,10 +1162,10 @@ mod tests {
             let text = header_text(&rendered);
             assert!(text.starts_with("  [ Default ]     Main   x "), "{text:?}");
             assert!(text.contains(" x     Shell 1   x "), "{text:?}");
-            assert!(
-                text.ends_with("[<]  [>]    [+ New]    [All tabs]  "),
-                "{text:?}"
-            );
+            // Tabs fit: no previous/next; + follows the last tab.
+            assert!(text.contains(" x     +  "), "{text:?}");
+            assert!(text.ends_with("   \u{2261}   "), "{text:?}");
+            assert!(!text.contains("[<]"), "{text:?}");
             for hit in &rendered.hit_regions {
                 for other in &rendered.hit_regions {
                     if hit != other {
@@ -1165,7 +1176,7 @@ mod tests {
         }
         // Just below the tier keeps the roomy spacing.
         let text = header_text(&super::layout(&index, route(1, 1), 24, 119).expect("layout"));
-        assert!(text.ends_with("[<] [>]  [+ New]  [All tabs] "), "{text:?}");
+        assert!(text.ends_with(" \u{2261}  "), "{text:?}");
         assert!(text.starts_with(" [ Default ]   Main   x "), "{text:?}");
     }
 }

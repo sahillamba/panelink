@@ -1,3 +1,26 @@
+## Herdr-inspired pane menu and top bar — 2026-11-01
+
+The user asked for Herdr-style changes. We read Herdr TUI's `tabs.rs`,
+`context_menu.rs` and `global_menu.rs` (Apache-2.0) for design ideas only; no
+Herdr code was copied. User decisions: keep all four split directions, keep the per-tab `x`,
+keep the pane `Menu`/`x` row for now, and move items into a global menu.
+- **Pane menu.** One page, no Back/More/Cancel. It opens at the pointer or below
+  the Menu button. Rows: a Split row (Left/Right/Up/Down), Zoom, Swap, Copy/Back
+  to live, a separator, then Close pane. Disabled items dim, and the reason
+  shows in the bottom border. Resize divider moved to divider drag or Ctrl-B e.
+  Saved layout, Help and Detach moved to the global menu; `v` still works.
+- **Strip.** Tabs keep their `x`. A ` + ` button follows the last tab, and a
+  `≡` global menu (All tabs, Saved layout, Keys & help, Detach) is pinned
+  right. `[<] [>]` appear only when the tabs overflow. Tab actions are now New
+  tab / Rename / Close.
+- **Tests.** Paged-menu tests were rewritten or removed, and new tests cover
+  the single page, the pointer anchor, the split row and the global menu.
+  Integration tests now look for the new labels.
+- **Checks.** A serial `cargo test --no-fail-fast` passed in about 398 s.
+  Strict clippy, fmt and docs pass. In `verify_non_ui.py` the cargo step hit its
+  420 s timeout under load; the direct serial run above passed. The Python
+  step has the same 13 pre-existing OpenCode bridge errors.
+
 ## Fix: server start failed after reboot (stale lock device) — 2026-10-31
 
 The user's `panelink` failed with "could not start the panelink server". The

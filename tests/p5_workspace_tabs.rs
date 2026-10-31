@@ -1527,20 +1527,20 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
     // These controls occupy the border below the workspace header. Both are
     // addressed through rendered labels rather than arbitrary content clicks.
     click_visible_label(&mut client, " Menu ");
-    client.wait_screen("discoverable pane actions", |_, screen| {
-        screen.contains("Split") && screen.contains("Layout") && screen.contains("More")
+    client.wait_screen("discoverable pane actions on one page", |_, screen| {
+        ["Split", "Zoom pane", "Swap pane", "Copy mode", "Close pane"]
+            .iter()
+            .all(|label| screen.contains(label))
+            && !screen.contains("[More")
     });
-    click_visible_label(&mut client, "[More");
-    client.wait_screen("copy and history group", |_, screen| {
-        screen.contains("Copy / History")
+    client.write(b"\x1b");
+    wait_root_shell_prompt(&client);
+    // Saved layout, help and detach live in the strip's global menu.
+    click_visible_label(&mut client, "\u{2261}");
+    client.wait_screen("global menu", |_, screen| {
+        screen.contains("All tabs") && screen.contains("Keys & help") && screen.contains("Detach")
     });
-    click_visible_label(&mut client, "[More");
-    client.wait_screen("close group", |_, screen| screen.contains("Close pane"));
-    click_visible_label(&mut client, "[More");
-    client.wait_screen("secondary pane actions", |_, screen| {
-        screen.contains("Zoom") && screen.contains("Detach")
-    });
-    click_visible_label(&mut client, "[Cancel]");
+    client.write(b"\x1b");
     wait_root_shell_prompt(&client);
     click_visible_label(&mut client, " x ");
     client.wait_screen("close confirmation", |_, screen| screen.contains("Cancel"));
@@ -1689,11 +1689,9 @@ fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
             .contents()
             .lines()
             .next()
-            .is_some_and(|header| {
-                header.contains("[+ New]") && header.trim_end().ends_with("[All tabs]")
-            })
+            .is_some_and(|header| header.contains(" + ") && header.trim_end().ends_with('\u{2261}'))
     });
-    client.click_text("[+ New]");
+    client.click_text("+");
     client.wait_header("Editors", "Shell 1");
     let shell = fixture.tab_id("Editors", "Shell 1");
     fixture.own_route(project, shell);

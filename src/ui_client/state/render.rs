@@ -391,35 +391,12 @@ impl<'a> RenderView<'a> {
             for (index, text) in action_text.iter().enumerate().take(action_count) {
                 lines[index] = OverlayLine {
                     text,
-                    style: if pressed.is_some_and(|p| {
-                        p.kind == 2
-                            && p.bounds.y
-                                == page.rect.y
-                                    + index as u16
-                                    + panelink::workspace_tabs::header_rows(
-                                        self.workspace.view().workspace_index.is_some(),
-                                    )
-                    }) {
-                        OverlayStyle::Status
-                    } else if index == 0 {
-                        OverlayStyle::Selected
+                    style: if page.bordered
+                        && (index == 0 || index + 1 == action_count || index == 5)
+                    {
+                        OverlayStyle::Border
                     } else if index == page.reason_row {
                         OverlayStyle::Status
-                    } else if text.starts_with('>') {
-                        OverlayStyle::Selected
-                    } else if self.interaction.view().actions_menu.is_some_and(|menu| {
-                        (page.start..page.end)
-                            .contains(&(page.start + index.saturating_sub(page.action_row)))
-                            && self
-                                .local_action_item(
-                                    menu,
-                                    page.start + index.saturating_sub(page.action_row),
-                                )
-                                .is_some_and(|(_, _, availability)| {
-                                    availability != Availability::Enabled
-                                })
-                    }) {
-                        OverlayStyle::Disabled
                     } else {
                         OverlayStyle::Normal
                     },
@@ -635,9 +612,7 @@ impl<'a> RenderView<'a> {
                         }
                     } else if control.kind == 2 {
                         if let Some(menu) = self.interaction.view().actions_menu {
-                            if control.index == menu.selected
-                                || (control.index == 102 && menu.selected == 12)
-                            {
+                            if control.index == menu.selected {
                                 state = ControlState::Focus;
                             }
                             if let Some((action, _, availability)) =

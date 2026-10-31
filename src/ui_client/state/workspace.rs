@@ -36,7 +36,15 @@ pub(super) enum TabDialog {
         close_selected: bool,
         pending: bool,
     },
+    /// Global menu opened from the strip's menu button.
+    Global { selected: usize },
 }
+
+/// Global menu items, in order; `WorkspaceFeedback::global` carries the
+/// activated index to the App, which owns help, recovery and detach.
+pub(super) const GLOBAL_MENU_ITEMS: [&str; 4] =
+    ["All tabs", "Saved layout", "Keys & help", "Detach"];
+const GLOBAL_MENU_COLUMNS: u16 = 22;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct PendingCreate {
@@ -66,6 +74,7 @@ pub(super) enum WorkspaceControl {
     Close,
     Clear,
     Route(WorkspaceRouteId),
+    Global(usize),
 }
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct WorkspaceStamp {
@@ -89,6 +98,8 @@ pub(super) struct WorkspaceFeedback {
     pub status: Option<(&'static str, Instant)>,
     pub persistent: Option<(&'static str, Instant)>,
     pub begin_switch: Option<Instant>,
+    /// Activated global menu item index.
+    pub global: Option<usize>,
 }
 #[derive(Default)]
 pub(super) struct WorkspaceState {
@@ -178,6 +189,11 @@ impl WorkspaceState {
                     };
                 }
             }
+            Some(TabDialog::Global { selected }) => {
+                if control == Global(*selected) {
+                    state = S::Focus;
+                }
+            }
             None => {
                 if matches!(control, Route(route) if Some(route) == self.picker_selection) {
                     state = S::Focus;
@@ -228,6 +244,19 @@ impl WorkspaceState {
                                 columns: rect.columns.saturating_sub(7).min(8),
                             },
                         ));
+                    }
+                    TabDialog::Global { .. } => {
+                        for index in 0..GLOBAL_MENU_ITEMS.len() {
+                            controls.push((
+                                Global(index),
+                                Rect {
+                                    x: rect.x + 1,
+                                    y: rect.y + 1 + index as u16,
+                                    rows: 1,
+                                    columns: rect.columns.saturating_sub(2),
+                                },
+                            ));
+                        }
                     }
                     TabDialog::Close { .. } => {
                         controls.push((
@@ -310,6 +339,7 @@ impl WorkspaceState {
             }
             Clear => self.clear_picker_filter(),
             Route(route) => self.request_route(route, now),
+            Global(index) => self.activate_global(index),
         }
     }
     pub(super) const fn view(&self) -> &Self {
@@ -930,6 +960,21 @@ impl WorkspaceState {
         });
         self.feedback.dirty = true;
     }
+    pub(super) fn open_global_menu(&mut self) {
+        self.ui_epoch = self.ui_epoch.wrapping_add(1);
+        self.cancel_selection();
+        self.picker_open = false;
+        self.picker_selection = None;
+        self.tab_dialog = Some(TabDialog::Global { selected: 0 });
+        self.feedback.clear_prefix = true;
+        self.feedback.dirty = true;
+    }
+    fn activate_global(&mut self, index: usize) {
+        if index < GLOBAL_MENU_ITEMS.len() {
+            self.cancel_tab_dialog();
+            self.feedback.global = Some(index);
+        }
+    }
     pub(super) fn open_tab_actions(&mut self, route: WorkspaceRouteId) {
         self.ui_epoch = self.ui_epoch.wrapping_add(1);
         if !self.route_exists(route) {
@@ -1143,6 +1188,21 @@ impl WorkspaceState {
             TabDialog::Actions { .. } => (4, 28),
             TabDialog::Rename { .. } => (4, 56),
             TabDialog::Close { .. } => (3, 44),
+            TabDialog::Global { .. } => {
+                // A dropdown under the strip's right-hand menu button.
+                let rows = GLOBAL_MENU_ITEMS.len() as u16 + 2;
+                if rows > viewport.0 || viewport.1 == 0 {
+                    return None;
+                }
+                let width = viewport.1.min(GLOBAL_MENU_COLUMNS);
+                let margin = if usize::from(viewport.1) >= 120 { 2 } else { 1 };
+                return Some(Rect {
+                    x: viewport.1.saturating_sub(width + margin),
+                    y: 0,
+                    rows,
+                    columns: width,
+                });
+            }
         };
         if rows < overlay_rows || columns == 0 {
             return None;
@@ -1170,7 +1230,7 @@ impl WorkspaceState {
         match selected {
             0 => {
                 self.tab_dialog = None;
-                self.request_route(route, now);
+                self.request_tab_create(route.project, now);
             }
             1 => self.begin_tab_rename(route),
             2 => self.begin_tab_close(route, generation),
@@ -1217,7 +1277,7 @@ impl WorkspaceState {
                         (KeyCode::Enter, true) if key.is_press() => {
                             self.activate_tab_action(route, selected, now, generation)
                         }
-                        (KeyCode::Char('s' | 'S'), true) if key.is_press() => {
+                        (KeyCode::Char('n' | 'N'), true) if key.is_press() => {
                             self.activate_tab_action(route, 0, now, generation)
                         }
                         (KeyCode::Char('r' | 'R'), true) if key.is_press() => {
@@ -1226,6 +1286,28 @@ impl WorkspaceState {
                         (KeyCode::Char('x' | 'X'), true) if key.is_press() => {
                             self.activate_tab_action(route, 2, now, generation)
                         }
+                        _ => {}
+                    }
+                }
+                Event::Resize(_, _) => self.feedback.dirty = true,
+                _ => {}
+            },
+            TabDialog::Global { mut selected } => match event {
+                Event::Key(key) if key.is_press() || key.is_repeat() => {
+                    let count = GLOBAL_MENU_ITEMS.len();
+                    match key.code {
+                        KeyCode::Esc => self.cancel_tab_dialog(),
+                        KeyCode::Up | KeyCode::BackTab => {
+                            selected = (selected + count - 1) % count;
+                            self.tab_dialog = Some(TabDialog::Global { selected });
+                            self.feedback.dirty = true;
+                        }
+                        KeyCode::Down | KeyCode::Tab => {
+                            selected = (selected + 1) % count;
+                            self.tab_dialog = Some(TabDialog::Global { selected });
+                            self.feedback.dirty = true;
+                        }
+                        KeyCode::Enter if key.is_press() => self.activate_global(selected),
                         _ => {}
                     }
                 }
@@ -1633,7 +1715,7 @@ impl WorkspaceState {
                 } else {
                     "Tab actions (Esc cancels)".into()
                 };
-                let labels = ["Select tab", "Rename", "Close tab"];
+                let labels = ["New tab", "Rename", "Close tab"];
                 for (index, label) in labels.iter().enumerate() {
                     tab_dialog_text[index + first] = format!(
                         "{}{} [{}]",
@@ -1688,6 +1770,26 @@ impl WorkspaceState {
                 tab_dialog_selected[0] = true;
                 tab_dialog_selected[2] = !close_selected && !pending;
                 3
+            }
+            Some(TabDialog::Global { selected }) => {
+                let width = usize::from(
+                    self.tab_dialog_geometry(viewport)
+                        .map_or(GLOBAL_MENU_COLUMNS, |rect| rect.columns),
+                );
+                let inner = width.saturating_sub(2);
+                tab_dialog_text[0] = format!("+{}+", "-".repeat(inner));
+                for (index, label) in GLOBAL_MENU_ITEMS.iter().enumerate() {
+                    let marker = if *selected == index { ">" } else { " " };
+                    let mut row = format!("|{marker} {label}");
+                    while row.len() + 1 < width {
+                        row.push(' ');
+                    }
+                    row.push('|');
+                    tab_dialog_text[index + 1] = row;
+                    tab_dialog_selected[index + 1] = *selected == index;
+                }
+                tab_dialog_text[GLOBAL_MENU_ITEMS.len() + 1] = format!("+{}+", "-".repeat(inner));
+                GLOBAL_MENU_ITEMS.len() + 2
             }
             None => 0,
         }

@@ -25,7 +25,7 @@ calling agent remains responsible for delegation, model choice and task success.
 ## Source button redesign
 
 This checkout implements filled button controls with captured press/release,
-grouped pane menus and separate tab-close targets. A valid release in the same
+a single-page pane menu, a strip `≡` global menu and separate tab-close targets. A valid release in the same
 control activates once; drag-away or stale UI/target cancels. Inactive-tab close
 requires selecting that tab first. Resolve the actual executable before assuming
 this source behavior is installed. The [interactive guide](references/interactive.md)
