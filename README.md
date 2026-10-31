@@ -10,9 +10,10 @@ Panelink's original application code is intended for the MIT license.
 Controls use filled backgrounds with visible focus, pressed, disabled and pending
 states. Press and release inside the same button to activate; dragging away or
 pressing Escape cancels. Keyboard shortcuts remain available. Pane Menu and
-right-click expose grouped Layout, Copy/History, Close and Secondary pages.
-The tab strip has separate select/close targets, with New tab and All tabs pinned
-right. Select an inactive tab before closing it; Close ends its processes after
+right-click open one short menu: a Split row (Left/Right/Up/Down), Zoom, Swap,
+Copy mode and Close pane. The tab strip has separate select/close targets, a
+`+` after the last tab and a `≡` global menu (All tabs, Saved layout, Keys &
+help, Detach) pinned right. Select an inactive tab before closing it; Close ends its processes after
 confirmation, while Detach leaves them running. Dialog Tab/Shift-Tab moves local
 focus; rename text editing stays in the editor.
 
@@ -63,7 +64,7 @@ does not identify that server.
 | Keyboard copy mode | Ctrl-B then `c`; move with arrows or `h`/`j`/`k`/`l`, press Space to set/clear an anchor, then Enter or `y` to copy a non-empty range |
 | Zoom a pane | Ctrl-B then `z`; the selected pane's PTY resizes to fill the current workspace view |
 | Swap pane locations | Ctrl-B then `m`; choose another pane with arrows or `h`/`j`/`k`/`l`, then Enter; Esc cancels |
-| Resize panes | Drag the divider and release; or Menu → Resize divider → `[-]`/`[+]` → Apply. Ctrl-B then `e` supports keyboard adjustment |
+| Resize panes | Drag the divider and release; or Ctrl-B then `e` → `[-]`/`[+]` → Apply |
 | Close a pane | Click its `x`, then `[Close]` (Cancel is selected by default; `y` also confirms); `[Cancel]`, `n` or Esc dismisses |
 | List/close panes from a shell | `panelink panes`; `panelink close 1` (or `2`) |
 | Detach (shells keep running) | Ctrl-X |
@@ -86,8 +87,8 @@ wheel event in one scoped transaction. Older servers use the query-first legacy
 path; installing a new client alone does not enable the fast path. Server restart
 ends its running panes, so keep activation separate from client installation.
 
-The visible pane Menu exposes split, zoom, swap, divider adjustment, copy,
-saved layout, shortcut help, close and detach. Mouse controls use terminal cell
+The visible pane Menu exposes split (all four directions), zoom, swap, copy and
+close; saved layout, shortcut help and detach are in the strip's `≡` menu. Mouse controls use terminal cell
 coordinates; touch gestures work when the host terminal translates them into
 mouse press, drag and release events. Native touch hardware acceptance remains
 open. See the [pointer controls plan and evidence](docs/progress/P5-POINTER-CONTROLS-2026-10-27.md).
@@ -188,10 +189,10 @@ no project-root discovery is included.
 
 Tab controls in the interactive client:
 - `+` or `Ctrl-B +` creates a managed "Shell N" tab and switches to it.
-- `Ctrl-B t` opens tab actions (Rename / Close) for the active tab.
+- `Ctrl-B t` (or right-click a tab) opens tab actions (New tab / Rename / Close).
 - `Ctrl-B w` opens the searchable All tabs chooser.
 - `Ctrl-B n/p` switches next/previous tab; `[`/`]` switches project.
-- At most eight tabs per project; the tab row ends with `[<] [>]`, `[All tabs]` and `[+ New]` (compact forms on narrow hosts).
+- At most eight tabs per project; `+` follows the last tab, `≡` (All tabs, Saved layout, Keys & help, Detach) is pinned right, and `[<] [>]` appear only when tabs overflow.
 - Rename uses a text field with Save/Cancel (Enter/Esc).
 - Close asks confirmation with Cancel as the default; closing the last tab
   returns to the empty state.
