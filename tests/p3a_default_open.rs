@@ -484,8 +484,9 @@ fn last_shell_exit_closes_the_workspace_and_the_client() {
     assert_eq!(code, 0, "client exits cleanly when the workspace closes");
     client.termios_restored();
     fixture.wait_server_gone();
-    let screen = String::from_utf8_lossy(&client.capture()).into_owned();
-    assert!(screen.contains("workspace closed"), "notice shown");
+    // The exit status is published before the outer PTY is fully drained, so
+    // wait for the final notice bytes instead of sampling the capture once.
+    client.wait_capture_contains(b"workspace closed", STEP);
 }
 
 #[test]
