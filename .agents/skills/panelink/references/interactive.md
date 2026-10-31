@@ -32,6 +32,10 @@ The client version (for example `v0.1.6`) is shown in the bottom-right pane
 margin, matching `--version`; it does not identify the running server. The
 render area is bounded to 80 rows by 240 columns, so host size and child PTY
 size can differ; discover pane dimensions through the matching executable's CLI.
+With the project/tab strip (plain `panelink`), the top two host rows are the
+strip and a blank spacer, so the pane root is two rows shorter than the host.
+From 120 columns the strip uses wider margins and gaps; panes at least 40
+columns wide inset their Menu and close controls two cells from the edges.
 
 ## Focus chrome
 

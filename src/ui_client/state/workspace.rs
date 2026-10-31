@@ -192,7 +192,7 @@ impl WorkspaceState {
         let mut controls = Vec::new();
         if let Some(dialog) = &self.tab_dialog {
             if let Some(mut rect) = self.tab_dialog_geometry(viewport) {
-                rect.y += u16::from(self.workspace_index.is_some());
+                rect.y += panelink::workspace_tabs::header_rows(self.workspace_index.is_some());
                 match dialog {
                     TabDialog::Actions { route, .. } => {
                         let padded = self.padded_tab_actions(viewport);
@@ -862,9 +862,11 @@ impl WorkspaceState {
         let detach_width = u16::try_from("[ Detach (Ctrl-X) ]".len()).ok()?;
         let action_start = columns.saturating_sub(action_width) / 2;
         let top = rows.saturating_sub(2) / 2;
-        let button_row = top
-            .saturating_add(1)
-            .saturating_add(u16::from(self.workspace_index.is_some()));
+        let button_row =
+            top.saturating_add(1)
+                .saturating_add(panelink::workspace_tabs::header_rows(
+                    self.workspace_index.is_some(),
+                ));
         Some(EmptyWorkspaceGeometry {
             overlay: Rect {
                 x: 0,
@@ -1445,7 +1447,11 @@ impl WorkspaceState {
                 .min(self.picker_visible_route_count(viewport));
             (visible_routes + 1).min(usize::from(view_rows)) as u16
         };
-        Some((1 + view_rows.saturating_sub(rows) / 2, rows))
+        // Screen row of the search header: below the strip and spacer.
+        Some((
+            panelink::workspace_tabs::HEADER_ROWS + view_rows.saturating_sub(rows) / 2,
+            rows,
+        ))
     }
     pub(super) fn picker_visible_route_count(&self, viewport: (u16, u16)) -> usize {
         let (view_rows, _) = viewport;

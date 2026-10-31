@@ -355,7 +355,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         }
     }
     fn apply_interaction_feedback(&mut self) {
@@ -389,7 +391,7 @@ impl App {
         self.interaction.confirm_ui_geometry(
             rows,
             columns,
-            u16::from(self.workspace.view().workspace_index.is_some()),
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some()),
         )
     }
     fn handle_pane_mode_event(&mut self, event: &Event, now: Instant, effects: &mut impl Effects) {
@@ -398,7 +400,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         self.interaction.handle_pane_mode_event(context, event, now);
         self.apply_interaction_feedback();
@@ -419,7 +423,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         self.interaction
             .open_swap_mode_for_target(context, source, revision, now);
@@ -440,7 +446,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         self.interaction
             .open_divider_mode_for_target(context, target, revision, now);
@@ -463,7 +471,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         let result =
             self.interaction
@@ -1040,7 +1050,7 @@ impl App {
                                     .rect
                                     .y
                                     .saturating_add(page.action_row as u16)
-                                    .saturating_add(u16::from(
+                                    .saturating_add(panelink::workspace_tabs::header_rows(
                                         self.workspace.view().workspace_index.is_some(),
                                     ))
                                     .saturating_add((9 - page.start) as u16)
@@ -1059,7 +1069,7 @@ impl App {
             || self.workspace.view().picker_open
             || self.workspace.view().tab_dialog.is_some()
             || (self.workspace.view().workspace_index.is_some()
-                && matches!(event, Event::Mouse(mouse) if mouse.row == 0))
+                && matches!(event, Event::Mouse(mouse) if mouse.row < panelink::workspace_tabs::HEADER_ROWS))
             || self.interaction.view().confirm.is_open()
             || self.interaction.view().menu.is_open()
         {
@@ -1107,7 +1117,10 @@ impl App {
             (root.rows, root.columns)
         } else if self.workspace.view().workspace_index.is_some() {
             let (rows, columns) = self.screen_viewport();
-            (rows.saturating_sub(if rows > 0 { 1 } else { 0 }), columns)
+            (
+                rows.saturating_sub(panelink::workspace_tabs::HEADER_ROWS),
+                columns,
+            )
         } else {
             self.screen_viewport()
         }
@@ -1185,7 +1198,8 @@ impl App {
             self.handle_workspace_picker_event(event, now);
             return Some(Flow::Continue);
         }
-        if matches!(event, Event::Mouse(mouse) if mouse.row == 0) {
+        if matches!(event, Event::Mouse(mouse) if mouse.row < panelink::workspace_tabs::HEADER_ROWS)
+        {
             self.handle_header_event(event, now);
             return Some(Flow::Continue);
         }
@@ -1825,7 +1839,7 @@ impl App {
         drag.total_rows = slot.history_total.max(slot.history_offset);
         let rect = shifted_rect(
             drag.pane_rect,
-            u16::from(self.workspace.view().workspace_index.is_some()),
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some()),
         );
         let Some(geometry) = scrollbar_geometry(
             rect,
@@ -1866,7 +1880,7 @@ impl App {
         let total_rows = slot.history_total.max(slot.history_offset);
         let rect = shifted_rect(
             drag.pane_rect,
-            u16::from(self.workspace.view().workspace_index.is_some()),
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some()),
         );
         let Some(geometry) = scrollbar_geometry(
             rect,
@@ -1970,7 +1984,7 @@ impl App {
         };
         let content = shifted_rect(
             content,
-            u16::from(self.workspace.view().workspace_index.is_some()),
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some()),
         );
         let point = pointer_content_point(content, screen_x, screen_y);
         let (column, row) = (point.column, point.row);
@@ -2436,7 +2450,9 @@ impl App {
         }
         if self.interaction.view().help_open {
             let viewport = self.viewport();
-            let header = u16::from(self.workspace.view().workspace_index.is_some());
+            let header = panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            );
             let flow = self.interaction.handle_help_event(event, viewport, header);
             self.apply_interaction_feedback();
             if flow == Flow::Quit {
@@ -2446,7 +2462,9 @@ impl App {
         }
         if self.interaction.view().confirm.is_open() {
             let viewport = self.viewport();
-            let header = u16::from(self.workspace.view().workspace_index.is_some());
+            let header = panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            );
             let intent = self
                 .interaction
                 .handle_confirm_event(event, now, viewport, header);
@@ -2457,7 +2475,9 @@ impl App {
             return Flow::Continue;
         }
         if self.interaction.view().menu.is_open() {
-            let header = u16::from(self.workspace.view().workspace_index.is_some());
+            let header = panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            );
             let response = self.interaction.handle_split_menu_event(event, header);
             self.apply_interaction_feedback();
             match response {
@@ -3600,7 +3620,8 @@ impl App {
         if !self.fits() {
             return None;
         }
-        let header_offset = u16::from(self.workspace.view().workspace_index.is_some());
+        let header_offset =
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some());
         let layout = self.display_layout()?;
         layout.panes.iter().flatten().find_map(|pane| {
             let slot = self
@@ -3646,7 +3667,8 @@ impl App {
             return None;
         }
         let (host_rows, host_columns) = self.screen_viewport();
-        let header_offset = u16::from(self.workspace.view().workspace_index.is_some());
+        let header_offset =
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some());
         self.display_layout()?
             .panes
             .iter()
@@ -3702,7 +3724,9 @@ impl App {
                 .map(|pane| {
                     shifted_rect(
                         pane.rect,
-                        u16::from(self.workspace.view().workspace_index.is_some()),
+                        panelink::workspace_tabs::header_rows(
+                            self.workspace.view().workspace_index.is_some(),
+                        ),
                     )
                 })
         });
@@ -3971,8 +3995,9 @@ impl App {
         let layout = self.display_layout()?;
         let local = self.local.as_ref()?;
         let revision = self.layout?.revision;
-        let root_y =
-            screen_y.checked_sub(u16::from(self.workspace.view().workspace_index.is_some()))?;
+        let root_y = screen_y.checked_sub(panelink::workspace_tabs::header_rows(
+            self.workspace.view().workspace_index.is_some(),
+        ))?;
         let (index, _) = divider_at(layout.dividers, x, root_y)?;
         for pane in layout.panes.iter().flatten() {
             if let Ok(info) = local.divider_info(pane.target, revision, index as u8) {
@@ -3991,7 +4016,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         if !self
             .interaction
@@ -4006,7 +4033,8 @@ impl App {
         if !self.fits() {
             return None;
         }
-        let header_offset = u16::from(self.workspace.view().workspace_index.is_some());
+        let header_offset =
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some());
         self.display_layout()?
             .panes
             .iter()
@@ -4027,7 +4055,7 @@ impl App {
 
     fn pane_row(&self, screen_row: u16) -> Option<u16> {
         if self.workspace.view().workspace_index.is_some() {
-            screen_row.checked_sub(1)
+            screen_row.checked_sub(panelink::workspace_tabs::HEADER_ROWS)
         } else {
             Some(screen_row)
         }
@@ -4307,7 +4335,9 @@ impl App {
             local: self.local.as_ref(),
             pane_operations: self.pane_operations,
             viewport: self.viewport(),
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         };
         let action = self.interaction.capture_action(menu, context, now);
         self.apply_interaction_feedback();

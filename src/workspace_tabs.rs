@@ -337,8 +337,8 @@ pub fn layout(
         header_cells: cells,
         pane_root: Rect {
             x: 0,
-            y: 1,
-            rows: rows.saturating_sub(1),
+            y: HEADER_ROWS,
+            rows: rows.saturating_sub(HEADER_ROWS),
             columns,
         },
         hit_regions: hits,
@@ -366,8 +366,8 @@ pub fn empty_layout(host_rows: u16, host_columns: u16) -> TabsLayout {
             vec![HeaderCell::blank(false); usize::from(columns)],
             Rect {
                 x: 0,
-                y: 1,
-                rows: rows.saturating_sub(1),
+                y: HEADER_ROWS,
+                rows: rows.saturating_sub(HEADER_ROWS),
                 columns,
             },
         )
@@ -511,6 +511,19 @@ fn emit_control(
             end: at as u16 + 1,
             action,
         });
+    }
+}
+
+/// Host rows reserved above the pane root when the strip is shown: the strip
+/// itself on row zero and one blank spacer row beneath it.
+pub const HEADER_ROWS: u16 = 2;
+
+/// Rows reserved above the pane root; zero when no strip is shown.
+pub const fn header_rows(present: bool) -> u16 {
+    if present {
+        HEADER_ROWS
+    } else {
+        0
     }
 }
 
@@ -835,24 +848,29 @@ mod tests {
     #[test]
     fn geometry_clamps_and_uses_header_plus_existing_outer_minimum() {
         let index = index();
-        let exact = layout(&index, route(1, 1), 8, MIN_PANE_COLUMNS).expect("layout");
-        assert_eq!(exact.rows(), 8);
+        let exact_rows = MIN_PANE_ROWS + HEADER_ROWS;
+        let exact = layout(&index, route(1, 1), exact_rows, MIN_PANE_COLUMNS).expect("layout");
+        assert_eq!(exact.rows(), exact_rows);
         assert_eq!(
             exact.pane_root(),
             Rect {
                 x: 0,
-                y: 1,
+                y: HEADER_ROWS,
                 rows: MIN_PANE_ROWS,
                 columns: MIN_PANE_COLUMNS
             }
         );
         assert!(exact.fits_single_pane());
-        assert!(!layout(&index, route(1, 1), 7, MIN_PANE_COLUMNS)
-            .expect("layout")
-            .fits_single_pane());
-        assert!(!layout(&index, route(1, 1), 8, MIN_PANE_COLUMNS - 1)
-            .expect("layout")
-            .fits_single_pane());
+        assert!(
+            !layout(&index, route(1, 1), exact_rows - 1, MIN_PANE_COLUMNS)
+                .expect("layout")
+                .fits_single_pane()
+        );
+        assert!(
+            !layout(&index, route(1, 1), exact_rows, MIN_PANE_COLUMNS - 1)
+                .expect("layout")
+                .fits_single_pane()
+        );
         let clamped = layout(&index, route(1, 1), 100, 500).expect("layout");
         assert_eq!((clamped.rows(), clamped.columns()), (80, 240));
         assert_eq!(clamped.header_cells().len(), 240);
@@ -881,7 +899,7 @@ mod tests {
             one.pane_root(),
             Rect {
                 x: 0,
-                y: 1,
+                y: HEADER_ROWS,
                 rows: 0,
                 columns: 1
             }

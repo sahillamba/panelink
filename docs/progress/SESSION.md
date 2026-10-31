@@ -10,7 +10,18 @@ offsets; a new state test covers centring, label/hit agreement and fallback.
 `RUST_TEST_THREADS=1 cargo test --no-fail-fast` all pass; fmt/clippy/build/docs
 pass in `verify_non_ui.py`. Its Python step has 13
 `test_opencode_bridge_plugin` listener timeouts, reproduced identically on the
-unmodified tree (pre-existing, unrelated). Steps 2–3 pending; no install or push.
+unmodified tree (pre-existing, unrelated).
+
+Step 2 (`8af1ba4`): `HeaderSpacing` tiers in `workspace_tabs.rs`. Hosts of 120 or
+more columns get 2-cell margins, a 4-cell gap after the project, 3-cell gaps
+between tabs, 4-cell gaps between button groups and `[<]  [>]`. `pane_controls` insets Menu/x
+two cells on panes of at least 40 columns. Step 3: `workspace_tabs::HEADER_ROWS = 2` (strip and
+blank spacer). Header offsets now use `header_rows()`; spacer clicks reach no
+pane. Tests that hard-coded a one-row header were updated. Checks after step 3:
+`RUST_TEST_THREADS=1 cargo test --no-fail-fast` passes. `verify_non_ui.py` passes
+everything except the same 13 pre-existing OpenCode bridge Python errors. An
+earlier parallel run showed three integration-target failures that did not
+reproduce in two serial runs. No push.
 
 ## Button redesign client installed — 2026-10-31
 

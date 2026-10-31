@@ -49,7 +49,9 @@ impl<'a> RenderView<'a> {
             local: self.local,
             pane_operations: self.pane_operations,
             viewport: self.viewport,
-            header_offset: u16::from(self.workspace.view().workspace_index.is_some()),
+            header_offset: panelink::workspace_tabs::header_rows(
+                self.workspace.view().workspace_index.is_some(),
+            ),
         }
     }
     fn tabs_layout(&self) -> Option<TabsLayout> {
@@ -59,7 +61,7 @@ impl<'a> RenderView<'a> {
         self.interaction.confirm_ui_geometry(
             rows,
             columns,
-            u16::from(self.workspace.view().workspace_index.is_some()),
+            panelink::workspace_tabs::header_rows(self.workspace.view().workspace_index.is_some()),
         )
     }
     fn actions_page_geometry(&self, menu: ActionsMenu) -> Option<ActionsMenuPage> {
@@ -137,7 +139,7 @@ impl<'a> RenderView<'a> {
                 .collect::<Vec<_>>()
         });
         let header_enabled = self.workspace.view().workspace_index.is_some();
-        let header_offset = if header_enabled { 1 } else { 0 };
+        let header_offset = panelink::workspace_tabs::header_rows(header_enabled);
         // Both legacy attach and workspace tabs use the bounded render area,
         // even when the physical terminal is larger than the screen caches.
         let (host_rows, host_columns) = self.screen_viewport;
@@ -394,7 +396,9 @@ impl<'a> RenderView<'a> {
                             && p.bounds.y
                                 == page.rect.y
                                     + index as u16
-                                    + u16::from(self.workspace.view().workspace_index.is_some())
+                                    + panelink::workspace_tabs::header_rows(
+                                        self.workspace.view().workspace_index.is_some(),
+                                    )
                     }) {
                         OverlayStyle::Status
                     } else if index == 0 {
@@ -460,7 +464,9 @@ impl<'a> RenderView<'a> {
                             && p.bounds.y
                                 == rect.y
                                     + index as u16
-                                    + u16::from(self.workspace.view().workspace_index.is_some())
+                                    + panelink::workspace_tabs::header_rows(
+                                        self.workspace.view().workspace_index.is_some(),
+                                    )
                     }) {
                         OverlayStyle::Status
                     } else {
@@ -511,7 +517,7 @@ impl<'a> RenderView<'a> {
             Some((
                 Rect {
                     x: self.picker_horizontal_bounds().start,
-                    y: top.saturating_sub(1),
+                    y: top.saturating_sub(panelink::workspace_tabs::HEADER_ROWS),
                     rows,
                     columns: self.picker_horizontal_bounds().len() as u16,
                 },

@@ -630,17 +630,18 @@ impl Interaction {
         event: &Event,
         header_offset: u16,
     ) -> MenuResponse {
-        let mut input =
-            if header_offset > 0 && matches!(event, Event::Mouse(mouse) if mouse.row == 0) {
-                panelink::split_menu::MenuInput::Other
-            } else {
-                menu_input(event)
-            };
+        let mut input = if header_offset > 0
+            && matches!(event, Event::Mouse(mouse) if mouse.row < header_offset)
+        {
+            panelink::split_menu::MenuInput::Other
+        } else {
+            menu_input(event)
+        };
         if header_offset > 0 {
             match &mut input {
                 panelink::split_menu::MenuInput::MousePress { y, .. }
                 | panelink::split_menu::MenuInput::MouseRelease { y, .. } => {
-                    *y = y.saturating_sub(1);
+                    *y = y.saturating_sub(header_offset);
                 }
                 _ => {}
             }

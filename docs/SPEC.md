@@ -257,7 +257,9 @@ and [tab integration evidence](progress/P5-TAB-INTEGRATION-2026-10-25.md).
 ### Interactive client tab behavior
 
 Plain `panelink` on a TTY reserves row zero for a persistent project/tab
-strip. Clicking the project control opens its chooser; clicking a tab requests
+strip and row one as a blank, non-interactive spacer; the pane root starts at
+row two, so PTYs are two rows shorter than the host. Clicks on the spacer
+reach no pane. Clicking the project control opens its chooser; clicking a tab requests
 that route. The `+` button and `Ctrl-B +` admit one create intent and open one
 managed "Shell N" tab, then switch to it. `Ctrl-B t` opens tab actions
 (Rename/Close) for the active tab. `Ctrl-B w` opens the searchable All tabs

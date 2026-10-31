@@ -1237,12 +1237,12 @@ fn keyboard_copy_caret_respects_the_workspace_header_offset() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     let mut layout = one_pane(1);
-    layout.rows = 23;
-    layout.panes[0].as_mut().unwrap().rect.rows = 23;
+    layout.rows = 22;
+    layout.panes[0].as_mut().unwrap().rect.rows = 22;
     app.set_layout(layout);
     let (index, route, _) = workspace_catalog();
     app.install_workspace_index(index, route);
-    let checkpoint = text_checkpoint_size("abc", 1, 21, 79);
+    let checkpoint = text_checkpoint_size("abc", 1, 20, 79);
     let snapshot = decode(&checkpoint).unwrap();
     let wraps = vec![false; usize::from(snapshot.rows())];
     app.load_screen_with_wraps(target(1), 1, &snapshot, Some(&wraps))
@@ -1254,7 +1254,7 @@ fn keyboard_copy_caret_respects_the_workspace_header_offset() {
         .unwrap();
     let mut parser = vt100::Parser::new(24, 81, 0);
     parser.process(&bytes);
-    assert!(parser.screen().cell(2, 1).unwrap().inverse());
+    assert!(parser.screen().cell(3, 1).unwrap().inverse());
     // The project control starts after a one-cell header margin. Its blank
     // cell must stay in the header while the copy caret highlights content.
     assert_eq!(parser.screen().cell(0, 2).unwrap().contents(), " ");
@@ -1280,10 +1280,10 @@ fn keyboard_copy_cancels_before_buffer_route_or_modal_identity_changes() {
     assert!(!app.copy.copy_mode);
 
     let mut tab_layout = one_pane(3);
-    tab_layout.rows = 23;
-    tab_layout.panes[0].as_mut().unwrap().rect.rows = 23;
+    tab_layout.rows = 22;
+    tab_layout.panes[0].as_mut().unwrap().rect.rows = 22;
     app.set_layout(tab_layout);
-    let tab_checkpoint = text_checkpoint_size("normal", 1, 21, 79);
+    let tab_checkpoint = text_checkpoint_size("normal", 1, 20, 79);
     let tab_snapshot = decode(&tab_checkpoint).unwrap();
     let tab_wraps = vec![false; usize::from(tab_snapshot.rows())];
     app.load_screen_with_wraps(target(1), 3, &tab_snapshot, Some(&tab_wraps))
@@ -1625,20 +1625,21 @@ fn zoom_projection_keeps_full_target_registry_and_hidden_screen_updates() {
     app.cancel_selection();
 
     let (catalog, current, _) = workspace_catalog();
-    let mut headed = App::new(25, 81).unwrap();
+    let mut headed = App::new(26, 81).unwrap();
     headed.install_workspace_index(catalog, current);
     install_operations_view(&mut headed, operations_view(two_panes(), Some(target(1))));
     headed.load_screen(target(1), 10, &zoomed_snapshot).unwrap();
-    assert_eq!(headed.pane_at(80, 24), Some(target(1)));
+    assert_eq!(headed.pane_at(80, 25), Some(target(1)));
     assert_eq!(headed.pane_at(80, 0), None);
+    assert_eq!(headed.pane_at(80, 1), None, "spacer row is not a pane");
     let mut headed_compositor = Compositor::try_new().unwrap();
     let mut headed_output = Vec::new();
     headed
         .render(&mut headed_compositor, &mut headed_output, Instant::now())
         .unwrap();
-    let mut headed_parser = vt100::Parser::new(25, 81, 0);
+    let mut headed_parser = vt100::Parser::new(26, 81, 0);
     headed_parser.process(&headed_output);
-    assert_eq!(headed_parser.screen().cursor_position(), (4, 4));
+    assert_eq!(headed_parser.screen().cursor_position(), (5, 4));
 
     let mut unzoomed = operations_view(two_panes(), None);
     unzoomed.layout.revision = 3;
@@ -2138,7 +2139,7 @@ fn navigation_mode_ctrl_x_still_detaches() {
 #[test]
 fn workspace_header_picker_and_root_rows_stay_local_and_aligned() {
     let (index, current, next) = workspace_catalog();
-    let mut app = App::new(25, 81).unwrap();
+    let mut app = App::new(26, 81).unwrap();
     let mut fake = Fake::default();
     app.install_workspace_index(index, current);
     app.set_layout(two_panes());
@@ -2165,12 +2166,15 @@ fn workspace_header_picker_and_root_rows_stay_local_and_aligned() {
     app.flush(Instant::now(), &mut fake);
     assert_eq!(fake.keys, vec![(target(1), vec![Key::Char('z')])]);
 
-    // The top screen row is not pane geometry; screen row 1 maps to root row 0.
+    // The strip and spacer rows are not pane geometry: a click on the
+    // spacer focuses nothing, and screen row 2 maps to root row 0.
     feed(&mut app, &mut fake, b"\x1b[<0;50;2M\x1b[<0;50;2m");
+    assert_eq!(app.focus(), Some(target(1)));
+    feed(&mut app, &mut fake, b"\x1b[<0;50;3M\x1b[<0;50;3m");
     assert_eq!(app.focus(), Some(target(2)));
     assert_eq!(app.desired_root(), Some((24, 81)));
     app.set_host(24, 81);
-    assert_eq!(app.desired_root(), Some((23, 81)));
+    assert_eq!(app.desired_root(), Some((22, 81)));
     app.set_host(1, 81);
     assert_eq!(app.desired_root(), None);
 }
@@ -2215,7 +2219,7 @@ fn route_selection_freezes_unsent_effects_copy_and_allows_local_detach_resize() 
 
     // Resize remains local and Ctrl-X detaches without flushing to the old route.
     app.set_host(30, 100);
-    assert_eq!(app.desired_root(), Some((29, 100)));
+    assert_eq!(app.desired_root(), Some((28, 100)));
     assert_eq!(feed(&mut app, &mut fake, b"\x18"), Flow::Quit);
     assert!(fake.keys.is_empty());
     assert!(fake.pastes.is_empty());
@@ -2276,7 +2280,7 @@ fn picker_scroll_tracks_short_viewport_and_hit_rows() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     app.install_workspace_index(index, current);
-    app.set_host(6, 30); // short, narrow host: four route rows below the title
+    app.set_host(7, 30); // short, narrow host: four route rows below the title
     feed(&mut app, &mut fake, b"\x02w\x1b[B\x1b[B\x1b[B\x1b[B");
     assert_eq!(app.workspace.picker_selection, Some(selected));
     let (top, rows) = app.picker_screen_geometry().unwrap();
@@ -2375,7 +2379,7 @@ fn recovery_availability_skips_picker_header_help_and_preparing_events() {
 #[test]
 fn header_composes_at_screen_row_zero_and_selection_uses_root_coordinates() {
     let (index, current, _) = workspace_catalog();
-    let mut app = App::new(25, 81).unwrap();
+    let mut app = App::new(26, 81).unwrap();
     let mut fake = Fake::default();
     app.install_workspace_index(index, current);
     app.set_layout(one_pane(1));
@@ -2389,7 +2393,7 @@ fn header_composes_at_screen_row_zero_and_selection_uses_root_coordinates() {
     let mut output = Vec::new();
     app.render(&mut compositor, &mut output, Instant::now())
         .unwrap();
-    let mut parser = vt100::Parser::new(25, 81, 0);
+    let mut parser = vt100::Parser::new(26, 81, 0);
     parser.process(&output);
     let rendered = parser.screen().contents();
     let header = rendered.lines().next().unwrap_or_default();
@@ -2412,16 +2416,21 @@ fn header_composes_at_screen_row_zero_and_selection_uses_root_coordinates() {
     let lines: Vec<_> = rendered.lines().collect();
     assert!(lines[0].contains("Editors"), "{}", lines[0]);
     assert!(lines
-        .get(9)
+        .get(10)
         .is_some_and(|line| line.contains("Panelink help")));
     feed(&mut app, &mut fake, b"\x1b");
 
-    // Screen row 0 is reserved; screen row 2 is content row 0 after the
-    // one-row header and one-cell pane inset are both removed.
+    // Screen rows 0-1 are the strip and spacer; screen row 3 is content row 0
+    // after the two header rows and one-cell pane inset are removed.
     feed(&mut app, &mut fake, b"\x1b[<0;2;1M\x1b[<0;2;1m");
     assert!(app.copy.selection.is_none());
     feed(&mut app, &mut fake, b"\x1b");
-    feed(&mut app, &mut fake, b"\x1b[<0;2;3M");
+    feed(&mut app, &mut fake, b"\x1b[<0;2;2M\x1b[<0;2;2m");
+    assert!(
+        app.copy.selection.is_none(),
+        "spacer row starts no selection"
+    );
+    feed(&mut app, &mut fake, b"\x1b[<0;2;4M");
     let drag = app
         .copy
         .selection
@@ -4118,7 +4127,7 @@ fn rendered_confirmation_labels_share_click_geometry_across_routes_and_widths() 
                     layout
                 };
                 app.set_layout(layout);
-                let offset = u16::from(workspace);
+                let offset = panelink::workspace_tabs::header_rows(workspace);
                 let close_x = columns - 3;
                 let opener = Event::Mouse(MouseEvent {
                     kind: MouseEventKind::Down(MouseButton::Left),
@@ -4628,7 +4637,11 @@ fn every_pane_action_and_cancel_is_pointer_reachable_at_minimum_height() {
     for rows in [7, 8, 24] {
         for columns in [22, 81] {
             for header in [false, true] {
-                let mut app = App::new(rows + u16::from(header), columns).unwrap();
+                let mut app = App::new(
+                    rows + panelink::workspace_tabs::header_rows(header),
+                    columns,
+                )
+                .unwrap();
                 let mut fake = Fake::default();
                 if header {
                     let (index, route, _) = workspace_catalog();
@@ -5870,14 +5883,14 @@ fn rename_enter_saves_once_and_mouse_cancel_discards_the_draft() {
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
         geometry.x + 2,
-        geometry.y + 4,
+        geometry.y + panelink::workspace_tabs::HEADER_ROWS + 3,
     );
     gesture(
         &mut mouse_save,
         &mut fake,
         MouseEventKind::Up(MouseButton::Left),
         geometry.x + 2,
-        geometry.y + 4,
+        geometry.y + panelink::workspace_tabs::HEADER_ROWS + 3,
     );
     assert!(matches!(
         mouse_save.take_workspace_metadata_mutation(),
@@ -5894,14 +5907,14 @@ fn rename_enter_saves_once_and_mouse_cancel_discards_the_draft() {
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
         geometry.x + 10,
-        geometry.y + 4,
+        geometry.y + panelink::workspace_tabs::HEADER_ROWS + 3,
     );
     gesture(
         &mut cancel,
         &mut fake,
         MouseEventKind::Up(MouseButton::Left),
         geometry.x + 10,
-        geometry.y + 4,
+        geometry.y + panelink::workspace_tabs::HEADER_ROWS + 3,
     );
     assert_eq!(cancel.workspace.tab_dialog, None);
     assert!(cancel.take_workspace_metadata_mutation().is_none());
@@ -5998,14 +6011,14 @@ fn close_tab_defaults_to_cancel_and_confirmation_captures_one_exact_route() {
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
         geometry.x + 15,
-        geometry.y + 3,
+        geometry.y + panelink::workspace_tabs::HEADER_ROWS + 2,
     );
     gesture(
         &mut app,
         &mut fake,
         MouseEventKind::Up(MouseButton::Left),
         geometry.x + 15,
-        geometry.y + 3,
+        geometry.y + panelink::workspace_tabs::HEADER_ROWS + 2,
     );
     assert_eq!(app.workspace.tab_dialog, None);
     assert!(app.take_workspace_metadata_mutation().is_none());
@@ -6344,14 +6357,14 @@ fn tab_modals_stay_compact_and_ignore_clicks_outside_their_bounds() {
         &mut fake,
         MouseEventKind::Down(MouseButton::Left),
         bounds.x + 2,
-        bounds.y + 5,
+        bounds.y + panelink::workspace_tabs::HEADER_ROWS + 4,
     );
     gesture(
         &mut app,
         &mut fake,
         MouseEventKind::Up(MouseButton::Left),
         bounds.x + 2,
-        bounds.y + 5,
+        bounds.y + panelink::workspace_tabs::HEADER_ROWS + 4,
     );
     assert!(matches!(
         app.workspace.tab_dialog,
