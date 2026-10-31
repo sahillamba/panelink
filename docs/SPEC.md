@@ -11,7 +11,11 @@ local to the owning UI. Keyboard focus, pane typing focus and active tab remain
 distinct. Pending/unknown operation receipts keep their existing authority.
 
 The strip keeps project left, tabs centrally, New tab/All tabs right, with
-separate tab close bounds. Inactive-tab close requires selecting that tab first
+separate tab close bounds. Strip spacing has three width tiers: below 60
+columns it is compact; from 60 it uses one-cell outer margins, two-cell gaps
+and `[<] [>]`; from 120 it uses two-cell margins, a four-cell gap after the
+project, three-cell gaps between tabs, four-cell gaps between the `[<]  [>]`,
+`[+ New]` and `[All tabs]` groups, and two cells between previous and next. Inactive-tab close requires selecting that tab first
 so runtime generation is known; it never silently switches and closes. Close
 ends the confirmed target's processes; Detach leaves them running. Pane menus
 paginate by Layout, Copy/History, Close and Secondary groups. Informational
@@ -114,8 +118,9 @@ Each pane reserves a one-cell margin on all four sides of its outer rectangle.
 The bottom-right pane margin displays the client package version, without
 changing PTY dimensions; modal notices temporarily cover it. Unpadded saved
 recovery views do not show this badge.
-The top margin carries pane Menu and close controls; normal-history scrollbars
-use the right margin. The shared compositor geometry defines their hitboxes.
+The top margin carries pane Menu and close controls, inset one cell from the
+pane edges, or two cells on panes at least 40 columns wide; normal-history
+scrollbars use the right margin. The shared compositor geometry defines their hitboxes.
 Its PTY and snapshots use the inset content size, with a minimum of 5 rows by
 20 columns (7 by 22 outer cells). Root limits remain 80 by 240 outer cells.
 Pointer coordinates sent to a child are relative to that content rectangle.

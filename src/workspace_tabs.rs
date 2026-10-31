@@ -235,14 +235,15 @@ pub fn layout(
 
     // New tab and All tabs stay pinned right. Narrow hosts shorten names
     // and omit optional previous/next controls before losing active-tab access.
+    let spacing = HeaderSpacing::for_width(screen_width);
     let controls_start = place_right_controls(&mut cells, &mut hits, tabs.len() > 1);
 
     let project_name = project.display_name();
     let project_cap = MAX_LABEL_CELLS.min((screen_width / 5).max(3));
     let project_label = bracketed_label("[ ", project_name, " ]", project_cap);
-    // One cell of left margin when the host is wide enough to afford it.
-    let left = usize::from(screen_width >= ROOMY_HEADER_COLUMNS);
-    let project_budget = controls_start.saturating_sub(2 + left);
+    // Left margin grows with the host width tier.
+    let left = spacing.margin;
+    let project_budget = controls_start.saturating_sub(spacing.project_gap + left);
     let project_width = place_label(
         &mut cells,
         left,
@@ -259,11 +260,11 @@ pub fn layout(
     }
 
     let mut cursor = if project_width > 0 {
-        left + project_width + TAB_GAP
+        left + project_width + spacing.project_gap
     } else {
         left
     };
-    let tab_end = controls_start.saturating_sub(1);
+    let tab_end = controls_start.saturating_sub(spacing.group_gap.saturating_sub(1).max(1));
     if cursor < tab_end {
         let remaining = (tab_end - cursor).saturating_sub(4);
         let labels: Vec<Vec<Glyph>> = tabs
@@ -276,17 +277,17 @@ pub fn layout(
             .ok_or(TabsError::InvalidRoute)?;
         let total_width = labels
             .iter()
-            .map(|label| label_width(label) + 4 + TAB_GAP)
+            .map(|label| label_width(label) + 4 + spacing.tab_gap)
             .sum::<usize>()
-            - TAB_GAP;
+            - spacing.tab_gap;
         let (start, end) = if total_width <= remaining {
             (0, labels.len())
         } else {
-            selected_window(&labels, current_index, remaining)
+            selected_window(&labels, current_index, remaining, spacing.tab_gap)
         };
         for index in start..end {
             if index > start && cursor < tab_end {
-                cursor += TAB_GAP;
+                cursor += spacing.tab_gap;
             }
             if cursor >= tab_end {
                 break;
@@ -513,10 +514,55 @@ fn emit_control(
     }
 }
 
-/// Gap between the project label and tabs, and between neighbouring tabs.
-const TAB_GAP: usize = 2;
 /// Width from which the header uses margins and full button labels.
 const ROOMY_HEADER_COLUMNS: usize = 60;
+/// Width from which the header uses wider margins and gaps.
+const SPACIOUS_HEADER_COLUMNS: usize = 120;
+
+/// Margins and gaps of the strip for one host width tier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HeaderSpacing {
+    /// Blank cells before the project label and after the last button.
+    margin: usize,
+    /// Gap between the project label and the first tab.
+    project_gap: usize,
+    /// Gap between neighbouring tabs.
+    tab_gap: usize,
+    /// Gap between right-hand button groups.
+    group_gap: usize,
+    /// Gap between the previous and next buttons.
+    nav_gap: usize,
+}
+
+impl HeaderSpacing {
+    fn for_width(width: usize) -> Self {
+        if width >= SPACIOUS_HEADER_COLUMNS {
+            Self {
+                margin: 2,
+                project_gap: 4,
+                tab_gap: 3,
+                group_gap: 4,
+                nav_gap: 2,
+            }
+        } else if width >= ROOMY_HEADER_COLUMNS {
+            Self {
+                margin: 1,
+                project_gap: 2,
+                tab_gap: 2,
+                group_gap: 2,
+                nav_gap: 1,
+            }
+        } else {
+            Self {
+                margin: 0,
+                project_gap: 2,
+                tab_gap: 2,
+                group_gap: 1,
+                nav_gap: 0,
+            }
+        }
+    }
+}
 const CREATE_LABEL: &str = "[+ New]";
 const ALL_LABEL: &str = "[All tabs]";
 
@@ -538,12 +584,13 @@ fn place_button(
     Some(start)
 }
 
-/// The create button, right-aligned with a one-cell margin on roomy hosts.
+/// The create button, right-aligned inside the tier's margin on roomy hosts.
 /// Returns its first column.
 fn place_create(cells: &mut [HeaderCell], hits: &mut Vec<HitRegion>) -> usize {
     let width = cells.len();
     if width >= ROOMY_HEADER_COLUMNS {
-        if let Some(start) = place_button(cells, hits, width - 1, CREATE_LABEL, TabAction::Create) {
+        let end = width - HeaderSpacing::for_width(width).margin;
+        if let Some(start) = place_button(cells, hits, end, CREATE_LABEL, TabAction::Create) {
             return start;
         }
     }
@@ -565,9 +612,17 @@ fn place_right_controls(
 ) -> usize {
     let width = cells.len();
     let roomy = width >= ROOMY_HEADER_COLUMNS;
-    let gap = if roomy { 2 } else { 1 };
+    let spacing = HeaderSpacing::for_width(width);
+    let gap = spacing.group_gap;
     let mut start = if width >= ROOMY_HEADER_COLUMNS {
-        place_button(cells, hits, width - 1, ALL_LABEL, TabAction::AllTabs).unwrap()
+        place_button(
+            cells,
+            hits,
+            width - spacing.margin,
+            ALL_LABEL,
+            TabAction::AllTabs,
+        )
+        .unwrap()
     } else if width >= 18 {
         place_button(cells, hits, width, " All ", TabAction::AllTabs).unwrap()
     } else {
@@ -590,7 +645,7 @@ fn place_right_controls(
     }
     if width >= 60 && navigation {
         let (previous, next) = if roomy { ("[<]", "[>]") } else { ("<", ">") };
-        let inner = usize::from(roomy);
+        let inner = spacing.nav_gap;
         if let Some(next_start) = start
             .checked_sub(gap)
             .and_then(|end| place_button(cells, hits, end, next, TabAction::NextTab))
@@ -617,7 +672,12 @@ fn place_ascii(cells: &mut [HeaderCell], start: usize, text: &str) {
     }
 }
 
-fn selected_window(labels: &[Vec<Glyph>], selected: usize, budget: usize) -> (usize, usize) {
+fn selected_window(
+    labels: &[Vec<Glyph>],
+    selected: usize,
+    budget: usize,
+    tab_gap: usize,
+) -> (usize, usize) {
     let mut start = selected;
     let mut end = selected + 1;
     let selected_width = (label_width(&labels[selected]) + 4).min(budget);
@@ -625,7 +685,7 @@ fn selected_window(labels: &[Vec<Glyph>], selected: usize, budget: usize) -> (us
     loop {
         let mut progressed = false;
         if start > 0 {
-            let cost = TAB_GAP + 4 + label_width(&labels[start - 1]);
+            let cost = tab_gap + 4 + label_width(&labels[start - 1]);
             if used + cost <= budget {
                 start -= 1;
                 used += cost;
@@ -633,7 +693,7 @@ fn selected_window(labels: &[Vec<Glyph>], selected: usize, budget: usize) -> (us
             }
         }
         if end < labels.len() {
-            let cost = TAB_GAP + 4 + label_width(&labels[end]);
+            let cost = tab_gap + 4 + label_width(&labels[end]);
             if used + cost <= budget {
                 used += cost;
                 end += 1;
@@ -1004,7 +1064,12 @@ mod tests {
             assert!(rendered.header_cells()[usize::from(selected.start)].selected());
             // Create is the rightmost control; roomy hosts keep a one-cell
             // right margin after its button.
-            let create_end = columns - u16::from(usize::from(columns) >= ROOMY_HEADER_COLUMNS);
+            let create_end = columns
+                - if usize::from(columns) >= ROOMY_HEADER_COLUMNS {
+                    HeaderSpacing::for_width(usize::from(columns)).margin as u16
+                } else {
+                    0
+                };
             assert_eq!(
                 rendered.hit_test(create_end - 1, 0),
                 Some(TabAction::AllTabs),
@@ -1034,8 +1099,16 @@ mod tests {
     #[test]
     fn roomy_header_uses_labelled_buttons_with_spacing() {
         let index = index();
-        let rendered = super::layout(&index, route(4, 5), 24, 120).expect("layout");
-        let text: String = rendered
+        let rendered = super::layout(&index, route(4, 5), 24, 100).expect("layout");
+        let text = header_text(&rendered);
+        assert!(text.ends_with("[All tabs] "), "{text:?}");
+        assert!(text.contains("[+ New]  [All tabs]"), "{text:?}");
+        assert!(text.contains("[<] [>]  [+ New]"), "{text:?}");
+        assert!(text.starts_with(" [ "), "{text:?}");
+    }
+
+    fn header_text(rendered: &TabsLayout) -> String {
+        rendered
             .header_cells()
             .iter()
             .map(|cell| {
@@ -1045,10 +1118,36 @@ mod tests {
                     cell.text()
                 }
             })
-            .collect();
-        assert!(text.ends_with("[All tabs] "), "{text:?}");
-        assert!(text.contains("[+ New]  [All tabs]"), "{text:?}");
-        assert!(text.contains("[<] [>]  [+ New]"), "{text:?}");
-        assert!(text.starts_with(" [ "), "{text:?}");
+            .collect()
+    }
+
+    #[test]
+    fn spacious_header_widens_margins_and_gaps() {
+        let mut index = WorkspaceIndex::new();
+        index
+            .add_project(id(1), "Default", tab(1), "Main")
+            .expect("project");
+        index.add_tab(id(1), tab(2), "Shell 1").expect("tab");
+        for columns in [120, 269] {
+            let rendered = super::layout(&index, route(1, 1), 24, columns).expect("layout");
+            let text = header_text(&rendered);
+            assert!(text.starts_with("  [ Default ]     Main   x "), "{text:?}");
+            assert!(text.contains(" x     Shell 1   x "), "{text:?}");
+            assert!(
+                text.ends_with("[<]  [>]    [+ New]    [All tabs]  "),
+                "{text:?}"
+            );
+            for hit in &rendered.hit_regions {
+                for other in &rendered.hit_regions {
+                    if hit != other {
+                        assert!(hit.end <= other.start || other.end <= hit.start);
+                    }
+                }
+            }
+        }
+        // Just below the tier keeps the roomy spacing.
+        let text = header_text(&super::layout(&index, route(1, 1), 24, 119).expect("layout"));
+        assert!(text.ends_with("[<] [>]  [+ New]  [All tabs] "), "{text:?}");
+        assert!(text.starts_with(" [ Default ]   Main   x "), "{text:?}");
     }
 }
