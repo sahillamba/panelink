@@ -1,3 +1,13 @@
+## Chrome spacing installed — 2026-10-31
+
+User requested installation. `~/.local/bin/panelink` is a symlink to this
+checkout's `bin/panelink` launcher, which runs `target/debug/panelink`. Ran
+`cargo build --locked` at `e3dacda`. `build-info --json` now reports revision `e3dacdadf43e`,
+`dirty: false`; it reported `8af1ba4fc674` dirty before the build. `server-info --json` returned
+`control_unavailable` (transport connect) from this session both before and
+after, so server identity was not compared. No server restart or pane input.
+Attached clients show the new UI after Ctrl-X and reopening `panelink`.
+
 ## Chrome spacing step 1: centred pane-close dialog — 2026-10-31
 
 User approved a three-step chrome spacing plan (centred close dialog; wider

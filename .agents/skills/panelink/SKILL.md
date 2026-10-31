@@ -44,10 +44,10 @@ records keyboard focus, reduced colors and exact lifecycle distinctions.
    to obtain the client revision, source fingerprint and source-dirty flag;
    `server-info --json` queries the running server separately and reports its
    negotiated capabilities. Old servers return `server_identity_unsupported`;
-   never substitute client identity for an unknown server. On 2026-10-29,
-   `~/.local/bin/panelink` is an installed standalone 0.1.8 binary, copied from
-   `/private/tmp/panelink-codex-wheel-target/debug/panelink` in this checkout.
-   Building this checkout does not automatically update that installed copy.
+   never substitute client identity for an unknown server. As observed on
+   2026-10-31, `~/.local/bin/panelink` is a symlink to this checkout's
+   `bin/panelink` launcher, so `cargo build --locked` here updates the client
+   it runs; verify with `build-info --json` before relying on this.
    Resolve the executable before assuming which artifact runs. To load a newly
    installed client, detach with Ctrl-X and reopen `panelink`; this client wheel
    FIFO fix works with an existing server, but the scoped-wheel fast path needs
