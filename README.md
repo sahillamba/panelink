@@ -60,7 +60,7 @@ ends its processes after confirmation; do not confuse Close with Detach.
 | Task | In the terminal client |
 | --- | --- |
 | Discover actions | Click a pane's **Menu**, right-click it, or press **Ctrl-B**, then `s` |
-| Split into a fresh shell | Choose Left, Right, Up, or Down from the pane menu; or **Ctrl-B**, then `l`, `r`, `u`, or `d` |
+| Split into a fresh shell | Choose Split, then Left, Right, Up, or Down from the pane menu; or **Ctrl-B**, then `l`, `r`, `u`, or `d` |
 | Navigate panes | **Ctrl-B**, then arrows, Tab, or `o`; Esc leaves navigation mode |
 | Create or switch tabs | Click `+`, or use **Ctrl-B** then `+`; **Ctrl-B** then `n`/`p` moves between tabs |
 | Find tabs / see help | Click `≡` for **All tabs** or **Keys & help**; **Ctrl-B** then `w` or `?` |
@@ -72,10 +72,18 @@ ends its processes after confirmation; do not confuse Close with Detach.
 
 `Ctrl-B` uses the **Control** key, not Command. Controls activate when you
 release inside the same button; dragging away or pressing Escape cancels. A
-tab's `x` is separate from selecting it. Select an inactive tab before
+pane menu offers Split, Zoom, Swap, Copy mode, and Close pane. The tab
+strip places `+` after the last tab and pins the `≡` global menu (All tabs,
+Saved layout, Keys & help, Detach) on the right. Dialog Tab/Shift-Tab moves
+local focus; rename text editing stays in the editor. A tab's `x` is separate
+from selecting it. Select an inactive tab before
 closing it. The current source supports up to **four panes per workspace** and
 **eight tabs per project**. See [interactive controls](.agents/skills/panelink/references/interactive.md)
 for the full key and pointer behavior.
+
+`NO_COLOR` presence or `TERM=dumb` selects reduced-color controls at setup.
+Native host/theme acceptance remains separate; see the
+[button-control evidence](docs/progress/button-redesign/PROGRESS.md).
 
 ## Let an agent inspect another process
 
