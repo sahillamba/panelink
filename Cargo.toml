@@ -15,4 +15,4 @@ crossterm-input = { version = "=0.29.0-panelink.1", path = "vendor/crossterm-inp
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 signal-hook = { version = "=0.4.5", default-features = false }
 libc = { version = "=0.2.191", default-features = false }
-rustix = { version = "=1.1.5", default-features = false, features = ["net"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["net"] }
