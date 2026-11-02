@@ -131,6 +131,7 @@ fn request_envelope(
             payload: encode_query(target).unwrap(),
         },
         reply: sender,
+        trace: None,
     };
     (envelope, receiver)
 }

@@ -8,6 +8,8 @@ pub mod agent_protocol;
 pub mod build_info;
 pub mod close_protocol;
 pub mod control_protocol;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod diagnostics;
 pub mod event_journal;
 pub mod event_protocol;
 pub mod handshake_protocol;

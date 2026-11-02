@@ -493,6 +493,10 @@ fn run_inner(directory: PathBuf, context_dir: PathBuf, workspace: Option<Workspa
             }
         },
     );
+    // Terminal restoration is complete: bounded local-diagnostics shutdown
+    // can now stop the writer inside its budget without ever delaying the
+    // restoration or the detach above.
+    panelink::diagnostics::shutdown_after_restore(Duration::from_millis(150));
     if abandoned_keys {
         report_notice(
             "[panelink: unsent queued keys were discarded on detach]",
@@ -1059,7 +1063,29 @@ fn event_loop(
                 },
             });
             while let Some(envelope) = worker.try_result() {
-                match worker.release_result(envelope) {
+                // Result application for user-visible input ops is recorded
+                // with fixed labels; `wait_us` here is the monotonic span
+                // between backend completion and host application (kept
+                // distinct from queue wait and service time). Per-poll
+                // results are never recorded (flood avoidance).
+                let (op, completed_at) = (envelope.op, envelope.completed_at);
+                let result = worker.release_result(envelope);
+                if matches!(op, "keys" | "paste") {
+                    let outcome = match &result {
+                        ClientResult::Keys(Ok(())) | ClientResult::Paste(Ok(())) => "ok",
+                        ClientResult::Keys(Err(label)) | ClientResult::Paste(Err(label)) => *label,
+                        _ => "discarded",
+                    };
+                    panelink::diagnostics::StageEvent {
+                        op,
+                        stage: "host_apply",
+                        outcome,
+                        wait_us: panelink::diagnostics::micros_since(completed_at),
+                        ..panelink::diagnostics::StageEvent::default()
+                    }
+                    .record();
+                }
+                match result {
                     ClientResult::Keys(result) | ClientResult::Paste(result) => {
                         if let Err(label) = result {
                             app.report_worker_status(label, now);

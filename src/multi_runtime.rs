@@ -20,6 +20,7 @@ use crate::close_protocol::{
     CloseResult, CLOSE_RESULT_BYTES, CLOSE_SCHEMA,
 };
 use crate::control_protocol::TargetRef;
+use crate::diagnostics::{self, StageEvent};
 use crate::event_protocol::{encode_event, Event};
 use crate::handshake_protocol::{
     encode_welcome, validate_welcome, Welcome, CAPABILITY_EVENTS, CAPABILITY_INPUT,
@@ -246,6 +247,55 @@ pub struct MultiEnvelope {
     /// The forwarded request.
     pub request: MultiRequest,
     reply: SyncSender<MultiReply>,
+    /// Correlation trace admitted with this request: connection-local wire
+    /// request id, monotonic enqueue instant and the span created at
+    /// admission (entered only while the owner processes this envelope).
+    trace: Option<RequestTrace>,
+}
+
+/// Admitted queue-correlation trace carried beside one owner request.
+///
+/// The wire request id alone is connection-local, so records join on
+/// `(generation, lease, wire request id)` wherever the connection context is
+/// available (see the module documentation of `crate::diagnostics`).
+#[derive(Clone)]
+struct RequestTrace {
+    request_id: u64,
+    enqueued_at: Instant,
+    span: Option<tracing::Span>,
+}
+
+impl RequestTrace {
+    /// Trace for a handshake frame (request id 0, no lease correlation yet).
+    fn hello() -> Self {
+        Self {
+            request_id: 0,
+            enqueued_at: Instant::now(),
+            span: Some(tracing::span!(
+                target: diagnostics::TARGET,
+                tracing::Level::INFO,
+                "server_hello",
+            )),
+        }
+    }
+
+    /// Trace for one validated request on an established connection.
+    fn request(request_id: u64, connection: &Connection) -> Self {
+        let generation = connection.generation();
+        let lease = connection.lease();
+        Self {
+            request_id,
+            enqueued_at: Instant::now(),
+            span: Some(tracing::span!(
+                target: diagnostics::TARGET,
+                tracing::Level::INFO,
+                "server_request",
+                gen = generation,
+                lease = lease,
+                request = request_id,
+            )),
+        }
+    }
 }
 
 impl MultiEnvelope {
@@ -259,6 +309,7 @@ impl fmt::Debug for MultiEnvelope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MultiEnvelope")
             .field("request", &self.request)
+            .field("traced", &self.trace.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -591,6 +642,9 @@ impl Drop for MultiServerDriver {
                 eprintln!("panelink: launch shutdown incomplete");
             }
         }
+        // Owner shutdown is finished: diagnostics may stop within a bounded
+        // budget so the writer never outlives the server's teardown.
+        diagnostics::shutdown_after_restore(Duration::from_millis(150));
     }
 }
 
@@ -830,6 +884,25 @@ impl MultiServerDriver {
             let Ok(envelope) = self.hub.receiver.try_recv() else {
                 break;
             };
+            // Correlation admitted with the request: monotonic queue wait is
+            // measured here inside this one process.
+            let trace = envelope.trace.clone();
+            let (wait_us, span, request_id) = match &trace {
+                Some(trace) => (
+                    diagnostics::micros_since(trace.enqueued_at),
+                    trace.span.clone(),
+                    Some(trace.request_id),
+                ),
+                None => (0, None, None),
+            };
+            let (op, generation, lease) = match &envelope.request {
+                MultiRequest::Hello { .. } => ("hello", 0, 0),
+                MultiRequest::Request { connection, .. } => {
+                    ("request", connection.generation(), connection.lease())
+                }
+            };
+            let dispatch_started = Instant::now();
+            let span_enter = span.as_ref().map(tracing::Span::enter);
             let metadata = match &envelope.request {
                 MultiRequest::Request {
                     connection,
@@ -838,6 +911,21 @@ impl MultiServerDriver {
                 _ => None,
             };
             if let Some((connection, payload)) = metadata {
+                drop(span_enter);
+                if let Some(request_id) = request_id {
+                    StageEvent {
+                        op,
+                        stage: "owner_dispatch",
+                        outcome: "metadata",
+                        generation: connection.generation(),
+                        lease: connection.lease(),
+                        request: request_id,
+                        wait_us,
+                        service_us: diagnostics::micros_since(dispatch_started),
+                        ..StageEvent::default()
+                    }
+                    .record();
+                }
                 self.begin_metadata(envelope, connection, &payload, clock());
                 continue;
             }
@@ -858,6 +946,28 @@ impl MultiServerDriver {
                     },
                 )
             };
+            drop(span_enter);
+            if let Some(request_id) = request_id {
+                let outcome = match &result {
+                    DispatchResult::Reply(_) => "reply",
+                    DispatchResult::Pending { .. } => "pending",
+                    DispatchResult::PendingWorkspaceWatch { .. } => "pending_workspace",
+                    DispatchResult::PendingClose { .. } => "pending_close",
+                    DispatchResult::PendingSplit { .. } => "pending_split",
+                };
+                StageEvent {
+                    op,
+                    stage: "owner_dispatch",
+                    outcome,
+                    generation,
+                    lease,
+                    request: request_id,
+                    wait_us,
+                    service_us: diagnostics::micros_since(dispatch_started),
+                    ..StageEvent::default()
+                }
+                .record();
+            }
             // Detach is an observation boundary, not a process stop. Save
             // changed visible screens after the owner's request is handled.
             if matches!(&envelope.request, MultiRequest::Request { payload, .. } if crate::session_protocol::decode_session_request(payload).is_ok_and(|request| matches!(request, SessionRequest::Detach)))
@@ -2175,40 +2285,81 @@ fn dispatch_ui(
             }
         }
         UiRequest::KeyInput(view) => {
-            match owner.handle_key_input(
+            let started = Instant::now();
+            let outcome = owner.handle_key_input(
                 connection,
                 &view,
                 payload,
                 now,
                 PtyEffects::validate_keys,
                 |effects| effects.keys(view.keys()),
-            ) {
+            );
+            // One input correlation record on the owner's apply path.
+            StageEvent {
+                op: "key_input",
+                stage: "owner_apply",
+                outcome: if outcome.is_ok() { "ok" } else { "failed" },
+                generation: view.key().generation,
+                lease: view.key().lease,
+                request: 0,
+                service_us: diagnostics::micros_since(started),
+                count0: ("keys", view.keys().len() as u64),
+                ..StageEvent::default()
+            }
+            .record();
+            match outcome {
                 Ok(bytes) => reply(MultiReply::Response(bytes)),
                 Err(error) => self::error(&error),
             }
         }
         UiRequest::MouseWheelInput(input) => {
-            match owner.handle_mouse_wheel(
+            let started = Instant::now();
+            let outcome = owner.handle_mouse_wheel(
                 connection,
                 &input,
                 payload,
                 now,
                 |effects| effects.validate_mouse_wheel(input.column, input.row, input.up),
                 |effects| effects.mouse_wheel(input.column, input.row, input.up),
-            ) {
+            );
+            StageEvent {
+                op: "wheel",
+                stage: "owner_apply",
+                outcome: if outcome.is_ok() { "ok" } else { "failed" },
+                generation: input.key.generation,
+                lease: input.key.lease,
+                request: 0,
+                service_us: diagnostics::micros_since(started),
+                ..StageEvent::default()
+            }
+            .record();
+            match outcome {
                 Ok(bytes) => reply(MultiReply::Response(bytes)),
                 Err(error) => self::error(&error),
             }
         }
         UiRequest::ScopedMouseWheelInput(input) => {
-            match owner.handle_scoped_mouse_wheel(
+            let started = Instant::now();
+            let outcome = owner.handle_scoped_mouse_wheel(
                 connection,
                 &input,
                 payload,
                 now,
                 |effects| effects.validate_mouse_wheel(input.column, input.row, input.up),
                 |effects| effects.mouse_wheel(input.column, input.row, input.up),
-            ) {
+            );
+            StageEvent {
+                op: "scoped_wheel",
+                stage: "owner_apply",
+                outcome: if outcome.is_ok() { "ok" } else { "failed" },
+                generation: input.key.generation,
+                lease: input.key.lease,
+                request: 0,
+                service_us: diagnostics::micros_since(started),
+                ..StageEvent::default()
+            }
+            .record();
+            match outcome {
                 Ok(bytes) => reply(MultiReply::Response(bytes)),
                 Err(error) => self::error(&error),
             }
@@ -2817,11 +2968,12 @@ fn run_worker(
         return;
     };
     drop(frame);
-    let Some(answer) = submit(
+    let Some(answer) = submit_traced(
         sender,
         stop,
         MultiRequest::Hello { hello, target },
         OWNER_REPLY_DEADLINE,
+        diagnostics::enabled().then(RequestTrace::hello),
     ) else {
         return;
     };
@@ -2916,7 +3068,9 @@ fn run_worker(
         } else {
             OWNER_REPLY_DEADLINE
         };
-        let Some(answer) = submit(
+        let trace = diagnostics::trace_request(frame.payload())
+            .then(|| RequestTrace::request(request_id, &connection));
+        let Some(answer) = submit_traced(
             sender,
             stop,
             MultiRequest::Request {
@@ -2924,6 +3078,7 @@ fn run_worker(
                 payload: frame.into_payload(),
             },
             reply_deadline,
+            trace,
         ) else {
             return;
         };
@@ -3037,22 +3192,41 @@ fn write_watch(
     )
 }
 
-fn submit(
+/// Submit with an admitted queue-correlation trace; a `None` trace keeps the
+/// envelope untraced (diagnostics disabled or a legacy call site).
+fn submit_traced(
     sender: &SyncSender<MultiEnvelope>,
     stop: &AtomicBool,
     request: MultiRequest,
     reply_deadline: Duration,
+    trace: Option<RequestTrace>,
 ) -> Option<MultiReply> {
     if stop.load(Ordering::Acquire) {
         return None;
     }
+    let op = match &request {
+        MultiRequest::Hello { .. } => "hello",
+        MultiRequest::Request { .. } => "request",
+    };
+    let enqueued_request_id = trace.as_ref().map(|trace| trace.request_id);
     let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
     let envelope = MultiEnvelope {
         request,
         reply: reply_sender,
+        trace,
     };
     if sender.try_send(envelope).is_err() {
         return None;
+    }
+    if let Some(request_id) = enqueued_request_id {
+        StageEvent {
+            op,
+            stage: "enqueue",
+            outcome: "queued",
+            request: request_id,
+            ..StageEvent::default()
+        }
+        .record();
     }
     let deadline = Instant::now().checked_add(reply_deadline)?;
     loop {

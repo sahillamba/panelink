@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use panelink::client_context::{ContextError, ContextFile};
 use panelink::control_protocol::{encode_request_payload, Command, ControlRequest, TargetRef};
+use panelink::diagnostics::{self, StageEvent};
 use panelink::event_protocol::{decode_event, EventBody};
 use panelink::handshake_protocol::{
     decode_welcome, validate_welcome, Hello, Welcome, CAPABILITY_EVENTS, CAPABILITY_HISTORY_CURSOR,
@@ -215,6 +216,33 @@ impl PaneConn {
         directory: &Path,
         dir: &Path,
         target: TargetRef,
+        bootstrap: Option<Bootstrap>,
+        now: Instant,
+        deadline: Duration,
+    ) -> Result<Self, &'static str> {
+        let started = Instant::now();
+        let pane = Self::attach_inner(directory, dir, target, bootstrap, now, deadline);
+        let (generation, lease, outcome) = match &pane {
+            Ok(pane) => (pane.generation(), pane.lease(), "ok"),
+            Err(label) => (0, 0, *label),
+        };
+        StageEvent {
+            op: "attach",
+            stage: "negotiated",
+            outcome,
+            generation,
+            lease,
+            service_us: diagnostics::micros_since(started),
+            ..StageEvent::default()
+        }
+        .record();
+        pane
+    }
+
+    fn attach_inner(
+        directory: &Path,
+        dir: &Path,
+        target: TargetRef,
         mut bootstrap: Option<Bootstrap>,
         now: Instant,
         deadline: Duration,
@@ -337,6 +365,31 @@ impl PaneConn {
         Ok(pane)
     }
 
+    /// One bounded stage record with this context's approved correlation
+    /// identifiers. Diagnostics disabled means this is a no-op.
+    fn stage_record(
+        &self,
+        op: &'static str,
+        stage: &'static str,
+        outcome: &'static str,
+        started: Instant,
+        request: u64,
+        bytes: u64,
+    ) {
+        StageEvent {
+            op,
+            stage,
+            outcome,
+            generation: self.generation(),
+            lease: self.lease(),
+            request,
+            service_us: diagnostics::micros_since(started),
+            bytes,
+            ..StageEvent::default()
+        }
+        .record();
+    }
+
     /// Reconnect (or proactively renew) by resuming this context's lease on a
     /// new stream. The old stream is replaced only after the new handshake
     /// succeeded. Nothing is resent; an uncertain key is settled by status.
@@ -402,7 +455,47 @@ impl PaneConn {
     }
 
     /// Send one request and read its single reply frame.
+    ///
+    /// Correlation: the exchange is joined under one admitted span carrying
+    /// the wire correlation available here (generation, lease and the
+    /// connection-local request id). The pilot cannot join the host-side
+    /// submit directly to this wire request id — the queueing host-to-worker
+    /// hop carries no wire id, so submit-to-wire attribution is explicitly
+    /// not claimed; side-by-side stage records are the correlation currency.
     pub(crate) fn request(&mut self, payload: &[u8]) -> Result<Reply, &'static str> {
+        if !diagnostics::trace_request(payload) {
+            return self.request_inner(payload);
+        }
+        let id = self.next_request;
+        let generation = self.generation();
+        let lease = self.lease();
+        let bytes = payload.len() as u64;
+        let started = Instant::now();
+        let span = tracing::span!(
+            target: diagnostics::TARGET,
+            tracing::Level::INFO,
+            "client_wire_request",
+            gen = generation,
+            lease = lease,
+            request = id,
+        );
+        let outcome = span.in_scope(|| self.request_inner(payload));
+        StageEvent {
+            op: "wire",
+            stage: "exchange",
+            outcome: if outcome.is_ok() { "ok" } else { "error" },
+            generation,
+            lease,
+            request: id,
+            service_us: diagnostics::micros_since(started),
+            bytes,
+            ..StageEvent::default()
+        }
+        .record();
+        outcome
+    }
+
+    fn request_inner(&mut self, payload: &[u8]) -> Result<Reply, &'static str> {
         let id = self.next_request;
         let deadline = self.deadline;
         let Some(stream) = self.stream.as_mut() else {
@@ -559,7 +652,15 @@ impl PaneConn {
     /// Acquire input ownership for one input batch. Callers must not retain it
     /// across idle polling or reads.
     pub(crate) fn claim(&mut self, _now: Instant) -> Result<bool, &'static str> {
-        self.claim_inner(false)
+        let started = Instant::now();
+        let outcome = self.claim_inner(false);
+        let outcome_label = match &outcome {
+            Ok(true) => "acquired",
+            Ok(false) => "denied",
+            Err(_) => "failed",
+        };
+        self.stage_record("claim", "completed", outcome_label, started, 0, 0);
+        outcome
     }
 
     /// Wheel input may claim only vacancy, never renew a retained claim.
@@ -567,7 +668,15 @@ impl PaneConn {
         if !self.input_capability {
             return Ok(false);
         }
-        self.claim_inner(true)
+        let started = Instant::now();
+        let outcome = self.claim_inner(true);
+        let outcome_label = match &outcome {
+            Ok(true) => "acquired",
+            Ok(false) => "denied",
+            Err(_) => "failed",
+        };
+        self.stage_record("claim_vacant", "completed", outcome_label, started, 0, 0);
+        outcome
     }
 
     fn claim_inner(&mut self, vacant_only: bool) -> Result<bool, &'static str> {
@@ -613,8 +722,15 @@ impl PaneConn {
     /// Release this connection's claim and verify the exact target is vacant.
     /// The locally held revision is retained on any uncertainty or refusal.
     pub(crate) fn release_confirmed(&mut self) -> Result<(), &'static str> {
-        self.release_confirmed_inner()
-            .map_err(|_| "input delivery confirmed; ownership release unconfirmed")
+        let started = Instant::now();
+        let outcome = self.release_confirmed_inner();
+        let outcome_label = if outcome.is_ok() {
+            "released"
+        } else {
+            "failed"
+        };
+        self.stage_record("release", "confirmed", outcome_label, started, 0, 0);
+        outcome.map_err(|_| "input delivery confirmed; ownership release unconfirmed")
     }
 
     fn release_confirmed_inner(&mut self) -> Result<(), &'static str> {
@@ -648,6 +764,20 @@ impl PaneConn {
 
     /// Deliver typed keys once; never resent.
     pub(crate) fn send_keys(&mut self, keys: &[Key]) -> Result<InputResult, &'static str> {
+        let started = Instant::now();
+        let outcome = self.send_keys_inner(keys);
+        self.stage_record(
+            "keys",
+            "deliver",
+            outcome.as_ref().map(input_result_label).unwrap_or("failed"),
+            started,
+            0,
+            keys.len() as u64,
+        );
+        outcome
+    }
+
+    fn send_keys_inner(&mut self, keys: &[Key]) -> Result<InputResult, &'static str> {
         let Some(revision) = self.owner_revision else {
             return Ok(InputResult::NotOwner);
         };
@@ -667,6 +797,25 @@ impl PaneConn {
 
     /// Deliver one typed wheel event. This event is never resent.
     pub(crate) fn send_mouse_wheel(
+        &mut self,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<MouseInputResult, &'static str> {
+        let started = Instant::now();
+        let outcome = self.send_mouse_wheel_inner(column, row, up);
+        self.stage_record(
+            "wheel",
+            "deliver",
+            outcome.as_ref().map(mouse_result_label).unwrap_or("failed"),
+            started,
+            0,
+            u64::try_from(panelink::ui_protocol::MOUSE_WHEEL_INPUT_BYTES).unwrap_or(u64::MAX),
+        );
+        outcome
+    }
+
+    fn send_mouse_wheel_inner(
         &mut self,
         column: u16,
         row: u16,
@@ -707,6 +856,26 @@ impl PaneConn {
 
     /// Deliver a vacancy-scoped wheel event as one durable keyed RPC.
     pub(crate) fn send_scoped_mouse_wheel(
+        &mut self,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Result<MouseInputResult, &'static str> {
+        let started = Instant::now();
+        let outcome = self.send_scoped_mouse_wheel_inner(column, row, up);
+        self.stage_record(
+            "scoped_wheel",
+            "deliver",
+            outcome.as_ref().map(mouse_result_label).unwrap_or("failed"),
+            started,
+            0,
+            u64::try_from(panelink::ui_protocol::SCOPED_MOUSE_WHEEL_INPUT_BYTES)
+                .unwrap_or(u64::MAX),
+        );
+        outcome
+    }
+
+    fn send_scoped_mouse_wheel_inner(
         &mut self,
         column: u16,
         row: u16,
@@ -753,6 +922,20 @@ impl PaneConn {
 
     /// Deliver one paste through control PASTE; never resent.
     pub(crate) fn send_paste(&mut self, text: &str) -> Result<InputResult, &'static str> {
+        let started = Instant::now();
+        let outcome = self.send_paste_inner(text);
+        self.stage_record(
+            "paste",
+            "deliver",
+            outcome.as_ref().map(input_result_label).unwrap_or("failed"),
+            started,
+            0,
+            text.len() as u64,
+        );
+        outcome
+    }
+
+    fn send_paste_inner(&mut self, text: &str) -> Result<InputResult, &'static str> {
         let Some(owner_revision) = self.owner_revision else {
             return Ok(InputResult::NotOwner);
         };
@@ -1161,6 +1344,25 @@ pub(crate) fn server_label(payload: &[u8]) -> &'static str {
     }
 }
 
+/// Fixed result labels for typed input delivery records.
+pub(crate) fn input_result_label(result: &InputResult) -> &'static str {
+    match result {
+        InputResult::Applied => "applied",
+        InputResult::NotOwner => "not_owner",
+        InputResult::Failed(_) => "failed",
+    }
+}
+
+/// Fixed result labels for wheel delivery records.
+pub(crate) fn mouse_result_label(result: &MouseInputResult) -> &'static str {
+    match result {
+        MouseInputResult::Applied => "applied",
+        MouseInputResult::NotOwner => "not_owner",
+        MouseInputResult::Unsupported => "unsupported",
+        MouseInputResult::Failed(_) => "failed",
+    }
+}
+
 fn context_label(error: ContextError) -> &'static str {
     match error {
         ContextError::LockTimeout => "context in use by another client",
@@ -1188,14 +1390,14 @@ fn nonce() -> u64 {
 mod tests {
     use super::*;
 
-    struct ScopedPeerRoot(PathBuf);
+    pub(super) struct ScopedPeerRoot(PathBuf);
     impl Drop for ScopedPeerRoot {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
-    fn scoped_peer_fixture() -> (ScopedPeerRoot, PaneConn, AuthenticatedStream) {
+    pub(super) fn scoped_peer_fixture() -> (ScopedPeerRoot, PaneConn, AuthenticatedStream) {
         use std::os::unix::{fs::DirBuilderExt, net::UnixStream};
         let root = ScopedPeerRoot(PathBuf::from(format!(
             "/private/tmp/pl-scoped-peer-{}-{}",
@@ -1765,5 +1967,148 @@ mod tests {
         ] {
             assert_eq!(parse_context_name(name), None, "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod diag_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Minimal targeted capture of `panelink::diag` events (scoped only).
+    struct Capture {
+        events: Mutex<Vec<Vec<(String, String)>>>,
+    }
+
+    impl Capture {
+        fn new() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    struct Visitor {
+        fields: Vec<(String, String)>,
+    }
+
+    impl tracing::field::Visit for Visitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .push((field.name().to_owned(), value.to_owned()));
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .push((field.name().to_owned(), value.to_string()));
+        }
+
+        fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {
+            panic!("diagnostic emission paths may not format Debug values");
+        }
+    }
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == diagnostics::TARGET
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = Visitor { fields: Vec::new() };
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(visitor.fields);
+        }
+        fn enter(&self, _span: &tracing::Id) {}
+        fn exit(&self, _span: &tracing::Id) {}
+    }
+
+    fn lookup<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a (String, String)> {
+        fields.iter().find(|(field, _)| field == name)
+    }
+
+    #[test]
+    fn delivery_labels_and_stage_records_use_fixed_allowlisted_content() {
+        assert_eq!(input_result_label(&InputResult::Applied), "applied");
+        assert_eq!(input_result_label(&InputResult::NotOwner), "not_owner");
+        assert_eq!(input_result_label(&InputResult::Failed("x")), "failed");
+        assert_eq!(
+            mouse_result_label(&MouseInputResult::Unsupported),
+            "unsupported"
+        );
+        assert_eq!(mouse_result_label(&MouseInputResult::Failed("x")), "failed");
+
+        assert_eq!(mouse_result_label(&MouseInputResult::Failed("x")), "failed");
+
+        let capture = std::sync::Arc::new(Capture::new());
+        let started = Instant::now();
+        let event = StageEvent {
+            op: "keys",
+            stage: "deliver",
+            outcome: input_result_label(&InputResult::Applied),
+            generation: 9,
+            lease: 3,
+            service_us: diagnostics::micros_since(started),
+            bytes: 4,
+            ..StageEvent::default()
+        };
+        tracing::subscriber::with_default(capture.clone(), || {
+            event.record();
+        });
+        let events = capture.events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "one record under interest: {events:?}");
+        let gen = lookup(&events[0], "gen").map(|(_, value)| value.clone());
+        assert_eq!(gen.as_deref(), Some("9"));
+        let lease = lookup(&events[0], "lease").map(|(_, value)| value.clone());
+        assert_eq!(lease.as_deref(), Some("3"));
+        let bytes = lookup(&events[0], "bytes").map(|(_, value)| value.clone());
+        assert_eq!(bytes.as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn wire_exchange_wraps_its_inner_frame_in_one_correlated_span() {
+        let (_root, mut pane, mut peer) = super::tests::scoped_peer_fixture();
+        let capture = std::sync::Arc::new(Capture::new());
+        // The peer answers one Describe with a minimal response, so the
+        // exchange completes and the wrapper records its stage.
+        std::thread::spawn(move || {
+            let frame = peer
+                .read_frame(Instant::now() + Duration::from_secs(2))
+                .unwrap();
+            let mut bytes = Vec::new();
+            use panelink::response_protocol::{encode_response_payload, Response};
+            encode_response_payload(
+                &Response {
+                    key: OperationKey {
+                        generation: 7,
+                        lease: 10,
+                        sequence: 1,
+                    },
+                    body: ResponseBody::Status(OperationStatus::Completed(Outcome::Applied)),
+                },
+                &mut bytes,
+            )
+            .unwrap();
+            let _ = peer.write_frame(
+                &Frame::new(MessageKind::Response, frame.request_id(), &bytes).unwrap(),
+                Instant::now() + Duration::from_secs(2),
+            );
+        });
+        tracing::subscriber::with_default(capture.clone(), || {
+            let _ = pane.describe();
+        });
+        let events = capture.events.lock().unwrap().clone();
+        let exchange = events
+            .iter()
+            .find(|fields| lookup(fields, "op").map(|(_, value)| value.as_str()) == Some("wire"))
+            .expect("the wire stage record was emitted");
+        assert_eq!(
+            lookup(exchange, "stage").map(|(_, value)| value.as_str()),
+            Some("exchange")
+        );
     }
 }

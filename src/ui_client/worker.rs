@@ -22,15 +22,28 @@ use super::net::{Net, NetUpdate, NetView, ScrollUpdate, DETACH_BUDGET};
 use super::pane_operations::{PaneAction, PaneOperationUpdate};
 use super::state::{ClosePlan, Effects, SplitPlan};
 
+use panelink::diagnostics::{self, StageEvent, ENVELOPE_TRACE_BYTES, RESULT_TRACE_BYTES};
+
 const COMMAND_CAPACITY: usize = 32;
 const RESULT_CAPACITY: usize = 32;
 const OWNED_BYTE_BUDGET: usize = 4 * 1024 * 1024;
-const CONTROL_RESULT_RESERVATION: usize = 512;
-const INPUT_RESULT_RESERVATION: usize = 128;
-const POLL_RESULT_RESERVATION: usize =
-    2 * MAX_SCREEN_REPLY_BYTES + LAYOUT_REPLY_BYTES + PANE_OPERATIONS_VIEW_BYTES + 128;
+/// Additive trace reservation carried inside each submitted command/result
+/// pair's existing reservation: the per-envelope span handle and monotonic
+/// enqueue instant plus the result-side completion instant. Diagnostics
+/// therefore never grow the bounded queues beyond the accounted budget.
+const TRACE_RESERVATION_BYTES: usize = ENVELOPE_TRACE_BYTES + RESULT_TRACE_BYTES;
+const CONTROL_RESULT_RESERVATION: usize = 512 + TRACE_RESERVATION_BYTES;
+const INPUT_RESULT_RESERVATION: usize = 128 + TRACE_RESERVATION_BYTES;
+const POLL_RESULT_RESERVATION: usize = 2 * MAX_SCREEN_REPLY_BYTES
+    + LAYOUT_REPLY_BYTES
+    + PANE_OPERATIONS_VIEW_BYTES
+    + 128
+    + TRACE_RESERVATION_BYTES;
 const PANE_OPERATION_RESULT_RESERVATION: usize =
     PANE_OPERATIONS_VIEW_BYTES + CONTROL_RESULT_RESERVATION;
+/// Bounded result reservation for the detach acknowledgment itself; its
+/// trace reservation rides on the same submit as every other command.
+const DETACH_RESULT_RESERVATION: usize = 32 + TRACE_RESERVATION_BYTES;
 const SHUTDOWN_POLL: Duration = Duration::from_millis(2);
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -109,6 +122,62 @@ impl Command {
 struct Envelope {
     command: Command,
     reservation: Reservation,
+    /// Monotonic enqueue instant; the monotonic queue wait is measured
+    /// inside this process when the worker dequeues the envelope.
+    submitted: Instant,
+    /// Correlation span admitted at submission and entered only while this
+    /// one command is processed by the worker (a shared global subscriber
+    /// does not propagate current spans between threads).
+    span: tracing::Span,
+}
+
+impl Command {
+    /// Fixed operation label for this command ("only approved labels").
+    fn op_label(&self) -> &'static str {
+        match self {
+            Self::Keys { .. } => "keys",
+            Self::Paste { .. } => "paste",
+            Self::Scroll { .. } => "scroll",
+            Self::AlternateWheel { .. } => "alternate_wheel",
+            Self::SeekHistory { .. } => "seek_history",
+            Self::Split { .. } => "split",
+            Self::Close { .. } => "close",
+            Self::PaneOperation { .. } => "pane_operation",
+            Self::Poll(_) => "poll",
+            Self::Detach => "detach",
+        }
+    }
+
+    /// Whether this command's stage record should be emitted: per-poll
+    /// screen fetches are excluded to bound record volume.
+    fn is_traceable(&self) -> bool {
+        !matches!(self, Self::Poll(_))
+    }
+
+    fn approved_counts(&self) -> (&'static str, u64, &'static str, u64) {
+        match self {
+            Self::Keys { keys, .. } => ("keys", keys.len() as u64, "", 0),
+            Self::Paste { text, .. } => ("text_bytes", text.len() as u64, "", 0),
+            Self::Scroll {
+                epoch, offset_rows, ..
+            } => ("epoch", *epoch, "offset_rows", u64::from(*offset_rows)),
+            Self::AlternateWheel { epoch, .. } => ("epoch", *epoch, "", 0),
+            Self::SeekHistory {
+                epoch, offset_rows, ..
+            } => ("epoch", *epoch, "offset_rows", u64::from(*offset_rows)),
+            _ => ("", 0, "", 0),
+        }
+    }
+
+    /// A per-command tracing span admitted at submission time.
+    fn trace_span(&self) -> tracing::Span {
+        tracing::span!(
+            target: panelink::diagnostics::TARGET,
+            tracing::Level::INFO,
+            "client_command",
+            op = self.op_label(),
+        )
+    }
 }
 
 pub(crate) enum ClientResult {
@@ -138,6 +207,36 @@ pub(crate) enum ClientResult {
 pub(crate) struct ResultEnvelope {
     pub result: ClientResult,
     reservation: Reservation,
+    /// Fixed operation label of the completed command.
+    pub(crate) op: &'static str,
+    /// Monotonic instant at which the backend finished this command.
+    pub(crate) completed_at: Instant,
+}
+
+impl ClientResult {
+    /// Fixed outcome label for this result.
+    fn outcome_label(&self) -> &'static str {
+        match self {
+            Self::Keys(result) | Self::Paste(result) => match result {
+                Ok(()) => "ok",
+                Err(_) => "failed",
+            },
+            Self::Scroll(_) | Self::Poll(_) => "reply",
+            Self::Split { result, .. } => match result {
+                Ok(_) => "reply",
+                Err(_) => "failed",
+            },
+            Self::Close { result, .. } => match result {
+                Ok(_) => "reply",
+                Err(_) => "failed",
+            },
+            Self::PaneOperation { result, .. } => match result {
+                Ok(_) => "reply",
+                Err(_) => "failed",
+            },
+            Self::Detached => "detached",
+        }
+    }
 }
 
 pub(crate) struct WorkerHandle {
@@ -218,11 +317,18 @@ impl WorkerHandle {
         } else {
             budget.bytes -= reservation_bytes - actual_reservation;
         }
+        let span = if command.is_traceable() {
+            command.trace_span()
+        } else {
+            tracing::Span::none()
+        };
         let envelope = Envelope {
             command,
             reservation: Reservation {
                 bytes: actual_reservation,
             },
+            submitted: Instant::now(),
+            span,
         };
         let Some(sender) = self.commands.as_ref() else {
             budget.count -= 1;
@@ -302,15 +408,23 @@ impl WorkerHandle {
         let Some(sender) = self.commands.as_ref() else {
             return false;
         };
-        const RESULT_BYTES: usize = 32;
+        const RESULT_BYTES: usize = DETACH_RESULT_RESERVATION;
         if budget.count >= COMMAND_CAPACITY || budget.bytes + RESULT_BYTES > OWNED_BYTE_BUDGET {
             return false;
         }
+        let command = Command::Detach;
+        let span = if command.is_traceable() {
+            command.trace_span()
+        } else {
+            tracing::Span::none()
+        };
         let envelope = Envelope {
-            command: Command::Detach,
+            command,
             reservation: Reservation {
                 bytes: RESULT_BYTES,
             },
+            submitted: Instant::now(),
+            span,
         };
         match sender.try_send(envelope) {
             Ok(()) => {
@@ -326,10 +440,14 @@ impl WorkerHandle {
     /// command queue or joins an unfinished worker.
     pub(crate) fn detach_after_restore(mut self) {
         let deadline = Instant::now() + DETACH_BUDGET;
-        let mut detach_queued = self.submit_with(0, 32, || Command::Detach).is_ok();
+        let mut detach_queued = self
+            .submit_with(0, DETACH_RESULT_RESERVATION, || Command::Detach)
+            .is_ok();
         while Instant::now() < deadline {
             if !detach_queued {
-                detach_queued = self.submit_with(0, 32, || Command::Detach).is_ok();
+                detach_queued = self
+                    .submit_with(0, DETACH_RESULT_RESERVATION, || Command::Detach)
+                    .is_ok();
             }
             let timeout = (deadline - Instant::now()).min(SHUTDOWN_POLL);
             match self.results.recv_timeout(timeout) {
@@ -425,13 +543,15 @@ impl Effects for WorkerHandle {
         if self.scroll_pending {
             return Err("client busy: history request pending");
         }
-        self.submit_with(HISTORY_QUERY_BYTES, MAX_HISTORY_REPLY_BYTES, || {
-            Command::SeekHistory {
+        self.submit_with(
+            HISTORY_QUERY_BYTES,
+            MAX_HISTORY_REPLY_BYTES + TRACE_RESERVATION_BYTES,
+            || Command::SeekHistory {
                 target,
                 epoch,
                 offset_rows,
-            }
-        })?;
+            },
+        )?;
         self.scroll_pending = true;
         Ok(())
     }
@@ -569,11 +689,37 @@ fn worker_loop<B: Backend>(
 ) {
     while let Ok(envelope) = commands.recv() {
         let detached = matches!(&envelope.command, Command::Detach);
+        let traceable = envelope.command.is_traceable();
+        let op = envelope.command.op_label();
+        let bytes = envelope.command.owned_bytes() as u64;
+        let (count0_label, count0_value, count1_label, count1_value) =
+            envelope.command.approved_counts();
+        let wait_us = diagnostics::micros_since(envelope.submitted);
+        let span_enter = envelope.span.enter();
+        let started = Instant::now();
         let result = backend.run(envelope.command);
+        let service_us = diagnostics::micros_since(started);
+        drop(span_enter);
+        if traceable {
+            StageEvent {
+                op,
+                stage: "client_service",
+                outcome: result.outcome_label(),
+                wait_us,
+                service_us,
+                bytes,
+                count0: (count0_label, count0_value),
+                count1: (count1_label, count1_value),
+                ..StageEvent::default()
+            }
+            .record();
+        }
         if results
             .send(ResultEnvelope {
                 result,
                 reservation: envelope.reservation,
+                op,
+                completed_at: Instant::now(),
             })
             .is_err()
         {
@@ -587,3 +733,211 @@ fn worker_loop<B: Backend>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod diag_tests {
+    use super::*;
+    use panelink::control_protocol::TargetRef;
+    use std::sync::mpsc;
+    use std::sync::Mutex;
+
+    /// Targeted capture: records diagnostic events on any thread inside this
+    /// test only (a scoped `set_default` subscriber on this test thread).
+    struct Capture {
+        events: Mutex<Vec<Vec<(String, String)>>>,
+        span_names: Mutex<Vec<String>>,
+        next_id: std::sync::atomic::AtomicU64,
+    }
+
+    impl Capture {
+        fn new() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+                span_names: Mutex::new(Vec::new()),
+                next_id: std::sync::atomic::AtomicU64::new(1),
+            }
+        }
+
+        fn events(&self) -> Vec<Vec<(String, String)>> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    struct Visitor {
+        fields: Vec<(String, String)>,
+    }
+
+    impl tracing::field::Visit for Visitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .push((field.name().to_owned(), value.to_owned()));
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .push((field.name().to_owned(), value.to_string()));
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.fields
+                .push((field.name().to_owned(), value.to_string()));
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.fields
+                .push((field.name().to_owned(), value.to_string()));
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .push((field.name().to_owned(), format!("CANARY:{value:?}")));
+        }
+    }
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == panelink::diagnostics::TARGET
+        }
+
+        fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::Id {
+            self.span_names
+                .lock()
+                .unwrap()
+                .push(span.metadata().name().to_owned());
+            tracing::Id::from_u64(
+                self.next_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            )
+        }
+
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = Visitor { fields: Vec::new() };
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(visitor.fields);
+        }
+
+        fn enter(&self, _span: &tracing::Id) {}
+        fn exit(&self, _span: &tracing::Id) {}
+    }
+
+    fn target() -> TargetRef {
+        TargetRef {
+            generation: 5,
+            workspace: 1,
+            pane: 2,
+            session: 1,
+            occupant_revision: 1,
+        }
+    }
+
+    fn keys_envelope(span: tracing::Span, submitted: Instant) -> Envelope {
+        Envelope {
+            command: Command::Keys {
+                target: target(),
+                keys: vec![panelink::terminal::Key::Enter],
+            },
+            reservation: Reservation {
+                bytes: MAX_KEYS * std::mem::size_of::<panelink::terminal::Key>()
+                    + INPUT_RESULT_RESERVATION,
+            },
+            submitted,
+            span,
+        }
+    }
+
+    #[test]
+    fn worker_loop_measures_queue_wait_under_the_admitted_span_and_labels_outcomes() {
+        let capture = std::sync::Arc::new(Capture::new());
+        let dispatch = tracing::Dispatch::new(capture.clone());
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let (commands_tx, commands_rx) = mpsc::channel();
+        let (results_tx, results_rx) = mpsc::sync_channel(2);
+        let submitted = Instant::now();
+        std::thread::sleep(Duration::from_millis(3));
+        let submitted_ref = submitted;
+        commands_tx
+            .send(keys_envelope(
+                tracing::span!(
+                    target: panelink::diagnostics::TARGET,
+                    tracing::Level::INFO,
+                    "client_command",
+                    op = "keys"
+                ),
+                submitted_ref,
+            ))
+            .expect("loop command capacity");
+        drop(commands_tx);
+        tracing::subscriber::with_default(capture.clone(), || {
+            worker_loop(BackendForTests, commands_rx, results_tx);
+        });
+        let events = capture.events();
+        assert_eq!(events.len(), 1, "one traceable command: {events:?}");
+        let lookup = |name: &str| {
+            events[0]
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(lookup("op"), "keys");
+        assert_eq!(lookup("stage"), "client_service");
+        assert_eq!(lookup("outcome"), "ok");
+        let wait_us: u64 = lookup("wait_us").parse().unwrap_or(0);
+        assert!(wait_us >= 3_000, "queue wait was measured: {wait_us}");
+        assert_eq!(lookup("count0_label"), "keys");
+        assert_eq!(lookup("count0_value"), "1");
+        assert!(capture
+            .span_names
+            .lock()
+            .unwrap()
+            .contains(&"client_command".to_owned()));
+        let result = results_rx.try_recv().expect("bounded result published");
+        assert_eq!(result.op, "keys");
+    }
+
+    #[test]
+    fn poll_commands_are_not_traced_to_bound_record_volume() {
+        let capture = std::sync::Arc::new(Capture::new());
+        let dispatch = tracing::Dispatch::new(capture.clone());
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let (commands_tx, commands_rx) = mpsc::channel();
+        let (results_tx, _results_rx) = mpsc::sync_channel(2);
+        let command = Command::Poll(NetView::default());
+        let envelope = Envelope {
+            command,
+            reservation: Reservation {
+                bytes: POLL_RESULT_RESERVATION,
+            },
+            submitted: Instant::now(),
+            span: tracing::Span::none(),
+        };
+        commands_tx.send(envelope).expect("loop command capacity");
+        drop(commands_tx);
+        tracing::subscriber::with_default(capture.clone(), || {
+            worker_loop(BackendForTests, commands_rx, results_tx);
+        });
+        assert!(capture.events().is_empty(), "poll stays untraced");
+    }
+
+    /// Minimal backend that returns immediately for every command shape.
+    struct BackendForTests;
+
+    impl Backend for BackendForTests {
+        fn run(&mut self, command: Command) -> ClientResult {
+            match command {
+                Command::Keys { .. } | Command::Paste { .. } => ClientResult::Keys(Ok(())),
+                Command::Poll(_) => ClientResult::Poll(Box::new(NetUpdate {
+                    layout: None,
+                    pane_operations: None,
+                    screens: Vec::new(),
+                    status: None,
+                    server_present: false,
+                })),
+                _ => ClientResult::Detached,
+            }
+        }
+    }
+}
