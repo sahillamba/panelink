@@ -336,6 +336,18 @@ impl<'a> RenderView<'a> {
         let pane_mode_count = self
             .interaction
             .format_mode(self.interaction_context(), &mut pane_mode_text);
+        let resize_hint = match self.interaction.view().pane_mode {
+            Some(super::PaneMode::Divider {
+                indices,
+                selected,
+                first_cells,
+                ..
+            }) => {
+                let index = indices.get(selected).copied().flatten().unwrap_or(0);
+                Some(format!("Resize {}: {first_cells} cells; drag/release; arrows; Tab divider; Enter apply; Esc cancel", index + 1))
+            }
+            _ => None,
+        };
         let empty_geometry = self.empty_action_geometry();
         let mut empty_text = [String::new(), String::new()];
         let overlay = if self.interaction.view().help_open && view_rows > 0 && view_columns > 0 {
@@ -551,6 +563,8 @@ impl<'a> RenderView<'a> {
                 ))
             } else if !fits && self.source.layout.is_some() {
                 Some((TOO_SMALL, 0))
+            } else if let Some(hint) = resize_hint.as_deref() {
+                Some((hint, view_rows.saturating_sub(1)))
             } else if self.interaction.view().prefix.is_some() {
                 Some((
                     if header_enabled {

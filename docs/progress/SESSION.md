@@ -1,3 +1,23 @@
+## Divider resize without a dialog — 2026-11-02
+
+User requested removal of the divider resize modal. Direct dragging retains
+local preview and one absolute resize on release, with zero requests for an
+unchanged position. Removed the central dialog and its pointer hit targets;
+Ctrl-B e retains arrow/Tab/Enter/Esc keyboard resizing with a footer hint.
+Target/revision checks, cancellation and typing focus are unchanged.
+
+Verification: all 240 UI client tests pass, including ten divider tests and
+regressions for absence of the dialog and invisible pointer controls. The
+real-PTY pane-operations integration test also passes (1/1). Repository
+docs (466 files) and the four Panelink skill Markdown files have zero findings.
+Strict Clippy (all targets, warnings denied), formatting, diff whitespace and
+`cargo build --locked` pass. Built checkout client identity: revision
+`5ecc22a0c767`, fingerprint `d9febc0df3ef325e`, dirty. The installed
+`~/.local/bin/panelink` is a regular binary, not the previously documented
+symlink, and was not replaced. Native Apple Terminal gesture acceptance and
+broader phase gates remain open. No server restart, live pane input, commit
+or push.
+
 ## Herdr-inspired pane menu and top bar — 2026-11-01
 
 The user asked for Herdr-style changes. We read Herdr TUI's `tabs.rs`,

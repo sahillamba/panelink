@@ -101,12 +101,13 @@ use divider drag or Ctrl-B `e`, and the strip's `≡` menu.
 
 ## Divider resize
 
-- A divider drag **previews** locally.
+- Drag a divider directly to **preview** locally, without a resize dialog.
 - Release applies **one absolute resize**; if the position is unchanged, **zero** effect is sent.
 - Host/layout/route changes, Esc and focus loss cancel the gesture; a later
-  Enter cannot commit a cancelled value. `Ctrl-B e` gives keyboard and
-  `[-]`/`[+]`/Apply pointer adjustment with the same limits. Never resend an uncertain
-  mutation with a new key.
+  Enter cannot commit a cancelled value. `Ctrl-B e` starts keyboard resizing:
+  arrows adjust, Tab/Shift-Tab selects an ancestor divider, Enter applies and
+  Esc cancels. A footer hint replaces the old Apply/Cancel dialog. Never resend
+  an uncertain mutation with a new key.
 
 ## Tabs (UX-05c + UX-06)
 

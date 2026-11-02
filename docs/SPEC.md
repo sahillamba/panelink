@@ -294,7 +294,7 @@ for current validation and open acceptance.
 
 The current pane controls use prototype bindings: `Ctrl-B z` toggles zoom,
 `Ctrl-B m` opens a pane-location swap chooser, and `Ctrl-B e` opens an
-ancestor-divider chooser. These bindings describe the current prototype; they
+ancestor-divider keyboard mode with a footer hint. These bindings describe the current prototype; they
 do not settle the final shortcut configuration.
 
 Zoom is server-authoritative and scoped to one workspace. It resizes the
@@ -309,7 +309,7 @@ along each divider's axis with arrow keys. Enter sends one absolute-position
 commit; Esc cancels the local preview.
 
 Layout topology changes are refused while zoom is active; unzoom before
-changing the split layout. Swap and divider choosers capture their target and
+changing the split layout. Swap and divider modes capture their target and
 layout revision. If that target or revision becomes stale, the local mode
 cancels instead of retargeting the action. Pane operations are asynchronous:
 fixed status messages report results, and an uncertain or unknown result is
@@ -722,8 +722,9 @@ Close requires a separate explicit Close click or keyboard y. The last-pane
 warning stays visible, and stale layout changes cancel the confirmation.
 
 Divider dragging previews locally and submits one absolute schema-13 request
-on release. Ctrl-B e opens divider selection with minus/plus adjustment and
-Apply/Cancel controls for keyboard and pointer operation. Minimum subtree
+on release, without an Apply/Cancel dialog. Ctrl-B e starts keyboard resizing
+with a footer hint: arrows adjust, Tab/Shift-Tab selects a divider, Enter applies
+and Esc cancels. Minimum subtree
 sizes constrain motion. Escape, focus loss, host resize, stale layout/route and
 buffer changes cancel captured gestures; uncertain mutations are not replayed.
 

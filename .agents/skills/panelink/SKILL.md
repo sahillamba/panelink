@@ -30,6 +30,8 @@ control activates once; drag-away or stale UI/target cancels. Inactive-tab close
 requires selecting that tab first. Resolve the actual executable before assuming
 this source behavior is installed. The [interactive guide](references/interactive.md)
 records keyboard focus, reduced colors and exact lifecycle distinctions.
+Divider resizing uses direct drag/release without a dialog; Ctrl-B e retains
+keyboard preview with a footer hint, Enter to apply and Esc to cancel.
 
 ## Identify the installation and workspace
 
