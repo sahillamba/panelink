@@ -71,6 +71,22 @@ class DependencyInventoryTests(unittest.TestCase):
         self.assertTrue(by_name["child-crate"]["build_script"])
         self.assertTrue(by_name["child-crate"]["proc_macro"])
 
+    def test_development_dependency_roots_and_transitive_edges_are_retained(self) -> None:
+        metadata = {
+            "resolve": {"root": "app", "nodes": [
+                {"id": "app", "deps": [{"pkg": "proptest", "dep_kinds": [{"kind": "dev"}]}]},
+                {"id": "proptest", "deps": [{"pkg": "rng", "dep_kinds": [{"kind": None}]}]},
+                {"id": "rng", "deps": []},
+            ]},
+            "packages": [
+                {"id": name, "name": name, "version": "1", "license": "MIT", "targets": []}
+                for name in ["app", "proptest", "rng"]
+            ],
+        }
+        rows = {row["name"]: row for row in dependency_inventory.build_inventory(metadata, "")["packages"]}
+        self.assertEqual("direct", rows["proptest"]["role"])
+        self.assertEqual(["proptest"], rows["rng"]["pulled_by"])
+
     def test_GIVEN_unknown_or_unreviewed_license_WHEN_flagged_THEN_names_the_condition(self) -> None:
         self.assertEqual(["unknown-license"], dependency_inventory.license_flags(None))
         self.assertEqual(

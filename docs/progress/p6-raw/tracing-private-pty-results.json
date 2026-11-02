@@ -1,0 +1,34 @@
+[
+  {
+    "enabled": false,
+    "attach_to_first_capture_ms": 67.03924998873845,
+    "input_to_first_capture_ms": [
+      59.456749993842095,
+      37.01325002475642,
+      34.32458301540464,
+      41.81195900309831,
+      35.94387500197627,
+      34.89891599747352,
+      45.09541598963551,
+      34.71179099869914
+    ],
+    "root": "/private/tmp/panelink-trace-pty-yihwe48d",
+    "scope": "private outer PTY; capture timing includes terminal echo; no child/provider/display acceptance"
+  },
+  {
+    "enabled": true,
+    "attach_to_first_capture_ms": 70.58133301325142,
+    "input_to_first_capture_ms": [
+      60.661208000965416,
+      45.05879199132323,
+      44.61550002451986,
+      50.789125001756474,
+      60.21412499831058,
+      49.8485830030404,
+      48.5861670167651,
+      46.129874972393736
+    ],
+    "root": "/private/tmp/panelink-trace-pty-hemvgzgn",
+    "scope": "private outer PTY; capture timing includes terminal echo; no child/provider/display acceptance"
+  }
+]

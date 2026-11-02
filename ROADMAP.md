@@ -1,5 +1,12 @@
 # Panelink implementation roadmap
 
+Tracing/property testing (2026-11-02): opt-in bounded local diagnostics and
+44 property/regression tests implemented in `t3/investigate-two-suggestions`.
+Canonical verifier passes 8/8; fresh all-lock advisory scan has no known
+vulnerabilities or warnings. See [evidence](docs/progress/TRACING-PROPTEST-RESULT.md)
+and [usage/limits](docs/DIAGNOSTICS.md). Native/provider and performance acceptance
+gates remain separate. No install, user-server restart, commit or push.
+
 Button redesign source complete (2026-10-31): all BTN-00..06 packets implemented
 in `t3/terminal-button-design-research`. Parent final canonical8/8:
 Rust1626/0/20ignored, decoder39, Python233run/1skip, docs464/0 and strict checks.

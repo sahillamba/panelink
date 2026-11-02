@@ -1,5 +1,23 @@
 # Third-party components
 
+## Tracing and property-testing additions — 2026-11-02
+
+The pinned tracing runtime and development-only proptest graph add 22 registry
+packages. [The adoption review](docs/progress/TRACING-PROPTEST-DEPENDENCIES.md)
+records exact features, runtime/development/target scope, build inputs and
+remaining review gaps. License and copyright files from 21 published crate
+archives are preserved under `third_party/licenses/<crate>-<version>/`; MIT is
+selected where offered. The lock-only UEFI dependency `r-efi 6.0.0` declares
+MIT OR Apache-2.0 OR LGPL-2.1-or-later but ships no license text in its archive;
+its notice provenance remains an explicit review gap before distributing that
+target. It is not built for Apple Silicon macOS. The inventory conservatively
+flags the offered LGPL alternative; no LGPL license option has been selected.
+
+The older component counts below describe their original checkpoints. Current
+package rows, including development dependencies, are in the
+[generated inventory](docs/progress/P6-DEPENDENCY-INVENTORY.md). Inclusion in this
+file does not establish a security audit or firm approval.
+
 Panelink's original application logic is independently written. The terminal core deliberately uses the components listed in [the prototype inventory](docs/progress/p2-core-review/INVENTORY.md). Their code is not covered solely by Panelink's intended application license.
 
 Preserved upstream license/copyright/notice texts for the 17 selected third-party components (including local variants) are under `third_party/licenses/<crate>-<upstream-version>/`. VT100's MIT notice is also in `vendor/vt100/LICENSE`. MIT is the selected license option where offered; other offered license texts and copyright files are preserved as provenance. Carry these notices with distributed source/binaries and recheck them when dependencies change. No binary distribution/installer is produced by this checkpoint.

@@ -1,5 +1,12 @@
 # Panelink: working implementation specification
 
+Local diagnostics prototype (2026-11-02): opt-in `PANELINK_TRACE_DIR` selects
+bounded private client/server logs, disabled by default, with fixed metadata
+fields and no input/paste/screen/credential contents. Logging does not authorize
+input, retries, server restart or uploads. See [diagnostics](DIAGNOSTICS.md) for
+limits, one-writer-per-role policy and pending performance/native acceptance.
+
+
 Button/control source update (2026-10-31): the user confirmed the
 [button implementation plan](design/BUTTON-IMPLEMENTATION-PLAN.md) and requested
 implementation. Compact filled controls use one shared action geometry for

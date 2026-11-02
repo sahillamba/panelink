@@ -1,0 +1,7 @@
+{
+  "baseline_revision": "5ecc22a0c7674e5d2a9f60959b779fa8111f2317",
+  "baseline_binary_bytes": 3951552,
+  "instrumented_binary_bytes": 4277408,
+  "baseline_source": "/private/tmp/panelink-trace-baseline-xuo2j45i",
+  "scope": "cold separate target directories; metadata revision unknown for archive; source baseline excludes tracing/proptest; one run, not benchmark acceptance"
+}

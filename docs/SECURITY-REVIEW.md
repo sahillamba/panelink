@@ -1,5 +1,16 @@
 # Panelink security review pack — evidence for review
 
+Dependency update (2026-11-02): tracing/proptest adoption expands the lockfile
+from 18 to 40 packages. The older advisory result and counts below describe
+their dated baseline and do not cover this addition. The refreshed
+[inventory](progress/P6-DEPENDENCY-INVENTORY.md) now includes development
+dependencies; [the adoption review](progress/TRACING-PROPTEST-DEPENDENCIES.md)
+separates Apple Silicon runtime, development, and lock-only targets. A fresh cargo-audit 0.22.2 scan of all 40 lock entries reports zero known
+vulnerabilities and no warnings; see the adoption review for the dated database
+commit and raw JSON. License texts are preserved for 21 of 22 added crates;
+the published lock-only UEFI `r-efi` archive lacks license text. This remains a
+notice provenance gap, not a selected LGPL obligation or firm approval.
+
 Date: 2026-10-22. Scope: repository evidence mapped to the proposed SEC-01 through
 SEC-08 criteria in [SPEC.md](SPEC.md#proposed-security-review-requirements).
 This is an implementation evidence pack for the current prototype. It is not a

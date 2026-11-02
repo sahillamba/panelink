@@ -102,7 +102,10 @@ impl fmt::Display for CliError {
 }
 
 fn main() {
-    std::process::exit(run(std::env::args_os().skip(1)));
+    let code = run(std::env::args_os().skip(1));
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    panelink::diagnostics::shutdown_after_restore(std::time::Duration::from_millis(150));
+    std::process::exit(code);
 }
 
 fn run<I>(arguments: I) -> i32
@@ -110,6 +113,22 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let mut arguments = arguments.into_iter().peekable();
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        // Process-boundary diagnostics: enable once, before any work. `serve`
+        // and `server-probe` processes are servers; every other invocation
+        // (including short CLI commands) is a client. A disabled or rejected
+        // enablement never affects the command itself.
+        let role = if arguments
+            .peek()
+            .is_some_and(|argument| argument == "serve" || argument == "server-probe")
+        {
+            panelink::diagnostics::Role::Server
+        } else {
+            panelink::diagnostics::Role::Client
+        };
+        panelink::diagnostics::init_process(role);
+    }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         if arguments
@@ -718,6 +737,10 @@ fn print_help() {
     println!("pane, s opens the menu, x closes the pane (asks y/n), Esc leaves.");
     println!("Ctrl-X detaches (shells keep running).");
     println!();
+    println!(
+        "Diagnostics: PANELINK_TRACE_DIR=<absolute-private-0700-dir> enables bounded local logs."
+    );
+    println!("Tracing is off by default; existing servers keep their startup configuration.");
     println!("Advanced:");
     println!("  panelink workspace list");
     println!("  panelink workspace project create <name> <first-tab-name>");

@@ -116,3 +116,11 @@ The fixture now explicitly clicks to discover the extent and waits for the
 positive oldest-content marker before dragging the resolved thumb to live.
 The live-tail marker and prompt assertions remain. Application behavior,
 timeouts and ignored-test counts are unchanged.
+
+## Property-based checks
+
+The normal root Rust check includes the bounded codec/layout/input property
+suite. `proptest` is development-only; default 256 cases and 4,096 shrink
+iterations retain the existing process deadline. For replay/stress commands and
+reviewed synthetic failure seeds, see [diagnostics and testing](DIAGNOSTICS.md).
+Do not discard a minimized failure or rerun until green.
