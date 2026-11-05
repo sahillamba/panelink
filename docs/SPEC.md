@@ -232,7 +232,18 @@ events. Native multitouch and a fixed project sidebar are not selected. The
 [bounded delivery contract](progress/P5-POINTER-CONTROLS-2026-10-27.md) records
 implementation progress and separate host acceptance.
 
-Numeric latency, memory, history, and build budgets remain to be established on real hardware. The workload statement is an evaluation target, not a measured result.
+Rendering engineering target (2026-11-05): aim for 60 changed-screen updates/s
+under continuous output. The opt-in private 24x100, single-pane PTY fixture uses
+a 50 updates/s floor and a 40 ms p95 inter-update ceiling to allow scheduler
+and capture sampling headroom. Event-capable panes poll again after 8 ms when
+changed (or needing a screen), returning to 30 ms after an unchanged watch;
+legacy screen polling stays at 100 ms. The host retains its 16 ms render cap,
+change-driven redraws and bounded output writes. This is a scoped engineering
+budget, not a guaranteed minimum physical display FPS or an input-latency SLA.
+See [measurement and limits](progress/SMOOTH-RENDERING-2026-11-05.md).
+
+Numeric latency, memory, history, and build budgets beyond that scoped rendering
+fixture remain to be established on real hardware. The workload statement is an evaluation target, not a measured result.
 
 Workload evaluation choice (user, 2026-10-26): ten idle OpenCode sessions
 concurrent with ordinary shell output and offline fixture build output, with

@@ -1,5 +1,10 @@
 # Panelink implementation roadmap
 
+Rendering cadence (2026-11-05): active event-watch polling now leaves headroom
+for the existing 16 ms compositor. Private single-pane continuous-output
+measurement reaches about 60 updates/s; native/multi-pane/resource/input-latency
+acceptance remains open. See [evidence](docs/progress/SMOOTH-RENDERING-2026-11-05.md).
+
 Tracing/property testing (2026-11-02): opt-in bounded local diagnostics and
 44 property/regression tests implemented in `t3/investigate-two-suggestions`.
 Canonical verifier passes 8/8; fresh all-lock advisory scan has no known

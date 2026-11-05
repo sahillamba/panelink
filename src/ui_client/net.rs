@@ -34,6 +34,9 @@ use super::pane_operations::{PaneAction, PaneOperationUpdate};
 use super::state::{App, ClosePlan, SplitPlan};
 
 const LAYOUT_INTERVAL: Duration = Duration::from_millis(250);
+// Leave headroom for transport and the host's 16 ms compositor cadence.
+// Quiet panes keep the existing watch cadence and emit no redraws.
+const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
 const SCREEN_FALLBACK_INTERVAL: Duration = Duration::from_millis(100);
 /// Total wall-clock budget for detach work after the host is restored.
@@ -658,7 +661,12 @@ impl Net {
             let changed = if pane.events {
                 pane.next_watch = now + POLL_INTERVAL;
                 match pane.watch() {
-                    Ok(changed) => changed,
+                    Ok(changed) => {
+                        if changed || pane.needs_screen {
+                            pane.next_watch = now + ACTIVE_POLL_INTERVAL;
+                        }
+                        changed
+                    }
                     Err(label) => {
                         update.status = Some(label);
                         pane.disconnect(now);

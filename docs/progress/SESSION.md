@@ -1,3 +1,18 @@
+## Continuous rendering cadence — 2026-11-05
+
+Branch `t3/smooth-terminal-rendering` in `t3-eb955439`. Real child/server/attach/
+outer-PTY counter fixture failed at 32.5 updates/s before the fix. Changed
+screen watches now use 8 ms and quiet watches retain 30 ms; host rendering
+remains capped at 16 ms. After: 60.1 updates/s initially; final regression
+57.6 updates/s, p95 20.2 ms, max 49.1 ms. Aim60, fixture floor50/p95<=40ms;
+no guaranteed physical frame rate. [Evidence and command](SMOOTH-RENDERING-2026-11-05.md).
+
+244 UI-client tests, both explicit rendering/wheel PTY tests and strict
+all-target Clippy pass. Docs/skill links, scoped rustfmt and whitespace checks
+pass. Full canonical gate not run; native host, large/multiple panes, resource
+and input-latency budgets remain open. No install, live pane input, server
+restart, commit or push. No broader phase marked complete.
+
 ## PR 21 menu-dismissal input barrier — 2026-11-05
 
 Hosted run [42024944436](https://github.com/sahillamba/panelink/actions/runs/42024944436)
