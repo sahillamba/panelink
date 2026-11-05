@@ -1,3 +1,20 @@
+## PR 21 terminal-reset capture synchronization — 2026-11-05
+
+Hosted run [42015086893](https://github.com/sahillamba/panelink/actions/runs/42015086893)
+failed in `real_attach_routes_renders_closes_and_detaches_four_panes` because
+its immediate capture snapshot lacked the mouse-reset sequence after attach
+exit. The fixture's background PTY reader is independent of the process-exit
+marker. It now waits within the existing STEP deadline for all five exact
+reset sequences, retaining termios, clean-exit and surviving-child assertions.
+Application behavior and usage commands are unchanged.
+
+Focused `p3_attach_four` passes 3/3. The canonical serial verifier passes all
+seven supporting checks (decoder, fingerprints, fmt, strict Clippy, build,
+Python 234 run/one skipped, docs 470/zero findings). Its root Rust step reaches
+the 420-second limit during `p5_workspace_tabs`, with no assertion failure
+reported; the repaired attach target passed within that run. This is not a
+full local gate pass. Hosted confirmation remains pending after publication.
+
 ## Divider resize without a dialog — 2026-11-02
 
 User requested removal of the divider resize modal. Direct dragging retains

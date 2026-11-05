@@ -1027,18 +1027,31 @@ fn real_attach_routes_renders_closes_and_detaches_four_panes() {
         "attach exits cleanly on Ctrl-X"
     );
     client.termios_restored();
-    let capture = client.capture();
-    for mode in [
-        &b"\x1b[?1006l"[..],
+    // Process exit and termios restoration do not synchronize the background
+    // master reader. Keep the supervisor/slave alive and wait for every exact
+    // reset sequence to reach the capture, rather than sampling it once.
+    let modes: &[&[u8]] = &[
+        b"\x1b[?1006l",
         b"\x1b[?1002l",
         b"\x1b[?1000l",
         b"\x1b[?1049l",
         b"\x1b[?2004l",
-    ] {
+    ];
+    let deadline = Instant::now() + STEP;
+    loop {
+        let capture = client.capture();
+        let missing: Vec<_> = modes
+            .iter()
+            .filter(|mode| !capture.windows(mode.len()).any(|window| window == **mode))
+            .collect();
+        if missing.is_empty() {
+            break;
+        }
         assert!(
-            capture.windows(mode.len()).any(|window| window == mode),
-            "{mode:?}"
+            Instant::now() < deadline,
+            "terminal reset sequences missing after capture drain: {missing:?}"
         );
+        thread::sleep(Duration::from_millis(2));
     }
     for target in &surviving_targets {
         let original_index = pane_targets
