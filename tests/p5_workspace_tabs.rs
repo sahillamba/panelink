@@ -750,6 +750,18 @@ fn screen_label_position(parser: &vt100::Parser, label: &str) -> Option<(u16, u1
         })
 }
 
+#[test]
+fn close_confirmation_target_ignores_stale_action_menu_row() {
+    let mut parser = vt100::Parser::new(ROWS, COLUMNS, 0);
+    // A frame can expose the confirmation before erasing the old menu row.
+    parser.process(b"\x1b[5;10H [Close tab]\x1b[14;29H[Close tab] [Cancel]");
+    assert_eq!(screen_label_position(&parser, "[Close tab]"), Some((4, 10)));
+    assert_eq!(
+        screen_label_position(&parser, "[Close tab] [Cancel]"),
+        Some((13, 28))
+    );
+}
+
 fn pane_content_rows() -> (usize, usize) {
     // The workspace strip and its spacer consume rows zero and one; pane
     // borders consume one row above and below the PTY's content area.
@@ -1763,7 +1775,7 @@ fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
     client.wait_screen("second close confirmation", |_, screen| {
         screen.contains("[Close tab] [Cancel]")
     });
-    client.click_text("[Close tab]");
+    client.click_text("[Close tab] [Cancel]");
     assert!(
         server_lock_held(&fixture.route_root(project, main).join("server")),
         "closing Shell 1 must leave Main's server lock held"
@@ -1799,7 +1811,7 @@ fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
     client.wait_screen("Editors/Main close confirmation", |_, screen| {
         screen.contains("[Close tab] [Cancel]")
     });
-    client.click_text("[Close tab]");
+    client.click_text("[Close tab] [Cancel]");
     client.wait_header("Default", "Main");
     client.wait_screen(
         "fallback shell restored after Editors tab close",
@@ -1820,7 +1832,7 @@ fn workspace_tab_create_rename_close_keeps_identity_and_cancel_is_safe() {
     client.wait_screen("last visible tab close confirmation", |_, screen| {
         screen.contains("[Close tab] [Cancel]")
     });
-    client.click_text("[Close tab]");
+    client.click_text("[Close tab] [Cancel]");
     client.wait_screen("empty workspace after last close", |_, screen| {
         screen.contains("No open tabs.") && screen.contains("New tab") && screen.contains("Detach")
     });

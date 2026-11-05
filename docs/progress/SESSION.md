@@ -1,3 +1,20 @@
+## PR 21 confirmation click disambiguation — 2026-11-05
+
+Hosted run [42023487854](https://github.com/sahillamba/panelink/actions/runs/42023487854)
+passed the repaired attach target but failed waiting for Main after a Shell
+tab close click. The fixture searched for bare `[Close tab]`, also present in
+the preceding action menu. A partial redraw can retain that earlier row while
+the confirmation is already visible. Confirmation clicks now locate the full
+`[Close tab] [Cancel]` row. A deterministic parser regression preserves both
+rows and demonstrates the old ambiguous target and the exact new target.
+The original hosted interleaving was not reproduced locally; the unmodified
+focused test passed before editing. No production behavior or timeouts change.
+
+The entire `p5_workspace_tabs` target passes 6/6, including the regression.
+Formatting, strict all-target Clippy, locked build and diff checks pass.
+The full canonical gate was not repeated for this test-only change; its prior
+local timeout remains recorded below. Hosted confirmation remains pending.
+
 ## PR 21 terminal-reset capture synchronization — 2026-11-05
 
 Hosted run [42015086893](https://github.com/sahillamba/panelink/actions/runs/42015086893)
