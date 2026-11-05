@@ -245,3 +245,13 @@ dialog bounds; clicks beside a dialog do not activate its actions.
 Tab actions has two columns of inner padding, blank rows around its content,
 a separate heading and a keyboard hint footer. Small viewports use the compact
 four-row layout.
+
+## Rendering cadence
+
+The source client targets 60 changed-screen updates/s during continuous output.
+Event-capable panes use an 8 ms watch interval after activity, returning to
+30 ms after an unchanged watch; legacy servers retain 100 ms screen polling.
+Idle screens do not force redraws. This needs a rebuilt/reopened client, not
+a server restart. The private single-pane fixture budget is not a physical
+display FPS guarantee; large/multiple panes and native host acceptance remain
+open. See [measurement](../../../docs/progress/SMOOTH-RENDERING-2026-11-05.md).
