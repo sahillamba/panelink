@@ -1,3 +1,21 @@
+## PR 21 menu-dismissal input barrier — 2026-11-05
+
+Hosted run [42024944436](https://github.com/sahillamba/panelink/actions/runs/42024944436)
+passed attach and tab lifecycle tests, but the pointer test timed out opening
+the global menu. Its shell displayed a mouse-sequence suffix after Escape.
+The fixture's prompt predicate can succeed while a menu remains onscreen;
+that does not acknowledge the standalone Escape before sending another
+escape-prefixed mouse sequence. Both menu exits now wait for their specific
+labels to disappear before waiting for the prompt and sending the next click.
+No fixed delay, input retry, assertion removal or production change was added.
+
+The full workspace-tab target passes 6/6. In the fresh canonical serial run,
+all Rust test binaries finish without assertion failures, including 6/6
+workspace-tab tests and property tests, but the overall Cargo step exceeds
+420 seconds before completion. All seven supporting checks pass, including
+strict Clippy, build, fmt, fingerprints, decoder, Python and docs. This is
+not a full canonical pass; hosted confirmation remains pending.
+
 ## PR 21 confirmation click disambiguation — 2026-11-05
 
 Hosted run [42023487854](https://github.com/sahillamba/panelink/actions/runs/42023487854)

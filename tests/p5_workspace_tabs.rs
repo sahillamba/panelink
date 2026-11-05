@@ -1546,6 +1546,11 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
             && !screen.contains("[More")
     });
     client.write(b"\x1b");
+    // The shell prompt remains behind the menu, so it cannot acknowledge
+    // Escape. Observe dismissal before the next mouse escape sequence.
+    client.wait_screen("pane menu dismissed", |_, screen| {
+        !screen.contains("Zoom pane") && !screen.contains("Swap pane")
+    });
     wait_root_shell_prompt(&client);
     // Saved layout, help and detach live in the strip's global menu.
     click_visible_label(&mut client, "\u{2261}");
@@ -1553,6 +1558,9 @@ fn workspace_pointer_controls_preserve_live_ptys_and_confirm_close() {
         screen.contains("All tabs") && screen.contains("Keys & help") && screen.contains("Detach")
     });
     client.write(b"\x1b");
+    client.wait_screen("global menu dismissed", |_, screen| {
+        !screen.contains("All tabs") && !screen.contains("Keys & help")
+    });
     wait_root_shell_prompt(&client);
     click_visible_label(&mut client, " x ");
     client.wait_screen("close confirmation", |_, screen| screen.contains("Cancel"));
