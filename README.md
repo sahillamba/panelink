@@ -194,6 +194,10 @@ original application code is **intended** for MIT licensing; see
 
 ## Develop and learn more
 
+Optional [local diagnostics and property tests](docs/DIAGNOSTICS.md) help
+investigate attach/input delays and validate codec/layout/input invariants.
+Tracing is disabled by default and writes only bounded private files.
+
 ```sh
 python3 scripts/verify_non_ui.py
 ```

@@ -174,6 +174,15 @@ target of a legacy CLI command.
 
 ## Handle uncertainty
 
+For attach/input delays or client/server failures, consult
+[local diagnostics](../../../docs/DIAGNOSTICS.md) before enabling tracing.
+`PANELINK_TRACE_DIR` enables bounded private logs only in newly launched
+macOS/arm64 processes. Discover client/server identities separately; an existing
+server keeps its startup configuration. One writer per role per trace directory
+is allowed, and logs may drop records. Never restart a live server without
+authority to end its panes, export traces automatically, or treat PTY acceptance
+as provider success.
+
 On stale targets, ownership loss, restart, timeout or disconnect, inspect current
 state before deciding what to do. Never rerun uncertain input, launch, interrupt
 or close with a new caller/context/key, and never guess a remaining input suffix.

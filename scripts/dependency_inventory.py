@@ -34,16 +34,16 @@ def _package_id(package: dict[str, Any]) -> str:
 
 
 def _dependency_edges(metadata: dict[str, Any]) -> dict[str, set[str]]:
-    """Return the normal/build package graph from Cargo metadata."""
+    """Return the normal/build/dev package graph from Cargo metadata."""
     edges: dict[str, set[str]] = {}
     for node in metadata.get("resolve", {}).get("nodes", []):
         children: set[str] = set()
         for dependency in node.get("deps", []):
             kinds = dependency.get("dep_kinds", [])
-            if any(kind.get("kind") in (None, "normal", "build") for kind in kinds):
+            if any(kind.get("kind") in (None, "normal", "build", "dev") for kind in kinds):
                 children.add(str(dependency["pkg"]))
         # Older Cargo metadata shapes expose only a package-ID dependency list.
-        if not children:
+        if "deps" not in node:
             children.update(str(item) for item in node.get("dependencies", []))
         edges[str(node["id"])] = children
     return edges
@@ -73,7 +73,7 @@ def direct_dependency_roots(metadata: dict[str, Any]) -> dict[str, set[str]]:
             return {}
         by_name = {str(package["name"]): _package_id(package) for package in package_by_id.values()}
         roots: dict[str, set[str]] = {}
-        sections = ("dependencies", "build-dependencies")
+        sections = ("dependencies", "build-dependencies", "dev-dependencies")
         entries: list[tuple[str, Any]] = []
         for section in sections:
             entries.extend(manifest.get(section, {}).items())
@@ -90,7 +90,7 @@ def direct_dependency_roots(metadata: dict[str, Any]) -> dict[str, set[str]]:
     roots: dict[str, set[str]] = {}
     for dependency in root_node.get("deps", []):
         kinds = dependency.get("dep_kinds", [])
-        if not any(kind.get("kind") in (None, "normal", "build") for kind in kinds):
+        if not any(kind.get("kind") in (None, "normal", "build", "dev") for kind in kinds):
             continue
         package_id = str(dependency["pkg"])
         package = packages.get(package_id)
@@ -214,7 +214,7 @@ def build_inventory(metadata: dict[str, Any], cargo_tree: str, root: Path = ROOT
         "schema_version": 1,
         "commands": {
             "metadata": "cargo metadata --locked --offline --format-version 1",
-            "tree": "cargo tree --locked --offline -e normal,build --prefix none",
+            "tree": "cargo tree --locked --offline -e normal,build,dev --prefix none",
         },
         "packages": package_rows,
         "package_count": len(package_rows),
@@ -225,7 +225,7 @@ def build_inventory(metadata: dict[str, Any], cargo_tree: str, root: Path = ROOT
             "status": "blocked",
             "cargo_audit_installed": shutil.which("cargo-audit") is not None,
             "cargo_deny_installed": shutil.which("cargo-deny") is not None,
-            "note": "Advisory scanning was not performed: cargo-audit and cargo-deny are not installed; no network or advisory database was used.",
+            "note": "This inventory command does not run an advisory scan; consult the dated security/adoption review for separately executed audit evidence.",
         },
     }
 
@@ -235,11 +235,11 @@ def build_lock_fallback(lock_text: str, manifest_text: str, root: Path = ROOT) -
     lock = tomllib.loads(lock_text)
     manifest = tomllib.loads(manifest_text)
     dependency_names: set[str] = set()
-    for section_name in ("dependencies", "build-dependencies"):
+    for section_name in ("dependencies", "build-dependencies", "dev-dependencies"):
         for alias, declaration in manifest.get(section_name, {}).items():
             dependency_names.add(str(declaration.get("package", alias)) if isinstance(declaration, dict) else str(alias))
     for target in manifest.get("target", {}).values():
-        for section_name in ("dependencies", "build-dependencies"):
+        for section_name in ("dependencies", "build-dependencies", "dev-dependencies"):
             for alias, declaration in target.get(section_name, {}).items():
                 dependency_names.add(str(declaration.get("package", alias)) if isinstance(declaration, dict) else str(alias))
 
@@ -387,7 +387,7 @@ def build_lock_fallback(lock_text: str, manifest_text: str, root: Path = ROOT) -
             "status": "blocked",
             "cargo_audit_installed": shutil.which("cargo-audit") is not None,
             "cargo_deny_installed": shutil.which("cargo-deny") is not None,
-            "note": "Advisory scanning was not performed: cargo-audit and cargo-deny are not installed; no network or advisory database was used.",
+            "note": "This inventory command does not run an advisory scan; consult the dated security/adoption review for separately executed audit evidence.",
         },
     }
 
@@ -400,7 +400,7 @@ def _markdown(inventory: dict[str, Any], metadata_exit: int, tree_exit: int) -> 
     lines = [
         "# Phase 6 dependency and license inventory",
         "",
-        "Status: generated from Cargo metadata and a normal/build dependency tree using locked offline commands.",
+        "Status: generated from Cargo metadata and a normal/build/dev dependency tree using locked offline commands.",
         "",
         f"Package rows: {inventory['package_count']} ({inventory['direct_count']} direct, {inventory['transitive_count']} transitive).",
         f"Metadata command exit: {metadata_exit}; tree command exit: {tree_exit}.",
@@ -448,7 +448,7 @@ def _markdown(inventory: dict[str, Any], metadata_exit: int, tree_exit: int) -> 
             "",
             "## Advisory scan",
             "",
-            "**Blocked:** cargo-audit and cargo-deny are not installed. Advisory scanning was not performed; no tools or advisory database were fetched.",
+            "This generator does not execute an advisory scan. See the dated [security review](../SECURITY-REVIEW.md) and [tracing/proptest adoption review](TRACING-PROPTEST-DEPENDENCIES.md) for separately executed audit evidence.",
             "",
             "Raw Cargo stdout/stderr, exit codes, package rows and command strings are retained in [p6-raw/dependency-inventory.json](p6-raw/dependency-inventory.json).",
             "",
@@ -459,7 +459,7 @@ def _markdown(inventory: dict[str, Any], metadata_exit: int, tree_exit: int) -> 
 
 def main() -> int:
     metadata = _run(["cargo", "metadata", "--locked", "--offline", "--format-version", "1"])
-    tree = _run(["cargo", "tree", "--locked", "--offline", "-e", "normal,build", "--prefix", "none"])
+    tree = _run(["cargo", "tree", "--locked", "--offline", "-e", "normal,build,dev", "--prefix", "none"])
     metadata_value: dict[str, Any] = {}
     if metadata.returncode == 0:
         try:
@@ -483,7 +483,7 @@ def main() -> int:
                 "stderr": metadata.stderr,
             },
             {
-                "command": "cargo tree --locked --offline -e normal,build --prefix none",
+                "command": "cargo tree --locked --offline -e normal,build,dev --prefix none",
                 "exit_code": tree.returncode,
                 "stdout": tree.stdout,
                 "stderr": tree.stderr,

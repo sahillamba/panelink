@@ -18,6 +18,21 @@ symlink, and was not replaced. Native Apple Terminal gesture acceptance and
 broader phase gates remain open. No server restart, live pane input, commit
 or push.
 
+## Tracing and property tests — 2026-11-02
+
+Implemented the user-authorized adoption in `t3-af2a1b87` on
+`t3/investigate-two-suggestions` (baseline `5ecc22a`). OpenCode workers delivered
+property tests, dependency review and partial tracing; parent reviewed and
+completed production/test hardening. [Result](TRACING-PROPTEST-RESULT.md) records
+mutation checks, private outer-PTY observations and the full canonical 8/8 pass:
+Rust1693/0/20ignored plus decoder39; Python234run/1skip. Fresh cargo-audit0.22.2
+scan of 40 lock entries reports no known vulnerabilities/warnings. Preserve the
+uncommitted work; no source activation/user-server restart/push. Read
+[diagnostics](../DIAGNOSTICS.md) for opt-in directory, files/retention/loss and
+correlation limits. Performance/native/provider acceptance remains open; no
+broader phase is closed. Lock-only UEFI r-efi has a license-text provenance gap
+as recorded in the dependency review/notices.
+
 ## Herdr-inspired pane menu and top bar — 2026-11-01
 
 The user asked for Herdr-style changes. We read Herdr TUI's `tabs.rs`,

@@ -9,6 +9,7 @@ use crate::control_protocol::TargetRef;
 use crate::control_protocol::{
     Command, ReadSource, MAX_INPUT_TEXT_BYTES, MAX_READ_BYTES, MAX_READ_LINES,
 };
+use crate::diagnostics::{self, StageEvent};
 use crate::history_capture::{
     lock_capture, CaptureObservation, CheckpointRecord, SharedHistoryCapture,
 };
@@ -879,6 +880,20 @@ impl PtyEffects {
     }
 
     fn apply_input(&mut self, command: Command<'_>) -> Outcome {
+        let started = Instant::now();
+        let outcome = self.apply_input_inner(command);
+        StageEvent {
+            op: "control_input",
+            stage: "pty_accept",
+            outcome: diagnostics::wire_outcome_label(outcome),
+            service_us: diagnostics::micros_since(started),
+            ..StageEvent::default()
+        }
+        .record();
+        outcome
+    }
+
+    fn apply_input_inner(&mut self, command: Command<'_>) -> Outcome {
         if self.validate(command).is_err() {
             return Outcome::Failed;
         }
@@ -1437,6 +1452,20 @@ impl PtyEffects {
     /// Queue and synchronously deliver one typed wheel event using the same
     /// bounded drain and suffix-discard policy as other pane input.
     pub fn mouse_wheel(&mut self, column: u16, row: u16, up: bool) -> Outcome {
+        let started = Instant::now();
+        let outcome = self.mouse_wheel_inner(column, row, up);
+        StageEvent {
+            op: "wheel",
+            stage: "pty_accept",
+            outcome: diagnostics::wire_outcome_label(outcome),
+            service_us: diagnostics::micros_since(started),
+            ..StageEvent::default()
+        }
+        .record();
+        outcome
+    }
+
+    fn mouse_wheel_inner(&mut self, column: u16, row: u16, up: bool) -> Outcome {
         if self.validate_mouse_wheel(column, row, up).is_err() {
             return Outcome::Failed;
         }
@@ -1455,6 +1484,20 @@ impl PtyEffects {
     /// suffix not written within the bounded drain window is discarded and
     /// reported as `Partial`/`Failed`, never retried.
     pub fn keys(&mut self, keys: impl IntoIterator<Item = Key>) -> Outcome {
+        let started = Instant::now();
+        let outcome = self.keys_inner(keys);
+        StageEvent {
+            op: "keys",
+            stage: "pty_accept",
+            outcome: diagnostics::wire_outcome_label(outcome),
+            service_us: diagnostics::micros_since(started),
+            ..StageEvent::default()
+        }
+        .record();
+        outcome
+    }
+
+    fn keys_inner(&mut self, keys: impl IntoIterator<Item = Key>) -> Outcome {
         if self.validate_input_capacity().is_err() {
             return Outcome::Failed;
         }
@@ -2073,5 +2116,88 @@ mod tests {
             store.load(target, ScreenBuffer::Normal).unwrap(),
             Some(post_rename)
         );
+    }
+
+    #[test]
+    fn pty_accept_keys_record_one_allowlisted_stage_per_batch() {
+        // Targeted scoped capture (never global; no interference with the
+        // final subscriber contract tests in crate::diagnostics).
+        type CapturedEvents = std::sync::Arc<std::sync::Mutex<Vec<Vec<(String, String)>>>>;
+        #[derive(Clone)]
+        struct Capture {
+            events: CapturedEvents,
+        }
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                metadata.target() == diagnostics::TARGET
+            }
+            fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::Id {
+                tracing::Id::from_u64(1)
+            }
+            fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct Visitor {
+                    fields: Vec<(String, String)>,
+                }
+                impl tracing::field::Visit for Visitor {
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        self.fields
+                            .push((field.name().to_owned(), value.to_owned()));
+                    }
+                    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                        self.fields
+                            .push((field.name().to_owned(), value.to_string()));
+                    }
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        self.fields
+                            .push((field.name().to_owned(), format!("CANARY:{value:?}")));
+                    }
+                }
+                let mut visitor = Visitor { fields: Vec::new() };
+                event.record(&mut visitor);
+                self.events.lock().unwrap().push(visitor.fields);
+            }
+            fn enter(&self, _span: &tracing::Id) {}
+            fn exit(&self, _span: &tracing::Id) {}
+        }
+        let capture = Capture {
+            events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let dispatch = tracing::Dispatch::new(capture.clone());
+        let guard = tracing::dispatcher::set_default(&dispatch);
+        let fixture = Fixture::new();
+        let mut effects = PtyEffects::new(shell("while :; do /bin/sleep 1; done", fixture.path()));
+        assert_eq!(effects.keys([Key::Char('a'), Key::Enter]), Outcome::Applied);
+        drop(guard);
+        effects
+            .session
+            .shutdown()
+            .expect("stop keyed fixture child");
+        let events = capture.events.lock().unwrap().clone();
+        let accept = events
+            .iter()
+            .find(|fields| {
+                fields.iter().all(|(name, value)| match name.as_str() {
+                    "op" => value == "keys",
+                    "stage" => value == "pty_accept",
+                    "outcome" => value == "applied",
+                    _ => true,
+                })
+            })
+            .expect("the keys stage record was emitted");
+        let outcome = accept
+            .iter()
+            .find(|(name, _)| name == "outcome")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default();
+        assert_eq!(outcome, "applied");
+        assert!(events
+            .iter()
+            .all(|fields| fields.iter().all(|(_, value)| !value.contains("CANARY"))));
     }
 }
