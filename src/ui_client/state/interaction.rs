@@ -319,30 +319,24 @@ impl Interaction {
             return None;
         }
         if let Some(mode) = self.pane_mode {
-            let (target, revision, count, adjust) = match mode {
-                PaneMode::Swap {
-                    source,
-                    revision,
-                    choices,
-                    ..
-                } => (source, revision, choices.iter().flatten().count(), 0),
-                PaneMode::Divider {
-                    target,
-                    revision,
-                    indices,
-                    ..
-                } => (target, revision, indices.iter().flatten().count(), 1),
+            let PaneMode::Swap {
+                source: target,
+                revision,
+                choices,
+                ..
+            } = mode
+            else {
+                return None;
             };
-            let rows = (1 + count + adjust + 2).min(context.viewport.0 as usize) as u16;
+            let count = choices.iter().flatten().count();
+            let rows = (1 + count + 2).min(context.viewport.0 as usize) as u16;
             let width = context.viewport.1.min(76);
             let left = context.viewport.1.saturating_sub(width) / 2;
             let top = context.viewport.0.saturating_sub(rows) / 2 + context.header_offset;
             for row in 1..rows {
-                let ranges: &[(u16, u16)] = if adjust == 1 && row as usize == 1 + count {
-                    &[(0, 3), (4, 3)]
-                } else if row as usize == 1 + count + adjust {
+                let ranges: &[(u16, u16)] = if row as usize == 1 + count {
                     &[(0, 7)]
-                } else if row as usize == 2 + count + adjust {
+                } else if row as usize == 2 + count {
                     &[(0, 8)]
                 } else {
                     &[(0, width)]
@@ -966,18 +960,18 @@ impl Interaction {
         y: u16,
         now: Instant,
     ) {
-        let Some(mode) = self.pane_mode else { return };
-        let (view_rows, view_columns) = context.viewport;
-        let (choice_count, total_rows) = match mode {
-            PaneMode::Swap { choices, .. } => {
-                let count = choices.iter().flatten().count();
-                (count, 1 + count + 2)
-            }
-            PaneMode::Divider { indices, .. } => {
-                let count = indices.iter().flatten().count();
-                (count, 1 + count + 3)
-            }
+        let Some(PaneMode::Swap {
+            source,
+            revision,
+            choices,
+            ..
+        }) = self.pane_mode
+        else {
+            return;
         };
+        let (view_rows, view_columns) = context.viewport;
+        let choice_count = choices.iter().flatten().count();
+        let total_rows = 1 + choice_count + 2;
         let rows = u16::try_from(total_rows).unwrap_or(u16::MAX).min(view_rows);
         let columns = view_columns.min(76);
         if rows == 0 || columns == 0 {
@@ -993,23 +987,8 @@ impl Interaction {
         if row >= total_rows || row == 0 {
             return;
         }
-        let adjustment = usize::from(matches!(mode, PaneMode::Divider { .. }));
-        let apply_row = 1 + choice_count + adjustment;
+        let apply_row = 1 + choice_count;
         let cancel_row = apply_row + 1;
-        if adjustment == 1 && row == 1 + choice_count {
-            let code = if x < left + 3 {
-                Some(KeyCode::Char('h'))
-            } else if (left + 4..left + 7).contains(&x) {
-                Some(KeyCode::Char('l'))
-            } else {
-                None
-            };
-            if let Some(code) = code {
-                let key = Event::Key(crossterm_input::KeyEvent::new(code, KeyModifiers::NONE));
-                self.handle_pane_mode_event(context, &key, now);
-            }
-            return;
-        }
         if row == apply_row {
             let enter = Event::Key(crossterm_input::KeyEvent::new(
                 KeyCode::Enter,
@@ -1027,39 +1006,15 @@ impl Interaction {
             return;
         }
         let selected = row - 1;
-        match mode {
-            PaneMode::Swap {
-                source,
-                revision,
-                choices,
-                ..
-            } if selected < choice_count => {
-                self.pane_mode = Some(PaneMode::Swap {
-                    source,
-                    revision,
-                    choices,
-                    selected,
-                });
-            }
-            PaneMode::Divider {
-                target,
-                revision,
-                indices,
-                ..
-            } if selected < choice_count => {
-                let first_cells = indices[selected].map_or(0, |index| {
-                    context.divider_first_span(target, revision, index)
-                });
-                self.pane_mode = Some(PaneMode::Divider {
-                    target,
-                    revision,
-                    indices,
-                    selected,
-                    first_cells,
-                });
-            }
-            _ => return,
+        if selected >= choice_count {
+            return;
         }
+        self.pane_mode = Some(PaneMode::Swap {
+            source,
+            revision,
+            choices,
+            selected,
+        });
         self.feedback.dirty = true;
     }
     pub(super) fn open_swap_mode_for_target(
@@ -1566,54 +1521,7 @@ impl Interaction {
                 let _ = source;
                 count
             }
-            Some(PaneMode::Divider {
-                target,
-                revision,
-                indices,
-                selected,
-                first_cells,
-            }) => {
-                let index = indices.get(selected).copied().flatten().unwrap_or(0);
-                let axis = context
-                    .local
-                    .and_then(|layout| layout.divider_info(target, revision, index).ok())
-                    .map_or("axis", |info| match info.orientation {
-                        DividerOrientation::Horizontal => "left/right",
-                        DividerOrientation::Vertical => "up/down",
-                    });
-                pane_mode_text[0] = format!(
-                    "Divider {} ({axis}) span {first_cells}; Tab changes ancestor, Enter applies, Esc cancels",
-                    index + 1
-                );
-                let mut count = 1;
-                for (candidate, divider_index) in indices
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(slot, index)| index.map(|index| (slot, index)))
-                {
-                    if count < pane_mode_text.len() {
-                        pane_mode_text[count] = format!(
-                            "{} Divider {}",
-                            if candidate == selected { ">" } else { " " },
-                            divider_index + 1
-                        );
-                        count += 1;
-                    }
-                }
-                if count < pane_mode_text.len() {
-                    pane_mode_text[count] = "[-] [+]".into();
-                    count += 1;
-                }
-                if count < pane_mode_text.len() {
-                    pane_mode_text[count] = "[Apply]".into();
-                    count += 1;
-                }
-                if count < pane_mode_text.len() {
-                    pane_mode_text[count] = "[Cancel]".into();
-                    count += 1;
-                }
-                count
-            }
+            Some(PaneMode::Divider { .. }) => 0,
             None => 0,
         }
     }

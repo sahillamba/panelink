@@ -4340,6 +4340,11 @@ fn pointer_dividers_on_both_axes_and_nested_trees_submit_once_on_release() {
                 next_y,
             );
             assert!(fake.pane_operations.is_empty(), "preview is local");
+            let text = render_text(&app);
+            assert!(
+                !text.contains("[Apply]") && !text.contains("[Cancel]"),
+                "{text}"
+            );
             assert_eq!(app.layout(), Some(&reply));
             gesture(
                 &mut app,
@@ -4802,36 +4807,40 @@ fn scrollbar_hit_testing_matches_resize_placeholder_rendering() {
 }
 
 #[test]
-fn divider_menu_has_pointer_adjust_apply_and_cancel_controls() {
+fn divider_resize_has_no_modal_or_invisible_pointer_controls() {
     let mut app = App::new(24, 81).unwrap();
     let mut fake = Fake::default();
     install_operations_view(&mut app, operations_view(two_panes(), None));
-    // Resize divider left the pane menu; Ctrl-B e and divider drags remain.
     feed(&mut app, &mut fake, b"\x02e");
-    for label in ["[-]", "[+]", "[-]", "[Apply]"] {
-        let (x, y) = parsed_label_position(&app, label).unwrap();
-        gesture(
-            &mut app,
-            &mut fake,
-            MouseEventKind::Down(MouseButton::Left),
-            x + 1,
-            y,
-        );
-        gesture(
-            &mut app,
-            &mut fake,
-            MouseEventKind::Up(MouseButton::Left),
-            x + 1,
-            y,
-        );
+    let text = render_text(&app);
+    assert!(text.contains("Resize 1:"), "{text}");
+    for label in ["[Apply]", "[Cancel]", "[-]", "[+]", "Tab changes ancestor"] {
+        assert!(!text.contains(label), "{text}");
     }
+    // The old dialog's Apply position must not commit an invisible control.
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Down(MouseButton::Left),
+        3,
+        13,
+    );
+    gesture(
+        &mut app,
+        &mut fake,
+        MouseEventKind::Up(MouseButton::Left),
+        3,
+        13,
+    );
+    assert!(fake.pane_operations.is_empty());
+    feed(&mut app, &mut fake, b"\x1b[C\r");
     assert_eq!(
         fake.pane_operations,
         vec![PaneAction::DividerSet {
             target: target(1),
             expected_layout_revision: 2,
             divider_index: 0,
-            first_cells: 39,
+            first_cells: 41,
         }]
     );
     assert!(fake.keys.is_empty() && fake.pastes.is_empty());

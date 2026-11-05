@@ -1,3 +1,75 @@
+## PR 21 menu-dismissal input barrier — 2026-11-05
+
+Hosted run [42024944436](https://github.com/sahillamba/panelink/actions/runs/42024944436)
+passed attach and tab lifecycle tests, but the pointer test timed out opening
+the global menu. Its shell displayed a mouse-sequence suffix after Escape.
+The fixture's prompt predicate can succeed while a menu remains onscreen;
+that does not acknowledge the standalone Escape before sending another
+escape-prefixed mouse sequence. Both menu exits now wait for their specific
+labels to disappear before waiting for the prompt and sending the next click.
+No fixed delay, input retry, assertion removal or production change was added.
+
+The full workspace-tab target passes 6/6. In the fresh canonical serial run,
+all Rust test binaries finish without assertion failures, including 6/6
+workspace-tab tests and property tests, but the overall Cargo step exceeds
+420 seconds before completion. All seven supporting checks pass, including
+strict Clippy, build, fmt, fingerprints, decoder, Python and docs. This is
+not a full canonical pass; hosted confirmation remains pending.
+
+## PR 21 confirmation click disambiguation — 2026-11-05
+
+Hosted run [42023487854](https://github.com/sahillamba/panelink/actions/runs/42023487854)
+passed the repaired attach target but failed waiting for Main after a Shell
+tab close click. The fixture searched for bare `[Close tab]`, also present in
+the preceding action menu. A partial redraw can retain that earlier row while
+the confirmation is already visible. Confirmation clicks now locate the full
+`[Close tab] [Cancel]` row. A deterministic parser regression preserves both
+rows and demonstrates the old ambiguous target and the exact new target.
+The original hosted interleaving was not reproduced locally; the unmodified
+focused test passed before editing. No production behavior or timeouts change.
+
+The entire `p5_workspace_tabs` target passes 6/6, including the regression.
+Formatting, strict all-target Clippy, locked build and diff checks pass.
+The full canonical gate was not repeated for this test-only change; its prior
+local timeout remains recorded below. Hosted confirmation remains pending.
+
+## PR 21 terminal-reset capture synchronization — 2026-11-05
+
+Hosted run [42015086893](https://github.com/sahillamba/panelink/actions/runs/42015086893)
+failed in `real_attach_routes_renders_closes_and_detaches_four_panes` because
+its immediate capture snapshot lacked the mouse-reset sequence after attach
+exit. The fixture's background PTY reader is independent of the process-exit
+marker. It now waits within the existing STEP deadline for all five exact
+reset sequences, retaining termios, clean-exit and surviving-child assertions.
+Application behavior and usage commands are unchanged.
+
+Focused `p3_attach_four` passes 3/3. The canonical serial verifier passes all
+seven supporting checks (decoder, fingerprints, fmt, strict Clippy, build,
+Python 234 run/one skipped, docs 470/zero findings). Its root Rust step reaches
+the 420-second limit during `p5_workspace_tabs`, with no assertion failure
+reported; the repaired attach target passed within that run. This is not a
+full local gate pass. Hosted confirmation remains pending after publication.
+
+## Divider resize without a dialog — 2026-11-02
+
+User requested removal of the divider resize modal. Direct dragging retains
+local preview and one absolute resize on release, with zero requests for an
+unchanged position. Removed the central dialog and its pointer hit targets;
+Ctrl-B e retains arrow/Tab/Enter/Esc keyboard resizing with a footer hint.
+Target/revision checks, cancellation and typing focus are unchanged.
+
+Verification: all 240 UI client tests pass, including ten divider tests and
+regressions for absence of the dialog and invisible pointer controls. The
+real-PTY pane-operations integration test also passes (1/1). Repository
+docs (466 files) and the four Panelink skill Markdown files have zero findings.
+Strict Clippy (all targets, warnings denied), formatting, diff whitespace and
+`cargo build --locked` pass. Built checkout client identity: revision
+`5ecc22a0c767`, fingerprint `d9febc0df3ef325e`, dirty. The installed
+`~/.local/bin/panelink` is a regular binary, not the previously documented
+symlink, and was not replaced. Native Apple Terminal gesture acceptance and
+broader phase gates remain open. No server restart, live pane input, commit
+or push.
+
 ## Tracing and property tests — 2026-11-02
 
 Implemented the user-authorized adoption in `t3-af2a1b87` on
