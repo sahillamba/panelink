@@ -6,6 +6,16 @@ fields and no input/paste/screen/credential contents. Logging does not authorize
 input, retries, server restart or uploads. See [diagnostics](DIAGNOSTICS.md) for
 limits, one-writer-per-role policy and pending performance/native acceptance.
 
+Private storage ACL follow-up (2026-11-05): macOS mode bits alone do not prove
+private storage when extended ACL entries grant access. Shared validation now
+rejects non-owner ALLOW entries on private files/directories, including
+inherit-only grants, and rejects non-owner ancestor mutation grants while
+allowing ancestor read/search/metadata-read access. ACL inspection failures
+fail closed. The implementation does not remove ACLs, alter storage formats,
+or fall back to a different root. See [security review](SECURITY-REVIEW.md)
+and [ACL verification evidence](progress/PRIVATE-STORAGE-ACL-2026-11-05.md);
+that evidence separates focused regression results from full-verifier limits.
+
 
 Button/control source update (2026-10-31): the user confirmed the
 [button implementation plan](design/BUTTON-IMPLEMENTATION-PLAN.md) and requested

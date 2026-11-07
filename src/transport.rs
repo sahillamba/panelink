@@ -564,6 +564,7 @@ fn validate_ancestor_directory(directory: &File) -> io::Result<()> {
             "socket path ancestor permissions are unsafe",
         ));
     }
+    crate::private_acl::require_safe_ancestor(directory)?;
     Ok(())
 }
 
@@ -577,6 +578,7 @@ fn validate_final_directory(directory: &File) -> io::Result<()> {
             "socket directory must be owned by this user with mode 0700",
         ));
     }
+    crate::private_acl::require_private(directory)?;
     Ok(())
 }
 

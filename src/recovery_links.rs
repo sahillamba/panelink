@@ -112,6 +112,8 @@ fn validate_directory_path(path: &Path) -> io::Result<()> {
         {
             return Err(unsafe_storage());
         }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        crate::private_acl::check_ancestor_path(&parent).map_err(|_| unsafe_storage())?;
     }
     Ok(())
 }
@@ -131,6 +133,8 @@ fn open_directory(path: &Path) -> io::Result<File> {
     {
         return Err(unsafe_storage());
     }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    crate::private_acl::require_private(&directory).map_err(|_| unsafe_storage())?;
     Ok(directory)
 }
 
@@ -143,6 +147,8 @@ fn validate_file(file: &File) -> io::Result<()> {
     {
         return Err(unsafe_storage());
     }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    crate::private_acl::require_private(file).map_err(|_| unsafe_storage())?;
     Ok(())
 }
 

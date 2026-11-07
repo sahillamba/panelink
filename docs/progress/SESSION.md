@@ -1,3 +1,60 @@
+## PR 24 main-branch conflict resolution — 2026-11-07
+
+Merged `origin/main` at `8e7861d383b36d712cb34a0bfaa91739be102e6d` into
+`fix/private-storage-acl` at `f488af3`. Only `ROADMAP.md` and this handoff
+conflicted; both ACL and continuous-rendering records were retained. Incoming
+rendering code and its PTY fixture match main exactly; ACL code/tests remain
+unchanged by the merge.
+
+Fresh combined-tree checks: ACL integration 11/11; binary UI-client plus
+state/log ACL checks 245/245; library diagnostic ACL check 1/1; explicit
+continuous-rendering PTY fixture 1/1 (59.9 parsed updates/s, p95 gap 17.9 ms).
+Formatting, strict all-target Clippy, locked build, docs472/0 and whitespace
+checks pass. The full canonical verifier was not repeated for these
+documentation conflicts; earlier full-Rust results and the 420-second
+canonical timeout remain dated evidence below. Fresh hosted confirmation is
+pending after push. No install, user-server restart or product gate closure.
+
+## ACL fix branch publication — 2026-11-07
+
+User requested a new branch and push for the completed ACL fix. This checkpoint
+packages the existing code, tests, skill and evidence on
+`fix/private-storage-acl`, based on `2958393c4c043e6cba008966d960ae7f76b1fa1b`.
+The application/test changes and the November 5 verification results below
+are unchanged. No merge/rebase, fresh test claim, install or server restart is
+part of publication. Pushing this branch is explicitly authorized; product
+phase and native/provider/reboot acceptance gates remain open.
+
+## Private-storage ACL security fix — 2026-11-05
+
+User authorized fixing the security review's medium-severity ACL finding.
+Baseline/local HEAD is `2958393c4c043e6cba008966d960ae7f76b1fa1b` on `main`.
+Shared descriptor-based native ACL validation now rejects non-owner ALLOW
+entries on private storage and non-owner ancestor mutation grants. Empty,
+deny-only and owner-only ACLs remain usable. Unsafe existing permissions are
+refused without repair or state-root fallback; formats and dependencies are
+unchanged. Guards cover private runtime/state, metadata/history/layout/links,
+contexts, registry, provider configuration and diagnostic storage. See the
+[implementation and evidence](PRIVATE-STORAGE-ACL-2026-11-05.md).
+
+All five original security-negative cases failed before implementation.
+All 13 new ACL cases now pass, including inheritance, late grants and
+preservation of refused existing payloads. Full serial Rust run with a
+600-second bound: **1,707 passed / zero failed / 20 ignored**, 88 result groups,
+exit 0. The unchanged canonical verifier separately exits 1: seven checks
+pass, while Cargo reaches its 420-second limit after 1,702 passes and zero
+reported assertion failures. The longer complete run is component evidence,
+not a relabeled canonical 8/8 result. Decoder39, Python234run/1skip, docs471/0,
+component fingerprints, fmt, strict Clippy and build pass. Final handoff and
+skill Markdown checks are recorded in the linked evidence.
+
+No installed binary replacement, user-server restart, live pane input, commit
+or push. Existing installed/running processes retain their old behavior.
+Product phase and native/provider/reboot acceptance gates remain open. The
+tracking ref advanced during checks (`main` now behind `origin/main` by two);
+local HEAD and verified source were not merged or rebased. Preserve these
+uncommitted changes for review/integration.
+
 ## Continuous rendering cadence — 2026-11-05
 
 Branch `t3/smooth-terminal-rendering` in `t3-eb955439`. Real child/server/attach/

@@ -453,6 +453,11 @@ fn open_private_parent(path: &Path) -> Result<(File, OsString), ContextError> {
     .map_err(|_| ContextError::UnsafeParent)?;
     let parent = File::from(fd);
     validate_private_directory(&parent)?;
+    let canonical = std::fs::canonicalize(parent_path).map_err(|_| ContextError::UnsafeParent)?;
+    for ancestor in canonical.ancestors().skip(1) {
+        crate::private_acl::check_ancestor_path(ancestor)
+            .map_err(|_| ContextError::UnsafeParent)?;
+    }
     Ok((parent, filename.to_os_string()))
 }
 
@@ -466,6 +471,7 @@ fn validate_private_directory(directory: &File) -> Result<(), ContextError> {
     {
         return Err(ContextError::UnsafeParent);
     }
+    crate::private_acl::require_private(directory).map_err(|_| ContextError::UnsafeParent)?;
     Ok(())
 }
 
@@ -478,6 +484,7 @@ fn validate_private_file(file: &File) -> Result<(), ContextError> {
     {
         return Err(ContextError::UnsafeFile);
     }
+    crate::private_acl::require_private(file).map_err(|_| ContextError::UnsafeFile)?;
     Ok(())
 }
 

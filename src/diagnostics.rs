@@ -336,7 +336,9 @@ const O_NOFOLLOW_FLAG: i32 = 0;
 fn ensure_private_dir(path: &Path) -> Result<(), &'static str> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+        use std::os::unix::fs::{
+            DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
+        };
 
         if !path.is_absolute() {
             return Err("PANELINK_TRACE_DIR must be an absolute path");
@@ -356,6 +358,13 @@ fn ensure_private_dir(path: &Path) -> Result<(), &'static str> {
                 if metadata.uid() != euid {
                     return Err("PANELINK_TRACE_DIR must be owned by the current user");
                 }
+                let directory = fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(path)
+                    .map_err(|_| "PANELINK_TRACE_DIR is unavailable")?;
+                crate::private_acl::require_private(&directory)
+                    .map_err(|_| "PANELINK_TRACE_DIR has an unsafe ACL")?;
                 Ok(())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -369,7 +378,7 @@ fn ensure_private_dir(path: &Path) -> Result<(), &'static str> {
                     && metadata.permissions().mode() & 0o777 == TRACE_DIR_MODE
                     && metadata.uid() == euid
                 {
-                    Ok(())
+                    ensure_private_dir(path)
                 } else {
                     // The mode was narrowed below the contract (umask): fail
                     // closed rather than trusting a weaker directory.
@@ -433,6 +442,8 @@ impl LogFile {
             if metadata.uid() != rustix::process::geteuid().as_raw() {
                 return Err("diagnostics log file must be owned by the current user");
             }
+            crate::private_acl::require_private(&file)
+                .map_err(|_| "diagnostics log file has an unsafe ACL")?;
         }
         let bytes = file
             .metadata()
@@ -606,10 +617,11 @@ pub fn init_process(role: Role) {
     };
     if directory.ancestors().any(|ancestor| {
         use std::os::unix::fs::MetadataExt;
-        fs::metadata(ancestor).map_or(true, |m| {
-            (m.uid() != 0 && m.uid() != rustix::process::geteuid().as_raw())
-                || (m.mode() & 0o022 != 0 && !(m.uid() == 0 && m.mode() & 0o1000 != 0))
-        })
+        crate::private_acl::check_ancestor_path(ancestor).is_err()
+            || fs::metadata(ancestor).map_or(true, |m| {
+                (m.uid() != 0 && m.uid() != rustix::process::geteuid().as_raw())
+                    || (m.mode() & 0o022 != 0 && !(m.uid() == 0 && m.mode() & 0o1000 != 0))
+            })
     }) {
         return;
     }
@@ -1037,6 +1049,28 @@ mod tests {
         assert!(ensure_private_dir(&wide).is_err());
 
         assert!(ensure_private_dir(Path::new("relative")).is_err());
+    }
+
+    #[test]
+    fn granting_acls_disable_diagnostics_without_changing_files() {
+        let parent = ScopedDir::new("acl");
+        let path = parent.0.join("client.log");
+        let mut log = LogFile::open(path.clone()).unwrap();
+        log.write_record(b"synthetic old record\n").unwrap();
+        drop(log);
+        let grant = |path: &Path, entry: &str| {
+            let status = std::process::Command::new("/bin/chmod")
+                .args(["+a", entry])
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        grant(&path, "everyone allow read");
+        assert!(LogFile::open(path.clone()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"synthetic old record\n");
+        grant(&parent.0, "everyone allow list,search");
+        assert!(ensure_private_dir(&parent.0).is_err());
     }
 
     #[test]
