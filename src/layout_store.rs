@@ -102,6 +102,8 @@ fn validate_file(file: &File) -> io::Result<()> {
     {
         return Err(unsafe_storage());
     }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    crate::private_acl::require_private(file).map_err(|_| unsafe_storage())?;
     Ok(())
 }
 
@@ -166,6 +168,8 @@ impl LayoutStore {
             {
                 return Err(unsafe_storage());
             }
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            crate::private_acl::check_ancestor_path(&parent).map_err(|_| unsafe_storage())?;
         }
         let directory = File::from(rustix::fs::open(
             path,
@@ -183,6 +187,8 @@ impl LayoutStore {
         {
             return Err(unsafe_storage());
         }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        crate::private_acl::require_private(&directory).map_err(|_| unsafe_storage())?;
         Ok(Self {
             directory,
             path: path.to_owned(),
@@ -193,6 +199,8 @@ impl LayoutStore {
 
     /// Create the layout directory inside `server_directory` if absent, then open it.
     pub fn prepare(server_directory: &Path) -> io::Result<Self> {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        crate::private_acl::check_ancestor_path(server_directory).map_err(|_| unsafe_storage())?;
         let layout = server_directory.join("layout");
         if !layout.exists() {
             fs::DirBuilder::new().mode(0o700).create(&layout)?;

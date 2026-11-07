@@ -20,6 +20,13 @@ canonical ancestors must be root/current-user owned and not writable by others
 (root-owned sticky temporary directories are allowed). Current log files must
 be regular, single-link, user-owned `0600` files. Symlinked/unsafe paths and
 initialization failures silently disable diagnostics without failing the command.
+On macOS, mode bits are not the only access control: private directories and
+files reject non-owner ACL allow entries, including inherited entries, and
+ancestors reject non-owner ACL grants that permit mutation. ACL inspection
+errors also disable diagnostics. If initialization silently disables tracing,
+inspect the selected path and ACLs read-only (for example,
+`ls -lde /path/to/trace`); do not automatically strip or rewrite ACLs. Choose a suitable
+private directory only when its ownership and ACL policy are understood.
 One writer per role per directory holds a nonblocking exclusive `client.lock`
 or `server.lock`. Other simultaneous clients/servers using that same role and
 directory do not trace. Use separate directories for separate traced sessions.

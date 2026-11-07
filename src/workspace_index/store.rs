@@ -110,6 +110,8 @@ pub(super) fn private_file(file: &File, allow_empty: bool) -> Result<(), StoreEr
     {
         return Err(StoreError::UnsafeFile);
     }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    crate::private_acl::require_private(file).map_err(|_| StoreError::UnsafeFile)?;
     Ok(())
 }
 
@@ -129,6 +131,8 @@ fn root_path_safe(path: &Path) -> Result<(), StoreError> {
         {
             return Err(StoreError::UnsafeRoot);
         }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        crate::private_acl::check_ancestor_path(&prefix).map_err(|_| StoreError::UnsafeRoot)?;
     }
     Ok(())
 }
@@ -143,6 +147,8 @@ fn verify_root(path: &Path, directory: &File) -> Result<(), StoreError> {
     {
         return Err(StoreError::UnsafeRoot);
     }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    crate::private_acl::require_private(directory).map_err(|_| StoreError::UnsafeRoot)?;
     Ok(())
 }
 

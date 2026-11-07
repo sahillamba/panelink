@@ -42,6 +42,7 @@ fn validate_file(file: &File) -> io::Result<()> {
     {
         return Err(denied());
     }
+    crate::private_acl::require_private(file).map_err(|_| denied())?;
     Ok(())
 }
 
@@ -63,6 +64,7 @@ fn private_directory(path: &Path) -> io::Result<File> {
         {
             return Err(denied());
         }
+        crate::private_acl::check_ancestor_path(&part).map_err(|_| denied())?;
     }
     let directory = File::from(open(
         path,
@@ -77,6 +79,7 @@ fn private_directory(path: &Path) -> io::Result<File> {
     {
         return Err(denied());
     }
+    crate::private_acl::require_private(&directory).map_err(|_| denied())?;
     Ok(directory)
 }
 

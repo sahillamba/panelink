@@ -140,7 +140,7 @@ pub(crate) fn validate_app_root_readonly() -> Result<bool, OpenError> {
     ancestors_ok(&app.root, current_uid())?;
     match fs::symlink_metadata(&app.root) {
         Ok(metadata) => {
-            private_dir_ok(&metadata, current_uid())?;
+            private_dir_ok(&app.root, &metadata, current_uid())?;
             Ok(true)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -154,7 +154,7 @@ pub(crate) fn validate_app_root_readonly() -> Result<bool, OpenError> {
 fn normalized_validated_root(root: &Path) -> Result<PathBuf, OpenError> {
     ancestors_ok(root, current_uid())?;
     match fs::symlink_metadata(root) {
-        Ok(metadata) => private_dir_ok(&metadata, current_uid())?,
+        Ok(metadata) => private_dir_ok(root, &metadata, current_uid())?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(OpenError::StateRootUnsafe),
     }
@@ -630,6 +630,7 @@ pub(crate) fn live_server_generation(state: &StateRoot) -> Result<Option<u64>, &
     {
         return Err("workspace state uncertain");
     }
+    panelink::private_acl::require_private(&file).map_err(|_| "workspace state unsafe")?;
     let mut bytes = [0_u8; 24];
     (&file)
         .read_exact(&mut bytes)
@@ -702,19 +703,17 @@ fn validate_workspace_root(
         ]);
     }
     for path in paths {
-        match fs::symlink_metadata(path) {
-            Ok(metadata) => {
-                private_dir_ok(&metadata, current_uid()).map_err(|_| "workspace state unsafe")?
-            }
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => private_dir_ok(&path, &metadata, current_uid())
+                .map_err(|_| "workspace state unsafe")?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(_) => return Err("workspace state unsafe"),
         }
     }
     for path in [&state.server, &state.contexts] {
         match fs::symlink_metadata(path) {
-            Ok(metadata) => {
-                private_dir_ok(&metadata, current_uid()).map_err(|_| "workspace state unsafe")?
-            }
+            Ok(metadata) => private_dir_ok(path, &metadata, current_uid())
+                .map_err(|_| "workspace state unsafe")?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(_) => return Err("workspace state unsafe"),
         }
@@ -777,13 +776,25 @@ fn ensure_private_dir(path: &Path) -> Result<(), OpenError> {
         Err(_) => return Err(OpenError::StateRootUnavailable),
     }
     let metadata = fs::symlink_metadata(path).map_err(|_| OpenError::StateRootUnavailable)?;
-    private_dir_ok(&metadata, current_uid())
+    private_dir_ok(path, &metadata, current_uid())
 }
 
-fn private_dir_ok(metadata: &fs::Metadata, uid: u32) -> Result<(), OpenError> {
+fn private_dir_ok(path: &Path, metadata: &fs::Metadata, uid: u32) -> Result<(), OpenError> {
     if !metadata.file_type().is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
         return Err(OpenError::StateRootUnsafe);
     }
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| OpenError::StateRootUnsafe)?;
+    let held = directory
+        .metadata()
+        .map_err(|_| OpenError::StateRootUnsafe)?;
+    if (held.dev(), held.ino()) != (metadata.dev(), metadata.ino()) {
+        return Err(OpenError::StateRootUnsafe);
+    }
+    panelink::private_acl::require_private(&directory).map_err(|_| OpenError::StateRootUnsafe)?;
     Ok(())
 }
 
@@ -814,6 +825,9 @@ fn ancestors_ok(path: &Path, uid: u32) -> Result<(), OpenError> {
             {
                 return Err(OpenError::StateRootUnsafe);
             }
+            let canonical = fs::canonicalize(&current).map_err(|_| OpenError::StateRootUnsafe)?;
+            panelink::private_acl::check_ancestor_path(&canonical)
+                .map_err(|_| OpenError::StateRootUnsafe)?;
             continue;
         }
         let owner_ok = metadata.uid() == 0 || metadata.uid() == uid;
@@ -821,6 +835,8 @@ fn ancestors_ok(path: &Path, uid: u32) -> Result<(), OpenError> {
         if !file_type.is_dir() || !owner_ok || (metadata.mode() & 0o022 != 0 && !sticky_root) {
             return Err(OpenError::StateRootUnsafe);
         }
+        panelink::private_acl::check_ancestor_path(&current)
+            .map_err(|_| OpenError::StateRootUnsafe)?;
     }
     Ok(())
 }
@@ -925,13 +941,30 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), OpenError> {
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
-        .truncate(true)
+        .truncate(false)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
+        .map_err(|_| OpenError::StateRootUnavailable)?;
+    validate_private_state_file(&file)?;
+    file.set_len(0)
         .map_err(|_| OpenError::StateRootUnavailable)?;
     file.write_all(bytes)
         .map_err(|_| OpenError::StateRootUnavailable)
+}
+
+fn validate_private_state_file(file: &File) -> Result<(), OpenError> {
+    let metadata = file
+        .metadata()
+        .map_err(|_| OpenError::StateRootUnavailable)?;
+    if !metadata.is_file()
+        || metadata.uid() != current_uid()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(OpenError::StateRootUnsafe);
+    }
+    panelink::private_acl::require_private(file).map_err(|_| OpenError::StateRootUnsafe)
 }
 
 /// What exists at the socket path and whether a server holds the lock.
@@ -1045,6 +1078,7 @@ fn server_lock_held_checked(server_dir: &Path) -> Result<bool, &'static str> {
     if !metadata.is_file() || metadata.uid() != current_uid() || metadata.mode() & 0o077 != 0 {
         return Err("workspace state unsafe");
     }
+    panelink::private_acl::require_private(&file).map_err(|_| "workspace state unsafe")?;
     let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
     // SAFETY: fd is a valid open descriptor owned by `file`.
     if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -1081,6 +1115,7 @@ fn lifecycle_lock(state: &StateRoot, timeout: Duration) -> Result<LifecycleLock,
     if !metadata.is_file() || metadata.uid() != current_uid() {
         return Err(OpenError::StateRootUnsafe);
     }
+    validate_private_state_file(&file)?;
     let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
     let deadline = Instant::now() + timeout;
     loop {
@@ -1106,16 +1141,29 @@ fn server_ready(state: &StateRoot) -> bool {
 /// Rotate the bounded server log before a new server appends to it.
 fn open_log(state: &StateRoot) -> Result<File, OpenError> {
     let path = state.root.join(LOG_NAME);
+    for existing in [&path, &state.root.join("server.log.1")] {
+        match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(existing)
+        {
+            Ok(file) => validate_private_state_file(&file)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(OpenError::StateRootUnsafe),
+        }
+    }
     if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > MAX_LOG_BYTES) {
         let _ = fs::rename(&path, state.root.join("server.log.1"));
     }
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .append(true)
         .create(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
-        .map_err(|_| OpenError::ServerStartFailed)
+        .map_err(|_| OpenError::ServerStartFailed)?;
+    validate_private_state_file(&file)?;
+    Ok(file)
 }
 
 /// Shell for new workspaces: absolute executable `$SHELL`, else `/bin/zsh`.
@@ -1455,7 +1503,7 @@ fn observe_live_server(state: &StateRoot) -> Result<bool, OpenError> {
 fn existing_private_directory(path: &Path, uid: u32) -> Result<bool, OpenError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
-            private_dir_ok(&metadata, uid)?;
+            private_dir_ok(path, &metadata, uid)?;
             Ok(true)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -1622,6 +1670,7 @@ fn live_server_pid(state: &StateRoot) -> Option<i32> {
     if !metadata.is_file() || metadata.uid() != current_uid() || metadata.mode() & 0o077 != 0 {
         return None;
     }
+    panelink::private_acl::require_private(&file).ok()?;
     let mut text = String::new();
     file.take(64).read_to_string(&mut text).ok()?;
     let (pid, start) = parse_identity(&text)?;
@@ -3866,6 +3915,31 @@ mod tests {
         assert_eq!(parse_identity("123 0"), None);
         assert_eq!(parse_identity("123 456 7"), None);
         assert_eq!(parse_identity("-5 456"), None);
+    }
+
+    #[test]
+    fn granting_acls_refuse_state_roots_and_preserve_existing_private_payloads() {
+        let dir = temp_dir("acl");
+        let path = dir.join(LOG_NAME);
+        write_private(&path, b"synthetic old payload").unwrap();
+        let grant = |path: &Path, entry: &str| {
+            let status = Command::new("/bin/chmod")
+                .args(["+a", entry])
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        grant(&path, "everyone allow read");
+        assert_eq!(
+            write_private(&path, b"replacement"),
+            Err(OpenError::StateRootUnsafe)
+        );
+        assert!(open_log(&StateRoot::from_root(dir.clone())).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"synthetic old payload");
+        grant(&dir, "everyone allow list,search");
+        assert_eq!(ensure_private_dir(&dir), Err(OpenError::StateRootUnsafe));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

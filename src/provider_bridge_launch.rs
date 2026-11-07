@@ -277,7 +277,7 @@ fn validate_server_dir(path: &Path) -> io::Result<()> {
     {
         return Err(unsafe_path());
     }
-    Ok(())
+    validate_private_dir(path)
 }
 
 fn create_private_dir(path: &Path) -> io::Result<()> {
@@ -302,6 +302,18 @@ fn validate_private_dir(path: &Path) -> io::Result<()> {
     {
         return Err(unsafe_path());
     }
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let held = directory.metadata()?;
+    if (held.dev(), held.ino()) != (metadata.dev(), metadata.ino()) {
+        return Err(unsafe_path());
+    }
+    crate::private_acl::require_private(&directory).map_err(|_| unsafe_path())?;
+    for ancestor in path.ancestors().skip(1) {
+        crate::private_acl::check_ancestor_path(ancestor).map_err(|_| unsafe_path())?;
+    }
     Ok(())
 }
 
@@ -320,6 +332,7 @@ fn write_private_file(path: &Path, content: &[u8]) -> io::Result<()> {
     {
         return Err(unsafe_path());
     }
+    crate::private_acl::require_private(&file).map_err(|_| unsafe_path())?;
     use std::io::Write;
     file.write_all(content)?;
     file.sync_all()

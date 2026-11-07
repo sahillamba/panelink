@@ -26,6 +26,9 @@ pub mod pane_layout;
 pub mod pane_metadata_protocol;
 pub mod pane_operations_protocol;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[doc(hidden)]
+pub mod private_acl;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod private_record_store;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod process_metadata;

@@ -34,6 +34,7 @@ here remain prerequisites and are not granted by the ownership change.
 | --- | --- | --- |
 | `context_directory_unavailable` | The CLI could not create its private caller directory, before querying the server | Check filesystem access and the directory's ownership/permissions |
 | `context_directory_unsafe` or `context_unavailable` | Context path validation/open failed | Preserve the existing context; inspect its path and permissions |
+| Private storage is rejected despite mode `0700`/`0600` | macOS extended ACLs can grant access beyond mode bits; inherited grants and ACL inspection failures are rejected | Inspect the exact path and ancestors read-only with `ls -lde PATH`; review the ACL entries with the owner/admin before changing them |
 | `control_permission_denied` | The OS denied connection or private endpoint-directory access | Allow the exact endpoint through the host permission profile; verify filesystem permissions |
 | `control_unavailable` | Connection or a control query failed | Inspect fixed `cause`, `stage` and `transport_stage` fields, then check the selected endpoint and host permission |
 | Socket exists | An endpoint pathname exists | This alone proves neither a live server nor permission to connect |
@@ -45,6 +46,13 @@ For the default legacy workspace, the endpoint is
 `~/Library/Application Support/Panelink/server/control.sock` when unset.
 For explicitly routed workspaces, use their actual endpoint rather than assuming
 the legacy route follows the visible tab. Keep the original `PANELINK_HOME`.
+Unsafe ACLs on a state or caller-context path are a storage validation failure,
+separate from host permission to connect to the socket. Panelink fails closed
+and does not repair ACLs or silently switch roots. A rebuilt source tree also
+does not update an already-running installed server; distinguish its executable
+from the server with `build-info --json` and `server-info --json` before
+diagnosing behavior. Do not stop or restart a server to work around a rejected
+path without separate authority to end its processes.
 
 This baseline supports `PANELINK_AGENT_CONTEXT_DIR` as an absolute private
 context root. Verify support in the chosen executable's matching source/help

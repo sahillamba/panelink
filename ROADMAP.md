@@ -1,5 +1,20 @@
 # Panelink implementation roadmap
 
+ACL publication follow-up (2026-11-07): user authorized a checkpoint on the new
+`fix/private-storage-acl` branch and its push. The November 5 verification
+results below remain the evidence; application/test content is unchanged.
+No product phase closure, installation or server restart is implied.
+
+Private-storage security fix (2026-11-05): shared native macOS ACL validation
+now rejects non-owner private-object grants and ancestor mutation grants,
+including inherited grants, without repairing existing permissions. All 13
+new ACL cases pass; the full warm Rust run passes 1,707/0/20ignored. Canonical
+verifier passes seven supporting checks but its Cargo step hits the existing
+420-second limit; this is not a canonical 8/8 pass. See
+[ACL evidence](docs/progress/PRIVATE-STORAGE-ACL-2026-11-05.md). Usage skill and
+security/diagnostic docs updated. No install, server restart, commit or push;
+product phase and native/provider/reboot gates remain unchanged.
+
 Tracing/property testing (2026-11-02): opt-in bounded local diagnostics and
 44 property/regression tests implemented in `t3/investigate-two-suggestions`.
 Canonical verifier passes 8/8; fresh all-lock advisory scan has no known

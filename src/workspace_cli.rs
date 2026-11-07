@@ -126,6 +126,9 @@ fn list() -> i32 {
     {
         return fail(ERROR);
     }
+    if panelink::private_acl::require_private(&file).is_err() {
+        return fail(ERROR);
+    }
     let mut bytes = Vec::new();
     use std::io::Read;
     if file.take(24_000).read_to_end(&mut bytes).is_err() {

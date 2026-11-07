@@ -79,6 +79,12 @@ If discovery fails, read [connection troubleshooting](references/connections.md)
 before changing paths or retrying. A sandboxed agent needs both writable caller
 context storage and permission to connect to the existing local control socket;
 installing this skill grants neither permission.
+On macOS, private state and caller-context storage also validate extended
+ACLs: non-owner grants on private objects and non-owner ancestor mutation
+grants are rejected, including inherited grants. ACL inspection errors fail
+closed. If a path is rejected despite `0700`/`0600` modes, use the read-only
+inspection guidance in [connection troubleshooting](references/connections.md).
+Panelink does not remove ACLs, repair paths or silently switch state roots.
 The CLI examples cover the repository's consolidated baseline, including
 workspace tabs, managed `pane run` and opt-in provider-binding commands, plus
 the source-implemented per-batch submit and recognized-agent slice. Private-runtime checks and a local real Codex `/status` check are recorded;

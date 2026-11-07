@@ -682,6 +682,15 @@ fn canonical_socket_path(path: &Path) -> io::Result<PathBuf> {
     {
         return Err(permission_denied("recovery endpoint parent is not private"));
     }
+    use std::os::unix::fs::OpenOptionsExt;
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&canonical_parent)?;
+    crate::private_acl::require_private(&directory)?;
+    for ancestor in canonical_parent.ancestors().skip(1) {
+        crate::private_acl::check_ancestor_path(ancestor)?;
+    }
     Ok(canonical_parent.join(name))
 }
 

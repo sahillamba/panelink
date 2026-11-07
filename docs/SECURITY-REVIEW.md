@@ -70,12 +70,24 @@ root symlink/sticky-directory cases
 ([`ensure_private_dir`](../src/default_open.rs#L136),
 [`ancestors_ok`](../src/default_open.rs#L160)).
 
+**ACL follow-up (2026-11-05).** On macOS, mode `0700`/`0600` does not override
+extended ACL grants. Shared descriptor-based validation now rejects every
+non-owner ALLOW entry on private files and directories, including inherit-only
+entries; empty and deny-only ACLs are allowed. For existing ancestor
+directories, non-owner read/search/metadata-read grants are allowed, while
+non-owner mutation grants are rejected, including under a sticky parent.
+Owner identity is compared by qualifier UUID. ACL fetch, validation or owner
+UUID lookup errors fail closed. Validation does not change ACLs, repair paths,
+change storage formats, or retry under another state root. See
+[scoped verification evidence](progress/PRIVATE-STORAGE-ACL-2026-11-05.md);
+that record separates completed regression tests from full-verifier limits.
+
 | Location / record | Persisted content | Enforced mode / bound |
 | --- | --- | --- |
-| `server/control.sock` | Local framed control connection; no file payload at rest. | Server directory `0700`; socket `0600`; pathname is fixed `control.sock`, existing endpoints are refused at bind ([`transport.rs`](../src/transport.rs#L31), [`bind`](../src/transport.rs#L321)). |
-| `server/server.lock`, `generation`, `launch.journal` | Lock identity, generation counter, and fixed lifecycle facts: operation key, managed-session ID and state. Journal records are 56 bytes and capped at 1 MiB/4,096 keys. | Server directory `0700`; files current-user-owned, mode `0600`, single link ([`server_storage.rs`](../src/server_storage.rs#L17), [`validate_file`](../src/server_storage.rs#L36), [`P3-STORAGE.md`](progress/P3-STORAGE.md#startup-and-identity)). |
-| `contexts/*` | Client generation/lease, sequence and uncertain-operation reconciliation metadata; not request bodies. | Parent directory `0700`; file `0600`; no-follow/exclusive create; existing file never reset ([`client_context.rs`](../src/client_context.rs#L22), [`create`](../src/client_context.rs#L192)). |
-| `server/history/*` | Sanitized normal-scrollback rows plus separate latest normal/alternate screen checkpoints, keyed by target. Capture is enabled by the runtime setup path, not by an end-user off setting. | History directory `0700`; committed files `0600`, single link; 1,024 rows and 8 MiB per history segment; 30-day retention after end ([`history_store.rs`](../src/history_store.rs#L17), [`validate_file`](../src/history_store.rs#L69), [`enable_history`](../src/multi_runtime.rs#L526), [`P5-SAVED-HISTORY.md`](progress/P5-SAVED-HISTORY.md#p5-bounded-saved-history-2026-10-20)). |
+| `server/control.sock` | Local framed control connection; no file payload at rest. | Server directory `0700`; socket `0600`; private-path ACL checks also apply; pathname is fixed `control.sock`, existing endpoints are refused at bind ([`transport.rs`](../src/transport.rs#L31), [`bind`](../src/transport.rs#L321)). |
+| `server/server.lock`, `generation`, `launch.journal` | Lock identity, generation counter, and fixed lifecycle facts: operation key, managed-session ID and state. Journal records are 56 bytes and capped at 1 MiB/4,096 keys. | Server directory `0700`; files current-user-owned, mode `0600`, single link and checked for non-owner ACL grants ([`server_storage.rs`](../src/server_storage.rs#L17), [`validate_file`](../src/server_storage.rs#L36), [`P3-STORAGE.md`](progress/P3-STORAGE.md#startup-and-identity)). |
+| `contexts/*` | Client generation/lease, sequence and uncertain-operation reconciliation metadata; not request bodies. | Parent directory `0700`; file `0600`; no-follow/exclusive create; ACL checked; existing file never reset ([`client_context.rs`](../src/client_context.rs#L22), [`create`](../src/client_context.rs#L192)). |
+| `server/history/*` | Sanitized normal-scrollback rows plus separate latest normal/alternate screen checkpoints, keyed by target. Capture is enabled by the runtime setup path, not by an end-user off setting. | History directory `0700`; committed files `0600`, single link and checked for non-owner ACL grants; 1,024 rows and 8 MiB per history segment; 30-day retention after end ([`history_store.rs`](../src/history_store.rs#L17), [`validate_file`](../src/history_store.rs#L69), [`enable_history`](../src/multi_runtime.rs#L526), [`P5-SAVED-HISTORY.md`](progress/P5-SAVED-HISTORY.md#p5-bounded-saved-history-2026-10-20)). |
 | `server/layout/current.layout`, `previous.layout` | Fixed 160-byte historical layout snapshots: dimensions, orientation, target IDs and snapshot metadata. No launch specification, cwd, environment, title, PID or provider identity ([`SPEC.md`](SPEC.md#scoped-saved-layoutrestart-design-implemented-as-bounded-snapshot--read-only-view)). | Layout directory `0700`; records `0600`, single link; two slots ([`layout_store.rs`](../src/layout_store.rs#L21), [`open`](../src/layout_store.rs#L151), [`P5-LAYOUT-SLICE.md`](progress/P5-LAYOUT-SLICE.md)). |
 | `server/links/links.bin` | Bounded old-to-new target IDs, operation outcome and timestamp for explicit relaunch links; no cwd/environment. | Link directory `0700`; file `0600`, single link; max 64 links, 30-day retention ([`recovery_links.rs`](../src/recovery_links.rs#L15), [`validate_file`](../src/recovery_links.rs#L137), [`P5-RECOVERY-RELAUNCH.md`](progress/P5-RECOVERY-RELAUNCH.md#behavior-implemented)). |
 | `server.log` and `server.log.1` | Server stdout/stderr diagnostics; no PTY output relay. | `0600` on creation; rotates after 1 MiB ([`open_log`](../src/default_open.rs#L407), [`spawn_server`](../src/default_open.rs#L434)). |
@@ -236,7 +248,10 @@ live server and preserves provider conversation data
 ([`history_store.rs`](../src/history_store.rs#L17),
 [`history_clear`](../src/default_open.rs#L971),
 [`P5-SAVED-HISTORY.md`](progress/P5-SAVED-HISTORY.md#p5-bounded-saved-history-2026-10-20)).
-Storage requires private `0700` directories and `0600` single-link files.
+Storage requires private `0700` directories and `0600` single-link files, plus
+macOS ACL validation: private objects reject non-owner ALLOW entries, and
+ancestors reject non-owner mutation grants. Unsafe or uninspectable ACLs cause
+the operation to fail closed. Diagnostics silently disable on unsafe ACLs.
 Diagnostics use fixed labels and redacted Debug implementations; launch
 environment override values, prepared launch requests and saved history Debug
 are covered by named tests (`debug_output_redacts_environment_values_and_override_values`,
@@ -246,8 +261,9 @@ are covered by named tests (`debug_output_redacts_environment_values_and_overrid
 
 **Gaps.** No user-facing history capture-off setting, copy-on-selection toggle,
 or organization diagnostic-content policy is implemented. Persisted visible
-terminal text can contain secrets; mode `0600` protects against other OS users,
-not the current user or another same-user process. The UI clipboard selection
+terminal text can contain secrets; ACL validation blocks extended grants to
+other principals but does not isolate the current user or other same-UID
+processes. The UI clipboard selection
 feature is not implemented, although programmatic child clipboard access is
 denied (SEC-07).
 
