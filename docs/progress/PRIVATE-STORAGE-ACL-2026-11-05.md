@@ -132,3 +132,20 @@ ACL changes and affected documentation on `fix/private-storage-acl`, based on
 The November 5 no-commit/no-push record above describes that earlier turn.
 Application and test content is unchanged; no merge/rebase or new test result,
 installation, user-server restart or broader acceptance is claimed here.
+
+## PR 24 conflict resolution — 2026-11-07
+
+Merged main `8e7861d` into the ACL checkpoint `f488af3` on its existing branch.
+The two conflicts were documentation insertions in `ROADMAP.md` and
+`SESSION.md`; both sides were preserved. Rendering code/tests match incoming
+main, and the ACL code/tests are unchanged by the merge.
+
+Fresh combined-tree verification: 11 ACL integration tests, 245 binary tests
+(UI-client plus the state/log ACL regression), one diagnostic ACL unit test,
+and one explicit rendering fixture all passed. The latter observed 59.9 parsed
+screen updates/s and a 17.9 ms p95 gap in its controlled private PTY; native
+physical-display and workload acceptance are not inferred. Formatting, strict
+all-target Clippy, locked build, docs (472 files, zero findings) and whitespace
+checks pass. Full canonical verification was not repeated for documentation
+conflicts; the earlier 1,707-pass run and canonical timeout are not relabeled
+as fresh combined-tree evidence. Hosted confirmation is pending after push.

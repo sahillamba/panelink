@@ -427,3 +427,92 @@ fn wheel_receiver_child() {
         .unwrap();
     output.flush().unwrap();
 }
+
+/// Measures parsed screen changes at the outer PTY, including server polling,
+/// socket transport, composition and terminal writes. Not physical display FPS.
+#[test]
+#[ignore = "private PTY rendering budget; run explicitly"]
+fn attached_continuous_rendering_budget() {
+    let fixture = Fixture::new();
+    let exe = std::env::current_exe().unwrap();
+    let script = format!(
+        "stty raw -echo; PANELINK_RENDER_RECEIVER=1 exec '{}' --exact continuous_render_child --ignored --nocapture",
+        exe.to_str().unwrap().replace('\'', "'\\''")
+    );
+    let mut server = fixture.serve(&script);
+    wait_server_ready(&fixture, &mut server);
+    let mut attach = Attach::spawn(&fixture);
+    attach.wait_for("render child ready", |s| s.contains("RENDER-READY"));
+    // Discard startup from the timing window, but retain its terminal state.
+    let mut parser = vt100::Parser::new(ROWS, COLUMNS, 0);
+    let mut consumed = 0;
+    let mut previous = String::new();
+    let mut samples = Vec::new();
+    attach.send(b"g");
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut first = None;
+    loop {
+        {
+            let capture = attach.capture.lock().unwrap();
+            assert!(capture.len() < MAX_CAPTURE, "capture overflow");
+            parser.process(&capture[consumed..]);
+            consumed = capture.len();
+        }
+        let screen = parser.screen().contents();
+        let marker = screen
+            .lines()
+            .find(|line| line.contains("FRAME-"))
+            .unwrap_or("");
+        let now = Instant::now();
+        if !marker.is_empty() && marker != previous {
+            first.get_or_insert(now);
+            samples.push(now);
+            previous = marker.to_owned();
+        }
+        if first.is_some_and(|at| now.duration_since(at) >= Duration::from_secs(2)) {
+            break;
+        }
+        assert!(now < deadline, "continuous output never became visible");
+        assert!(attach.child.try_wait().unwrap().is_none(), "attach exited");
+        thread::sleep(Duration::from_millis(1));
+    }
+    let mut gaps: Vec<_> = samples
+        .windows(2)
+        .map(|w| w[1].duration_since(w[0]))
+        .collect();
+    assert!(gaps.len() >= 2, "too few screen changes");
+    let elapsed = samples.last().unwrap().duration_since(samples[0]);
+    let rate = gaps.len() as f64 / elapsed.as_secs_f64();
+    gaps.sort();
+    let p95 = gaps[(gaps.len() - 1) * 95 / 100];
+    println!("parsed_screen_updates_per_second={rate:.1} p95_gap_ms={:.1} max_gap_ms={:.1} samples={} capture_bytes={consumed}",
+        p95.as_secs_f64() * 1000.0, gaps.last().unwrap().as_secs_f64() * 1000.0, samples.len());
+    // 60 Hz engineering target with scheduler/PTY sampling headroom. This is
+    // an opt-in performance gate, never a timing assertion in ordinary CI.
+    assert!(
+        rate >= 50.0,
+        "continuous rendering below 50 updates/s floor: {rate:.1}"
+    );
+    assert!(
+        p95 <= Duration::from_millis(40),
+        "uneven rendering: p95={p95:?}"
+    );
+}
+
+#[test]
+#[ignore = "private continuous rendering child"]
+fn continuous_render_child() {
+    if std::env::var_os("PANELINK_RENDER_RECEIVER").is_none() {
+        return;
+    }
+    let mut output = io::stdout();
+    output.write_all(b"\x1b[?1049hRENDER-READY\r\n").unwrap();
+    output.flush().unwrap();
+    io::stdin().read_exact(&mut [0u8; 1]).unwrap();
+    for frame in 0..900 {
+        write!(output, "\x1b[5;1HFRAME-{frame:06}\x1b[K").unwrap();
+        output.flush().unwrap();
+        thread::sleep(Duration::from_millis(4));
+    }
+    thread::sleep(Duration::from_secs(3));
+}

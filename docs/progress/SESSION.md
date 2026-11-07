@@ -1,3 +1,20 @@
+## PR 24 main-branch conflict resolution — 2026-11-07
+
+Merged `origin/main` at `8e7861d383b36d712cb34a0bfaa91739be102e6d` into
+`fix/private-storage-acl` at `f488af3`. Only `ROADMAP.md` and this handoff
+conflicted; both ACL and continuous-rendering records were retained. Incoming
+rendering code and its PTY fixture match main exactly; ACL code/tests remain
+unchanged by the merge.
+
+Fresh combined-tree checks: ACL integration 11/11; binary UI-client plus
+state/log ACL checks 245/245; library diagnostic ACL check 1/1; explicit
+continuous-rendering PTY fixture 1/1 (59.9 parsed updates/s, p95 gap 17.9 ms).
+Formatting, strict all-target Clippy, locked build, docs472/0 and whitespace
+checks pass. The full canonical verifier was not repeated for these
+documentation conflicts; earlier full-Rust results and the 420-second
+canonical timeout remain dated evidence below. Fresh hosted confirmation is
+pending after push. No install, user-server restart or product gate closure.
+
 ## ACL fix branch publication — 2026-11-07
 
 User requested a new branch and push for the completed ACL fix. This checkpoint
@@ -37,6 +54,21 @@ Product phase and native/provider/reboot acceptance gates remain open. The
 tracking ref advanced during checks (`main` now behind `origin/main` by two);
 local HEAD and verified source were not merged or rebased. Preserve these
 uncommitted changes for review/integration.
+
+## Continuous rendering cadence — 2026-11-05
+
+Branch `t3/smooth-terminal-rendering` in `t3-eb955439`. Real child/server/attach/
+outer-PTY counter fixture failed at 32.5 updates/s before the fix. Changed
+screen watches now use 8 ms and quiet watches retain 30 ms; host rendering
+remains capped at 16 ms. After: 60.1 updates/s initially; final regression
+57.6 updates/s, p95 20.2 ms, max 49.1 ms. Aim60, fixture floor50/p95<=40ms;
+no guaranteed physical frame rate. [Evidence and command](SMOOTH-RENDERING-2026-11-05.md).
+
+244 UI-client tests, both explicit rendering/wheel PTY tests and strict
+all-target Clippy pass. Docs/skill links, scoped rustfmt and whitespace checks
+pass. Full canonical gate not run; native host, large/multiple panes, resource
+and input-latency budgets remain open. No install, live pane input, server
+restart, commit or push. No broader phase marked complete.
 
 ## PR 21 menu-dismissal input barrier — 2026-11-05
 

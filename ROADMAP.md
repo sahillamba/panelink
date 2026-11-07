@@ -1,5 +1,11 @@
 # Panelink implementation roadmap
 
+PR 24 conflict resolution (2026-11-07): main's continuous-rendering update and
+the ACL fix are combined; both roadmap/handoff records are preserved. Fresh
+ACL/UI-client tests, rendering fixture, strict Clippy, build, fmt and docs
+checks pass. Full canonical gate not repeated; hosted confirmation pending.
+See [handoff](docs/progress/SESSION.md). No product acceptance gates changed.
+
 ACL publication follow-up (2026-11-07): user authorized a checkpoint on the new
 `fix/private-storage-acl` branch and its push. The November 5 verification
 results below remain the evidence; application/test content is unchanged.
@@ -14,6 +20,11 @@ verifier passes seven supporting checks but its Cargo step hits the existing
 [ACL evidence](docs/progress/PRIVATE-STORAGE-ACL-2026-11-05.md). Usage skill and
 security/diagnostic docs updated. No install, server restart, commit or push;
 product phase and native/provider/reboot gates remain unchanged.
+
+Rendering cadence (2026-11-05): active event-watch polling now leaves headroom
+for the existing 16 ms compositor. Private single-pane continuous-output
+measurement reaches about 60 updates/s; native/multi-pane/resource/input-latency
+acceptance remains open. See [evidence](docs/progress/SMOOTH-RENDERING-2026-11-05.md).
 
 Tracing/property testing (2026-11-02): opt-in bounded local diagnostics and
 44 property/regression tests implemented in `t3/investigate-two-suggestions`.
